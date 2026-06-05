@@ -3,6 +3,8 @@
 *.dll
 *.so
 *.dylib
+/fast-markdown
+/fast-markdown-cli
 
 # Object files
 *.o
@@ -18,6 +20,9 @@ out/
 bin/
 obj/
 benchmark-output/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
 
 # IDE and editor files
 .vs/

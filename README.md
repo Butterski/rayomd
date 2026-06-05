@@ -1,8 +1,8 @@
 # Fast Markdown
 
-A lightweight native Windows Markdown to PDF converter built with Dear ImGui and DirectX 11.
+A lightweight native Markdown to PDF converter. The Windows build includes a Dear ImGui + DirectX 11 desktop app; Linux builds the same native exporter as a portable CLI.
 
-The default exporter is built into the EXE. It does not require Pandoc, LaTeX, a browser engine, or a bundled runtime.
+The default exporter is built into the app binary. It does not require Pandoc, LaTeX, a browser engine, or a bundled runtime.
 
 ![Fast Markdown](catto.png)
 
@@ -10,10 +10,10 @@ The default exporter is built into the EXE. It does not require Pandoc, LaTeX, a
 
 - Native Markdown to PDF export with no external runtime dependency
 - Optional Pandoc compatibility engine for full-fidelity documents
-- Dark Windows-style ImGui interface
+- Dark Windows-style ImGui interface on Windows
 - Drag and drop `.md` files into the editor
 - `Ctrl+E` quick export
-- Command-line single-file and batch export modes for scripts
+- Command-line single-file and batch export modes for Windows and Linux scripts
 - Independent margin control: compact, normal, or wide
 - Single small Windows EXE release artifact
 - Unicode font subsetting for much smaller embedded-font PDFs
@@ -39,9 +39,9 @@ Supported Markdown subset:
 - Common status emoji fallback text for small embedded-font PDFs
 - YAML front matter is ignored
 
-Native mode writes PDF directly from C++ and embeds a subset of a Windows system font into the generated PDF so Unicode text can render correctly without shipping a font file.
+Native mode writes PDF directly from C++ and embeds a subset of a system font into the generated PDF so Unicode text can render correctly without shipping a font file. On Windows it searches Segoe UI, Arial, and Tahoma. On Linux it searches common DejaVu, Liberation, FreeFont, and Noto paths. Set `FAST_MARKDOWN_FONT=/path/to/font.ttf` to force a specific font.
 
-ASCII-only documents use an even faster standard PDF font path. That path does not load or embed a Windows font, so output files are usually only a few KB and batch exports can run in a few milliseconds per document. Documents with Polish characters, emoji, or other Unicode automatically use the Unicode-safe embedded-font path.
+ASCII-only documents use an even faster standard PDF font path. That path does not load or embed a system font, so output files are usually only a few KB and batch exports can run in a few milliseconds per document. Documents with Polish characters, emoji, or other Unicode automatically use the Unicode-safe embedded-font path.
 
 Not supported in native mode:
 
@@ -64,22 +64,50 @@ Pandoc mode requires:
 
 ## Build
 
-Requirements:
+Windows GUI requirements:
 
 - MinGW-w64 with C++17 support
 - Windows SDK / DirectX 11 libraries
 
-Build:
+Windows GUI build:
 
-```batch
-build.bat
+```sh
+cmake -S . -B build/windows -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build/windows --config Release
 ```
 
-The current build produces `fast-markdown-imgui.exe` at about 1.25 MB.
+The current Windows CMake release build produces `fast-markdown-imgui.exe` at about 1.16 MB.
+
+Linux portable CLI requirements:
+
+- `g++` or `clang++` with C++17 support
+- A system TrueType font for Unicode output, such as DejaVu Sans
+
+On Ubuntu/WSL, install build dependencies with your package manager:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y g++ cmake fonts-dejavu-core
+```
+
+Linux CLI build:
+
+```sh
+cmake -S . -B build/linux -DCMAKE_BUILD_TYPE=Release
+cmake --build build/linux --config Release
+```
+
+The Linux build does not compile ImGui or DirectX. It builds the native Markdown-to-PDF CLI from the same PDF exporter core.
+
+Linux verification:
+
+```sh
+sh scripts/verify-linux.sh
+```
 
 ## Usage
 
-GUI:
+Windows GUI:
 
 1. Run `fast-markdown-imgui.exe`.
 2. Write or paste Markdown, or drag in a `.md` file.
@@ -100,6 +128,16 @@ fast-markdown-imgui.exe --batch input-folder output-folder native modern normal
 type files.txt | fast-markdown-imgui.exe --stdin-batch output-folder native modern normal
 fast-markdown-imgui.exe --serve output-folder native modern normal
 fast-markdown-imgui.exe --bench input.md bench-output-folder 5000 modern normal
+```
+
+Linux CLI uses the same native arguments after building `fast-markdown`:
+
+```sh
+./fast-markdown --export input.md output.pdf native elegant normal
+./fast-markdown --batch input-folder output-folder native modern normal
+cat files.txt | ./fast-markdown --stdin-batch output-folder native modern normal
+./fast-markdown --serve output-folder native modern normal
+./fast-markdown --bench input.md bench-output-folder 5000 modern normal
 ```
 
 Styles are `elegant`, `modern`, and `tech`. Numeric style indexes `0`, `1`, and `2` also work.
@@ -126,7 +164,7 @@ CLI exit codes:
 - `0`: success
 - `2`: missing CLI arguments
 - `3`: input file could not be read
-- `11`: native exporter could not load a Windows font
+- `11`: native exporter could not load a system font
 - `12`: native exporter could not write the PDF
 - `20`: Pandoc export failed
 
@@ -135,6 +173,7 @@ CLI exit codes:
 For the default native exporter, package only:
 
 - `fast-markdown-imgui.exe`
+- `fast-markdown` on Linux CLI releases
 
 Optional files for source/releases:
 
@@ -147,8 +186,12 @@ Do not bundle Pandoc unless you intentionally want a large compatibility package
 ## Project Structure
 
 ```text
-main.cpp              Application and native PDF exporter
-build.bat             MinGW build script
+include/              Public C++ headers
+src/core/             Portable Markdown parser and PDF writer
+src/cli/              Portable native CLI entrypoint
+src/win32/            Windows ImGui + DirectX app and Windows CLI glue
+CMakeLists.txt        Cross-platform build definition
+scripts/              Non-root verification helpers
 imgui/                Dear ImGui sources
 catto.ico             Application icon
 catto.png             Image used in README
