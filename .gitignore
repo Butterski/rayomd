@@ -1,0 +1,34 @@
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Object files
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Build directories
+build/
+out/
+bin/
+obj/
+
+# IDE and editor files
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+
+# ImGui generated
+imgui.ini
+
+# Temp files
+*.tmp
+*.temp
+*.log
