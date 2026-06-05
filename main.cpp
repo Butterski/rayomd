@@ -256,6 +256,8 @@ enum class BlockType {
     Numbered,
     Quote,
     Code,
+    MathBlock,
+    Table,
     Rule
 };
 
@@ -264,6 +266,8 @@ struct Block {
     int level = 0;
     int number = 0;
     std::string text;
+    std::vector<std::vector<std::string>> rows;
+    std::vector<int> aligns;
 };
 
 static bool IsSpace(char c) {
@@ -334,58 +338,148 @@ static bool ParseHeading(const std::string& line, int& level, std::string& text)
     return true;
 }
 
-static bool ParseBullet(const std::string& line, std::string& text) {
+static int CountIndent(const std::string& line) {
+    int indent = 0;
+    for (char c : line) {
+        if (c == ' ') indent++;
+        else if (c == '\t') indent += 4;
+        else break;
+    }
+    return indent;
+}
+
+static bool ParseBullet(const std::string& line, int& level, std::string& text) {
     std::string s = LTrim(line);
     if (s.size() < 2) return false;
     if ((s[0] == '-' || s[0] == '*' || s[0] == '+') && IsSpace(s[1])) {
+        level = std::min(4, CountIndent(line) / 4);
         text = Trim(s.substr(2));
         return true;
     }
     return false;
 }
 
-static bool ParseNumbered(const std::string& line, int& number, std::string& text) {
+static bool ParseNumbered(const std::string& line, int& level, int& number, std::string& text) {
     std::string s = LTrim(line);
     size_t i = 0;
     while (i < s.size() && std::isdigit((unsigned char)s[i])) i++;
     if (i == 0 || i >= s.size()) return false;
     if ((s[i] != '.' && s[i] != ')') || i + 1 >= s.size() || !IsSpace(s[i + 1])) return false;
+    level = std::min(4, CountIndent(line) / 4);
     number = atoi(s.substr(0, i).c_str());
     text = Trim(s.substr(i + 2));
     return true;
 }
 
-static bool IsBlockStart(const std::string& line) {
-    int level = 0, number = 0;
-    std::string text;
-    std::string trimmed = Trim(line);
-    return trimmed.empty() || StartsWith(trimmed, "```") || StartsWith(trimmed, "~~~") ||
-        IsRuleLine(line) || ParseHeading(line, level, text) || ParseBullet(line, text) ||
-        ParseNumbered(line, number, text) || StartsWith(LTrim(line), ">");
+static std::vector<std::string> SplitTableRow(const std::string& line) {
+    std::string s = Trim(line);
+    if (!s.empty() && s.front() == '|') s.erase(s.begin());
+    if (!s.empty() && s.back() == '|') s.pop_back();
+
+    std::vector<std::string> cells;
+    std::string cell;
+    bool escaped = false;
+    for (char c : s) {
+        if (escaped) {
+            cell.push_back(c);
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '|') {
+            cells.push_back(Trim(cell));
+            cell.clear();
+        } else {
+            cell.push_back(c);
+        }
+    }
+    cells.push_back(Trim(cell));
+    return cells;
+}
+
+static bool IsTableSeparatorCell(const std::string& cell, int& align) {
+    std::string s = Trim(cell);
+    if (s.size() < 3) return false;
+
+    bool left = s.front() == ':';
+    bool right = s.back() == ':';
+    size_t start = left ? 1 : 0;
+    size_t end = right ? s.size() - 1 : s.size();
+    if (end <= start) return false;
+
+    for (size_t i = start; i < end; i++) {
+        if (s[i] != '-') return false;
+    }
+
+    align = left && right ? 0 : (right ? 1 : -1);
+    return true;
+}
+
+static bool ParseTableSeparator(const std::string& line, std::vector<int>& aligns) {
+    std::vector<std::string> cells = SplitTableRow(line);
+    if (cells.empty()) return false;
+
+    std::vector<int> parsed;
+    for (const auto& cell : cells) {
+        int align = -1;
+        if (!IsTableSeparatorCell(cell, align)) return false;
+        parsed.push_back(align);
+    }
+
+    aligns = parsed;
+    return true;
+}
+
+static bool IsTableStart(const std::vector<std::string>& lines, size_t i) {
+    if (i + 1 >= lines.size()) return false;
+    if (SplitTableRow(lines[i]).size() < 2) return false;
+    std::vector<int> aligns;
+    return ParseTableSeparator(lines[i + 1], aligns);
+}
+
+static void ReplaceAll(std::string& s, const std::string& from, const std::string& to) {
+    if (from.empty()) return;
+    size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::string::npos) {
+        s.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
+static std::string NormalizeSymbols(std::string s) {
+    ReplaceAll(s, std::string("\xE2\x9C\x85"), "[OK]");
+    ReplaceAll(s, std::string("\xE2\x9A\xA0\xEF\xB8\x8F"), "[!]");
+    ReplaceAll(s, std::string("\xE2\x9A\xA0"), "[!]");
+    ReplaceAll(s, std::string("\xE2\x9D\x8C"), "[X]");
+    return s;
 }
 
 static std::string StripInlineMarkdown(const std::string& input) {
+    std::string source = NormalizeSymbols(input);
     std::string out;
-    out.reserve(input.size());
+    out.reserve(source.size());
 
-    for (size_t i = 0; i < input.size();) {
-        if (input[i] == '!' && i + 1 < input.size() && input[i + 1] == '[') {
-            size_t close = input.find("](", i + 2);
-            size_t end = close == std::string::npos ? std::string::npos : input.find(')', close + 2);
+    for (size_t i = 0; i < source.size();) {
+        if (source[i] == '!' && i + 1 < source.size() && source[i + 1] == '[') {
+            size_t close = source.find("](", i + 2);
+            size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
             if (close != std::string::npos && end != std::string::npos) {
                 out += "image: ";
-                out += input.substr(i + 2, close - (i + 2));
+                out += source.substr(i + 2, close - (i + 2));
                 i = end + 1;
                 continue;
             }
         }
 
-        if (input[i] == '[') {
-            size_t close = input.find("](", i + 1);
-            size_t end = close == std::string::npos ? std::string::npos : input.find(')', close + 2);
+        if (source[i] == '[') {
+            size_t close = source.find("](", i + 1);
+            size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
             if (close != std::string::npos && end != std::string::npos) {
-                out += input.substr(i + 1, close - (i + 1));
-                std::string url = input.substr(close + 2, end - (close + 2));
+                out += source.substr(i + 1, close - (i + 1));
+                std::string url = source.substr(close + 2, end - (close + 2));
                 if (!url.empty()) {
                     out += " <";
                     out += url;
@@ -396,44 +490,63 @@ static std::string StripInlineMarkdown(const std::string& input) {
             }
         }
 
-        if (input[i] == '`') {
-            size_t end = input.find('`', i + 1);
+        if (source[i] == '`') {
+            size_t end = source.find('`', i + 1);
             if (end != std::string::npos) {
-                out += input.substr(i + 1, end - i - 1);
+                out += source.substr(i + 1, end - i - 1);
                 i = end + 1;
                 continue;
             }
         }
 
-        if (input[i] == '\\' && i + 1 < input.size()) {
-            out.push_back(input[i + 1]);
+        if (source[i] == '$' && !(i + 1 < source.size() && source[i + 1] == '$')) {
+            size_t end = source.find('$', i + 1);
+            if (end != std::string::npos) {
+                out += source.substr(i + 1, end - i - 1);
+                i = end + 1;
+                continue;
+            }
+        }
+
+        if (source[i] == '\\' && i + 1 < source.size()) {
+            out.push_back(source[i + 1]);
             i += 2;
             continue;
         }
 
-        if (input[i] == '*') {
+        if (source[i] == '*') {
             i++;
             continue;
         }
 
-        if (input[i] == '_') {
-            bool leftWord = i > 0 && std::isalnum((unsigned char)input[i - 1]);
-            bool rightWord = i + 1 < input.size() && std::isalnum((unsigned char)input[i + 1]);
+        if (source[i] == '_') {
+            bool leftWord = i > 0 && std::isalnum((unsigned char)source[i - 1]);
+            bool rightWord = i + 1 < source.size() && std::isalnum((unsigned char)source[i + 1]);
             if (!leftWord || !rightWord) {
                 i++;
                 continue;
             }
         }
 
-        if (input[i] == '~' && i + 1 < input.size() && input[i + 1] == '~') {
+        if (source[i] == '~' && i + 1 < source.size() && source[i + 1] == '~') {
             i += 2;
             continue;
         }
 
-        out.push_back(input[i++]);
+        out.push_back(source[i++]);
     }
 
     return Trim(out);
+}
+
+static bool IsBlockStart(const std::string& line) {
+    int level = 0, number = 0;
+    std::string text;
+    std::string trimmed = Trim(line);
+    return trimmed.empty() || StartsWith(trimmed, "```") || StartsWith(trimmed, "~~~") ||
+        StartsWith(trimmed, "$$") || IsRuleLine(line) || ParseHeading(line, level, text) ||
+        ParseBullet(line, level, text) || ParseNumbered(line, level, number, text) ||
+        StartsWith(LTrim(line), ">");
 }
 
 static std::vector<Block> ParseMarkdown(const std::string& markdown) {
@@ -469,6 +582,54 @@ static std::vector<Block> ParseMarkdown(const std::string& markdown) {
             continue;
         }
 
+        if (StartsWith(trimmed, "$$")) {
+            std::string text;
+            std::string rest = Trim(trimmed.substr(2));
+            if (!rest.empty()) {
+                if (rest.size() >= 2 && rest.compare(rest.size() - 2, 2, "$$") == 0) {
+                    rest = Trim(rest.substr(0, rest.size() - 2));
+                    blocks.push_back({ BlockType::MathBlock, 0, 0, rest });
+                    i++;
+                    continue;
+                }
+                text = rest;
+            }
+
+            i++;
+            while (i < lines.size() && !StartsWith(Trim(lines[i]), "$$")) {
+                if (!text.empty()) text += "\n";
+                text += Trim(lines[i]);
+                i++;
+            }
+            if (i < lines.size()) i++;
+            blocks.push_back({ BlockType::MathBlock, 0, 0, text });
+            continue;
+        }
+
+        if (IsTableStart(lines, i)) {
+            std::vector<std::vector<std::string>> rows;
+            std::vector<int> aligns;
+            rows.push_back(SplitTableRow(lines[i]));
+            ParseTableSeparator(lines[i + 1], aligns);
+            i += 2;
+
+            while (i < lines.size() && !Trim(lines[i]).empty()) {
+                std::vector<std::string> row = SplitTableRow(lines[i]);
+                if (row.size() < 2) break;
+                for (auto& cell : row) cell = StripInlineMarkdown(cell);
+                rows.push_back(row);
+                i++;
+            }
+
+            for (auto& cell : rows[0]) cell = StripInlineMarkdown(cell);
+            Block table;
+            table.type = BlockType::Table;
+            table.rows = std::move(rows);
+            table.aligns = std::move(aligns);
+            blocks.push_back(std::move(table));
+            continue;
+        }
+
         int level = 0;
         std::string text;
         if (ParseHeading(line, level, text)) {
@@ -483,15 +644,15 @@ static std::vector<Block> ParseMarkdown(const std::string& markdown) {
             continue;
         }
 
-        if (ParseBullet(line, text)) {
-            blocks.push_back({ BlockType::Bullet, 0, 0, StripInlineMarkdown(text) });
+        if (ParseBullet(line, level, text)) {
+            blocks.push_back({ BlockType::Bullet, level, 0, text });
             i++;
             continue;
         }
 
         int number = 0;
-        if (ParseNumbered(line, number, text)) {
-            blocks.push_back({ BlockType::Numbered, 0, number, StripInlineMarkdown(text) });
+        if (ParseNumbered(line, level, number, text)) {
+            blocks.push_back({ BlockType::Numbered, level, number, text });
             i++;
             continue;
         }
@@ -519,7 +680,7 @@ static std::vector<Block> ParseMarkdown(const std::string& markdown) {
             paragraph = trimmed;
             i++;
         }
-        blocks.push_back({ BlockType::Paragraph, 0, 0, StripInlineMarkdown(paragraph) });
+        blocks.push_back({ BlockType::Paragraph, 0, 0, paragraph });
     }
 
     return blocks;
@@ -963,11 +1124,11 @@ public:
                 RenderParagraph(block.text);
                 break;
             case BlockType::Bullet:
-                RenderParagraph("- " + block.text, margin + 16.0, PAGE_W - margin * 2.0 - 16.0);
+                RenderListItem("- ", block);
                 y -= 2.0;
                 break;
             case BlockType::Numbered:
-                RenderParagraph(std::to_string(block.number) + ". " + block.text, margin + 16.0, PAGE_W - margin * 2.0 - 16.0);
+                RenderListItem(std::to_string(block.number) + ". ", block);
                 y -= 2.0;
                 break;
             case BlockType::Quote:
@@ -975,6 +1136,12 @@ public:
                 break;
             case BlockType::Code:
                 RenderCode(block.text);
+                break;
+            case BlockType::MathBlock:
+                RenderMath(block.text);
+                break;
+            case BlockType::Table:
+                RenderTable(block.rows, block.aligns);
                 break;
             case BlockType::Rule:
                 RenderRule();
@@ -997,6 +1164,200 @@ private:
     std::vector<std::string> pages;
     std::set<uint16_t> usedCids;
 
+    struct StyledSpan {
+        std::wstring text;
+        bool bold = false;
+        bool italic = false;
+        bool strike = false;
+    };
+
+    struct StyledWord {
+        std::wstring text;
+        bool bold = false;
+        bool italic = false;
+        bool strike = false;
+    };
+
+    void PushSpan(std::vector<StyledSpan>& spans, const std::string& text, bool bold, bool italic, bool strike) {
+        if (text.empty()) return;
+        std::wstring wide = Utf8ToWide(text);
+        if (!spans.empty() && spans.back().bold == bold && spans.back().italic == italic && spans.back().strike == strike) {
+            spans.back().text += wide;
+        } else {
+            spans.push_back({ wide, bold, italic, strike });
+        }
+    }
+
+    std::vector<StyledSpan> ParseInlineStyled(const std::string& input) {
+        std::string source = NormalizeSymbols(input);
+        std::vector<StyledSpan> spans;
+        std::string buf;
+        bool bold = false, italic = false, strike = false;
+
+        auto flush = [&]() {
+            PushSpan(spans, buf, bold, italic, strike);
+            buf.clear();
+        };
+
+        for (size_t i = 0; i < source.size();) {
+            if (source[i] == '!' && i + 1 < source.size() && source[i + 1] == '[') {
+                size_t close = source.find("](", i + 2);
+                size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
+                if (close != std::string::npos && end != std::string::npos) {
+                    buf += "image: ";
+                    buf += source.substr(i + 2, close - (i + 2));
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            if (source[i] == '[') {
+                size_t close = source.find("](", i + 1);
+                size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
+                if (close != std::string::npos && end != std::string::npos) {
+                    buf += source.substr(i + 1, close - (i + 1));
+                    std::string url = source.substr(close + 2, end - (close + 2));
+                    if (!url.empty()) {
+                        buf += " <";
+                        buf += url;
+                        buf += ">";
+                    }
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            if (source[i] == '`') {
+                size_t end = source.find('`', i + 1);
+                if (end != std::string::npos) {
+                    flush();
+                    PushSpan(spans, source.substr(i + 1, end - i - 1), false, false, false);
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            if (source[i] == '$' && !(i + 1 < source.size() && source[i + 1] == '$')) {
+                size_t end = source.find('$', i + 1);
+                if (end != std::string::npos) {
+                    flush();
+                    PushSpan(spans, source.substr(i + 1, end - i - 1), false, true, false);
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            if (source[i] == '\\' && i + 1 < source.size()) {
+                buf.push_back(source[i + 1]);
+                i += 2;
+                continue;
+            }
+
+            if (i + 2 < source.size() && source.compare(i, 3, "***") == 0) {
+                flush();
+                bool turnOn = !(bold && italic);
+                bold = turnOn;
+                italic = turnOn;
+                i += 3;
+                continue;
+            }
+
+            if (i + 1 < source.size() && source.compare(i, 2, "**") == 0) {
+                flush();
+                bold = !bold;
+                i += 2;
+                continue;
+            }
+
+            if (i + 1 < source.size() && source.compare(i, 2, "~~") == 0) {
+                flush();
+                strike = !strike;
+                i += 2;
+                continue;
+            }
+
+            if (source[i] == '*') {
+                flush();
+                italic = !italic;
+                i++;
+                continue;
+            }
+
+            if (source[i] == '_') {
+                bool leftWord = i > 0 && std::isalnum((unsigned char)source[i - 1]);
+                bool rightWord = i + 1 < source.size() && std::isalnum((unsigned char)source[i + 1]);
+                if (!leftWord || !rightWord) {
+                    flush();
+                    italic = !italic;
+                    i++;
+                    continue;
+                }
+            }
+
+            buf.push_back(source[i++]);
+        }
+
+        flush();
+        return spans;
+    }
+
+    std::vector<StyledWord> SplitStyledWords(const std::vector<StyledSpan>& spans) {
+        std::vector<StyledWord> words;
+        for (const auto& span : spans) {
+            std::wstring current;
+            for (wchar_t ch : span.text) {
+                if (ch == L' ' || ch == L'\t' || ch == L'\n' || ch == L'\r') {
+                    if (!current.empty()) {
+                        words.push_back({ current, span.bold, span.italic, span.strike });
+                        current.clear();
+                    }
+                } else {
+                    current.push_back(ch);
+                }
+            }
+            if (!current.empty()) words.push_back({ current, span.bold, span.italic, span.strike });
+        }
+        return words;
+    }
+
+    bool IsClosingPunctuation(const std::wstring& text) {
+        return text.size() == 1 && (text[0] == L'.' || text[0] == L',' || text[0] == L';' ||
+            text[0] == L':' || text[0] == L'!' || text[0] == L'?' || text[0] == L')');
+    }
+
+    std::vector<std::vector<StyledSpan>> WrapStyled(const std::string& text, double width, double size) {
+        std::vector<StyledWord> words = SplitStyledWords(ParseInlineStyled(text));
+        std::vector<std::vector<StyledSpan>> lines;
+        std::vector<StyledSpan> line;
+        double lineWidth = 0.0;
+        double spaceWidth = TextWidth(font, L" ", size);
+
+        for (const auto& word : words) {
+            double wordWidth = TextWidth(font, word.text, size);
+            bool needsSpace = !line.empty() && !IsClosingPunctuation(word.text);
+            double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
+
+            if (!line.empty() && lineWidth + addWidth > width) {
+                lines.push_back(line);
+                line.clear();
+                lineWidth = 0.0;
+                needsSpace = false;
+                addWidth = wordWidth;
+            }
+
+            if (needsSpace) {
+                line.push_back({ L" ", false, false, false });
+                lineWidth += spaceWidth;
+            }
+            line.push_back({ word.text, word.bold, word.italic, word.strike });
+            lineWidth += wordWidth;
+        }
+
+        if (!line.empty()) lines.push_back(line);
+        if (lines.empty()) lines.push_back({});
+        return lines;
+    }
+
     void NewPage() {
         pages.push_back("");
         y = PAGE_H - margin;
@@ -1006,21 +1367,55 @@ private:
         if (y - needed < margin) NewPage();
     }
 
-    void DrawTextLine(double x, double size, const std::wstring& line, const char* color = "0.08 0.08 0.08") {
-        double lh = size * 1.35;
-        Ensure(lh);
+    void PaintText(double x, double baseline, double size, const std::wstring& line, const char* color,
+        bool fauxBold = false, bool italic = false, bool strike = false) {
         std::string& c = pages.back();
+        double width = TextWidth(font, line, size);
         c += "q ";
         c += color;
         c += " rg BT /F1 ";
         c += F(size);
-        c += " Tf 1 0 0 1 ";
+        c += " Tf 1 0 ";
+        c += italic ? "0.18 " : "0 ";
+        c += "1 ";
         c += F(x);
         c += " ";
-        c += F(y - size);
+        c += F(baseline);
         c += " Tm ";
         c += HexText(font, line, usedCids);
-        c += " Tj ET Q\n";
+        c += " Tj";
+        if (fauxBold) {
+            c += " 1 0 ";
+            c += italic ? "0.18 " : "0 ";
+            c += "1 ";
+            c += F(x + 0.28);
+            c += " ";
+            c += F(baseline);
+            c += " Tm ";
+            c += HexText(font, line, usedCids);
+            c += " Tj";
+        }
+        c += " ET";
+        if (strike && !line.empty()) {
+            c += " ";
+            c += color;
+            c += " RG 0.55 w ";
+            c += F(x);
+            c += " ";
+            c += F(baseline + size * 0.34);
+            c += " m ";
+            c += F(x + width);
+            c += " ";
+            c += F(baseline + size * 0.34);
+            c += " l S";
+        }
+        c += " Q\n";
+    }
+
+    void DrawTextLine(double x, double size, const std::wstring& line, const char* color = "0.08 0.08 0.08") {
+        double lh = size * 1.35;
+        Ensure(lh);
+        PaintText(x, y - size, size, line, color);
         y -= lh;
     }
 
@@ -1037,6 +1432,23 @@ private:
         c += " ";
         c += F(h);
         c += " re f Q\n";
+    }
+
+    void DrawStrokeRect(double x, double top, double w, double h, const char* color = "0.72 0.72 0.72", double lineWidth = 0.45) {
+        std::string& c = pages.back();
+        c += "q ";
+        c += color;
+        c += " RG ";
+        c += F(lineWidth);
+        c += " w ";
+        c += F(x);
+        c += " ";
+        c += F(top - h);
+        c += " ";
+        c += F(w);
+        c += " ";
+        c += F(h);
+        c += " re S Q\n";
     }
 
     void RenderHeading(const Block& block) {
@@ -1057,11 +1469,24 @@ private:
     }
 
     void RenderParagraph(const std::string& text, double x, double width) {
-        std::wstring wide = Utf8ToWide(text);
-        for (const auto& line : WrapText(font, wide, width, bodySize)) {
-            DrawTextLine(x, bodySize, line);
+        double lh = bodySize * 1.35;
+        for (const auto& line : WrapStyled(text, width, bodySize)) {
+            Ensure(lh);
+            double cursor = x;
+            double baseline = y - bodySize;
+            for (const auto& span : line) {
+                PaintText(cursor, baseline, bodySize, span.text, "0.08 0.08 0.08", span.bold, span.italic, span.strike);
+                cursor += TextWidth(font, span.text, bodySize);
+            }
+            y -= lh;
         }
         y -= 5.0;
+    }
+
+    void RenderListItem(const std::string& marker, const Block& block) {
+        double x = margin + 16.0 + block.level * 18.0;
+        double width = PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0;
+        RenderParagraph(marker + block.text, x, width);
     }
 
     void RenderQuote(const std::string& text) {
@@ -1092,6 +1517,76 @@ private:
             }
         }
         y -= 8.0;
+    }
+
+    void RenderMath(const std::string& text) {
+        std::vector<std::string> raw = SplitLines(text);
+        double size = 10.5;
+        double lh = size * 1.45;
+        double x = margin + 12.0;
+        double width = PAGE_W - margin * 2.0 - 24.0;
+        for (const auto& rawLine : raw) {
+            std::wstring wide = Utf8ToWide(rawLine);
+            for (const auto& line : WrapCodeLine(font, wide, width, size)) {
+                Ensure(lh + 6.0);
+                DrawRect(margin, y + 4.0, PAGE_W - margin * 2.0, lh + 7.0, "0.97 0.97 0.95");
+                DrawStrokeRect(margin, y + 4.0, PAGE_W - margin * 2.0, lh + 7.0, "0.82 0.78 0.62", 0.4);
+                DrawTextLine(x, size, line, "0.10 0.10 0.10");
+            }
+        }
+        y -= 8.0;
+    }
+
+    void RenderTable(const std::vector<std::vector<std::string>>& rows, const std::vector<int>& aligns) {
+        if (rows.empty()) return;
+
+        size_t columns = 0;
+        for (const auto& row : rows) columns = std::max(columns, row.size());
+        if (columns == 0) return;
+
+        double tableWidth = PAGE_W - margin * 2.0;
+        double colWidth = tableWidth / columns;
+        double size = 9.6;
+        double lh = size * 1.32;
+        double pad = 5.0;
+        double cellTextWidth = std::max(16.0, colWidth - pad * 2.0);
+
+        y -= 3.0;
+        for (size_t r = 0; r < rows.size(); r++) {
+            std::vector<std::vector<std::wstring>> wrapped(columns);
+            size_t maxLines = 1;
+
+            for (size_t c = 0; c < columns; c++) {
+                std::string cell = c < rows[r].size() ? rows[r][c] : "";
+                wrapped[c] = WrapText(font, Utf8ToWide(cell), cellTextWidth, size);
+                maxLines = std::max(maxLines, wrapped[c].size());
+            }
+
+            double rowHeight = maxLines * lh + pad * 2.0;
+            Ensure(rowHeight + 5.0);
+            double top = y;
+            if (r == 0) DrawRect(margin, top, tableWidth, rowHeight, "0.91 0.93 0.95");
+
+            for (size_t c = 0; c < columns; c++) {
+                double cellX = margin + c * colWidth;
+                DrawStrokeRect(cellX, top, colWidth, rowHeight);
+
+                int align = c < aligns.size() ? aligns[c] : -1;
+                for (size_t lineIdx = 0; lineIdx < wrapped[c].size(); lineIdx++) {
+                    const std::wstring& line = wrapped[c][lineIdx];
+                    double tx = cellX + pad;
+                    double lineWidth = TextWidth(font, line, size);
+                    if (align == 0) tx = cellX + (colWidth - lineWidth) * 0.5;
+                    else if (align == 1) tx = cellX + colWidth - pad - lineWidth;
+
+                    double baseline = top - pad - size - lineIdx * lh;
+                    PaintText(tx, baseline, size, line, r == 0 ? "0.04 0.04 0.04" : "0.10 0.10 0.10", r == 0);
+                }
+            }
+
+            y -= rowHeight;
+        }
+        y -= 9.0;
     }
 
     void RenderRule() {

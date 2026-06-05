@@ -17,6 +17,7 @@ build/
 out/
 bin/
 obj/
+benchmark-output/
 
 # IDE and editor files
 .vs/

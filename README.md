@@ -26,19 +26,23 @@ Supported Markdown subset:
 
 - Headings
 - Paragraphs
-- Bullet and numbered lists
+- Bullet and numbered lists, including simple indentation-based nesting
 - Block quotes
 - Fenced code blocks
+- Pipe tables with basic left/center/right alignment
+- Inline math marker cleanup and `$$` math blocks rendered as formula boxes
 - Horizontal rules
-- Basic inline cleanup for emphasis, code spans, links, and images
+- Faux bold, italic, and strikethrough for inline emphasis
+- Basic inline cleanup for code spans, links, and images
+- Common status emoji fallback text for small embedded-font PDFs
 - YAML front matter is ignored
 
 Native mode writes PDF directly from C++ and embeds a Windows system font into the generated PDF so Unicode text can render correctly. The app does not ship a font file.
 
 Not supported in native mode:
 
-- Tables
-- Math
+- Full TeX math layout
+- Syntax highlighting
 - Footnotes
 - Citations
 - Image embedding
