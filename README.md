@@ -13,8 +13,10 @@ The default exporter is built into the EXE. It does not require Pandoc, LaTeX, a
 - Dark Windows-style ImGui interface
 - Drag and drop `.md` files into the editor
 - `Ctrl+E` quick export
-- Command-line export mode for scripts
+- Command-line single-file and batch export modes for scripts
+- Independent margin control: compact, normal, or wide
 - Single small Windows EXE release artifact
+- Unicode font subsetting for much smaller embedded-font PDFs
 
 ## Export Engines
 
@@ -37,7 +39,9 @@ Supported Markdown subset:
 - Common status emoji fallback text for small embedded-font PDFs
 - YAML front matter is ignored
 
-Native mode writes PDF directly from C++ and embeds a Windows system font into the generated PDF so Unicode text can render correctly. The app does not ship a font file.
+Native mode writes PDF directly from C++ and embeds a subset of a Windows system font into the generated PDF so Unicode text can render correctly without shipping a font file.
+
+ASCII-only documents use an even faster standard PDF font path. That path does not load or embed a Windows font, so output files are usually only a few KB and batch exports can run in a few milliseconds per document. Documents with Polish characters, emoji, or other Unicode automatically use the Unicode-safe embedded-font path.
 
 Not supported in native mode:
 
@@ -71,7 +75,7 @@ Build:
 build.bat
 ```
 
-The current build produces `fast-markdown-imgui.exe` at about 1.1 MB.
+The current build produces `fast-markdown-imgui.exe` at about 1.25 MB.
 
 ## Usage
 
@@ -81,7 +85,8 @@ GUI:
 2. Write or paste Markdown, or drag in a `.md` file.
 3. Choose `Native Tiny PDF` or `Pandoc (full)`.
 4. Choose a style.
-5. Click `Export PDF` or press `Ctrl+E`.
+5. Choose a margin.
+6. Click `Export PDF` or press `Ctrl+E`.
 
 CLI:
 
@@ -90,9 +95,31 @@ fast-markdown-imgui.exe --export input.md output.pdf
 fast-markdown-imgui.exe --export input.md output.pdf native elegant
 fast-markdown-imgui.exe --export input.md output.pdf pandoc modern
 fast-markdown-imgui.exe --export input.md output.pdf native tech
+fast-markdown-imgui.exe --export input.md output.pdf native modern compact
+fast-markdown-imgui.exe --batch input-folder output-folder native modern normal
+type files.txt | fast-markdown-imgui.exe --stdin-batch output-folder native modern normal
+fast-markdown-imgui.exe --serve output-folder native modern normal
+fast-markdown-imgui.exe --bench input.md bench-output-folder 5000 modern normal
 ```
 
 Styles are `elegant`, `modern`, and `tech`. Numeric style indexes `0`, `1`, and `2` also work.
+Margins are `compact`, `normal`, and `wide`.
+
+Batch mode converts every `.md` file in the input folder to a same-name `.pdf` in the output folder. Native batch mode keeps the parsed font metrics cached for the whole batch, so it is much faster than launching the EXE once per document.
+
+Stdin batch mode reads one Markdown file path per input line and writes same-name PDFs to the output folder. It is meant for tools that want to keep one Fast Markdown process warm and feed it work without relaunching the EXE per document.
+
+Serve mode is the lowest-latency integration path. Start one process, write one Markdown file path per stdin line, and read `OK/ERR`, elapsed milliseconds, and the output PDF path from stdout. Send `quit` or close stdin to stop it.
+
+Benchmark mode warms the native renderer once, then measures in-process PDF byte generation. It writes `bench-results.txt` and a validated `sample.pdf` to the output folder.
+
+Current local benchmark examples after the optimization roadmap pass:
+
+- ASCII standard-font path: 5,000 iterations, 0.07 ms average conversion, 2.5 KB PDF.
+- Unicode embedded-font path using `tester.md`: 500 iterations, 0.52 ms average conversion, 105 KB PDF.
+- Serve path: 20 ASCII files in 21.6-23.5 ms wall-clock total; reported per-file export plus write averaged 0.37-0.43 ms.
+- Long ASCII document, 156 KB input: 100 iterations, 9.59 ms average conversion, 352 KB PDF.
+- Long Unicode document, 163 KB input: 50 iterations, 49.79 ms average conversion, 1.85 MB PDF.
 
 CLI exit codes:
 
