@@ -1,61 +1,128 @@
 # Fast Markdown
 
-A lightweight, modern Markdown to PDF converter with a native Windows UI built using ImGui and DirectX 11.
+A lightweight native Windows Markdown to PDF converter built with Dear ImGui and DirectX 11.
+
+The default exporter is built into the EXE. It does not require Pandoc, LaTeX, a browser engine, or a bundled runtime.
 
 ![Fast Markdown](catto.png)
 
 ## Features
 
-- 🎨 **Dark Windows 11-style UI** - Clean, modern interface
-- 📝 **Live Markdown editing** - Write and preview your content
-- 📄 **PDF export** - Convert to beautifully formatted PDFs via Pandoc
-- 🎯 **Multiple styles** - Elegant (LaTeX), Modern (Sans), Tech (Mono)
-- 📂 **Drag & drop** - Load `.md` files directly
-- ⌨️ **Keyboard shortcut** - `Ctrl+E` for quick export
+- Native Markdown to PDF export with no external runtime dependency
+- Optional Pandoc compatibility engine for full-fidelity documents
+- Dark Windows-style ImGui interface
+- Drag and drop `.md` files into the editor
+- `Ctrl+E` quick export
+- Command-line export mode for scripts
+- Single small Windows EXE release artifact
 
-## Requirements
+## Export Engines
 
-### Build
-- MinGW-w64 (g++ with C++17 support)
-- Windows SDK (for DirectX 11)
+### Native Tiny PDF
 
-### Runtime
-- Windows 10/11
-- [Pandoc](https://pandoc.org/installing.html) (for PDF export)
-- [MiKTeX](https://miktex.org/) or [TeX Live](https://tug.org/texlive/) with XeLaTeX
+This is the default engine. It is designed for speed, low memory use, and simple packaging.
+
+Supported Markdown subset:
+
+- Headings
+- Paragraphs
+- Bullet and numbered lists
+- Block quotes
+- Fenced code blocks
+- Horizontal rules
+- Basic inline cleanup for emphasis, code spans, links, and images
+- YAML front matter is ignored
+
+Native mode writes PDF directly from C++ and embeds a Windows system font into the generated PDF so Unicode text can render correctly. The app does not ship a font file.
+
+Not supported in native mode:
+
+- Tables
+- Math
+- Footnotes
+- Citations
+- Image embedding
+- Custom Pandoc filters/templates
+- Full CommonMark/Pandoc extension compatibility
+
+### Pandoc
+
+Pandoc mode is still available for documents that need the full Pandoc pipeline. It shells out to `pandoc` and uses the selected style arguments.
+
+Pandoc mode requires:
+
+- Pandoc
+- A PDF engine such as XeLaTeX, LaTeX, Typst, wkhtmltopdf, or another Pandoc-supported engine
 
 ## Build
+
+Requirements:
+
+- MinGW-w64 with C++17 support
+- Windows SDK / DirectX 11 libraries
+
+Build:
 
 ```batch
 build.bat
 ```
 
-This produces `fast-markdown-imgui.exe` (~1MB).
+The current build produces `fast-markdown-imgui.exe` at about 1.1 MB.
 
 ## Usage
 
-1. Run `fast-markdown-imgui.exe`
-2. Write or paste Markdown content
-3. Select a style from the dropdown
-4. Click **Export PDF** (or press `Ctrl+E`)
-5. Choose save location
+GUI:
 
-### Drag & Drop
+1. Run `fast-markdown-imgui.exe`.
+2. Write or paste Markdown, or drag in a `.md` file.
+3. Choose `Native Tiny PDF` or `Pandoc (full)`.
+4. Choose a style.
+5. Click `Export PDF` or press `Ctrl+E`.
 
-Drop a `.md` file onto the window to load it.
+CLI:
+
+```batch
+fast-markdown-imgui.exe --export input.md output.pdf
+fast-markdown-imgui.exe --export input.md output.pdf native elegant
+fast-markdown-imgui.exe --export input.md output.pdf pandoc modern
+fast-markdown-imgui.exe --export input.md output.pdf native tech
+```
+
+Styles are `elegant`, `modern`, and `tech`. Numeric style indexes `0`, `1`, and `2` also work.
+
+CLI exit codes:
+
+- `0`: success
+- `2`: missing CLI arguments
+- `3`: input file could not be read
+- `11`: native exporter could not load a Windows font
+- `12`: native exporter could not write the PDF
+- `20`: Pandoc export failed
+
+## Release Packaging
+
+For the default native exporter, package only:
+
+- `fast-markdown-imgui.exe`
+
+Optional files for source/releases:
+
+- `README.md`
+- `LICENSE`
+- `catto.ico` / `catto.png`
+
+Do not bundle Pandoc unless you intentionally want a large compatibility package and are prepared to comply with Pandoc's GPL license terms.
 
 ## Project Structure
 
-```
-├── main.cpp              # Application source
-├── build.bat             # Build script
-├── imgui/                # ImGui library
-│   ├── backends/         # Platform/renderer backends
-│   └── ...
-├── catto.ico             # Application icon
-└── catto.png             # Icon source
+```text
+main.cpp              Application and native PDF exporter
+build.bat             MinGW build script
+imgui/                Dear ImGui sources
+catto.ico             Application icon
+catto.png             Image used in README
 ```
 
 ## License
 
-MIT License - See [imgui/LICENSE.txt](imgui/LICENSE.txt) for ImGui license.
+Fast Markdown is released under the MIT License. Dear ImGui keeps its own license in `imgui/LICENSE.txt`.

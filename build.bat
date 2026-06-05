@@ -9,6 +9,7 @@ g++ -O3 -s -std=c++17 -DUNICODE -D_UNICODE ^
     %IMGUI%/imgui_draw.cpp ^
     %IMGUI%/imgui_tables.cpp ^
     %IMGUI%/imgui_widgets.cpp ^
+    %IMGUI%/misc/cpp/imgui_stdlib.cpp ^
     %IMGUI%/backends/imgui_impl_win32.cpp ^
     %IMGUI%/backends/imgui_impl_dx11.cpp ^
     -o fast-markdown-imgui.exe ^
