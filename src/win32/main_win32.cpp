@@ -109,6 +109,8 @@ const char* BASE_ARGS = "--highlight-style=tango -V colorlinks=true "
     "\\definecolor{shadecolor}{RGB}{245,245,245}"
     "\\renewenvironment{quote}{\\begin{shaded*}}{\\end{shaded*}}\"";
 
+constexpr long long kMaxMarkdownInputBytes = 128LL * 1024LL * 1024LL;
+
 // ============================================================================
 // DirectX 11 Helpers
 // ============================================================================
@@ -259,7 +261,7 @@ bool ReadUtf8File(const std::wstring& path, std::string& content) {
     if (hFile == INVALID_HANDLE_VALUE) return false;
 
     LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0 || size.QuadPart > 64LL * 1024LL * 1024LL) {
+    if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0 || size.QuadPart > kMaxMarkdownInputBytes) {
         CloseHandle(hFile);
         return false;
     }

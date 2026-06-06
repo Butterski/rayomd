@@ -26,6 +26,10 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef FAST_MARKDOWN_USE_SIMDUTF
+#include "simdutf.h"
+#endif
+
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_IX86)
 #include <emmintrin.h>
 #define FAST_MD_SSE2 1
@@ -35,7 +39,7 @@ namespace TinyPdf {
 
 using CidList = std::vector<uint16_t>;
 
-static std::wstring Utf8ToWide(std::string_view str) {
+static std::wstring Utf8ToWideFallback(std::string_view str) {
     if (str.empty()) return L"";
 #ifdef _WIN32
     int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), nullptr, 0);
@@ -46,6 +50,36 @@ static std::wstring Utf8ToWide(std::string_view str) {
 #else
     std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
     return conv.from_bytes(str.data(), str.data() + str.size());
+#endif
+}
+
+static std::wstring Utf8ToWide(std::string_view str) {
+    if (str.empty()) return L"";
+#ifdef FAST_MARKDOWN_USE_SIMDUTF
+#if defined(_WIN32)
+    const size_t units = simdutf::utf16_length_from_utf8(str.data(), str.size());
+    if (units == 0) return Utf8ToWideFallback(str);
+    static_assert(sizeof(wchar_t) == sizeof(char16_t), "Windows wchar_t must be UTF-16 sized");
+    std::wstring wstr(units, 0);
+    size_t written = simdutf::convert_valid_utf8_to_utf16le(
+        str.data(), str.size(), reinterpret_cast<char16_t*>(&wstr[0]));
+    if (written == 0) return Utf8ToWideFallback(str);
+    wstr.resize(written);
+    return wstr;
+#else
+    const size_t units = simdutf::utf16_length_from_utf8(str.data(), str.size());
+    if (units == 0) return Utf8ToWideFallback(str);
+    std::u16string utf16(units, 0);
+    size_t written = simdutf::convert_valid_utf8_to_utf16le(str.data(), str.size(), &utf16[0]);
+    if (written == 0) return Utf8ToWideFallback(str);
+    std::wstring wstr(written, 0);
+    for (size_t i = 0; i < written; i++) {
+        wstr[i] = (wchar_t)utf16[i];
+    }
+    return wstr;
+#endif
+#else
+    return Utf8ToWideFallback(str);
 #endif
 }
 

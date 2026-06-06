@@ -22,12 +22,14 @@ namespace {
 
 namespace fs = std::filesystem;
 
+constexpr long long kMaxMarkdownInputBytes = 128LL * 1024LL * 1024LL;
+
 bool ReadUtf8FilePortable(const fs::path& path, std::string& content) {
 #ifndef _WIN32
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd >= 0) {
         struct stat st = {};
-        if (::fstat(fd, &st) == 0 && st.st_size >= 0 && st.st_size <= 64LL * 1024LL * 1024LL) {
+        if (::fstat(fd, &st) == 0 && st.st_size >= 0 && st.st_size <= kMaxMarkdownInputBytes) {
             if (st.st_size == 0) {
                 content.clear();
                 ::close(fd);
@@ -49,7 +51,7 @@ bool ReadUtf8FilePortable(const fs::path& path, std::string& content) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) return false;
     std::streamsize size = file.tellg();
-    if (size < 0 || size > 64LL * 1024LL * 1024LL) return false;
+    if (size < 0 || size > kMaxMarkdownInputBytes) return false;
     file.seekg(0, std::ios::beg);
     content.assign((size_t)size, '\0');
     return size == 0 || (bool)file.read(content.data(), size);
