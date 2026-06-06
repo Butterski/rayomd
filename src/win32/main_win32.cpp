@@ -329,7 +329,9 @@ bool WriteBinaryFile(const std::wstring& path, const std::string& content) {
 #endif
 
 bool ExportNativePdf(const std::string& markdown, const std::wstring& outputPath, int styleIdx, int marginIdx) {
-    std::string pdfBytes;
+    static thread_local std::string pdfBytes;
+    pdfBytes.clear();
+    pdfBytes.reserve(1024 * 1024);
     if (!TinyPdf::BuildPdfBytes(markdown, styleIdx, marginIdx, pdfBytes)) {
         return false;
     }
@@ -449,6 +451,14 @@ std::wstring JoinPath(const std::wstring& a, const std::wstring& b) {
     return a + L"\\" + b;
 }
 
+bool EnsureDirectoryRecursive(const std::wstring& path) {
+    if (path.empty()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path), ec);
+    if (!ec) return true;
+    return std::filesystem::exists(std::filesystem::path(path));
+}
+
 std::wstring PdfNameForMarkdown(const std::wstring& name) {
     size_t slash = name.find_last_of(L"\\/");
     std::wstring base = slash == std::wstring::npos ? name : name.substr(slash + 1);
@@ -474,7 +484,7 @@ bool ExportNativeFileWithBuffer(const std::wstring& inputPath, const std::wstrin
 }
 
 int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, int engine, int style, int margin) {
-    CreateDirectoryW(outputDir.c_str(), nullptr);
+    if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
     WIN32_FIND_DATAW findData = {};
     HANDLE hFind = FindFirstFileW(JoinPath(inputDir, L"*.md").c_str(), &findData);
@@ -514,7 +524,7 @@ void WriteStdoutLine(const std::string& line) {
 }
 
 int RunStdinBatchExport(const std::wstring& outputDir, int engine, int style, int margin) {
-    CreateDirectoryW(outputDir.c_str(), nullptr);
+    if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
     std::string list;
     if (!ReadAllStdin(list)) return 3;
@@ -533,7 +543,7 @@ int RunStdinBatchExport(const std::wstring& outputDir, int engine, int style, in
 }
 
 int RunServeExport(const std::wstring& outputDir, int engine, int style, int margin) {
-    CreateDirectoryW(outputDir.c_str(), nullptr);
+    if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
     HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
     if (hIn == INVALID_HANDLE_VALUE || hIn == nullptr) return 3;
@@ -586,7 +596,7 @@ int RunServeExport(const std::wstring& outputDir, int engine, int style, int mar
 
 int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir, int iterations, int style, int margin) {
     if (iterations < 1) iterations = 1;
-    CreateDirectoryW(outputDir.c_str(), nullptr);
+    if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
     std::string markdown;
     if (!ReadUtf8File(inputPath, markdown)) return 3;

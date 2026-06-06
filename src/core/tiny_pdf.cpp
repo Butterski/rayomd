@@ -9,6 +9,8 @@
 #endif
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cctype>
 #include <codecvt>
 #include <cstdint>
@@ -19,8 +21,6 @@
 #include <iterator>
 #include <locale>
 #include <map>
-#include <set>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -33,17 +33,19 @@
 
 namespace TinyPdf {
 
-static std::wstring Utf8ToWide(const std::string& str) {
+using CidList = std::vector<uint16_t>;
+
+static std::wstring Utf8ToWide(std::string_view str) {
     if (str.empty()) return L"";
 #ifdef _WIN32
-    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), nullptr, 0);
+    if (len <= 0) return L"";
     std::wstring wstr(len, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &wstr[0], len);
-    wstr.resize(len - 1);
+    MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), &wstr[0], len);
     return wstr;
 #else
     std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
-    return conv.from_bytes(str);
+    return conv.from_bytes(str.data(), str.data() + str.size());
 #endif
 }
 
@@ -182,17 +184,19 @@ std::vector<std::string> SplitLines(const std::string& text) {
 }
 
 static bool IsRuleLine(std::string_view line) {
-    std::string s;
+    char rule = 0;
+    int count = 0;
     for (char c : TrimView(line)) {
-        if (c != ' ') s.push_back(c);
+        if (c == ' ') continue;
+        if (rule == 0) {
+            if (c != '-' && c != '*' && c != '_') return false;
+            rule = c;
+        } else if (c != rule) {
+            return false;
+        }
+        count++;
     }
-    if (s.size() < 3) return false;
-    char c = s[0];
-    if (c != '-' && c != '*' && c != '_') return false;
-    for (char x : s) {
-        if (x != c) return false;
-    }
-    return true;
+    return count >= 3;
 }
 
 static bool ParseHeading(std::string_view line, int& level, std::string& text) {
@@ -286,6 +290,7 @@ static std::vector<std::string> SplitTableRow(std::string_view line) {
     if (!s.empty() && s.back() == '|') s.remove_suffix(1);
 
     std::vector<std::string> cells;
+    cells.reserve(4);
     std::string cell;
     bool escaped = false;
     for (char c : s) {
@@ -299,13 +304,15 @@ static std::vector<std::string> SplitTableRow(std::string_view line) {
             continue;
         }
         if (c == '|') {
-            cells.push_back(Trim(cell));
+            std::string_view v = TrimView(cell);
+            cells.emplace_back(v.data(), v.size());
             cell.clear();
         } else {
             cell.push_back(c);
         }
     }
-    cells.push_back(Trim(cell));
+    std::string_view v = TrimView(cell);
+    cells.emplace_back(v.data(), v.size());
     return cells;
 }
 
@@ -344,6 +351,11 @@ static bool ParseTableSeparator(std::string_view line, std::vector<int>& aligns)
 
 static bool IsTableStart(const std::vector<std::string_view>& lines, size_t i) {
     if (i + 1 >= lines.size()) return false;
+    if (lines[i].find('|') == std::string_view::npos ||
+        lines[i + 1].find('|') == std::string_view::npos ||
+        lines[i + 1].find('-') == std::string_view::npos) {
+        return false;
+    }
     if (SplitTableRow(lines[i]).size() < 2) return false;
     std::vector<int> aligns;
     return ParseTableSeparator(lines[i + 1], aligns);
@@ -359,6 +371,7 @@ static void ReplaceAll(std::string& s, const std::string& from, const std::strin
 }
 
 static std::string NormalizeSymbols(std::string s) {
+    if (s.find('\xE2') == std::string::npos) return s;
     ReplaceAll(s, std::string("\xE2\x9C\x85"), "[OK]");
     ReplaceAll(s, std::string("\xE2\x9A\xA0\xEF\xB8\x8F"), "[!]");
     ReplaceAll(s, std::string("\xE2\x9A\xA0"), "[!]");
@@ -367,6 +380,11 @@ static std::string NormalizeSymbols(std::string s) {
 }
 
 static std::string StripInlineMarkdown(std::string_view input) {
+    if (input.find_first_of("!*_~`$[\\") == std::string_view::npos &&
+        input.find('\xE2') == std::string_view::npos) {
+        return ToString(TrimView(input));
+    }
+
     std::string source = NormalizeSymbols(ToString(input));
     std::string out;
     out.reserve(source.size());
@@ -722,7 +740,7 @@ struct TtfFont {
     std::unordered_map<uint16_t, uint16_t> glyphForBmp;
     std::vector<uint16_t> advances;
     std::vector<uint32_t> loca;
-    mutable std::unordered_map<uint16_t, uint16_t> widthCache;
+    mutable std::array<uint16_t, 65536> widthCache{};
     uint16_t unitsPerEm = 1000;
     uint16_t glyphCount = 0;
     uint16_t metricCount = 0;
@@ -763,7 +781,7 @@ struct TtfFont {
             glyphForBmp.clear();
             advances.clear();
             loca.clear();
-            widthCache.clear();
+            widthCache.fill(0);
             if (ReadWholeFile(path, bytes) && Parse()) {
                 loaded = true;
                 return true;
@@ -920,8 +938,8 @@ struct TtfFont {
     }
 
     uint16_t WidthForCid(uint16_t cid) const {
-        auto cached = widthCache.find(cid);
-        if (cached != widthCache.end()) return cached->second;
+        uint16_t cached = widthCache[cid];
+        if (cached != 0) return cached;
         uint16_t glyph = GlyphFor(cid);
         if (glyph < advances.size()) {
             uint16_t width = (uint16_t)((advances[glyph] * 1000u + unitsPerEm / 2u) / unitsPerEm);
@@ -936,22 +954,6 @@ struct TtfFont {
         return (int)((value * 1000.0) / unitsPerEm);
     }
 };
-
-static std::vector<uint32_t> Codepoints(const std::wstring& text) {
-    std::vector<uint32_t> cps;
-    for (size_t i = 0; i < text.size(); i++) {
-        uint32_t cp = (uint16_t)text[i];
-        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < text.size()) {
-            uint32_t lo = (uint16_t)text[i + 1];
-            if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                i++;
-            }
-        }
-        cps.push_back(cp);
-    }
-    return cps;
-}
 
 template<typename Fn>
 static void ForEachCodepoint(std::wstring_view text, Fn fn) {
@@ -972,11 +974,15 @@ static uint16_t CidForCodepoint(const TtfFont& font, uint32_t cp) {
     return (cp <= 0xffff && font.GlyphFor(cp) != 0) ? (uint16_t)cp : (uint16_t)'?';
 }
 
+static double CodepointWidth(const TtfFont& font, uint32_t cp, double scale) {
+    return font.WidthForCid(CidForCodepoint(font, cp)) * scale;
+}
+
 static double TextWidth(const TtfFont& font, std::wstring_view text, double size) {
     double w = 0.0;
+    const double scale = size * 0.001;
     ForEachCodepoint(text, [&](uint32_t cp) {
-        uint16_t cid = CidForCodepoint(font, cp);
-        w += font.WidthForCid(cid) * size / 1000.0;
+        w += CodepointWidth(font, cp, scale);
     });
     return w;
 }
@@ -1018,8 +1024,9 @@ static void PushWrappedWord(const TtfFont& font, std::wstring_view word, double 
     std::wstring part;
     part.reserve(word.size());
     double partWidth = 0.0;
+    const double scale = size * 0.001;
     for (wchar_t ch : word) {
-        double chWidth = TextWidth(font, std::wstring_view(&ch, 1), size);
+        double chWidth = CodepointWidth(font, (uint16_t)ch, scale);
         if (!part.empty() && partWidth + chWidth > maxWidth) {
             lines.push_back(part);
             part.clear();
@@ -1055,17 +1062,15 @@ static std::vector<std::wstring> WrapText(const TtfFont& font, std::wstring_view
     return lines;
 }
 
-static std::vector<std::wstring> WrapCodeLine(const TtfFont& font, std::wstring line, double maxWidth, double size) {
-    for (wchar_t& ch : line) {
-        if (ch == L'\t') ch = L' ';
-    }
-
+static std::vector<std::wstring> WrapCodeLine(const TtfFont& font, std::wstring_view line, double maxWidth, double size) {
     std::vector<std::wstring> lines;
     std::wstring part;
     part.reserve(std::min<size_t>(line.size(), 256));
     double partWidth = 0.0;
+    const double scale = size * 0.001;
     for (wchar_t ch : line) {
-        double chWidth = TextWidth(font, std::wstring_view(&ch, 1), size);
+        if (ch == L'\t') ch = L' ';
+        double chWidth = CodepointWidth(font, (uint16_t)ch, scale);
         if (!part.empty() && partWidth + chWidth > maxWidth) {
             lines.push_back(part);
             part.clear();
@@ -1093,6 +1098,18 @@ std::string F(double v) {
     return s;
 }
 
+static void AppendInt(std::string& out, int value) {
+    char buf[24];
+    auto result = std::to_chars(buf, buf + sizeof(buf), value);
+    if (result.ec == std::errc()) out.append(buf, (size_t)(result.ptr - buf));
+}
+
+static void AppendSize(std::string& out, size_t value) {
+    char buf[32];
+    auto result = std::to_chars(buf, buf + sizeof(buf), value);
+    if (result.ec == std::errc()) out.append(buf, (size_t)(result.ptr - buf));
+}
+
 static void AppendHex4(std::string& out, uint16_t value) {
     static char table[65536][4];
     static bool init = false;
@@ -1111,13 +1128,38 @@ static void AppendHex4(std::string& out, uint16_t value) {
     memcpy(&out[old], table[value], 4);
 }
 
-static std::string HexText(const TtfFont& font, const std::wstring& text, std::set<uint16_t>& usedCids) {
+class UsedCidSet {
+public:
+    void Add(uint16_t cid) {
+        uint64_t mask = 1ull << (cid & 63);
+        uint64_t& word = bits[cid >> 6];
+        if ((word & mask) != 0) return;
+        word |= mask;
+        values.push_back(cid);
+        sorted = false;
+    }
+
+    const CidList& Values() const {
+        if (!sorted) {
+            std::sort(values.begin(), values.end());
+            sorted = true;
+        }
+        return values;
+    }
+
+private:
+    std::array<uint64_t, 1024> bits{};
+    mutable CidList values;
+    mutable bool sorted = true;
+};
+
+static std::string HexText(const TtfFont& font, const std::wstring& text, UsedCidSet& usedCids) {
     std::string out;
     out.reserve(2 + text.size() * 4);
     out.push_back('<');
     ForEachCodepoint(std::wstring_view(text), [&](uint32_t cp) {
         uint16_t cid = CidForCodepoint(font, cp);
-        usedCids.insert(cid);
+        usedCids.Add(cid);
         AppendHex4(out, cid);
     });
     out.push_back('>');
@@ -1167,7 +1209,7 @@ static uint32_t ChecksumString(const std::string& s) {
     return ChecksumBytes(s.data(), s.size());
 }
 
-static std::string MakeCidKey(const std::set<uint16_t>& used) {
+static std::string MakeCidKey(const CidList& used) {
     std::string key;
     key.reserve(used.size() * 2);
     for (uint16_t cid : used) {
@@ -1199,7 +1241,7 @@ public:
         body += "<< ";
         body += dict;
         body += " /Length ";
-        body += std::to_string(data.size());
+        AppendSize(body, data.size());
         body += " >>\nstream\n";
         body += data;
         body += "\nendstream";
@@ -1221,7 +1263,7 @@ public:
         std::vector<size_t> offsets(objects.size() + 1, 0);
         for (size_t i = 0; i < objects.size(); i++) {
             offsets[i + 1] = pdf.size();
-            pdf += std::to_string(i + 1);
+            AppendSize(pdf, i + 1);
             pdf += " 0 obj\n";
             pdf += objects[i];
             pdf += "\nendobj\n";
@@ -1229,7 +1271,7 @@ public:
 
         size_t xref = pdf.size();
         pdf += "xref\n0 ";
-        pdf += std::to_string(objects.size() + 1);
+        AppendSize(pdf, objects.size() + 1);
         pdf += "\n0000000000 65535 f \n";
 
         char entry[32];
@@ -1239,13 +1281,13 @@ public:
         }
 
         pdf += "trailer\n<< /Size ";
-        pdf += std::to_string(objects.size() + 1);
+        AppendSize(pdf, objects.size() + 1);
         pdf += " /Root ";
-        pdf += std::to_string(rootId);
+        AppendInt(pdf, rootId);
         pdf += " 0 R /Info ";
-        pdf += std::to_string(infoId);
+        AppendInt(pdf, infoId);
         pdf += " 0 R >>\nstartxref\n";
-        pdf += std::to_string(xref);
+        AppendSize(pdf, xref);
         pdf += "\n%%EOF\n";
         return pdf;
     }
@@ -1283,9 +1325,15 @@ public:
                 y -= 2.0;
                 break;
             case BlockType::Numbered:
-                RenderListItem(std::to_string(block.number) + ". ", block);
+            {
+                std::string marker;
+                marker.reserve(8);
+                AppendInt(marker, block.number);
+                marker += ". ";
+                RenderListItem(marker, block);
                 y -= 2.0;
                 break;
+            }
             case BlockType::Quote:
                 RenderQuote(block.text);
                 break;
@@ -1306,7 +1354,7 @@ public:
     }
 
     const std::vector<std::string>& Pages() const { return pages; }
-    const std::set<uint16_t>& UsedCids() const { return usedCids; }
+    const CidList& UsedCids() const { return usedCids.Values(); }
 
 private:
     const TtfFont& font;
@@ -1318,7 +1366,7 @@ private:
     double lineHeight = 15.5;
     double y = 0.0;
     std::vector<std::string> pages;
-    std::set<uint16_t> usedCids;
+    UsedCidSet usedCids;
 
     struct StyledSpan {
         std::wstring text;
@@ -1334,7 +1382,7 @@ private:
         bool strike = false;
     };
 
-    void PushSpan(std::vector<StyledSpan>& spans, const std::string& text, bool bold, bool italic, bool strike) {
+    void PushSpan(std::vector<StyledSpan>& spans, std::string_view text, bool bold, bool italic, bool strike) {
         if (text.empty()) return;
         std::wstring wide = Utf8ToWide(text);
         if (!spans.empty() && spans.back().bold == bold && spans.back().italic == italic && spans.back().strike == strike) {
@@ -1351,7 +1399,7 @@ private:
         bool bold = false, italic = false, strike = false;
 
         auto flush = [&]() {
-            PushSpan(spans, buf, bold, italic, strike);
+            PushSpan(spans, std::string_view(buf), bold, italic, strike);
             buf.clear();
         };
 
@@ -1387,7 +1435,7 @@ private:
                 size_t end = source.find('`', i + 1);
                 if (end != std::string::npos) {
                     flush();
-                    PushSpan(spans, source.substr(i + 1, end - i - 1), false, false, false);
+                    PushSpan(spans, std::string_view(source.data() + i + 1, end - i - 1), false, false, false);
                     i = end + 1;
                     continue;
                 }
@@ -1397,7 +1445,7 @@ private:
                 size_t end = source.find('$', i + 1);
                 if (end != std::string::npos) {
                     flush();
-                    PushSpan(spans, source.substr(i + 1, end - i - 1), false, true, false);
+                    PushSpan(spans, std::string_view(source.data() + i + 1, end - i - 1), false, true, false);
                     i = end + 1;
                     continue;
                 }
@@ -1459,6 +1507,7 @@ private:
 
     std::vector<StyledWord> SplitStyledWords(const std::vector<StyledSpan>& spans) {
         std::vector<StyledWord> words;
+        words.reserve(spans.size() * 3);
         for (const auto& span : spans) {
             std::wstring current;
             for (wchar_t ch : span.text) {
@@ -1474,6 +1523,15 @@ private:
             if (!current.empty()) words.push_back({ current, span.bold, span.italic, span.strike });
         }
         return words;
+    }
+
+    void AppendStyledSpan(std::vector<StyledSpan>& line, std::wstring text, bool bold, bool italic, bool strike) {
+        if (text.empty()) return;
+        if (!line.empty() && line.back().bold == bold && line.back().italic == italic && line.back().strike == strike) {
+            line.back().text += text;
+            return;
+        }
+        line.push_back({ std::move(text), bold, italic, strike });
     }
 
     bool IsClosingPunctuation(const std::wstring& text) {
@@ -1494,7 +1552,9 @@ private:
 
         std::vector<StyledWord> words = SplitStyledWords(ParseInlineStyled(text));
         std::vector<std::vector<StyledSpan>> lines;
+        lines.reserve(std::max<size_t>(1, text.size() / 72));
         std::vector<StyledSpan> line;
+        line.reserve(16);
         double lineWidth = 0.0;
         double spaceWidth = TextWidth(font, L" ", size);
 
@@ -1511,11 +1571,17 @@ private:
                 addWidth = wordWidth;
             }
 
+            std::wstring textRun = word.text;
             if (needsSpace) {
-                line.push_back({ L" ", false, false, false });
-                lineWidth += spaceWidth;
+                if (word.strike) {
+                    AppendStyledSpan(line, L" ", false, false, false);
+                    lineWidth += spaceWidth;
+                } else {
+                    textRun.insert(textRun.begin(), L' ');
+                    wordWidth += spaceWidth;
+                }
             }
-            line.push_back({ word.text, word.bold, word.italic, word.strike });
+            AppendStyledSpan(line, std::move(textRun), word.bold, word.italic, word.strike);
             lineWidth += wordWidth;
         }
 
@@ -1537,7 +1603,6 @@ private:
     void PaintText(double x, double baseline, double size, const std::wstring& line, const char* color,
         bool fauxBold = false, bool italic = false, bool strike = false) {
         std::string& c = pages.back();
-        double width = TextWidth(font, line, size);
         c += "q ";
         c += color;
         c += " rg BT /F1 ";
@@ -1549,7 +1614,8 @@ private:
         c += " ";
         AppendF(c, baseline);
         c += " Tm ";
-        c += HexText(font, line, usedCids);
+        std::string hex = HexText(font, line, usedCids);
+        c += hex;
         c += " Tj";
         if (fauxBold) {
             c += " 1 0 ";
@@ -1559,11 +1625,12 @@ private:
             c += " ";
             AppendF(c, baseline);
             c += " Tm ";
-            c += HexText(font, line, usedCids);
+            c += hex;
             c += " Tj";
         }
         c += " ET";
         if (strike && !line.empty()) {
+            double width = TextWidth(font, line, size);
             c += " ";
             c += color;
             c += " RG 0.55 w ";
@@ -1819,7 +1886,7 @@ static bool OriginalTableBytes(const TtfFont& font, const std::string& tag, std:
     return true;
 }
 
-static bool BuildSubsetFontBytes(const TtfFont& font, const std::set<uint16_t>& used, std::string& out) {
+static bool BuildSubsetFontBytes(const TtfFont& font, const CidList& used, std::string& out) {
     if (font.glyphCount == 0 || font.loca.size() < (size_t)font.glyphCount + 1) return false;
 
     std::vector<uint8_t> include((size_t)font.glyphCount, 0);
@@ -1934,16 +2001,18 @@ static bool BuildSubsetFontBytes(const TtfFont& font, const std::set<uint16_t>& 
 static std::string BuildFontFileObject(const std::string& fontBytes) {
     std::string body;
     body.reserve(fontBytes.size() + 128);
-    body = "<< /Length " + std::to_string(fontBytes.size()) + " /Length1 " +
-        std::to_string(fontBytes.size()) + " >>\nstream\n";
+    body += "<< /Length ";
+    AppendSize(body, fontBytes.size());
+    body += " /Length1 ";
+    AppendSize(body, fontBytes.size());
+    body += " >>\nstream\n";
     body.append(fontBytes.data(), fontBytes.size());
     body += "\nendstream";
     return body;
 }
 
-static const std::string& CachedFontFileObject(const TtfFont& font, const std::set<uint16_t>& used) {
+static const std::string& CachedFontFileObject(const TtfFont& font, const CidList& used, const std::string& key) {
     static std::unordered_map<std::string, std::string> cache;
-    std::string key = MakeCidKey(used);
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
 
@@ -1959,13 +2028,12 @@ static const std::string& CachedFontFileObject(const TtfFont& font, const std::s
         fontBytes = &full;
     }
 
-    auto inserted = cache.emplace(std::move(key), BuildFontFileObject(*fontBytes));
+    auto inserted = cache.emplace(key, BuildFontFileObject(*fontBytes));
     return inserted.first->second;
 }
 
-static const std::string& MakeCidToGidMap(const TtfFont& font, const std::set<uint16_t>& used) {
+static const std::string& MakeCidToGidMap(const TtfFont& font, const CidList& used, const std::string& key) {
     static std::unordered_map<std::string, std::string> cache;
-    std::string key = MakeCidKey(used);
     auto cached = cache.find(key);
     if (cached != cache.end()) return cached->second;
 
@@ -1978,13 +2046,12 @@ static const std::string& MakeCidToGidMap(const TtfFont& font, const std::set<ui
         map[(size_t)cid * 2] = (char)((glyph >> 8) & 0xff);
         map[(size_t)cid * 2 + 1] = (char)(glyph & 0xff);
     }
-    auto inserted = cache.emplace(std::move(key), std::move(map));
+    auto inserted = cache.emplace(key, std::move(map));
     return inserted.first->second;
 }
 
-static const std::string& MakeToUnicodeCMap(const std::set<uint16_t>& used) {
+static const std::string& MakeToUnicodeCMap(const CidList& used, const std::string& key) {
     static std::unordered_map<std::string, std::string> cache;
-    std::string key = MakeCidKey(used);
     auto cached = cache.find(key);
     if (cached != cache.end()) return cached->second;
 
@@ -2000,7 +2067,7 @@ static const std::string& MakeToUnicodeCMap(const std::set<uint16_t>& used) {
     int count = 0;
     for (auto it = used.begin(); it != used.end();) {
         int chunk = std::min<int>(100, (int)used.size() - count);
-        out += std::to_string(chunk);
+        AppendInt(out, chunk);
         out += " beginbfchar\n";
         for (int i = 0; i < chunk; i++, ++it) {
             out.push_back('<');
@@ -2018,13 +2085,12 @@ static const std::string& MakeToUnicodeCMap(const std::set<uint16_t>& used) {
     }
 
     out += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
-    auto inserted = cache.emplace(std::move(key), std::move(out));
+    auto inserted = cache.emplace(key, std::move(out));
     return inserted.first->second;
 }
 
-static const std::string& MakeWidths(const TtfFont& font, const std::set<uint16_t>& used) {
+static const std::string& MakeWidths(const TtfFont& font, const CidList& used, const std::string& key) {
     static std::unordered_map<std::string, std::string> cache;
-    std::string key = MakeCidKey(used);
     auto cached = cache.find(key);
     if (cached != cache.end()) return cached->second;
 
@@ -2033,18 +2099,18 @@ static const std::string& MakeWidths(const TtfFont& font, const std::set<uint16_
     out += "[ ";
     if (used.empty()) {
         out += "32 [ ";
-        out += std::to_string(font.WidthForCid(32));
+        AppendInt(out, font.WidthForCid(32));
         out += " ] ";
     } else {
         for (uint16_t cid : used) {
-            out += std::to_string(cid);
+            AppendInt(out, cid);
             out += " [ ";
-            out += std::to_string(font.WidthForCid(cid));
+            AppendInt(out, font.WidthForCid(cid));
             out += " ] ";
         }
     }
     out += "]";
-    auto inserted = cache.emplace(std::move(key), std::move(out));
+    auto inserted = cache.emplace(key, std::move(out));
     return inserted.first->second;
 }
 
@@ -2058,24 +2124,49 @@ static std::string EscapeLiteral(const std::string& s) {
 }
 
 bool IsAsciiDocument(const std::string& s) {
+    auto isAsciiAfterSymbolNormalization = [](std::string_view text) {
+        for (size_t i = 0; i < text.size();) {
+            unsigned char c = (unsigned char)text[i];
+            if (c < 128) {
+                i++;
+                continue;
+            }
+            if (i + 3 <= text.size() && text.compare(i, 3, "\xE2\x9C\x85") == 0) {
+                i += 3;
+                continue;
+            }
+            if (i + 6 <= text.size() && text.compare(i, 6, "\xE2\x9A\xA0\xEF\xB8\x8F") == 0) {
+                i += 6;
+                continue;
+            }
+            if (i + 3 <= text.size() && text.compare(i, 3, "\xE2\x9A\xA0") == 0) {
+                i += 3;
+                continue;
+            }
+            if (i + 3 <= text.size() && text.compare(i, 3, "\xE2\x9D\x8C") == 0) {
+                i += 3;
+                continue;
+            }
+            return false;
+        }
+        return true;
+    };
+
 #ifdef FAST_MD_SSE2
     const char* ptr = s.data();
     const char* end = ptr + s.size();
     while (ptr + 16 <= end) {
         __m128i chunk = _mm_loadu_si128((const __m128i*)ptr);
-        if (_mm_movemask_epi8(chunk) != 0) return false;
+        if (_mm_movemask_epi8(chunk) != 0) return isAsciiAfterSymbolNormalization(s);
         ptr += 16;
     }
     while (ptr < end) {
-        if ((unsigned char)*ptr >= 128) return false;
+        if ((unsigned char)*ptr >= 128) return isAsciiAfterSymbolNormalization(s);
         ptr++;
     }
     return true;
 #else
-    for (unsigned char c : s) {
-        if (c >= 128) return false;
-    }
-    return true;
+    return isAsciiAfterSymbolNormalization(s);
 #endif
 }
 
@@ -2188,10 +2279,17 @@ public:
                 y -= 2.0;
                 break;
             case BlockType::Numbered:
-                RenderParagraph(std::to_string(block.number) + ". " + block.text, margin + 16.0 + block.level * 18.0,
+            {
+                std::string item;
+                item.reserve(block.text.size() + 8);
+                AppendInt(item, block.number);
+                item += ". ";
+                item += block.text;
+                RenderParagraph(item, margin + 16.0 + block.level * 18.0,
                     PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0);
                 y -= 2.0;
                 break;
+            }
             case BlockType::Quote:
                 RenderQuote(block.text);
                 break;
@@ -2411,22 +2509,44 @@ static bool BuildStandardPdfBytes(const std::string& markdown, int styleIdx, int
     std::vector<int> pageIds;
     for (const std::string& pageContent : renderer.Pages()) {
         int contentId = pdf.AddStream("", pageContent);
-        std::ostringstream page;
-        page << "<< /Type /Page /Parent " << pagesId << " 0 R"
-             << " /MediaBox [0 0 " << F(PAGE_W) << " " << F(PAGE_H) << "]"
-             << " /Resources << /Font << /F1 " << fontRegularId << " 0 R /F2 "
-             << fontBoldId << " 0 R /F3 " << fontMonoId << " 0 R >> >>"
-             << " /Contents " << contentId << " 0 R >>";
-        pageIds.push_back(pdf.Add(page.str()));
+        std::string page;
+        page.reserve(192);
+        page += "<< /Type /Page /Parent ";
+        AppendInt(page, pagesId);
+        page += " 0 R /MediaBox [0 0 ";
+        AppendF(page, PAGE_W);
+        page += " ";
+        AppendF(page, PAGE_H);
+        page += "] /Resources << /Font << /F1 ";
+        AppendInt(page, fontRegularId);
+        page += " 0 R /F2 ";
+        AppendInt(page, fontBoldId);
+        page += " 0 R /F3 ";
+        AppendInt(page, fontMonoId);
+        page += " 0 R >> >> /Contents ";
+        AppendInt(page, contentId);
+        page += " 0 R >>";
+        pageIds.push_back(pdf.Add(page));
     }
 
-    std::ostringstream pages;
-    pages << "<< /Type /Pages /Kids [";
-    for (int id : pageIds) pages << id << " 0 R ";
-    pages << "] /Count " << pageIds.size() << " >>";
-    pdf.Set(pagesId, pages.str());
+    std::string pages;
+    pages.reserve(48 + pageIds.size() * 8);
+    pages += "<< /Type /Pages /Kids [";
+    for (int id : pageIds) {
+        AppendInt(pages, id);
+        pages += " 0 R ";
+    }
+    pages += "] /Count ";
+    AppendSize(pages, pageIds.size());
+    pages += " >>";
+    pdf.Set(pagesId, pages);
 
-    int catalogId = pdf.Add("<< /Type /Catalog /Pages " + std::to_string(pagesId) + " 0 R >>");
+    std::string catalog;
+    catalog.reserve(48);
+    catalog += "<< /Type /Catalog /Pages ";
+    AppendInt(catalog, pagesId);
+    catalog += " 0 R >>";
+    int catalogId = pdf.Add(catalog);
     int infoId = pdf.Add("<< /Producer (Fast Markdown Native Standard PDF) /Creator (Fast Markdown) /Title (" +
         EscapeLiteral("Markdown Export") + ") >>");
 
@@ -2468,58 +2588,111 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, int styleIdx, int 
     Renderer renderer(font, type0FontId, styleIdx, marginIdx);
     renderer.Render(blocks);
 
-    const std::set<uint16_t>& used = renderer.UsedCids();
-    const std::string& cidMapBytes = MakeCidToGidMap(font, used);
-    const std::string& toUnicodeBytes = MakeToUnicodeCMap(used);
+    const CidList& used = renderer.UsedCids();
+    std::string cidKey = MakeCidKey(used);
+    const std::string& cidMapBytes = MakeCidToGidMap(font, used, cidKey);
+    const std::string& toUnicodeBytes = MakeToUnicodeCMap(used, cidKey);
 
-    pdf.Set(fontFileId, CachedFontFileObject(font, used));
-    pdf.Set(cidMapId, "<< /Length " + std::to_string(cidMapBytes.size()) +
-        " >>\nstream\n" + cidMapBytes + "\nendstream");
-    pdf.Set(toUnicodeId, "<< /Length " + std::to_string(toUnicodeBytes.size()) +
-        " >>\nstream\n" + toUnicodeBytes + "\nendstream");
+    pdf.Set(fontFileId, CachedFontFileObject(font, used, cidKey));
+    std::string cidMapObject;
+    cidMapObject.reserve(cidMapBytes.size() + 48);
+    cidMapObject += "<< /Length ";
+    AppendSize(cidMapObject, cidMapBytes.size());
+    cidMapObject += " >>\nstream\n";
+    cidMapObject += cidMapBytes;
+    cidMapObject += "\nendstream";
+    pdf.Set(cidMapId, cidMapObject);
 
-    std::ostringstream desc;
-    desc << "<< /Type /FontDescriptor /FontName /FastMarkdownSegoe /Flags 32"
-         << " /FontBBox [" << font.Metric(font.xMin) << " " << font.Metric(font.yMin) << " "
-         << font.Metric(font.xMax) << " " << font.Metric(font.yMax) << "]"
-         << " /ItalicAngle 0 /Ascent " << font.Metric(font.ascent)
-         << " /Descent " << font.Metric(font.descent)
-         << " /CapHeight " << (int)(font.Metric(font.ascent) * 0.72)
-         << " /StemV 80 /FontFile2 " << fontFileId << " 0 R >>";
-    pdf.Set(descriptorId, desc.str());
+    std::string toUnicodeObject;
+    toUnicodeObject.reserve(toUnicodeBytes.size() + 48);
+    toUnicodeObject += "<< /Length ";
+    AppendSize(toUnicodeObject, toUnicodeBytes.size());
+    toUnicodeObject += " >>\nstream\n";
+    toUnicodeObject += toUnicodeBytes;
+    toUnicodeObject += "\nendstream";
+    pdf.Set(toUnicodeId, toUnicodeObject);
 
-    std::ostringstream cidFont;
-    cidFont << "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /FastMarkdownSegoe"
-            << " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
-            << " /FontDescriptor " << descriptorId << " 0 R"
-            << " /CIDToGIDMap " << cidMapId << " 0 R"
-            << " /DW 500 /W " << MakeWidths(font, used) << " >>";
-    pdf.Set(cidFontId, cidFont.str());
+    std::string desc;
+    desc.reserve(224);
+    desc += "<< /Type /FontDescriptor /FontName /FastMarkdownSegoe /Flags 32 /FontBBox [";
+    AppendInt(desc, font.Metric(font.xMin));
+    desc += " ";
+    AppendInt(desc, font.Metric(font.yMin));
+    desc += " ";
+    AppendInt(desc, font.Metric(font.xMax));
+    desc += " ";
+    AppendInt(desc, font.Metric(font.yMax));
+    desc += "] /ItalicAngle 0 /Ascent ";
+    AppendInt(desc, font.Metric(font.ascent));
+    desc += " /Descent ";
+    AppendInt(desc, font.Metric(font.descent));
+    desc += " /CapHeight ";
+    AppendInt(desc, (int)(font.Metric(font.ascent) * 0.72));
+    desc += " /StemV 80 /FontFile2 ";
+    AppendInt(desc, fontFileId);
+    desc += " 0 R >>";
+    pdf.Set(descriptorId, desc);
 
-    std::ostringstream type0;
-    type0 << "<< /Type /Font /Subtype /Type0 /BaseFont /FastMarkdownSegoe"
-          << " /Encoding /Identity-H /DescendantFonts [" << cidFontId << " 0 R]"
-          << " /ToUnicode " << toUnicodeId << " 0 R >>";
-    pdf.Set(type0FontId, type0.str());
+    std::string cidFont;
+    cidFont.reserve(256);
+    cidFont += "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /FastMarkdownSegoe"
+        " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
+        " /FontDescriptor ";
+    AppendInt(cidFont, descriptorId);
+    cidFont += " 0 R /CIDToGIDMap ";
+    AppendInt(cidFont, cidMapId);
+    cidFont += " 0 R /DW 500 /W ";
+    cidFont += MakeWidths(font, used, cidKey);
+    cidFont += " >>";
+    pdf.Set(cidFontId, cidFont);
+
+    std::string type0;
+    type0.reserve(160);
+    type0 += "<< /Type /Font /Subtype /Type0 /BaseFont /FastMarkdownSegoe"
+        " /Encoding /Identity-H /DescendantFonts [";
+    AppendInt(type0, cidFontId);
+    type0 += " 0 R] /ToUnicode ";
+    AppendInt(type0, toUnicodeId);
+    type0 += " 0 R >>";
+    pdf.Set(type0FontId, type0);
 
     std::vector<int> pageIds;
     for (const std::string& pageContent : renderer.Pages()) {
         int contentId = pdf.AddStream("", pageContent);
-        std::ostringstream page;
-        page << "<< /Type /Page /Parent " << pagesId << " 0 R"
-             << " /MediaBox [0 0 " << F(PAGE_W) << " " << F(PAGE_H) << "]"
-             << " /Resources << /Font << /F1 " << type0FontId << " 0 R >> >>"
-             << " /Contents " << contentId << " 0 R >>";
-        pageIds.push_back(pdf.Add(page.str()));
+        std::string page;
+        page.reserve(160);
+        page += "<< /Type /Page /Parent ";
+        AppendInt(page, pagesId);
+        page += " 0 R /MediaBox [0 0 ";
+        AppendF(page, PAGE_W);
+        page += " ";
+        AppendF(page, PAGE_H);
+        page += "] /Resources << /Font << /F1 ";
+        AppendInt(page, type0FontId);
+        page += " 0 R >> >> /Contents ";
+        AppendInt(page, contentId);
+        page += " 0 R >>";
+        pageIds.push_back(pdf.Add(page));
     }
 
-    std::ostringstream pages;
-    pages << "<< /Type /Pages /Kids [";
-    for (int id : pageIds) pages << id << " 0 R ";
-    pages << "] /Count " << pageIds.size() << " >>";
-    pdf.Set(pagesId, pages.str());
+    std::string pages;
+    pages.reserve(48 + pageIds.size() * 8);
+    pages += "<< /Type /Pages /Kids [";
+    for (int id : pageIds) {
+        AppendInt(pages, id);
+        pages += " 0 R ";
+    }
+    pages += "] /Count ";
+    AppendSize(pages, pageIds.size());
+    pages += " >>";
+    pdf.Set(pagesId, pages);
 
-    int catalogId = pdf.Add("<< /Type /Catalog /Pages " + std::to_string(pagesId) + " 0 R >>");
+    std::string catalog;
+    catalog.reserve(48);
+    catalog += "<< /Type /Catalog /Pages ";
+    AppendInt(catalog, pagesId);
+    catalog += " 0 R >>";
+    int catalogId = pdf.Add(catalog);
     int infoId = pdf.Add("<< /Producer (Fast Markdown Native Tiny PDF) /Creator (Fast Markdown) /Title (" +
         EscapeLiteral("Markdown Export") + ") >>");
 

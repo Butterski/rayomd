@@ -11,11 +11,41 @@
 #include <sstream>
 #include <string>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace {
 
 namespace fs = std::filesystem;
 
 bool ReadUtf8FilePortable(const fs::path& path, std::string& content) {
+#ifndef _WIN32
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd >= 0) {
+        struct stat st = {};
+        if (::fstat(fd, &st) == 0 && st.st_size >= 0 && st.st_size <= 64LL * 1024LL * 1024LL) {
+            if (st.st_size == 0) {
+                content.clear();
+                ::close(fd);
+                return true;
+            }
+            void* mapped = ::mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+            if (mapped != MAP_FAILED) {
+                const char* data = static_cast<const char*>(mapped);
+                content.assign(data, data + (size_t)st.st_size);
+                ::munmap(mapped, (size_t)st.st_size);
+                ::close(fd);
+                return true;
+            }
+        }
+        ::close(fd);
+    }
+#endif
+
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) return false;
     std::streamsize size = file.tellg();
