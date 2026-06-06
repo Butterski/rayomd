@@ -225,3 +225,68 @@ Szacunki konserwatywne. Font subsetting to ~60–70% całego zysku dla Unicode p
 6. **`glyphForBmp` jako mapa** — redukcja footprintu, lepszy cache behavior
 7. **Word count poza render loop** — UX, nie performance PDF
 
+
+---
+
+## Status po audycie kodu (2026-06-06)
+
+Legenda: ✅ zrobione | 🔶 częściowo | ❌ nie zrobione
+
+### 1.1 Eliminacja `std::string` w hot path — 🔶 CZĘŚCIOWO
+- `LTrimView`, `RTrimView`, `TrimView`, `StartsWith(string_view)` — ✅ już są
+- `SplitLineViews` zwraca `vector<string_view>` — ✅ zrobione
+- `LineInfo` używa `string_view` — ✅ zrobione
+- `SplitLines` zwraca `vector<string>` jako compat shim — 🔶 nadal istnieje
+- `Block::text` to `std::string` — ❌ każdy blok alokuje
+
+### 1.2 `IsBlockStart` — ✅ ZROBIONE
+- `ClassifyLine` pre-klasyfikuje wszystkie linie raz do `vector<LineInfo>`
+
+### 1.3 SIMD lexer dla `SplitLines` — ✅ ZROBIONE
+
+### 1.4 Arena allocator dla `Block` — ❌ NIE ZROBIONE
+
+### 2.1 Cache `MakeCidToGidMap`, `MakeToUnicodeCMap`, `MakeWidths` — ✅ ZROBIONE
+
+### 2.2 Font subsetting — 🔶 CZĘŚCIOWO
+- `glyf` + `loca` przycinane — ✅
+- `cmap`, `hmtx`, `name` kopiowane w całości — ❌
+
+### 2.3 `widthForBmp` — ✅ ZROBIONE (lazy `WidthForCid`)
+
+### 2.4 `glyphForBmp` jako `unordered_map` — ✅ ZROBIONE
+
+### 3.1 `ostringstream` — 🔶 CZĘŚCIOWO
+- `MakeToUnicodeCMap`, `MakeWidths` — ✅ `string` z `reserve()`
+- `BuildStandardPdfBytes`, `BuildUnicodePdfBytes` — ❌ wciąż `ostringstream`
+
+### 3.2 `F()` — 🔶 CZĘŚCIOWO
+- `AppendF()` istnieje i używane w rendererze — ✅
+- `F()` wciąż wołane w PDF assembly — ❌
+
+### 3.3 Jeden `WriteFile` call — ✅ ZROBIONE
+
+### 3.4 Brak zlib — ✅ ŚWIADOMA DECYZJA
+
+### 3.5 `PdfObjects::Build` reserve — 🔶 CZĘŚCIOWO
+- `pdf.reserve()` jest — ✅
+- `std::to_string(i+1)` w pętli — ❌
+
+### 4.1 `WrapText` — 🔶 CZĘŚCIOWO
+
+### 4.2 `Utf8ToWide` w hot path — ❌ NIE ZROBIONE
+
+### 4.3 `AppendHex4` z pre-computed tabelą — ✅ ZROBIONE
+
+### 4.4 `pages.back().reserve(64*1024)` — ✅ ZROBIONE
+
+### 5.1 Font cache — ✅ ZROBIONE
+
+### 5.2 `MapViewOfFile` — ✅ GUI / ❌ CLI (Linux `ifstream`)
+
+### 5.3 Output buffer reuse — ✅ CLI / ❌ GUI
+
+### 6.1 Word/line count — ❌ NIE ZROBIONE (60 FPS scan)
+
+### 6.2 VSync / `WaitMessage()` — ❌ NIE ZROBIONE
+
