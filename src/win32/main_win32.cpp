@@ -17,6 +17,8 @@
 #include <vector>
 #include <atomic>
 #include <cctype>
+#include <cfloat>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +29,7 @@
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -87,10 +90,16 @@ int g_selectedMargin = 1;
 float g_customMarginInches = 1.0f;
 bool g_openAfterExport = true;
 std::atomic<bool> g_isExporting{false};
+std::atomic<bool> g_isFileLoading{false};
+std::atomic<int> g_forcedRenderFrames{0};
 std::string g_statusText = "Ready";
 int g_lineCount = 1;
 int g_wordCount = 0;
 int g_charCount = 0;
+ImFont* g_fontBody = nullptr;
+ImFont* g_fontTitle = nullptr;
+ImFont* g_fontStrong = nullptr;
+ImFont* g_fontEditor = nullptr;
 const char* g_engines[] = { "Native Tiny PDF", "Pandoc (full)" };
 const char* g_styles[] = { "Elegant", "Modern", "Tech" };
 const char* g_margins[] = { "Compact", "Normal", "Wide", "Custom" };
@@ -110,6 +119,11 @@ const char* BASE_ARGS = "--highlight-style=tango -V colorlinks=true "
     "\\renewenvironment{quote}{\\begin{shaded*}}{\\end{shaded*}}\"";
 
 constexpr long long kMaxMarkdownInputBytes = 128LL * 1024LL * 1024LL;
+
+#ifdef _WIN32
+constexpr UINT WM_FAST_MARKDOWN_FILE_LOADED = WM_APP + 1;
+constexpr UINT WM_FAST_MARKDOWN_EXPORT_DONE = WM_APP + 2;
+#endif
 
 // ============================================================================
 // DirectX 11 Helpers
@@ -196,21 +210,34 @@ std::string WideToUtf8(const std::wstring& wstr) {
 #endif
 }
 
-void UpdateMarkdownStats() {
-    g_charCount = (int)g_markdownText.size();
-    g_lineCount = 1;
-    g_wordCount = 0;
+struct MarkdownStats {
+    int lines = 1;
+    int words = 0;
+    int chars = 0;
+};
+
+MarkdownStats CalculateMarkdownStats(const std::string& text) {
+    MarkdownStats stats;
+    stats.chars = (int)text.size();
 
     bool inWord = false;
-    for (char c : g_markdownText) {
-        if (c == '\n') g_lineCount++;
+    for (char c : text) {
+        if (c == '\n') stats.lines++;
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
             inWord = false;
         } else if (!inWord) {
             inWord = true;
-            g_wordCount++;
+            stats.words++;
         }
     }
+    return stats;
+}
+
+void UpdateMarkdownStats() {
+    MarkdownStats stats = CalculateMarkdownStats(g_markdownText);
+    g_lineCount = stats.lines;
+    g_wordCount = stats.words;
+    g_charCount = stats.chars;
 }
 
 #ifdef _WIN32
@@ -544,6 +571,33 @@ int RunStdinBatchExport(const std::wstring& outputDir, int engine, int style, in
     return failures == 0 ? 0 : (engine == 0 ? 10 + GetNativePdfLastError() : 20);
 }
 
+std::string FormatDurationMs(double ms) {
+    char buf[64];
+    if (ms < 0.0) {
+        ms = 0.0;
+    }
+
+    if (ms < 1.0) {
+        double us = ms * 1000.0;
+        if (us < 10.0) {
+            snprintf(buf, sizeof(buf), "%.2f us", us);
+        } else if (us < 100.0) {
+            snprintf(buf, sizeof(buf), "%.1f us", us);
+        } else {
+            snprintf(buf, sizeof(buf), "%.0f us", us);
+        }
+    } else if (ms < 10.0) {
+        snprintf(buf, sizeof(buf), "%.2f ms", ms);
+    } else if (ms < 100.0) {
+        snprintf(buf, sizeof(buf), "%.1f ms", ms);
+    } else if (ms < 1000.0) {
+        snprintf(buf, sizeof(buf), "%.0f ms", ms);
+    } else {
+        snprintf(buf, sizeof(buf), "%.2f s", ms / 1000.0);
+    }
+    return buf;
+}
+
 int RunServeExport(const std::wstring& outputDir, int engine, int style, int margin) {
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
@@ -742,9 +796,17 @@ struct ExportParams {
     HWND hWnd;
 };
 
+struct ExportResult {
+    bool ok = false;
+    double elapsedMs = 0.0;
+};
+
 DWORD WINAPI ExportThread(LPVOID lp) {
     auto* p = (ExportParams*)lp;
     bool ok = false;
+    LARGE_INTEGER freq = {}, start = {}, end = {};
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
 
     if (p->engineIdx == 0) {
         ok = ExportNativePdf(p->markdown, p->outputPath, p->styleIdx, p->marginIdx);
@@ -753,18 +815,19 @@ DWORD WINAPI ExportThread(LPVOID lp) {
         ok = WriteUtf8File(tmp, p->markdown) && RunPandoc(tmp, p->outputPath, p->styleIdx, p->marginIdx);
         DeleteFileW(tmp.c_str());
     }
+    QueryPerformanceCounter(&end);
+    double elapsedMs = freq.QuadPart > 0
+        ? (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart
+        : 0.0;
     
     if (ok) {
         if (p->openAfter) {
             ShellExecuteW(nullptr, L"open", p->outputPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
-        g_statusText = "Export complete!";
-    } else {
-        g_statusText = "Export failed!";
     }
     
-    g_isExporting = false;
-    PostMessageW(p->hWnd, WM_NULL, 0, 0);
+    auto* result = new ExportResult{ ok, elapsedMs };
+    PostMessageW(p->hWnd, WM_FAST_MARKDOWN_EXPORT_DONE, 0, (LPARAM)result);
     delete p;
     return 0;
 }
@@ -793,6 +856,59 @@ void DoExport(HWND hWnd) {
     if (hThread) CloseHandle(hThread);
 }
 
+struct FileLoadParams {
+    std::wstring path;
+    HWND hWnd;
+};
+
+struct FileLoadResult {
+    bool ok = false;
+    std::string content;
+    MarkdownStats stats;
+    double elapsedMs = 0.0;
+};
+
+DWORD WINAPI FileLoadThread(LPVOID lp) {
+    auto* p = (FileLoadParams*)lp;
+    auto* result = new FileLoadResult();
+
+    LARGE_INTEGER freq = {}, start = {}, end = {};
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+
+    result->ok = ReadUtf8File(p->path, result->content);
+    if (result->ok) {
+        result->stats = CalculateMarkdownStats(result->content);
+    }
+
+    QueryPerformanceCounter(&end);
+    result->elapsedMs = freq.QuadPart > 0
+        ? (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart
+        : 0.0;
+
+    PostMessageW(p->hWnd, WM_FAST_MARKDOWN_FILE_LOADED, 0, (LPARAM)result);
+    delete p;
+    return 0;
+}
+
+void LoadMarkdownFileAsync(HWND hWnd, const std::wstring& path) {
+    if (g_isFileLoading.exchange(true)) {
+        g_statusText = "Still loading the previous file.";
+        return;
+    }
+
+    g_statusText = "Loading file...";
+    auto* params = new FileLoadParams{ path, hWnd };
+    HANDLE hThread = CreateThread(nullptr, 0, FileLoadThread, params, 0, nullptr);
+    if (hThread) {
+        CloseHandle(hThread);
+    } else {
+        delete params;
+        g_isFileLoading = false;
+        g_statusText = "File load failed.";
+    }
+}
+
 // ============================================================================
 // ImGui Theme
 // ============================================================================
@@ -800,83 +916,218 @@ void SetupImGuiStyle() {
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* colors = style.Colors;
     
-    // Windows 11 Dark Style
-    colors[ImGuiCol_Text]                   = ImVec4(0.95f, 0.95f, 0.95f, 1.00f);
-    colors[ImGuiCol_TextDisabled]           = ImVec4(0.45f, 0.45f, 0.45f, 1.00f);
-    colors[ImGuiCol_WindowBg]               = ImVec4(0.05f, 0.05f, 0.05f, 1.00f);
-    colors[ImGuiCol_ChildBg]                = ImVec4(0.06f, 0.06f, 0.06f, 1.00f);
-    colors[ImGuiCol_PopupBg]                = ImVec4(0.12f, 0.12f, 0.12f, 0.98f);
-    colors[ImGuiCol_Border]                 = ImVec4(0.20f, 0.20f, 0.20f, 0.50f);
+    colors[ImGuiCol_Text]                   = ImVec4(0.92f, 0.95f, 0.98f, 1.00f);
+    colors[ImGuiCol_TextDisabled]           = ImVec4(0.46f, 0.51f, 0.58f, 1.00f);
+    colors[ImGuiCol_WindowBg]               = ImVec4(0.04f, 0.05f, 0.07f, 1.00f);
+    colors[ImGuiCol_ChildBg]                = ImVec4(0.07f, 0.09f, 0.12f, 1.00f);
+    colors[ImGuiCol_PopupBg]                = ImVec4(0.08f, 0.10f, 0.14f, 0.98f);
+    colors[ImGuiCol_Border]                 = ImVec4(0.20f, 0.25f, 0.33f, 0.72f);
     colors[ImGuiCol_BorderShadow]           = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    colors[ImGuiCol_FrameBg]                = ImVec4(0.05f, 0.05f, 0.05f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    colors[ImGuiCol_TitleBg]                = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-    colors[ImGuiCol_TitleBgCollapsed]       = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-    colors[ImGuiCol_MenuBarBg]              = ImVec4(0.11f, 0.11f, 0.11f, 1.00f);
-    colors[ImGuiCol_ScrollbarBg]            = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabHovered]   = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabActive]    = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-    colors[ImGuiCol_CheckMark]              = ImVec4(0.38f, 0.80f, 1.00f, 1.00f);
-    colors[ImGuiCol_SliderGrab]             = ImVec4(0.38f, 0.80f, 1.00f, 0.80f);
-    colors[ImGuiCol_SliderGrabActive]       = ImVec4(0.38f, 0.80f, 1.00f, 1.00f);
-    colors[ImGuiCol_Button]                 = ImVec4(0.38f, 0.80f, 1.00f, 0.85f);
-    colors[ImGuiCol_ButtonHovered]          = ImVec4(0.50f, 0.86f, 1.00f, 1.00f);
-    colors[ImGuiCol_ButtonActive]           = ImVec4(0.30f, 0.70f, 0.90f, 1.00f);
-    colors[ImGuiCol_Header]                 = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-    colors[ImGuiCol_HeaderHovered]          = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_HeaderActive]           = ImVec4(0.25f, 0.25f, 0.25f, 1.00f);
-    colors[ImGuiCol_Separator]              = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_SeparatorHovered]       = ImVec4(0.38f, 0.80f, 1.00f, 1.00f);
-    colors[ImGuiCol_SeparatorActive]        = ImVec4(0.38f, 0.80f, 1.00f, 1.00f);
-    colors[ImGuiCol_ResizeGrip]             = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_ResizeGripHovered]      = ImVec4(0.38f, 0.80f, 1.00f, 1.00f);
-    colors[ImGuiCol_ResizeGripActive]       = ImVec4(0.38f, 0.80f, 1.00f, 1.00f);
-    colors[ImGuiCol_Tab]                    = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);
-    colors[ImGuiCol_TabHovered]             = ImVec4(0.38f, 0.80f, 1.00f, 0.80f);
-    colors[ImGuiCol_TabActive]              = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_TabUnfocused]           = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);
-    colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_PlotLines]              = ImVec4(0.61f, 0.61f, 0.61f, 1.00f);
-    colors[ImGuiCol_PlotLinesHovered]       = ImVec4(1.00f, 0.43f, 0.35f, 1.00f);
-    colors[ImGuiCol_PlotHistogram]          = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
-    colors[ImGuiCol_PlotHistogramHovered]   = ImVec4(1.00f, 0.60f, 0.00f, 1.00f);
-    colors[ImGuiCol_TextSelectedBg]         = ImVec4(0.38f, 0.80f, 1.00f, 0.35f);
-    colors[ImGuiCol_DragDropTarget]         = ImVec4(1.00f, 1.00f, 0.00f, 0.90f);
-    colors[ImGuiCol_NavHighlight]           = ImVec4(0.38f, 0.80f, 1.00f, 1.00f);
+    colors[ImGuiCol_FrameBg]                = ImVec4(0.08f, 0.10f, 0.14f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.11f, 0.14f, 0.19f, 1.00f);
+    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.14f, 0.18f, 0.25f, 1.00f);
+    colors[ImGuiCol_TitleBg]                = ImVec4(0.05f, 0.06f, 0.08f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.05f, 0.06f, 0.08f, 1.00f);
+    colors[ImGuiCol_TitleBgCollapsed]       = ImVec4(0.05f, 0.06f, 0.08f, 1.00f);
+    colors[ImGuiCol_MenuBarBg]              = ImVec4(0.08f, 0.10f, 0.13f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg]            = ImVec4(0.04f, 0.05f, 0.07f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.20f, 0.25f, 0.33f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered]   = ImVec4(0.28f, 0.35f, 0.45f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabActive]    = ImVec4(0.36f, 0.45f, 0.57f, 1.00f);
+    colors[ImGuiCol_CheckMark]              = ImVec4(0.39f, 0.86f, 0.95f, 1.00f);
+    colors[ImGuiCol_SliderGrab]             = ImVec4(0.39f, 0.86f, 0.95f, 0.92f);
+    colors[ImGuiCol_SliderGrabActive]       = ImVec4(0.49f, 0.92f, 1.00f, 1.00f);
+    colors[ImGuiCol_Button]                 = ImVec4(0.10f, 0.13f, 0.18f, 1.00f);
+    colors[ImGuiCol_ButtonHovered]          = ImVec4(0.14f, 0.18f, 0.25f, 1.00f);
+    colors[ImGuiCol_ButtonActive]           = ImVec4(0.18f, 0.24f, 0.32f, 1.00f);
+    colors[ImGuiCol_Header]                 = ImVec4(0.12f, 0.16f, 0.21f, 1.00f);
+    colors[ImGuiCol_HeaderHovered]          = ImVec4(0.18f, 0.24f, 0.31f, 1.00f);
+    colors[ImGuiCol_HeaderActive]           = ImVec4(0.22f, 0.30f, 0.39f, 1.00f);
+    colors[ImGuiCol_Separator]              = ImVec4(0.20f, 0.25f, 0.33f, 1.00f);
+    colors[ImGuiCol_SeparatorHovered]       = ImVec4(0.39f, 0.86f, 0.95f, 1.00f);
+    colors[ImGuiCol_SeparatorActive]        = ImVec4(0.39f, 0.86f, 0.95f, 1.00f);
+    colors[ImGuiCol_ResizeGrip]             = ImVec4(0.16f, 0.21f, 0.28f, 1.00f);
+    colors[ImGuiCol_ResizeGripHovered]      = ImVec4(0.39f, 0.86f, 0.95f, 1.00f);
+    colors[ImGuiCol_ResizeGripActive]       = ImVec4(0.39f, 0.86f, 0.95f, 1.00f);
+    colors[ImGuiCol_Tab]                    = ImVec4(0.10f, 0.13f, 0.18f, 1.00f);
+    colors[ImGuiCol_TabHovered]             = ImVec4(0.18f, 0.24f, 0.31f, 1.00f);
+    colors[ImGuiCol_TabActive]              = ImVec4(0.15f, 0.20f, 0.27f, 1.00f);
+    colors[ImGuiCol_TabUnfocused]           = ImVec4(0.10f, 0.13f, 0.18f, 1.00f);
+    colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.15f, 0.20f, 0.27f, 1.00f);
+    colors[ImGuiCol_PlotLines]              = ImVec4(0.61f, 0.67f, 0.75f, 1.00f);
+    colors[ImGuiCol_PlotLinesHovered]       = ImVec4(1.00f, 0.63f, 0.42f, 1.00f);
+    colors[ImGuiCol_PlotHistogram]          = ImVec4(0.95f, 0.75f, 0.35f, 1.00f);
+    colors[ImGuiCol_PlotHistogramHovered]   = ImVec4(1.00f, 0.84f, 0.48f, 1.00f);
+    colors[ImGuiCol_TextSelectedBg]         = ImVec4(0.39f, 0.86f, 0.95f, 0.28f);
+    colors[ImGuiCol_DragDropTarget]         = ImVec4(0.96f, 0.73f, 0.35f, 0.90f);
+    colors[ImGuiCol_NavHighlight]           = ImVec4(0.39f, 0.86f, 0.95f, 1.00f);
     colors[ImGuiCol_NavWindowingHighlight]  = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
     colors[ImGuiCol_NavWindowingDimBg]      = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
     colors[ImGuiCol_ModalWindowDimBg]       = ImVec4(0.00f, 0.00f, 0.00f, 0.60f);
     
-    // Style tweaks
     style.WindowRounding = 0.0f;
-    style.ChildRounding = 4.0f;
-    style.FrameRounding = 4.0f;
-    style.PopupRounding = 4.0f;
-    style.ScrollbarRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.TabRounding = 4.0f;
-    style.WindowPadding = ImVec2(16, 12);
-    style.FramePadding = ImVec2(10, 6);
-    style.ItemSpacing = ImVec2(10, 8);
-    style.ItemInnerSpacing = ImVec2(6, 4);
-    style.ScrollbarSize = 0.0f;
+    style.ChildRounding = 10.0f;
+    style.FrameRounding = 8.0f;
+    style.PopupRounding = 10.0f;
+    style.ScrollbarRounding = 999.0f;
+    style.GrabRounding = 999.0f;
+    style.TabRounding = 8.0f;
+    style.WindowPadding = ImVec2(0, 0);
+    style.FramePadding = ImVec2(12, 8);
+    style.ItemSpacing = ImVec2(12, 10);
+    style.ItemInnerSpacing = ImVec2(8, 6);
+    style.ScrollbarSize = 10.0f;
     style.WindowBorderSize = 0.0f;
     style.FrameBorderSize = 1.0f;
+    style.DisplaySafeAreaPadding = ImVec2(0, 0);
 }
 
+static ImVec4 Rgba(int r, int g, int b, int a = 255) {
+    return ImVec4(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
+}
 
+static ImU32 Rgba32(int r, int g, int b, int a = 255) {
+    return IM_COL32(r, g, b, a);
+}
+
+static void DrawSectionTitle(ImDrawList* draw, const char* text, ImVec2 pos) {
+    ImFont* font = g_fontStrong ? g_fontStrong : ImGui::GetFont();
+    draw->AddText(font, font->LegacySize, pos, Rgba32(218, 226, 236), text);
+}
+
+static bool DrawQuietChip(const char* id, const char* label, bool selected, ImVec2 size) {
+    ImGui::PushID(id);
+    bool pressed = ImGui::InvisibleButton(label, size);
+    bool hovered = ImGui::IsItemHovered();
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    ImVec2 min = ImGui::GetItemRectMin();
+    ImVec2 max = ImGui::GetItemRectMax();
+    ImU32 bg = selected ? Rgba32(20, 44, 52) : (hovered ? Rgba32(23, 29, 39) : Rgba32(14, 18, 25));
+    ImU32 border = selected ? Rgba32(84, 205, 229, 190) : (hovered ? Rgba32(70, 82, 104, 170) : Rgba32(42, 51, 68, 150));
+    ImU32 text = selected ? Rgba32(228, 250, 255) : Rgba32(154, 166, 182);
+
+    draw->AddRectFilled(min, max, bg, 8.0f);
+    draw->AddRect(min, max, border, 8.0f);
+    if (selected) {
+        draw->AddCircleFilled(ImVec2(min.x + 10.0f, min.y + size.y * 0.5f), 3.0f, Rgba32(93, 220, 242));
+    }
+
+    ImVec2 textSize = ImGui::CalcTextSize(label);
+    float x = min.x + (size.x - textSize.x) * 0.5f + (selected ? 5.0f : 0.0f);
+    draw->AddText(ImVec2(x, min.y + (size.y - textSize.y) * 0.5f - 1.0f), text, label);
+    ImGui::PopID();
+    return pressed;
+}
+
+static bool DrawOptionTile(const char* id, const char* title, const char* detail, bool selected, ImVec2 size) {
+    ImGui::PushID(id);
+    bool pressed = ImGui::InvisibleButton("tile", size);
+    bool hovered = ImGui::IsItemHovered();
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    ImVec2 min = ImGui::GetItemRectMin();
+    ImVec2 max = ImGui::GetItemRectMax();
+    ImU32 bg = selected ? Rgba32(17, 31, 38) : (hovered ? Rgba32(16, 21, 30) : Rgba32(12, 16, 23));
+    ImU32 border = selected ? Rgba32(84, 205, 229, 180) : Rgba32(39, 48, 64, hovered ? 210 : 150);
+
+    draw->AddRectFilled(min, max, bg, 10.0f);
+    draw->AddRect(min, max, border, 10.0f);
+    if (selected) {
+        draw->AddRectFilled(ImVec2(min.x, min.y + 8.0f), ImVec2(min.x + 3.0f, max.y - 8.0f), Rgba32(94, 218, 242), 3.0f);
+    }
+
+    ImFont* font = g_fontStrong ? g_fontStrong : ImGui::GetFont();
+    draw->AddText(font, font->LegacySize, ImVec2(min.x + 14.0f, min.y + 9.0f), Rgba32(225, 233, 242), title);
+    draw->AddText(ImVec2(min.x + 14.0f, min.y + 31.0f), Rgba32(122, 136, 153), detail);
+    ImGui::PopID();
+    return pressed;
+}
+
+static bool DrawSwitch(const char* id, bool* value) {
+    ImGui::PushID(id);
+    ImVec2 size(46.0f, 26.0f);
+    bool pressed = ImGui::InvisibleButton("switch", size);
+    if (pressed) *value = !*value;
+    bool hovered = ImGui::IsItemHovered();
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    ImVec2 min = ImGui::GetItemRectMin();
+    ImVec2 max = ImGui::GetItemRectMax();
+    ImU32 bg = *value ? Rgba32(36, 139, 162) : (hovered ? Rgba32(38, 47, 62) : Rgba32(26, 32, 43));
+    draw->AddRectFilled(min, max, bg, 999.0f);
+    draw->AddRect(min, max, *value ? Rgba32(94, 218, 242, 160) : Rgba32(62, 73, 94, 160), 999.0f);
+    float knobX = *value ? max.x - 21.0f : min.x + 5.0f;
+    draw->AddCircleFilled(ImVec2(knobX + 8.0f, min.y + 13.0f), 8.0f, Rgba32(235, 244, 248));
+    ImGui::PopID();
+    return pressed;
+}
+
+static bool DrawActionButton(const char* id, const char* label, ImVec2 size, bool disabled) {
+    ImGui::PushID(id);
+    if (disabled) ImGui::BeginDisabled();
+    bool pressed = ImGui::InvisibleButton("action", size);
+    bool hovered = ImGui::IsItemHovered();
+    bool active = ImGui::IsItemActive();
+    if (disabled) ImGui::EndDisabled();
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    ImVec2 min = ImGui::GetItemRectMin();
+    ImVec2 max = ImGui::GetItemRectMax();
+    ImU32 bg = disabled ? Rgba32(31, 39, 50) : (active ? Rgba32(31, 133, 159) : (hovered ? Rgba32(69, 188, 216) : Rgba32(51, 163, 191)));
+    draw->AddRectFilled(min, max, bg, 12.0f);
+    draw->AddRectFilled(min, ImVec2(max.x, min.y + size.y * 0.45f), disabled ? Rgba32(255, 255, 255, 10) : Rgba32(255, 255, 255, 22), 12.0f, ImDrawFlags_RoundCornersTop);
+    draw->AddRect(min, max, disabled ? Rgba32(71, 82, 100, 120) : Rgba32(132, 232, 248, 150), 12.0f);
+
+    ImFont* font = g_fontStrong ? g_fontStrong : ImGui::GetFont();
+    ImVec2 textSize = font->CalcTextSizeA(font->LegacySize, FLT_MAX, 0.0f, label);
+    draw->AddText(font, font->LegacySize, ImVec2(min.x + (size.x - textSize.x) * 0.5f, min.y + (size.y - textSize.y) * 0.5f - 1.0f), disabled ? Rgba32(135, 148, 164) : Rgba32(3, 18, 24), label);
+    ImGui::PopID();
+    return pressed && !disabled;
+}
 
 // ============================================================================
 // Window Procedure
 // ============================================================================
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+    if (msg != WM_DROPFILES &&
+        msg != WM_FAST_MARKDOWN_EXPORT_DONE &&
+        msg != WM_FAST_MARKDOWN_FILE_LOADED &&
+        ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) {
         return true;
+    }
 
     switch (msg) {
+    case WM_FAST_MARKDOWN_EXPORT_DONE: {
+        auto* result = (ExportResult*)lParam;
+        if (result) {
+            g_statusText = result->ok
+                ? "Export complete in " + FormatDurationMs(result->elapsedMs) + "."
+                : "Export failed after " + FormatDurationMs(result->elapsedMs) + ".";
+            delete result;
+        }
+        g_isExporting = false;
+        g_forcedRenderFrames = 2;
+        return 0;
+    }
+    case WM_FAST_MARKDOWN_FILE_LOADED: {
+        auto* result = (FileLoadResult*)lParam;
+        if (result) {
+            if (result->ok) {
+                g_markdownText = std::move(result->content);
+                g_lineCount = result->stats.lines;
+                g_wordCount = result->stats.words;
+                g_charCount = result->stats.chars;
+                g_statusText = "File loaded in " + FormatDurationMs(result->elapsedMs) + ".";
+            } else {
+                g_statusText = "File load failed.";
+            }
+            delete result;
+        }
+        g_isFileLoading = false;
+        g_forcedRenderFrames = 2;
+        return 0;
+    }
     case WM_SIZE:
         if (g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED) {
             CleanupRenderTarget();
@@ -889,21 +1140,20 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         break;
     case WM_DROPFILES: {
+        BringWindowToTop(hWnd);
+        SetForegroundWindow(hWnd);
+        SetActiveWindow(hWnd);
+        SetFocus(hWnd);
+
         wchar_t path[MAX_PATH];
         if (DragQueryFileW((HDROP)wParam, 0, path, MAX_PATH)) {
             std::wstring p(path);
             if (p.size() > 3 && _wcsicmp(p.c_str() + p.size() - 3, L".md") == 0) {
-                HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-                if (hFile != INVALID_HANDLE_VALUE) {
-                    DWORD size = GetFileSize(hFile, nullptr);
-                    std::string content(size, 0);
-                    DWORD read;
-                    ReadFile(hFile, &content[0], size, &read, nullptr);
-                    CloseHandle(hFile);
-                    g_markdownText = content;
-                    UpdateMarkdownStats();
-                    g_statusText = "File loaded!";
-                }
+                LoadMarkdownFileAsync(hWnd, p);
+                g_forcedRenderFrames = 2;
+            } else {
+                g_statusText = "Drop a .md file.";
+                g_forcedRenderFrames = 2;
             }
         }
         DragFinish((HDROP)wParam);
@@ -935,8 +1185,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     
     // Create window
     HWND hWnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Fast Markdown",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1100, 760,
         nullptr, nullptr, hInstance, nullptr);
+    DragAcceptFiles(hWnd, TRUE);
     
     // Enable dark title bar (Windows 11 style)
     BOOL darkMode = TRUE;
@@ -960,8 +1211,12 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename = nullptr; // Disable imgui.ini
     
-    // Load font (use Segoe UI for Windows look)
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 20.0f);
+    g_fontBody = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f);
+    g_fontTitle = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 28.0f);
+    g_fontStrong = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 18.0f);
+    g_fontEditor = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\CascadiaMono.ttf", 16.0f);
+    if (!g_fontBody) g_fontBody = io.Fonts->AddFontDefault();
+    io.FontDefault = g_fontBody;
     
     SetupImGuiStyle();
     
@@ -983,7 +1238,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             continue;
         }
 
-        if (GetForegroundWindow() != hWnd && !g_isExporting.load()) {
+        if (GetForegroundWindow() != hWnd && !g_isExporting.load() && !g_isFileLoading.load() && g_forcedRenderFrames.load() <= 0) {
             WaitMessage();
             continue;
         }
@@ -1006,91 +1261,188 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | 
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
             ImGuiWindowFlags_NoBringToFrontOnFocus);
-        
-        // Top toolbar
-        float toolbarY = ImGui::GetCursorPosY();
-        
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Engine");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(130);
-        ImGui::Combo("##engine", &g_selectedEngine, g_engines, IM_ARRAYSIZE(g_engines));
 
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Style");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(95);
-        ImGui::Combo("##style", &g_selectedStyle, g_styles, IM_ARRAYSIZE(g_styles));
-
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Margin");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(105);
-        ImGui::Combo("##margin", &g_selectedMargin, g_margins, IM_ARRAYSIZE(g_margins));
-
-        if (g_selectedMargin == 3) {
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(90);
-            ImGui::SliderFloat("##customMargin", &g_customMarginInches, 0.25f, 2.0f, "%.2fin", ImGuiSliderFlags_AlwaysClamp);
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        ImVec2 win = ImGui::GetWindowPos();
+        const float pad = width < 760.0f ? 14.0f : 18.0f;
+        const float gap = 14.0f;
+        const float headerH = 76.0f;
+        const float bodyTop = headerH + 12.0f;
+        const float statusH = 34.0f;
+        float sidebarW = std::min(296.0f, std::max(252.0f, width * 0.30f));
+        float editorW = width - pad * 2.0f - gap - sidebarW;
+        if (editorW < 430.0f) {
+            sidebarW = std::max(230.0f, width - pad * 2.0f - gap - 430.0f);
+            editorW = width - pad * 2.0f - gap - sidebarW;
         }
-        
-        ImGui::SameLine(width - 305);
-        ImGui::Checkbox("Open after export", &g_openAfterExport);
-        
-        ImGui::SameLine(width - 116);
-        ImGui::BeginDisabled(g_isExporting);
-        if (ImGui::Button(g_isExporting ? "Exporting..." : "Export PDF", ImVec2(90, 0))) {
-            DoExport(hWnd);
-        }
-        ImGui::EndDisabled();
+        const float editorBottom = height - pad - statusH - 10.0f;
+        const float editorH = std::max(140.0f, editorBottom - bodyTop);
+
+        draw->AddRectFilled(win, ImVec2(win.x + width, win.y + height), Rgba32(7, 9, 13));
+        draw->AddRectFilled(win, ImVec2(win.x + width, win.y + headerH), Rgba32(9, 12, 18));
+        draw->AddLine(ImVec2(win.x, win.y + headerH), ImVec2(win.x + width, win.y + headerH), Rgba32(31, 39, 53, 210));
+
+        ImFont* strongFont = g_fontStrong ? g_fontStrong : ImGui::GetFont();
+        float strongSize = strongFont->LegacySize;
+        ImFont* titleFont = g_fontTitle ? g_fontTitle : ImGui::GetFont();
+        float titleSizePx = titleFont->LegacySize;
+
+        ImVec2 titlePos(win.x + pad + 10.0f, win.y + 16.0f);
+        draw->AddRectFilled(ImVec2(win.x + pad, win.y + 22.0f), ImVec2(win.x + pad + 3.0f, win.y + 56.0f), Rgba32(94, 218, 242), 2.0f);
+        draw->AddText(titleFont, titleSizePx, titlePos, Rgba32(238, 244, 249), "Fast Markdown");
+        char headerDetail[160];
+        snprintf(headerDetail, sizeof(headerDetail), "%s / %s / %s", g_engines[g_selectedEngine], g_styles[g_selectedStyle], g_margins[g_selectedMargin]);
+        draw->AddText(ImVec2(titlePos.x, titlePos.y + 35.0f), Rgba32(126, 139, 155), headerDetail);
+
+        char headerStats[128];
+        snprintf(headerStats, sizeof(headerStats), "%d lines   %d words   %d chars", g_lineCount, g_wordCount, g_charCount);
+        ImVec2 headerStatsSize = ImGui::CalcTextSize(headerStats);
+        draw->AddText(ImVec2(win.x + width - pad - sidebarW - gap - headerStatsSize.x, win.y + 38.0f), Rgba32(112, 125, 142), headerStats);
         
         // Keyboard shortcut
-        if (ImGui::IsKeyPressed(ImGuiKey_E) && io.KeyCtrl && !g_isExporting) {
+        if (ImGui::IsKeyPressed(ImGuiKey_E) && io.KeyCtrl && !g_isExporting.load() && !g_isFileLoading.load()) {
             DoExport(hWnd);
         }
-        
-        ImGui::Spacing();
-        ImGui::Spacing();
-        
-        // Text editor (fill remaining space)
-        float editorHeight = height - 110;
-        
+
+        ImVec2 editorMin(win.x + pad, win.y + bodyTop);
+        ImVec2 editorMax(editorMin.x + editorW, editorMin.y + editorH);
+        const float editorHeaderH = 42.0f;
+        draw->AddRectFilled(ImVec2(editorMin.x, editorMin.y + 6.0f), ImVec2(editorMax.x, editorMax.y + 6.0f), Rgba32(0, 0, 0, 70), 16.0f);
+        draw->AddRectFilled(editorMin, editorMax, Rgba32(10, 13, 19), 16.0f);
+        draw->AddRect(editorMin, editorMax, Rgba32(39, 49, 66, 190), 16.0f);
+        draw->AddRectFilled(editorMin, ImVec2(editorMax.x, editorMin.y + editorHeaderH), Rgba32(13, 17, 24), 16.0f, ImDrawFlags_RoundCornersTop);
+        draw->AddLine(ImVec2(editorMin.x, editorMin.y + editorHeaderH), ImVec2(editorMax.x, editorMin.y + editorHeaderH), Rgba32(37, 47, 64, 150));
+        DrawSectionTitle(draw, "Markdown", ImVec2(editorMin.x + 16.0f, editorMin.y + 11.0f));
+
         // Draw placeholder if empty
         bool isEmpty = g_markdownText.empty() || g_markdownText[0] == '\0';
-        
+
+        ImGui::SetCursorScreenPos(ImVec2(editorMin.x + 10.0f, editorMin.y + editorHeaderH + 10.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 12));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, Rgba(7, 10, 15));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Rgba(8, 12, 18));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Rgba(8, 12, 18));
+        ImGui::PushStyleColor(ImGuiCol_Border, Rgba(31, 40, 55, 220));
+        if (g_fontEditor) ImGui::PushFont(g_fontEditor);
         if (ImGui::InputTextMultiline("##editor", &g_markdownText,
-            ImVec2(-1, editorHeight),
+            ImVec2(std::max(80.0f, editorW - 20.0f), std::max(80.0f, editorH - editorHeaderH - 20.0f)),
             ImGuiInputTextFlags_AllowTabInput)) {
             UpdateMarkdownStats();
         }
+        if (g_fontEditor) ImGui::PopFont();
+        ImGui::PopStyleColor(4);
+        ImGui::PopStyleVar(2);
         
         // Draw placeholder on top if empty and not focused
         if (isEmpty && !ImGui::IsItemActive()) {
             ImVec2 pos = ImGui::GetItemRectMin();
-            ImGui::GetWindowDrawList()->AddText(
-                ImVec2(pos.x + 10, pos.y + 6),
-                IM_COL32(100, 100, 100, 255),
-                "Write your Markdown here... (or drag & drop a .md file)"
-            );
+            ImFont* editorFont = g_fontEditor ? g_fontEditor : ImGui::GetFont();
+            draw->AddText(editorFont, editorFont->LegacySize, ImVec2(pos.x + 14.0f, pos.y + 12.0f), Rgba32(94, 105, 120), "Start typing Markdown, or drop a .md file here.");
         }
-        
-        // Status bar
-        ImGui::Spacing();
-        
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", g_statusText.c_str());
-        ImGui::SameLine(width - 220);
-        ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "%d lines  |  %d words  |  %d chars", g_lineCount, g_wordCount, g_charCount);
+
+        ImVec2 inspectorMin(editorMax.x + gap, editorMin.y);
+        ImVec2 inspectorMax(win.x + width - pad, win.y + height - pad);
+        draw->AddRectFilled(ImVec2(inspectorMin.x, inspectorMin.y + 6.0f), ImVec2(inspectorMax.x, inspectorMax.y + 6.0f), Rgba32(0, 0, 0, 80), 16.0f);
+        draw->AddRectFilled(inspectorMin, inspectorMax, Rgba32(12, 16, 23), 16.0f);
+        draw->AddRect(inspectorMin, inspectorMax, Rgba32(42, 52, 70, 185), 16.0f);
+
+        const float panelX = inspectorMin.x + 16.0f;
+        const float panelW = inspectorMax.x - inspectorMin.x - 32.0f;
+        float panelY = inspectorMin.y + 18.0f;
+        DrawSectionTitle(draw, "Export", ImVec2(panelX, panelY));
+        draw->AddText(ImVec2(panelX, panelY + 23.0f), Rgba32(117, 131, 149), "PDF settings");
+        panelY += 62.0f;
+
+        draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Engine");
+        panelY += 24.0f;
+        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+        if (DrawOptionTile("engine_native", "Native Tiny PDF", "Fast local export", g_selectedEngine == 0, ImVec2(panelW, 58.0f))) g_selectedEngine = 0;
+        panelY += 66.0f;
+        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+        if (DrawOptionTile("engine_pandoc", "Pandoc", "Full document pipeline", g_selectedEngine == 1, ImVec2(panelW, 58.0f))) g_selectedEngine = 1;
+        panelY += 78.0f;
+
+        draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Style");
+        panelY += 24.0f;
+        float styleChipW = (panelW - 10.0f) / 3.0f;
+        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+        if (DrawQuietChip("style_elegant", "Elegant", g_selectedStyle == 0, ImVec2(styleChipW, 34.0f))) g_selectedStyle = 0;
+        ImGui::SameLine(0.0f, 5.0f);
+        if (DrawQuietChip("style_modern", "Modern", g_selectedStyle == 1, ImVec2(styleChipW, 34.0f))) g_selectedStyle = 1;
+        ImGui::SameLine(0.0f, 5.0f);
+        if (DrawQuietChip("style_tech", "Tech", g_selectedStyle == 2, ImVec2(styleChipW, 34.0f))) g_selectedStyle = 2;
+        panelY += 56.0f;
+
+        draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Margin");
+        panelY += 24.0f;
+        float marginChipW = (panelW - 8.0f) * 0.5f;
+        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+        if (DrawQuietChip("margin_compact", "Compact", g_selectedMargin == 0, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 0;
+        ImGui::SameLine(0.0f, 8.0f);
+        if (DrawQuietChip("margin_normal", "Normal", g_selectedMargin == 1, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 1;
+        panelY += 42.0f;
+        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+        if (DrawQuietChip("margin_wide", "Wide", g_selectedMargin == 2, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 2;
+        ImGui::SameLine(0.0f, 8.0f);
+        if (DrawQuietChip("margin_custom", "Custom", g_selectedMargin == 3, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 3;
+        panelY += 48.0f;
+        if (g_selectedMargin == 3) {
+            ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+            ImGui::SetNextItemWidth(panelW);
+            ImGui::SliderFloat("##customMargin", &g_customMarginInches, 0.25f, 2.0f, "%.2fin", ImGuiSliderFlags_AlwaysClamp);
+            panelY += 42.0f;
+        }
+
+        float actionY = inspectorMax.y - 68.0f;
+        float switchY = actionY - 46.0f;
+        draw->AddLine(ImVec2(panelX, switchY - 14.0f), ImVec2(panelX + panelW, switchY - 14.0f), Rgba32(39, 49, 66, 160));
+        draw->AddText(ImVec2(panelX, switchY + 4.0f), Rgba32(174, 185, 198), "Open after export");
+        ImGui::SetCursorScreenPos(ImVec2(panelX + panelW - 46.0f, switchY));
+        DrawSwitch("open_after_export", &g_openAfterExport);
+
+        bool exportDisabled = g_isExporting.load() || g_isFileLoading.load();
+        const char* exportLabel = g_isFileLoading.load()
+            ? "Loading..."
+            : (g_isExporting.load() ? "Exporting..." : "Export PDF");
+        ImGui::SetCursorScreenPos(ImVec2(panelX, actionY));
+        if (DrawActionButton("export_pdf", exportLabel, ImVec2(panelW, 48.0f), exportDisabled)) {
+            DoExport(hWnd);
+        }
+
+        ImVec2 statusMin(editorMin.x, editorMax.y + 10.0f);
+        ImVec2 statusMax(editorMax.x, statusMin.y + statusH);
+        draw->AddRectFilled(statusMin, statusMax, Rgba32(10, 13, 19), 12.0f);
+        draw->AddRect(statusMin, statusMax, Rgba32(38, 48, 64, 145), 12.0f);
+        bool isBusy = g_isExporting.load() || g_isFileLoading.load();
+        ImU32 statusDot = isBusy ? Rgba32(94, 218, 242) : Rgba32(94, 205, 145);
+        draw->AddCircleFilled(ImVec2(statusMin.x + 18.0f, statusMin.y + statusH * 0.5f), 4.0f, statusDot);
+        draw->AddText(ImVec2(statusMin.x + 30.0f, statusMin.y + 10.0f), Rgba32(168, 180, 194), g_statusText.c_str());
+
+        char stats[128];
+        snprintf(stats, sizeof(stats), "%d lines   %d words   %d chars", g_lineCount, g_wordCount, g_charCount);
+        ImVec2 statsSize = ImGui::CalcTextSize(stats);
+        draw->AddText(ImVec2(statusMax.x - statsSize.x - 16.0f, statusMin.y + 10.0f), Rgba32(122, 134, 150), stats);
+        if (isBusy) {
+            float progressW = std::min(220.0f, (statusMax.x - statusMin.x) * 0.30f);
+            float travel = std::max(1.0f, statusMax.x - statusMin.x - progressW - 12.0f);
+            float x = statusMin.x + 6.0f + fmodf((float)ImGui::GetTime() * 180.0f, travel);
+            draw->AddRectFilled(ImVec2(x, statusMax.y - 4.0f), ImVec2(x + progressW, statusMax.y - 2.0f), Rgba32(94, 218, 242, 210), 999.0f);
+        }
         
         ImGui::End();
         
         // Render
         ImGui::Render();
-        const float clear_color[4] = { 0.05f, 0.05f, 0.05f, 1.0f };
+        const float clear_color[4] = { 0.027f, 0.035f, 0.051f, 1.0f };
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         
         g_pSwapChain->Present(1, 0); // Present with vsync
+        if (g_forcedRenderFrames.load() > 0) {
+            g_forcedRenderFrames--;
+        }
     }
     
     // Cleanup

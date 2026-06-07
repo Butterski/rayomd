@@ -26,9 +26,11 @@ function(fast_markdown_simdutf target)
 endfunction()
 
 if(WIN32)
+    enable_language(RC)
     add_executable(fast-markdown-imgui WIN32
         src/core/tiny_pdf.cpp
         src/win32/main_win32.cpp
+        src/win32/fast_markdown.rc
         imgui/imgui.cpp
         imgui/imgui_draw.cpp
         imgui/imgui_tables.cpp
