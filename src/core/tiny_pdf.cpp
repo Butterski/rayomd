@@ -6,6 +6,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <winhttp.h>
+#include <wincodec.h>
 #endif
 
 #include <algorithm>
@@ -17,14 +19,24 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <locale>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+
+#ifdef FAST_MARKDOWN_USE_CURL
+#include <curl/curl.h>
+#endif
+
+#ifdef FAST_MARKDOWN_USE_ZLIB
+#include <zlib.h>
+#endif
 
 #ifdef FAST_MARKDOWN_USE_SIMDUTF
 #include "simdutf.h"
@@ -105,7 +117,9 @@ enum class BlockType {
     Code,
     MathBlock,
     Table,
-    Rule
+    Rule,
+    PageBreak,
+    Image
 };
 
 struct Block {
@@ -113,6 +127,7 @@ struct Block {
     int level = 0;
     int number = 0;
     std::string text;
+    std::string imageSrc;
     std::vector<std::vector<std::string>> rows;
     std::vector<int> aligns;
 };
@@ -218,10 +233,26 @@ std::vector<std::string> SplitLines(const std::string& text) {
 }
 
 static bool IsRuleLine(std::string_view line) {
+    size_t i = 0;
+    int indent = 0;
+    while (i < line.size()) {
+        if (line[i] == ' ') {
+            indent++;
+            i++;
+        } else if (line[i] == '\t') {
+            indent += 4 - (indent % 4);
+            i++;
+        } else {
+            break;
+        }
+        if (indent > 3) return false;
+    }
+
     char rule = 0;
     int count = 0;
-    for (char c : TrimView(line)) {
-        if (c == ' ') continue;
+    for (; i < line.size(); i++) {
+        char c = line[i];
+        if (c == ' ' || c == '\t') continue;
         if (rule == 0) {
             if (c != '-' && c != '*' && c != '_') return false;
             rule = c;
@@ -231,6 +262,36 @@ static bool IsRuleLine(std::string_view line) {
         count++;
     }
     return count >= 3;
+}
+
+static bool EqualsAsciiInsensitive(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        unsigned char ac = (unsigned char)a[i];
+        unsigned char bc = (unsigned char)b[i];
+        if (std::tolower(ac) != std::tolower(bc)) return false;
+    }
+    return true;
+}
+
+static bool IsPageBreakLine(std::string_view trimmed) {
+    if (trimmed.empty()) return false;
+    if (trimmed[0] == '\\') return trimmed == "\\pagebreak" || trimmed == "\\newpage";
+    if (trimmed[0] != '<') return false;
+    if (trimmed == "<!-- pagebreak -->" || trimmed == "<!--pagebreak-->" ||
+        trimmed == "<!-- page-break -->" || trimmed == "<!-- page break -->") {
+        return true;
+    }
+
+    constexpr std::string_view open = "<!--";
+    constexpr std::string_view close = "-->";
+    if (!StartsWith(trimmed, open) || trimmed.size() < open.size() + close.size()) return false;
+    if (trimmed.substr(trimmed.size() - close.size()) != close) return false;
+
+    std::string_view marker = TrimView(trimmed.substr(open.size(), trimmed.size() - open.size() - close.size()));
+    return EqualsAsciiInsensitive(marker, "pagebreak") ||
+        EqualsAsciiInsensitive(marker, "page break") ||
+        EqualsAsciiInsensitive(marker, "page-break");
 }
 
 static bool ParseHeading(std::string_view line, int& level, std::string& text) {
@@ -500,6 +561,51 @@ static std::string StripInlineMarkdown(std::string_view input) {
     return Trim(out);
 }
 
+struct ImageSyntax {
+    std::string alt;
+    std::string src;
+};
+
+static bool ExtractMarkdownDestination(std::string_view target, std::string_view& dest) {
+    target = TrimView(target);
+    if (target.empty()) return false;
+
+    if (target.front() == '<') {
+        size_t end = target.find('>');
+        if (end == std::string_view::npos || end == 1) return false;
+        dest = target.substr(1, end - 1);
+    } else {
+        size_t end = 0;
+        while (end < target.size() && !IsSpace(target[end])) end++;
+        dest = target.substr(0, end);
+    }
+
+    dest = TrimView(dest);
+    return !dest.empty();
+}
+
+static bool ParseStandaloneImage(std::string_view line, ImageSyntax* image) {
+    std::string_view s = TrimView(line);
+    if (s.size() < 5 || s[0] != '!' || s[1] != '[') return false;
+
+    size_t closeAlt = s.find("](", 2);
+    if (closeAlt == std::string_view::npos) return false;
+    size_t closeParen = s.rfind(')');
+    if (closeParen == std::string_view::npos || closeParen <= closeAlt + 2) return false;
+    if (!TrimView(s.substr(closeParen + 1)).empty()) return false;
+
+    std::string_view alt = s.substr(2, closeAlt - 2);
+    std::string_view target = TrimView(s.substr(closeAlt + 2, closeParen - (closeAlt + 2)));
+    std::string_view src;
+    if (!ExtractMarkdownDestination(target, src)) return false;
+
+    if (image) {
+        image->alt = StripInlineMarkdown(alt);
+        image->src = ToString(src);
+    }
+    return true;
+}
+
 enum class LineKind {
     Plain,
     Empty,
@@ -509,7 +615,9 @@ enum class LineKind {
     Heading,
     Bullet,
     Numbered,
-    Quote
+    Quote,
+    PageBreak,
+    Image
 };
 
 struct LineInfo {
@@ -537,6 +645,14 @@ static LineInfo ClassifyLine(std::string_view line) {
     if (StartsWith(info.trimmed, "$$")) {
         info.kind = LineKind::Math;
         info.text = TrimView(info.trimmed.substr(2));
+        return info;
+    }
+    if (IsPageBreakLine(info.trimmed)) {
+        info.kind = LineKind::PageBreak;
+        return info;
+    }
+    if (ParseStandaloneImage(info.trimmed, nullptr)) {
+        info.kind = LineKind::Image;
         return info;
     }
     if (IsRuleLine(line)) {
@@ -581,9 +697,13 @@ static std::vector<Block> ParseMarkdown(const std::string& markdown) {
     size_t i = 0;
 
     if (!infos.empty() && infos[0].trimmed == "---") {
-        i = 1;
-        while (i < infos.size() && infos[i].trimmed != "---" && infos[i].trimmed != "...") i++;
-        if (i < lines.size()) i++;
+        size_t frontMatterEnd = 1;
+        while (frontMatterEnd < infos.size() &&
+            infos[frontMatterEnd].trimmed != "---" &&
+            infos[frontMatterEnd].trimmed != "...") {
+            frontMatterEnd++;
+        }
+        if (frontMatterEnd < infos.size()) i = frontMatterEnd + 1;
     }
 
     while (i < lines.size()) {
@@ -666,6 +786,24 @@ static std::vector<Block> ParseMarkdown(const std::string& markdown) {
 
         if (info.kind == LineKind::Rule) {
             blocks.push_back({ BlockType::Rule, 0, 0, "" });
+            i++;
+            continue;
+        }
+
+        if (info.kind == LineKind::PageBreak) {
+            blocks.push_back({ BlockType::PageBreak, 0, 0, "" });
+            i++;
+            continue;
+        }
+
+        if (info.kind == LineKind::Image) {
+            ImageSyntax image;
+            ParseStandaloneImage(line, &image);
+            Block block;
+            block.type = BlockType::Image;
+            block.text = std::move(image.alt);
+            block.imageSrc = std::move(image.src);
+            blocks.push_back(std::move(block));
             i++;
             continue;
         }
@@ -1330,10 +1468,1143 @@ private:
     std::vector<std::string> objects;
 };
 
+constexpr size_t kMaxImageBytes = 32u * 1024u * 1024u;
+constexpr size_t kMaxDecodedImageBytes = 96u * 1024u * 1024u;
+
+struct PdfImage {
+    std::string name;
+    std::string stream;
+    std::string maskStream;
+    std::string colorSpace = "/DeviceRGB";
+    std::string filter;
+    std::string decodeParms;
+    std::string maskFilter;
+    std::string maskDecodeParms;
+    int width = 0;
+    int height = 0;
+    int bitsPerComponent = 8;
+};
+
+struct LinkRect {
+    double x1 = 0.0;
+    double y1 = 0.0;
+    double x2 = 0.0;
+    double y2 = 0.0;
+    std::string url;
+};
+
+static bool IsHttpUrl(std::string_view src) {
+    return StartsWith(src, "http://") || StartsWith(src, "https://");
+}
+
+static std::string EscapeLiteral(const std::string& s);
+
+static std::filesystem::path PathFromUtf8(std::string_view s) {
+    return std::filesystem::u8path(s.begin(), s.end());
+}
+
+static std::string PathToUtf8(const std::filesystem::path& path) {
+    return path.u8string();
+}
+
+static bool ResolveLocalImagePath(const std::string& src, const BuildOptions& options,
+    std::string& key, std::string& pathUtf8) {
+    if (src.empty() || IsHttpUrl(src)) return false;
+
+    std::filesystem::path path = PathFromUtf8(src);
+    if (path.is_relative() && !options.sourcePath.empty()) {
+        std::filesystem::path base = PathFromUtf8(options.sourcePath);
+        if (base.has_filename()) base = base.parent_path();
+        path = base / path;
+    }
+
+    std::error_code ec;
+    std::filesystem::path absolute = path.is_absolute() ? path : std::filesystem::absolute(path, ec);
+    if (ec) absolute = path;
+
+    std::filesystem::path normalized = std::filesystem::weakly_canonical(absolute, ec);
+    if (ec) normalized = absolute.lexically_normal();
+
+    pathUtf8 = PathToUtf8(normalized);
+    key = "file:" + pathUtf8;
+    return true;
+}
+
+static bool ReadLocalImageFile(const std::string& pathUtf8, std::vector<uint8_t>& bytes) {
+#ifdef _WIN32
+    return ReadWholeFile(Utf8ToWide(pathUtf8), bytes);
+#else
+    return ReadWholeFile(pathUtf8, bytes);
+#endif
+}
+
+#ifdef _WIN32
+static std::wstring ResolveRedirectUrl(const std::wstring& currentUrl, const std::wstring& location) {
+    if (location.empty()) return L"";
+    if (location.rfind(L"http://", 0) == 0 || location.rfind(L"https://", 0) == 0) return location;
+
+    URL_COMPONENTSW parts = {};
+    parts.dwStructSize = sizeof(parts);
+    parts.dwSchemeLength = (DWORD)-1;
+    parts.dwHostNameLength = (DWORD)-1;
+    parts.dwUrlPathLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(currentUrl.c_str(), (DWORD)currentUrl.size(), 0, &parts)) return L"";
+
+    std::wstring base;
+    base.assign(parts.lpszScheme, parts.dwSchemeLength);
+    base += L"://";
+    base.append(parts.lpszHostName, parts.dwHostNameLength);
+    if ((parts.nScheme == INTERNET_SCHEME_HTTP && parts.nPort != 80) ||
+        (parts.nScheme == INTERNET_SCHEME_HTTPS && parts.nPort != 443)) {
+        base += L":";
+        wchar_t port[16];
+        swprintf(port, 16, L"%u", (unsigned)parts.nPort);
+        base += port;
+    }
+
+    if (location[0] == L'/') return base + location;
+
+    std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
+    size_t slash = path.find_last_of(L'/');
+    if (slash == std::wstring::npos) path = L"/";
+    else path.resize(slash + 1);
+    return base + path + location;
+}
+
+static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& bytes) {
+    std::wstring currentUrl = Utf8ToWide(url);
+    if (currentUrl.empty()) return false;
+
+    HINTERNET session = WinHttpOpen(L"FastMarkdown/1.0",
+#ifdef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+#else
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+#endif
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return false;
+    WinHttpSetTimeouts(session, 5000, 5000, 8000, 15000);
+
+    bool ok = false;
+    for (int redirect = 0; redirect < 6 && !ok; redirect++) {
+        URL_COMPONENTSW parts = {};
+        parts.dwStructSize = sizeof(parts);
+        parts.dwSchemeLength = (DWORD)-1;
+        parts.dwHostNameLength = (DWORD)-1;
+        parts.dwUrlPathLength = (DWORD)-1;
+        parts.dwExtraInfoLength = (DWORD)-1;
+        if (!WinHttpCrackUrl(currentUrl.c_str(), (DWORD)currentUrl.size(), 0, &parts)) break;
+        if (parts.nScheme != INTERNET_SCHEME_HTTP && parts.nScheme != INTERNET_SCHEME_HTTPS) break;
+
+        std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
+        std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
+        if (parts.dwExtraInfoLength > 0) path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
+        if (path.empty()) path = L"/";
+
+        HINTERNET connect = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
+        if (!connect) break;
+
+        DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
+        HINTERNET request = WinHttpOpenRequest(connect, L"GET", path.c_str(), nullptr,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+        if (!request) {
+            WinHttpCloseHandle(connect);
+            break;
+        }
+
+        DWORD disableRedirects = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &disableRedirects, sizeof(disableRedirects));
+
+        bool gotResponse = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(request, nullptr);
+
+        DWORD status = 0;
+        DWORD statusSize = sizeof(status);
+        if (gotResponse) {
+            WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX);
+        }
+
+        if (status >= 200 && status < 300) {
+            bytes.clear();
+            for (;;) {
+                DWORD available = 0;
+                if (!WinHttpQueryDataAvailable(request, &available)) break;
+                if (available == 0) {
+                    ok = !bytes.empty();
+                    break;
+                }
+                if (bytes.size() + available > kMaxImageBytes) break;
+                size_t old = bytes.size();
+                bytes.resize(old + available);
+                DWORD read = 0;
+                if (!WinHttpReadData(request, bytes.data() + old, available, &read) || read == 0) break;
+                bytes.resize(old + read);
+            }
+        } else if (status >= 300 && status < 400) {
+            DWORD locationSize = 0;
+            WinHttpQueryHeaders(request, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
+                nullptr, &locationSize, WINHTTP_NO_HEADER_INDEX);
+            std::wstring location(locationSize / sizeof(wchar_t), L'\0');
+            if (locationSize > 0 && WinHttpQueryHeaders(request, WINHTTP_QUERY_LOCATION,
+                WINHTTP_HEADER_NAME_BY_INDEX, &location[0], &locationSize, WINHTTP_NO_HEADER_INDEX)) {
+                location.resize(wcslen(location.c_str()));
+                std::wstring next = ResolveRedirectUrl(currentUrl, location);
+                if (!next.empty() && next != currentUrl) currentUrl = std::move(next);
+                else redirect = 6;
+            } else {
+                redirect = 6;
+            }
+        }
+
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connect);
+    }
+
+    WinHttpCloseHandle(session);
+    return ok;
+}
+#elif defined(FAST_MARKDOWN_USE_CURL)
+struct CurlImageBuffer {
+    std::vector<uint8_t>* bytes = nullptr;
+    bool tooLarge = false;
+};
+
+static size_t CurlWriteImageBytes(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    size_t count = size * nmemb;
+    CurlImageBuffer* buffer = static_cast<CurlImageBuffer*>(userdata);
+    if (!buffer || !buffer->bytes) return 0;
+    if (buffer->bytes->size() + count > kMaxImageBytes) {
+        buffer->tooLarge = true;
+        return 0;
+    }
+    buffer->bytes->insert(buffer->bytes->end(), ptr, ptr + count);
+    return count;
+}
+
+static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& bytes) {
+    static bool curlReady = []() { return curl_global_init(CURL_GLOBAL_DEFAULT) == 0; }();
+    if (!curlReady) return false;
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return false;
+
+    bytes.clear();
+    CurlImageBuffer buffer{ &bytes, false };
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 15000L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "FastMarkdown/1.0");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteImageBytes);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+
+    CURLcode result = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_cleanup(curl);
+    return result == CURLE_OK && !buffer.tooLarge && status >= 200 && status < 300 && !bytes.empty();
+}
+#else
+static bool FetchUrlBytesPlatform(const std::string&, std::vector<uint8_t>&) {
+    return false;
+}
+#endif
+
+static bool FetchUrlBytes(const std::string& src, const BuildOptions& options, std::vector<uint8_t>& bytes) {
+    if (!options.enableUrlImages || !IsHttpUrl(src)) return false;
+    return FetchUrlBytesPlatform(src, bytes);
+}
+
+static void AppendHexByte(std::string& out, uint8_t value) {
+    static const char* h = "0123456789ABCDEF";
+    out.push_back(h[(value >> 4) & 0xf]);
+    out.push_back(h[value & 0xf]);
+}
+
+static std::string HexBytes(const std::string& bytes) {
+    std::string out;
+    out.reserve(bytes.size() * 2 + 2);
+    out.push_back('<');
+    for (unsigned char c : bytes) AppendHexByte(out, c);
+    out.push_back('>');
+    return out;
+}
+
+static bool ParseJpegImage(const std::vector<uint8_t>& bytes, PdfImage& image) {
+    if (bytes.size() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8) return false;
+
+    size_t i = 2;
+    while (i + 3 < bytes.size()) {
+        while (i < bytes.size() && bytes[i] != 0xff) i++;
+        while (i < bytes.size() && bytes[i] == 0xff) i++;
+        if (i >= bytes.size()) break;
+
+        uint8_t marker = bytes[i++];
+        if (marker == 0xd9 || marker == 0xda) break;
+        if (marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+        if (i + 2 > bytes.size()) return false;
+
+        uint16_t length = (uint16_t)((bytes[i] << 8) | bytes[i + 1]);
+        if (length < 2 || i + length > bytes.size()) return false;
+
+        bool sof = (marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc);
+        if (sof) {
+            if (length < 8) return false;
+            int precision = bytes[i + 2];
+            int height = (bytes[i + 3] << 8) | bytes[i + 4];
+            int width = (bytes[i + 5] << 8) | bytes[i + 6];
+            int components = bytes[i + 7];
+            if (precision != 8 || width <= 0 || height <= 0) return false;
+            if (components == 1) image.colorSpace = "/DeviceGray";
+            else if (components == 3) image.colorSpace = "/DeviceRGB";
+            else return false;
+
+            image.width = width;
+            image.height = height;
+            image.bitsPerComponent = 8;
+            image.filter = "/DCTDecode";
+            image.stream.assign((const char*)bytes.data(), bytes.size());
+            return true;
+        }
+
+        i += length;
+    }
+
+    return false;
+}
+
+struct PngInfo {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    int bitDepth = 0;
+    int colorType = 0;
+    int compression = 0;
+    int filter = 0;
+    int interlace = 0;
+    std::string idat;
+    std::string palette;
+    std::vector<uint8_t> transparency;
+};
+
+static bool ParsePngChunks(const std::vector<uint8_t>& bytes, PngInfo& png) {
+    static const uint8_t sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    if (bytes.size() < 33 || memcmp(bytes.data(), sig, sizeof(sig)) != 0) return false;
+
+    size_t pos = 8;
+    bool seenIhdr = false;
+    while (pos + 12 <= bytes.size()) {
+        uint32_t length = ReadU32(bytes, pos);
+        if (length > kMaxImageBytes || pos + 12 + (size_t)length > bytes.size()) return false;
+        const char* type = (const char*)bytes.data() + pos + 4;
+        size_t data = pos + 8;
+
+        if (memcmp(type, "IHDR", 4) == 0) {
+            if (length != 13) return false;
+            png.width = ReadU32(bytes, data);
+            png.height = ReadU32(bytes, data + 4);
+            png.bitDepth = bytes[data + 8];
+            png.colorType = bytes[data + 9];
+            png.compression = bytes[data + 10];
+            png.filter = bytes[data + 11];
+            png.interlace = bytes[data + 12];
+            seenIhdr = png.width > 0 && png.height > 0;
+        } else if (memcmp(type, "PLTE", 4) == 0) {
+            png.palette.assign((const char*)bytes.data() + data, length);
+        } else if (memcmp(type, "tRNS", 4) == 0) {
+            png.transparency.assign(bytes.begin() + data, bytes.begin() + data + length);
+        } else if (memcmp(type, "IDAT", 4) == 0) {
+            if (png.idat.size() + length > kMaxImageBytes) return false;
+            png.idat.append((const char*)bytes.data() + data, length);
+        } else if (memcmp(type, "IEND", 4) == 0) {
+            break;
+        }
+
+        pos += 12 + (size_t)length;
+    }
+
+    return seenIhdr && !png.idat.empty() && png.compression == 0 && png.filter == 0 && png.width <= 20000 && png.height <= 20000;
+}
+
+static bool BuildFastPngImage(const PngInfo& png, PdfImage& image) {
+    if (png.interlace != 0 || !png.transparency.empty()) return false;
+
+    int colors = 0;
+    std::string colorSpace;
+    if (png.colorType == 0) {
+        colors = 1;
+        colorSpace = "/DeviceGray";
+    } else if (png.colorType == 2 && png.bitDepth == 8) {
+        colors = 3;
+        colorSpace = "/DeviceRGB";
+    } else if (png.colorType == 3 && !png.palette.empty() &&
+        (png.bitDepth == 1 || png.bitDepth == 2 || png.bitDepth == 4 || png.bitDepth == 8)) {
+        int entries = (int)(png.palette.size() / 3);
+        if (entries <= 0 || entries > 256) return false;
+        colors = 1;
+        colorSpace.reserve(png.palette.size() * 2 + 48);
+        colorSpace += "[/Indexed /DeviceRGB ";
+        AppendInt(colorSpace, entries - 1);
+        colorSpace += " ";
+        colorSpace += HexBytes(png.palette);
+        colorSpace += "]";
+    } else {
+        return false;
+    }
+
+    image.width = (int)png.width;
+    image.height = (int)png.height;
+    image.bitsPerComponent = png.bitDepth;
+    image.colorSpace = std::move(colorSpace);
+    image.filter = "/FlateDecode";
+    image.decodeParms.reserve(96);
+    image.decodeParms += "<< /Predictor 15 /Colors ";
+    AppendInt(image.decodeParms, colors);
+    image.decodeParms += " /BitsPerComponent ";
+    AppendInt(image.decodeParms, png.bitDepth);
+    image.decodeParms += " /Columns ";
+    AppendInt(image.decodeParms, (int)png.width);
+    image.decodeParms += " >>";
+    image.stream = png.idat;
+    return true;
+}
+
+static uint8_t PngPaeth(uint8_t a, uint8_t b, uint8_t c) {
+    int p = (int)a + (int)b - (int)c;
+    int pa = std::abs(p - (int)a);
+    int pb = std::abs(p - (int)b);
+    int pc = std::abs(p - (int)c);
+    if (pa <= pb && pa <= pc) return a;
+    return pb <= pc ? b : c;
+}
+
+static bool PngUnfilter(const std::vector<uint8_t>& filtered, size_t width, size_t height,
+    size_t rowBytes, size_t bpp, std::vector<uint8_t>& rows) {
+    if (height == 0 || rowBytes == 0 || bpp == 0) return false;
+    if (filtered.size() != (rowBytes + 1) * height) return false;
+
+    rows.assign(rowBytes * height, 0);
+    for (size_t y = 0; y < height; y++) {
+        const uint8_t* src = filtered.data() + y * (rowBytes + 1);
+        uint8_t filter = src[0];
+        const uint8_t* raw = src + 1;
+        uint8_t* cur = rows.data() + y * rowBytes;
+        const uint8_t* prev = y == 0 ? nullptr : rows.data() + (y - 1) * rowBytes;
+
+        for (size_t x = 0; x < rowBytes; x++) {
+            uint8_t left = x >= bpp ? cur[x - bpp] : 0;
+            uint8_t up = prev ? prev[x] : 0;
+            uint8_t upLeft = (prev && x >= bpp) ? prev[x - bpp] : 0;
+            uint8_t value = raw[x];
+            switch (filter) {
+            case 0: break;
+            case 1: value = (uint8_t)(value + left); break;
+            case 2: value = (uint8_t)(value + up); break;
+            case 3: value = (uint8_t)(value + (uint8_t)(((int)left + (int)up) >> 1)); break;
+            case 4: value = (uint8_t)(value + PngPaeth(left, up, upLeft)); break;
+            default: return false;
+            }
+            cur[x] = value;
+        }
+    }
+    return true;
+}
+
+#ifdef FAST_MARKDOWN_USE_ZLIB
+static bool InflatePngRows(const PngInfo& png, size_t rowBytes, std::vector<uint8_t>& filtered) {
+    if (png.height == 0 || rowBytes == 0) return false;
+    size_t expected = (rowBytes + 1) * (size_t)png.height;
+    if (expected > kMaxDecodedImageBytes) return false;
+    filtered.assign(expected, 0);
+    uLongf destLen = (uLongf)filtered.size();
+    int result = uncompress(filtered.data(), &destLen,
+        reinterpret_cast<const Bytef*>(png.idat.data()), (uLong)png.idat.size());
+    if (result != Z_OK || destLen != filtered.size()) return false;
+    return true;
+}
+
+static uint64_t PngPredictorCost(const uint8_t* row, const uint8_t* prev, size_t rowBytes,
+    size_t bpp, int filter) {
+    uint64_t cost = 0;
+    for (size_t x = 0; x < rowBytes; x++) {
+        uint8_t left = x >= bpp ? row[x - bpp] : 0;
+        uint8_t up = prev ? prev[x] : 0;
+        uint8_t upLeft = (prev && x >= bpp) ? prev[x - bpp] : 0;
+        uint8_t predictor = 0;
+        switch (filter) {
+        case 1: predictor = left; break;
+        case 2: predictor = up; break;
+        case 3: predictor = (uint8_t)(((int)left + (int)up) >> 1); break;
+        case 4: predictor = PngPaeth(left, up, upLeft); break;
+        default: predictor = 0; break;
+        }
+        uint8_t residual = (uint8_t)(row[x] - predictor);
+        cost += residual < 128 ? residual : 256 - residual;
+    }
+    return cost;
+}
+
+static bool BuildPngPredictorRows(const std::string& raw, size_t width, size_t height,
+    size_t components, std::string& predicted) {
+    if (width == 0 || height == 0 || components == 0) return false;
+    size_t rowBytes = width * components;
+    if (rowBytes == 0 || raw.size() != rowBytes * height) return false;
+
+    predicted.clear();
+    predicted.resize((rowBytes + 1) * height);
+    for (size_t y = 0; y < height; y++) {
+        const uint8_t* row = reinterpret_cast<const uint8_t*>(raw.data()) + y * rowBytes;
+        const uint8_t* prev = y ? reinterpret_cast<const uint8_t*>(raw.data()) + (y - 1) * rowBytes : nullptr;
+        uint8_t* out = reinterpret_cast<uint8_t*>(&predicted[0]) + y * (rowBytes + 1);
+
+        int bestFilter = 0;
+        uint64_t bestCost = PngPredictorCost(row, prev, rowBytes, components, 0);
+        for (int filter = 1; filter <= 4; filter++) {
+            uint64_t cost = PngPredictorCost(row, prev, rowBytes, components, filter);
+            if (cost < bestCost) {
+                bestCost = cost;
+                bestFilter = filter;
+            }
+        }
+
+        out[0] = (uint8_t)bestFilter;
+        for (size_t x = 0; x < rowBytes; x++) {
+            uint8_t left = x >= components ? row[x - components] : 0;
+            uint8_t up = prev ? prev[x] : 0;
+            uint8_t upLeft = (prev && x >= components) ? prev[x - components] : 0;
+            uint8_t predictor = 0;
+            switch (bestFilter) {
+            case 1: predictor = left; break;
+            case 2: predictor = up; break;
+            case 3: predictor = (uint8_t)(((int)left + (int)up) >> 1); break;
+            case 4: predictor = PngPaeth(left, up, upLeft); break;
+            default: predictor = 0; break;
+            }
+            out[x + 1] = (uint8_t)(row[x] - predictor);
+        }
+    }
+    return true;
+}
+
+static bool CompressFlate(const std::string& input, std::string& output) {
+    if (input.empty()) return false;
+    uLong sourceLen = (uLong)input.size();
+    uLongf destLen = compressBound(sourceLen);
+    output.assign((size_t)destLen, '\0');
+    int result = compress2(reinterpret_cast<Bytef*>(&output[0]), &destLen,
+        reinterpret_cast<const Bytef*>(input.data()), sourceLen, Z_BEST_SPEED);
+    if (result != Z_OK) return false;
+    output.resize((size_t)destLen);
+    return true;
+}
+
+static std::string BuildPngPredictorDecodeParms(size_t columns, size_t components) {
+    std::string parms;
+    parms.reserve(80);
+    parms += "<< /Predictor 15 /Colors ";
+    AppendSize(parms, components);
+    parms += " /BitsPerComponent 8 /Columns ";
+    AppendSize(parms, columns);
+    parms += " >>";
+    return parms;
+}
+
+static bool BuildDecodedPngImageWithZlib(const PngInfo& png, PdfImage& image) {
+    if (png.interlace != 0 || png.bitDepth != 8) return false;
+    if (png.width == 0 || png.height == 0) return false;
+
+    size_t rowBytes = 0;
+    size_t bpp = 0;
+    if (png.colorType == 6) {
+        rowBytes = (size_t)png.width * 4;
+        bpp = 4;
+    } else if (png.colorType == 4) {
+        rowBytes = (size_t)png.width * 2;
+        bpp = 2;
+    } else if (png.colorType == 3 && !png.palette.empty()) {
+        rowBytes = (size_t)png.width;
+        bpp = 1;
+    } else if (png.colorType == 2 && png.transparency.size() >= 6) {
+        rowBytes = (size_t)png.width * 3;
+        bpp = 3;
+    } else if (png.colorType == 0 && png.transparency.size() >= 2) {
+        rowBytes = (size_t)png.width;
+        bpp = 1;
+    } else {
+        return false;
+    }
+
+    std::vector<uint8_t> filtered;
+    if (!InflatePngRows(png, rowBytes, filtered)) return false;
+    std::vector<uint8_t> rows;
+    if (!PngUnfilter(filtered, png.width, png.height, rowBytes, bpp, rows)) return false;
+
+    size_t pixels = (size_t)png.width * (size_t)png.height;
+    if (pixels == 0 || pixels * 4 > kMaxDecodedImageBytes) return false;
+
+    std::string color;
+    std::string alpha;
+    bool hasAlpha = false;
+
+    if (png.colorType == 6) {
+        color.reserve(pixels * 3);
+        alpha.reserve(pixels);
+        for (size_t i = 0; i < pixels; i++) {
+            uint8_t r = rows[i * 4 + 0];
+            uint8_t g = rows[i * 4 + 1];
+            uint8_t b = rows[i * 4 + 2];
+            uint8_t a = rows[i * 4 + 3];
+            color.push_back((char)r);
+            color.push_back((char)g);
+            color.push_back((char)b);
+            alpha.push_back((char)a);
+            hasAlpha = hasAlpha || a != 255;
+        }
+        image.colorSpace = "/DeviceRGB";
+    } else if (png.colorType == 4) {
+        color.reserve(pixels);
+        alpha.reserve(pixels);
+        for (size_t i = 0; i < pixels; i++) {
+            uint8_t gray = rows[i * 2 + 0];
+            uint8_t a = rows[i * 2 + 1];
+            color.push_back((char)gray);
+            alpha.push_back((char)a);
+            hasAlpha = hasAlpha || a != 255;
+        }
+        image.colorSpace = "/DeviceGray";
+    } else if (png.colorType == 3) {
+        size_t entries = png.palette.size() / 3;
+        color.reserve(pixels * 3);
+        alpha.reserve(pixels);
+        for (size_t i = 0; i < pixels; i++) {
+            uint8_t index = rows[i];
+            if (index >= entries) return false;
+            color.push_back(png.palette[index * 3 + 0]);
+            color.push_back(png.palette[index * 3 + 1]);
+            color.push_back(png.palette[index * 3 + 2]);
+            uint8_t a = index < png.transparency.size() ? png.transparency[index] : 255;
+            alpha.push_back((char)a);
+            hasAlpha = hasAlpha || a != 255;
+        }
+        image.colorSpace = "/DeviceRGB";
+    } else if (png.colorType == 2) {
+        uint16_t tr = (uint16_t)((png.transparency[0] << 8) | png.transparency[1]);
+        uint16_t tg = (uint16_t)((png.transparency[2] << 8) | png.transparency[3]);
+        uint16_t tb = (uint16_t)((png.transparency[4] << 8) | png.transparency[5]);
+        color.reserve(pixels * 3);
+        alpha.reserve(pixels);
+        for (size_t i = 0; i < pixels; i++) {
+            uint8_t r = rows[i * 3 + 0];
+            uint8_t g = rows[i * 3 + 1];
+            uint8_t b = rows[i * 3 + 2];
+            color.push_back((char)r);
+            color.push_back((char)g);
+            color.push_back((char)b);
+            uint8_t a = (r == tr && g == tg && b == tb) ? 0 : 255;
+            alpha.push_back((char)a);
+            hasAlpha = hasAlpha || a != 255;
+        }
+        image.colorSpace = "/DeviceRGB";
+    } else {
+        uint16_t transparent = (uint16_t)((png.transparency[0] << 8) | png.transparency[1]);
+        color.reserve(pixels);
+        alpha.reserve(pixels);
+        for (size_t i = 0; i < pixels; i++) {
+            uint8_t gray = rows[i];
+            color.push_back((char)gray);
+            uint8_t a = gray == transparent ? 0 : 255;
+            alpha.push_back((char)a);
+            hasAlpha = hasAlpha || a != 255;
+        }
+        image.colorSpace = "/DeviceGray";
+    }
+
+    image.width = (int)png.width;
+    image.height = (int)png.height;
+    image.bitsPerComponent = 8;
+
+    size_t colorComponents = image.colorSpace == "/DeviceRGB" ? 3 : 1;
+    std::string predictedColor;
+    std::string compressedColor;
+    if (!BuildPngPredictorRows(color, png.width, png.height, colorComponents, predictedColor)) return false;
+    if (!CompressFlate(predictedColor, compressedColor)) return false;
+    image.stream = std::move(compressedColor);
+    image.filter = "/FlateDecode";
+    image.decodeParms = BuildPngPredictorDecodeParms(png.width, colorComponents);
+
+    if (hasAlpha) {
+        std::string predictedAlpha;
+        std::string compressedAlpha;
+        if (!BuildPngPredictorRows(alpha, png.width, png.height, 1, predictedAlpha)) return false;
+        if (!CompressFlate(predictedAlpha, compressedAlpha)) return false;
+        image.maskStream = std::move(compressedAlpha);
+        image.maskFilter = "/FlateDecode";
+        image.maskDecodeParms = BuildPngPredictorDecodeParms(png.width, 1);
+    }
+    return true;
+}
+#else
+static bool BuildDecodedPngImageWithZlib(const PngInfo&, PdfImage&) {
+    return false;
+}
+#endif
+
+static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image);
+
+#ifdef _WIN32
+template<typename T>
+static void ReleaseCom(T*& ptr) {
+    if (ptr) {
+        ptr->Release();
+        ptr = nullptr;
+    }
+}
+
+static bool EncodeWicPngBytes(IWICImagingFactory* factory, UINT width, UINT height,
+    const WICPixelFormatGUID& format, UINT stride, const std::vector<uint8_t>& pixels,
+    std::vector<uint8_t>& pngBytes) {
+    if (!factory || width == 0 || height == 0 || pixels.empty()) return false;
+    if (pixels.size() > UINT32_MAX) return false;
+
+    IWICBitmap* bitmap = nullptr;
+    IStream* stream = nullptr;
+    IWICBitmapEncoder* encoder = nullptr;
+    IWICBitmapFrameEncode* frame = nullptr;
+    HGLOBAL global = nullptr;
+
+    HRESULT hr = factory->CreateBitmapFromMemory(width, height, format, stride,
+        (UINT)pixels.size(), (BYTE*)pixels.data(), &bitmap);
+    if (SUCCEEDED(hr)) {
+        hr = CreateStreamOnHGlobal(nullptr, TRUE, &stream);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = encoder->CreateNewFrame(&frame, nullptr);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = frame->Initialize(nullptr);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = frame->SetSize(width, height);
+    }
+    WICPixelFormatGUID frameFormat = format;
+    if (SUCCEEDED(hr)) {
+        hr = frame->SetPixelFormat(&frameFormat);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = frame->WriteSource(bitmap, nullptr);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = frame->Commit();
+    }
+    if (SUCCEEDED(hr)) {
+        hr = encoder->Commit();
+    }
+    if (SUCCEEDED(hr)) {
+        hr = GetHGlobalFromStream(stream, &global);
+    }
+
+    bool ok = false;
+    if (SUCCEEDED(hr) && global) {
+        SIZE_T size = GlobalSize(global);
+        void* data = GlobalLock(global);
+        if (data && size > 0 && size <= kMaxImageBytes) {
+            pngBytes.assign((uint8_t*)data, (uint8_t*)data + size);
+            ok = true;
+        }
+        if (data) GlobalUnlock(global);
+    }
+
+    ReleaseCom(frame);
+    ReleaseCom(encoder);
+    ReleaseCom(stream);
+    ReleaseCom(bitmap);
+    return ok;
+}
+
+static bool TryCompressWicDecodedImage(IWICImagingFactory* factory, UINT width, UINT height,
+    const std::string& rgb, const std::string& alpha, bool hasAlpha, PdfImage& image) {
+    if (!factory || width == 0 || height == 0 || rgb.empty()) return false;
+    if (rgb.size() > UINT32_MAX || alpha.size() > UINT32_MAX) return false;
+
+    std::vector<uint8_t> rgbBytes(rgb.begin(), rgb.end());
+    std::vector<uint8_t> rgbPng;
+    PdfImage compressedColor;
+    if (!EncodeWicPngBytes(factory, width, height, GUID_WICPixelFormat24bppRGB,
+        width * 3, rgbBytes, rgbPng)) {
+        return false;
+    }
+    if (!ParsePngImage(rgbPng, compressedColor) || compressedColor.maskStream.size() != 0) return false;
+
+    image.width = (int)width;
+    image.height = (int)height;
+    image.bitsPerComponent = compressedColor.bitsPerComponent;
+    image.colorSpace = compressedColor.colorSpace;
+    image.filter = compressedColor.filter;
+    image.decodeParms = compressedColor.decodeParms;
+    image.stream = std::move(compressedColor.stream);
+
+    if (hasAlpha) {
+        std::vector<uint8_t> alphaBytes(alpha.begin(), alpha.end());
+        std::vector<uint8_t> alphaPng;
+        PdfImage compressedMask;
+        if (!EncodeWicPngBytes(factory, width, height, GUID_WICPixelFormat8bppGray,
+            width, alphaBytes, alphaPng)) {
+            return false;
+        }
+        if (!ParsePngImage(alphaPng, compressedMask) || compressedMask.maskStream.size() != 0) return false;
+        image.maskStream = std::move(compressedMask.stream);
+        image.maskFilter = compressedMask.filter;
+        image.maskDecodeParms = compressedMask.decodeParms;
+    }
+
+    return true;
+}
+
+static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage& image) {
+    if (bytes.empty() || bytes.size() > kMaxImageBytes) return false;
+
+    HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool uninitialize = SUCCEEDED(co);
+    if (FAILED(co) && co != RPC_E_CHANGED_MODE) return false;
+
+    IWICImagingFactory* factory = nullptr;
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(hr)) {
+        hr = factory->CreateStream(&stream);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = stream->InitializeFromMemory((BYTE*)bytes.data(), (DWORD)bytes.size());
+    }
+    if (SUCCEEDED(hr)) {
+        hr = factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = decoder->GetFrame(0, &frame);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = factory->CreateFormatConverter(&converter);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
+            nullptr, 0.0, WICBitmapPaletteTypeCustom);
+    }
+
+    UINT width = 0, height = 0;
+    if (SUCCEEDED(hr)) hr = converter->GetSize(&width, &height);
+
+    std::vector<uint8_t> rgba;
+    if (SUCCEEDED(hr) && width > 0 && height > 0) {
+        size_t stride = (size_t)width * 4;
+        size_t total = stride * (size_t)height;
+        if (total > kMaxDecodedImageBytes) {
+            hr = E_FAIL;
+        } else {
+            rgba.assign(total, 0);
+            hr = converter->CopyPixels(nullptr, (UINT)stride, (UINT)rgba.size(), rgba.data());
+        }
+    }
+
+    bool ok = false;
+    if (SUCCEEDED(hr) && !rgba.empty()) {
+        size_t pixels = (size_t)width * (size_t)height;
+        std::string rgb;
+        std::string alpha;
+        rgb.reserve(pixels * 3);
+        alpha.reserve(pixels);
+        bool hasAlpha = false;
+        for (size_t i = 0; i < pixels; i++) {
+            uint8_t r = rgba[i * 4 + 0];
+            uint8_t g = rgba[i * 4 + 1];
+            uint8_t b = rgba[i * 4 + 2];
+            uint8_t a = rgba[i * 4 + 3];
+            rgb.push_back((char)r);
+            rgb.push_back((char)g);
+            rgb.push_back((char)b);
+            alpha.push_back((char)a);
+            hasAlpha = hasAlpha || a != 255;
+        }
+
+        if (!TryCompressWicDecodedImage(factory, width, height, rgb, alpha, hasAlpha, image)) {
+            image.width = (int)width;
+            image.height = (int)height;
+            image.bitsPerComponent = 8;
+            image.colorSpace = "/DeviceRGB";
+            image.stream = std::move(rgb);
+            if (hasAlpha) image.maskStream = std::move(alpha);
+        }
+        ok = true;
+    }
+
+    ReleaseCom(converter);
+    ReleaseCom(frame);
+    ReleaseCom(decoder);
+    ReleaseCom(stream);
+    ReleaseCom(factory);
+    if (uninitialize) CoUninitialize();
+    return ok;
+}
+#else
+static bool BuildDecodedImageWithWic(const std::vector<uint8_t>&, PdfImage&) {
+    return false;
+}
+#endif
+
+static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image) {
+    PngInfo png;
+    if (!ParsePngChunks(bytes, png)) return false;
+    if (BuildFastPngImage(png, image)) return true;
+    if (BuildDecodedPngImageWithZlib(png, image)) return true;
+    return BuildDecodedImageWithWic(bytes, image);
+}
+
+static bool DecodeImageBytes(const std::vector<uint8_t>& bytes, PdfImage& image) {
+    PdfImage parsed;
+    if (ParseJpegImage(bytes, parsed) || ParsePngImage(bytes, parsed) || BuildDecodedImageWithWic(bytes, parsed)) {
+        image = std::move(parsed);
+        return image.width > 0 && image.height > 0 && !image.stream.empty();
+    }
+    return false;
+}
+
+class ImageRegistry {
+public:
+    explicit ImageRegistry(const BuildOptions& opts) : options(opts) {}
+
+    bool Resolve(const std::string& src, const std::string& alt, int& index) {
+        std::string key;
+        std::string localPathUtf8;
+        bool isUrl = IsHttpUrl(src);
+        if (isUrl) {
+            key = "url:" + src;
+        } else if (!ResolveLocalImagePath(src, options, key, localPathUtf8)) {
+            return false;
+        }
+
+        auto local = indexByKey.find(key);
+        if (local != indexByKey.end()) {
+            index = local->second;
+            return true;
+        }
+        if (IsKnownFailure(key)) return false;
+
+        PdfImage image;
+        if (!LoadDecodedImageFromCache(key, image)) {
+            std::vector<uint8_t> bytes;
+            bool loaded = isUrl
+                ? FetchUrlBytes(src, options, bytes)
+                : (ReadLocalImageFile(localPathUtf8, bytes) && bytes.size() <= kMaxImageBytes);
+            if (!loaded || !DecodeImageBytes(bytes, image)) {
+                StoreFailure(key);
+                return false;
+            }
+            StoreDecodedImageInCache(key, image);
+        }
+
+        image.name = "Im";
+        AppendSize(image.name, images.size() + 1);
+        index = (int)images.size();
+        indexByKey[key] = index;
+        images.push_back(std::move(image));
+        (void)alt;
+        return true;
+    }
+
+    const PdfImage& Get(int index) const {
+        return images[(size_t)index];
+    }
+
+    const std::vector<PdfImage>& Images() const { return images; }
+
+private:
+    const BuildOptions& options;
+    std::vector<PdfImage> images;
+    std::unordered_map<std::string, int> indexByKey;
+
+    static std::unordered_map<std::string, PdfImage>& Cache() {
+        static std::unordered_map<std::string, PdfImage> cache;
+        return cache;
+    }
+
+    static size_t& CacheBytes() {
+        static size_t bytes = 0;
+        return bytes;
+    }
+
+    static std::unordered_map<std::string, bool>& FailureCache() {
+        static std::unordered_map<std::string, bool> failures;
+        return failures;
+    }
+
+    static size_t ImageCacheCost(const PdfImage& image) {
+        return image.stream.size() + image.maskStream.size() + image.colorSpace.size() +
+            image.filter.size() + image.decodeParms.size() + 128;
+    }
+
+    static bool LoadDecodedImageFromCache(const std::string& key, PdfImage& image) {
+        auto& cache = Cache();
+        auto it = cache.find(key);
+        if (it == cache.end()) return false;
+        image = it->second;
+        image.name.clear();
+        return true;
+    }
+
+    static void StoreDecodedImageInCache(const std::string& key, const PdfImage& image) {
+        size_t cost = ImageCacheCost(image);
+        if (cost > kMaxImageBytes) return;
+        auto& cache = Cache();
+        size_t& cacheBytes = CacheBytes();
+        if (cacheBytes + cost > 64u * 1024u * 1024u) {
+            cache.clear();
+            cacheBytes = 0;
+        }
+        PdfImage copy = image;
+        copy.name.clear();
+        cacheBytes += cost;
+        cache[key] = std::move(copy);
+    }
+
+    static bool IsKnownFailure(const std::string& key) {
+        auto& failures = FailureCache();
+        return failures.find(key) != failures.end();
+    }
+
+    static void StoreFailure(const std::string& key) {
+        auto& failures = FailureCache();
+        if (failures.size() > 256) failures.clear();
+        failures[key] = true;
+    }
+};
+
+static std::string BuildImageStreamDict(const PdfImage& image, int smaskId) {
+    std::string dict;
+    dict.reserve(256 + image.colorSpace.size() + image.filter.size() + image.decodeParms.size());
+    dict += "/Type /XObject /Subtype /Image /Width ";
+    AppendInt(dict, image.width);
+    dict += " /Height ";
+    AppendInt(dict, image.height);
+    dict += " /ColorSpace ";
+    dict += image.colorSpace;
+    dict += " /BitsPerComponent ";
+    AppendInt(dict, image.bitsPerComponent);
+    if (!image.filter.empty()) {
+        dict += " /Filter ";
+        dict += image.filter;
+    }
+    if (!image.decodeParms.empty()) {
+        dict += " /DecodeParms ";
+        dict += image.decodeParms;
+    }
+    if (smaskId > 0) {
+        dict += " /SMask ";
+        AppendInt(dict, smaskId);
+        dict += " 0 R";
+    }
+    return dict;
+}
+
+static std::string BuildMaskStreamDict(const PdfImage& image) {
+    std::string dict;
+    dict.reserve(128);
+    dict += "/Type /XObject /Subtype /Image /Width ";
+    AppendInt(dict, image.width);
+    dict += " /Height ";
+    AppendInt(dict, image.height);
+    dict += " /ColorSpace /DeviceGray /BitsPerComponent 8";
+    if (!image.maskFilter.empty()) {
+        dict += " /Filter ";
+        dict += image.maskFilter;
+    }
+    if (!image.maskDecodeParms.empty()) {
+        dict += " /DecodeParms ";
+        dict += image.maskDecodeParms;
+    }
+    return dict;
+}
+
+static std::vector<int> AddImageObjects(PdfObjects& pdf, const std::vector<PdfImage>& images) {
+    std::vector<int> ids;
+    ids.reserve(images.size());
+    for (const PdfImage& image : images) {
+        int smaskId = 0;
+        if (!image.maskStream.empty()) {
+            smaskId = pdf.AddStream(BuildMaskStreamDict(image), image.maskStream);
+        }
+        ids.push_back(pdf.AddStream(BuildImageStreamDict(image, smaskId), image.stream));
+    }
+    return ids;
+}
+
+static void AppendXObjectResources(std::string& page, const std::vector<PdfImage>& images,
+    const std::vector<int>& imageObjectIds) {
+    if (images.empty()) return;
+    page += " /XObject << ";
+    for (size_t i = 0; i < images.size() && i < imageObjectIds.size(); i++) {
+        page += "/";
+        page += images[i].name;
+        page += " ";
+        AppendInt(page, imageObjectIds[i]);
+        page += " 0 R ";
+    }
+    page += ">>";
+}
+
+static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
+    const std::vector<std::vector<LinkRect>>& linksByPage) {
+    std::vector<std::vector<int>> idsByPage;
+    idsByPage.reserve(linksByPage.size());
+    for (const auto& pageLinks : linksByPage) {
+        std::vector<int> ids;
+        ids.reserve(pageLinks.size());
+        for (const LinkRect& link : pageLinks) {
+            if (link.url.empty() || link.x2 <= link.x1 || link.y2 <= link.y1) continue;
+            std::string annot;
+            annot.reserve(link.url.size() + 192);
+            annot += "<< /Type /Annot /Subtype /Link /Rect [";
+            AppendF(annot, link.x1);
+            annot += " ";
+            AppendF(annot, link.y1);
+            annot += " ";
+            AppendF(annot, link.x2);
+            annot += " ";
+            AppendF(annot, link.y2);
+            annot += "] /Border [0 0 0] /A << /S /URI /URI (";
+            annot += EscapeLiteral(link.url);
+            annot += ") >> >>";
+            ids.push_back(pdf.Add(annot));
+        }
+        idsByPage.push_back(std::move(ids));
+    }
+    return idsByPage;
+}
+
+static void AppendPageAnnotations(std::string& page, const std::vector<int>& annotationIds) {
+    if (annotationIds.empty()) return;
+    page += " /Annots [";
+    for (int id : annotationIds) {
+        AppendInt(page, id);
+        page += " 0 R ";
+    }
+    page += "]";
+}
+
 class Renderer {
 public:
-    Renderer(const TtfFont& f, int fontObject, int styleIndex, int marginIndex)
-        : font(f), fontId(fontObject), style(styleIndex), marginStyle(marginIndex) {
+    Renderer(const TtfFont& f, int fontObject, int styleIndex, int marginIndex, ImageRegistry* imageRegistry)
+        : font(f), fontId(fontObject), images(imageRegistry), style(styleIndex), marginStyle(marginIndex) {
         margin = ResolveMarginPoints(marginStyle);
         bodySize = style == 2 ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
@@ -1346,7 +2617,17 @@ public:
             return;
         }
 
+        bool pageBreakPending = false;
         for (const Block& block : blocks) {
+            if (block.type == BlockType::PageBreak) {
+                pageBreakPending = true;
+                continue;
+            }
+            if (pageBreakPending) {
+                RenderPageBreak();
+                pageBreakPending = false;
+            }
+
             switch (block.type) {
             case BlockType::Heading:
                 RenderHeading(block);
@@ -1383,16 +2664,23 @@ public:
             case BlockType::Rule:
                 RenderRule();
                 break;
+            case BlockType::PageBreak:
+                break;
+            case BlockType::Image:
+                RenderImage(block);
+                break;
             }
         }
     }
 
     const std::vector<std::string>& Pages() const { return pages; }
+    const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     const CidList& UsedCids() const { return usedCids.Values(); }
 
 private:
     const TtfFont& font;
     int fontId = 0;
+    ImageRegistry* images = nullptr;
     int style = 0;
     int marginStyle = 1;
     double margin = 62.0;
@@ -1400,10 +2688,12 @@ private:
     double lineHeight = 15.5;
     double y = 0.0;
     std::vector<std::string> pages;
+    std::vector<std::vector<LinkRect>> pageLinks;
     UsedCidSet usedCids;
 
     struct StyledSpan {
         std::wstring text;
+        std::string url;
         bool bold = false;
         bool italic = false;
         bool strike = false;
@@ -1411,18 +2701,21 @@ private:
 
     struct StyledWord {
         std::wstring text;
+        std::string url;
         bool bold = false;
         bool italic = false;
         bool strike = false;
     };
 
-    void PushSpan(std::vector<StyledSpan>& spans, std::string_view text, bool bold, bool italic, bool strike) {
+    void PushSpan(std::vector<StyledSpan>& spans, std::string_view text, bool bold, bool italic, bool strike,
+        std::string_view url = {}) {
         if (text.empty()) return;
         std::wstring wide = Utf8ToWide(text);
-        if (!spans.empty() && spans.back().bold == bold && spans.back().italic == italic && spans.back().strike == strike) {
+        if (!spans.empty() && spans.back().bold == bold && spans.back().italic == italic &&
+            spans.back().strike == strike && spans.back().url == url) {
             spans.back().text += wide;
         } else {
-            spans.push_back({ wide, bold, italic, strike });
+            spans.push_back({ wide, ToString(url), bold, italic, strike });
         }
     }
 
@@ -1453,12 +2746,14 @@ private:
                 size_t close = source.find("](", i + 1);
                 size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
                 if (close != std::string::npos && end != std::string::npos) {
-                    buf += source.substr(i + 1, close - (i + 1));
-                    std::string url = source.substr(close + 2, end - (close + 2));
-                    if (!url.empty()) {
-                        buf += " <";
-                        buf += url;
-                        buf += ">";
+                    flush();
+                    std::string_view label(source.data() + i + 1, close - (i + 1));
+                    std::string_view target(source.data() + close + 2, end - (close + 2));
+                    std::string_view url;
+                    if (ExtractMarkdownDestination(target, url)) {
+                        PushSpan(spans, label, bold, italic, strike, url);
+                    } else {
+                        PushSpan(spans, label, bold, italic, strike);
                     }
                     i = end + 1;
                     continue;
@@ -1547,25 +2842,27 @@ private:
             for (wchar_t ch : span.text) {
                 if (ch == L' ' || ch == L'\t' || ch == L'\n' || ch == L'\r') {
                     if (!current.empty()) {
-                        words.push_back({ current, span.bold, span.italic, span.strike });
+                        words.push_back({ current, span.url, span.bold, span.italic, span.strike });
                         current.clear();
                     }
                 } else {
                     current.push_back(ch);
                 }
             }
-            if (!current.empty()) words.push_back({ current, span.bold, span.italic, span.strike });
+            if (!current.empty()) words.push_back({ current, span.url, span.bold, span.italic, span.strike });
         }
         return words;
     }
 
-    void AppendStyledSpan(std::vector<StyledSpan>& line, std::wstring text, bool bold, bool italic, bool strike) {
+    void AppendStyledSpan(std::vector<StyledSpan>& line, std::wstring text, bool bold, bool italic, bool strike,
+        const std::string& url = std::string()) {
         if (text.empty()) return;
-        if (!line.empty() && line.back().bold == bold && line.back().italic == italic && line.back().strike == strike) {
+        if (!line.empty() && line.back().bold == bold && line.back().italic == italic &&
+            line.back().strike == strike && line.back().url == url) {
             line.back().text += text;
             return;
         }
-        line.push_back({ std::move(text), bold, italic, strike });
+        line.push_back({ std::move(text), url, bold, italic, strike });
     }
 
     bool IsClosingPunctuation(const std::wstring& text) {
@@ -1578,7 +2875,7 @@ private:
             std::vector<std::vector<StyledSpan>> lines;
             std::wstring wide = Utf8ToWide(NormalizeSymbols(text));
             for (const auto& line : WrapText(font, std::wstring_view(wide), width, size)) {
-                lines.push_back({ { line, false, false, false } });
+                lines.push_back({ { line, "", false, false, false } });
             }
             if (lines.empty()) lines.push_back({});
             return lines;
@@ -1615,7 +2912,7 @@ private:
                     wordWidth += spaceWidth;
                 }
             }
-            AppendStyledSpan(line, std::move(textRun), word.bold, word.italic, word.strike);
+            AppendStyledSpan(line, std::move(textRun), word.bold, word.italic, word.strike, word.url);
             lineWidth += wordWidth;
         }
 
@@ -1626,8 +2923,13 @@ private:
 
     void NewPage() {
         pages.push_back("");
+        pageLinks.push_back({});
         pages.back().reserve(64 * 1024);
         y = PAGE_H - margin;
+    }
+
+    void RenderPageBreak() {
+        if (!pages.empty() && !pages.back().empty()) NewPage();
     }
 
     void Ensure(double needed) {
@@ -1719,6 +3021,64 @@ private:
         c += " re S Q\n";
     }
 
+    void AddLink(double x, double baseline, double width, double size, const std::string& url) {
+        if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
+        pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, url });
+    }
+
+    void DrawImage(const PdfImage& image, double x, double top, double w, double h) {
+        std::string& c = pages.back();
+        c += "q ";
+        AppendF(c, w);
+        c += " 0 0 ";
+        AppendF(c, h);
+        c += " ";
+        AppendF(c, x);
+        c += " ";
+        AppendF(c, top - h);
+        c += " cm /";
+        c += image.name;
+        c += " Do Q\n";
+    }
+
+    void RenderImageFallback(const Block& block) {
+        std::string fallback = block.text.empty() ? block.imageSrc : block.text;
+        if (fallback.empty()) fallback = "image";
+        RenderParagraph(fallback);
+    }
+
+    void RenderImage(const Block& block) {
+        if (!images) {
+            RenderImageFallback(block);
+            return;
+        }
+
+        int index = -1;
+        if (!images->Resolve(block.imageSrc, block.text, index)) {
+            RenderImageFallback(block);
+            return;
+        }
+
+        const PdfImage& image = images->Get(index);
+        double maxW = PAGE_W - margin * 2.0;
+        double maxH = PAGE_H - margin * 2.0;
+        double w = (double)image.width * 72.0 / 96.0;
+        double h = (double)image.height * 72.0 / 96.0;
+        if (w <= 0.0 || h <= 0.0) {
+            RenderImageFallback(block);
+            return;
+        }
+
+        double scale = std::min(1.0, std::min(maxW / w, maxH / h));
+        w *= scale;
+        h *= scale;
+
+        Ensure(h + 10.0);
+        double x = margin + (maxW - w) * 0.5;
+        DrawImage(image, x, y, w, h);
+        y -= h + 10.0;
+    }
+
     void RenderHeading(const Block& block) {
         static const double sizes[] = { 0, 26, 22, 18, 15, 13, 12 };
         int level = std::max(1, std::min(6, block.level));
@@ -1743,8 +3103,11 @@ private:
             double cursor = x;
             double baseline = y - bodySize;
             for (const auto& span : line) {
-                PaintText(cursor, baseline, bodySize, span.text, "0.08 0.08 0.08", span.bold, span.italic, span.strike);
-                cursor += TextWidth(font, span.text, bodySize);
+                double spanWidth = TextWidth(font, span.text, bodySize);
+                const char* color = span.url.empty() ? "0.08 0.08 0.08" : "0.05 0.30 0.68";
+                PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
+                AddLink(cursor, baseline, spanWidth, bodySize, span.url);
+                cursor += spanWidth;
             }
             y -= lh;
         }
@@ -2286,7 +3649,7 @@ static std::vector<std::string> WrapAsciiText(const std::string& raw, double max
 
 class StandardRenderer {
 public:
-    StandardRenderer(int styleIndex, int marginIndex) : style(styleIndex) {
+    StandardRenderer(int styleIndex, int marginIndex, ImageRegistry* imageRegistry) : images(imageRegistry), style(styleIndex) {
         margin = ResolveMarginPoints(marginIndex);
         bodySize = style == 2 ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
@@ -2299,7 +3662,17 @@ public:
             return;
         }
 
+        bool pageBreakPending = false;
         for (const Block& block : blocks) {
+            if (block.type == BlockType::PageBreak) {
+                pageBreakPending = true;
+                continue;
+            }
+            if (pageBreakPending) {
+                RenderPageBreak();
+                pageBreakPending = false;
+            }
+
             switch (block.type) {
             case BlockType::Heading:
                 RenderHeading(block);
@@ -2339,24 +3712,37 @@ public:
             case BlockType::Rule:
                 RenderRule();
                 break;
+            case BlockType::PageBreak:
+                break;
+            case BlockType::Image:
+                RenderImage(block);
+                break;
             }
         }
     }
 
     const std::vector<std::string>& Pages() const { return pages; }
+    const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
 
 private:
+    ImageRegistry* images = nullptr;
     int style = 0;
     double margin = 54.0;
     double bodySize = 11.5;
     double lineHeight = 15.5;
     double y = 0.0;
     std::vector<std::string> pages;
+    std::vector<std::vector<LinkRect>> pageLinks;
 
     void NewPage() {
         pages.push_back("");
+        pageLinks.push_back({});
         pages.back().reserve(64 * 1024);
         y = PAGE_H - margin;
+    }
+
+    void RenderPageBreak() {
+        if (!pages.empty() && !pages.back().empty()) NewPage();
     }
 
     void Ensure(double needed) {
@@ -2377,6 +3763,186 @@ private:
         AppendF(c, h);
         c += " re ";
         c += stroke ? "S Q\n" : "f Q\n";
+    }
+
+    struct AsciiSpan {
+        std::string text;
+        std::string url;
+    };
+
+    struct AsciiWord {
+        std::string text;
+        std::string url;
+    };
+
+    void AddLink(double x, double baseline, double width, double size, const std::string& url) {
+        if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
+        pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, url });
+    }
+
+    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string_view text, std::string_view url = {}) {
+        if (text.empty()) return;
+        std::string stripped = StripInlineMarkdown(text);
+        if (stripped.empty()) return;
+        if (!spans.empty() && spans.back().url == url) {
+            spans.back().text += stripped;
+        } else {
+            spans.push_back({ std::move(stripped), ToString(url) });
+        }
+    }
+
+    std::vector<AsciiSpan> ParseAsciiLinkSpans(const std::string& text) {
+        std::string source = NormalizeSymbols(text);
+        std::vector<AsciiSpan> spans;
+        std::string buf;
+
+        auto flush = [&]() {
+            PushAsciiSpan(spans, std::string_view(buf));
+            buf.clear();
+        };
+
+        for (size_t i = 0; i < source.size();) {
+            if (source[i] == '[') {
+                size_t close = source.find("](", i + 1);
+                size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
+                if (close != std::string::npos && end != std::string::npos) {
+                    flush();
+                    std::string_view label(source.data() + i + 1, close - (i + 1));
+                    std::string_view target(source.data() + close + 2, end - (close + 2));
+                    std::string_view url;
+                    if (ExtractMarkdownDestination(target, url)) {
+                        PushAsciiSpan(spans, label, url);
+                    } else {
+                        PushAsciiSpan(spans, label);
+                    }
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            buf.push_back(source[i++]);
+        }
+
+        flush();
+        return spans;
+    }
+
+    std::vector<AsciiWord> SplitAsciiWords(const std::vector<AsciiSpan>& spans) {
+        std::vector<AsciiWord> words;
+        words.reserve(spans.size() * 3);
+        for (const AsciiSpan& span : spans) {
+            std::string current;
+            for (char ch : span.text) {
+                if (IsSpace(ch)) {
+                    if (!current.empty()) {
+                        words.push_back({ current, span.url });
+                        current.clear();
+                    }
+                } else {
+                    current.push_back(ch);
+                }
+            }
+            if (!current.empty()) words.push_back({ current, span.url });
+        }
+        return words;
+    }
+
+    void AppendAsciiLineSpan(std::vector<AsciiSpan>& line, std::string text, const std::string& url) {
+        if (text.empty()) return;
+        if (!line.empty() && line.back().url == url) {
+            line.back().text += text;
+            return;
+        }
+        line.push_back({ std::move(text), url });
+    }
+
+    std::vector<std::vector<AsciiSpan>> WrapAsciiLinks(const std::string& text, double width, double size) {
+        std::vector<AsciiWord> words = SplitAsciiWords(ParseAsciiLinkSpans(text));
+        std::vector<std::vector<AsciiSpan>> lines;
+        lines.reserve(std::max<size_t>(1, text.size() / 72));
+        std::vector<AsciiSpan> line;
+        double lineWidth = 0.0;
+        double spaceWidth = AsciiTextWidth(" ", size);
+
+        for (const AsciiWord& word : words) {
+            double wordWidth = AsciiTextWidth(word.text, size);
+            bool needsSpace = !line.empty();
+            double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
+
+            if (!line.empty() && lineWidth + addWidth > width) {
+                lines.push_back(line);
+                line.clear();
+                lineWidth = 0.0;
+                needsSpace = false;
+                addWidth = wordWidth;
+            }
+
+            std::string textRun = word.text;
+            if (needsSpace) {
+                textRun.insert(textRun.begin(), ' ');
+                wordWidth += spaceWidth;
+            }
+
+            AppendAsciiLineSpan(line, std::move(textRun), word.url);
+            lineWidth += wordWidth;
+        }
+
+        if (!line.empty()) lines.push_back(line);
+        if (lines.empty()) lines.push_back({});
+        return lines;
+    }
+
+    void DrawImage(const PdfImage& image, double x, double top, double w, double h) {
+        std::string& c = pages.back();
+        c += "q ";
+        AppendF(c, w);
+        c += " 0 0 ";
+        AppendF(c, h);
+        c += " ";
+        AppendF(c, x);
+        c += " ";
+        AppendF(c, top - h);
+        c += " cm /";
+        c += image.name;
+        c += " Do Q\n";
+    }
+
+    void RenderImageFallback(const Block& block) {
+        std::string fallback = block.text.empty() ? block.imageSrc : block.text;
+        if (fallback.empty()) fallback = "image";
+        RenderParagraph(fallback);
+    }
+
+    void RenderImage(const Block& block) {
+        if (!images) {
+            RenderImageFallback(block);
+            return;
+        }
+
+        int index = -1;
+        if (!images->Resolve(block.imageSrc, block.text, index)) {
+            RenderImageFallback(block);
+            return;
+        }
+
+        const PdfImage& image = images->Get(index);
+        double maxW = PAGE_W - margin * 2.0;
+        double maxH = PAGE_H - margin * 2.0;
+        double w = (double)image.width * 72.0 / 96.0;
+        double h = (double)image.height * 72.0 / 96.0;
+        if (w <= 0.0 || h <= 0.0) {
+            RenderImageFallback(block);
+            return;
+        }
+
+        double scale = std::min(1.0, std::min(maxW / w, maxH / h));
+        w *= scale;
+        h *= scale;
+
+        Ensure(h + 10.0);
+        double x = margin + (maxW - w) * 0.5;
+        DrawImage(image, x, y, w, h);
+        y -= h + 10.0;
     }
 
     void Text(double x, double baseline, double size, const std::string& text, const char* fontName, const char* color = "0.08 0.08 0.08") {
@@ -2420,6 +3986,25 @@ private:
     }
 
     void RenderParagraph(const std::string& text, double x, double width) {
+        if (text.find('[') != std::string::npos) {
+            for (const auto& line : WrapAsciiLinks(text, width, bodySize)) {
+                double lh = bodySize * 1.35;
+                Ensure(lh);
+                double cursor = x;
+                double baseline = y - bodySize;
+                for (const AsciiSpan& span : line) {
+                    double spanWidth = AsciiTextWidth(span.text, bodySize);
+                    const char* color = span.url.empty() ? "0.08 0.08 0.08" : "0.05 0.30 0.68";
+                    Text(cursor, baseline, bodySize, span.text, "F1", color);
+                    AddLink(cursor, baseline, spanWidth, bodySize, span.url);
+                    cursor += spanWidth;
+                }
+                y -= lh;
+            }
+            y -= 5.0;
+            return;
+        }
+
         for (const auto& line : WrapAsciiText(text, width, bodySize)) {
             DrawTextLine(x, bodySize, line);
         }
@@ -2529,7 +4114,7 @@ private:
     }
 };
 
-static bool BuildStandardPdfBytes(const std::string& markdown, int styleIdx, int marginIdx, std::string& pdfBytes) {
+static bool BuildStandardPdfBytes(const std::string& markdown, const BuildOptions& options, std::string& pdfBytes) {
     std::vector<Block> blocks = ParseMarkdown(markdown);
     PdfObjects pdf;
     int pagesId = pdf.Reserve();
@@ -2537,11 +4122,16 @@ static bool BuildStandardPdfBytes(const std::string& markdown, int styleIdx, int
     int fontBoldId = pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
     int fontMonoId = pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
 
-    StandardRenderer renderer(styleIdx, marginIdx);
+    ImageRegistry imageRegistry(options);
+    StandardRenderer renderer(options.styleIdx, options.marginIdx, &imageRegistry);
     renderer.Render(blocks);
+    std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
+    std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks());
 
     std::vector<int> pageIds;
-    for (const std::string& pageContent : renderer.Pages()) {
+    const std::vector<std::string>& renderedPages = renderer.Pages();
+    for (size_t pageIndex = 0; pageIndex < renderedPages.size(); pageIndex++) {
+        const std::string& pageContent = renderedPages[pageIndex];
         int contentId = pdf.AddStream("", pageContent);
         std::string page;
         page.reserve(192);
@@ -2557,9 +4147,13 @@ static bool BuildStandardPdfBytes(const std::string& markdown, int styleIdx, int
         AppendInt(page, fontBoldId);
         page += " 0 R /F3 ";
         AppendInt(page, fontMonoId);
-        page += " 0 R >> >> /Contents ";
-        AppendInt(page, contentId);
         page += " 0 R >>";
+        AppendXObjectResources(page, imageRegistry.Images(), imageObjectIds);
+        page += " >> /Contents ";
+        AppendInt(page, contentId);
+        page += " 0 R";
+        if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
+        page += " >>";
         pageIds.push_back(pdf.Add(page));
     }
 
@@ -2600,7 +4194,7 @@ static const TtfFont* GetCachedFont() {
     return loaded ? &font : nullptr;
 }
 
-static bool BuildUnicodePdfBytes(const std::string& markdown, int styleIdx, int marginIdx, std::string& pdfBytes) {
+static bool BuildUnicodePdfBytes(const std::string& markdown, const BuildOptions& options, std::string& pdfBytes) {
     const TtfFont* fontPtr = GetCachedFont();
     if (!fontPtr) {
         g_lastError = 1;
@@ -2619,8 +4213,11 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, int styleIdx, int 
     int type0FontId = pdf.Reserve();
     int pagesId = pdf.Reserve();
 
-    Renderer renderer(font, type0FontId, styleIdx, marginIdx);
+    ImageRegistry imageRegistry(options);
+    Renderer renderer(font, type0FontId, options.styleIdx, options.marginIdx, &imageRegistry);
     renderer.Render(blocks);
+    std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
+    std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks());
 
     const CidList& used = renderer.UsedCids();
     std::string cidKey = MakeCidKey(used);
@@ -2691,7 +4288,9 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, int styleIdx, int 
     pdf.Set(type0FontId, type0);
 
     std::vector<int> pageIds;
-    for (const std::string& pageContent : renderer.Pages()) {
+    const std::vector<std::string>& renderedPages = renderer.Pages();
+    for (size_t pageIndex = 0; pageIndex < renderedPages.size(); pageIndex++) {
+        const std::string& pageContent = renderedPages[pageIndex];
         int contentId = pdf.AddStream("", pageContent);
         std::string page;
         page.reserve(160);
@@ -2703,9 +4302,13 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, int styleIdx, int 
         AppendF(page, PAGE_H);
         page += "] /Resources << /Font << /F1 ";
         AppendInt(page, type0FontId);
-        page += " 0 R >> >> /Contents ";
-        AppendInt(page, contentId);
         page += " 0 R >>";
+        AppendXObjectResources(page, imageRegistry.Images(), imageObjectIds);
+        page += " >> /Contents ";
+        AppendInt(page, contentId);
+        page += " 0 R";
+        if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
+        page += " >>";
         pageIds.push_back(pdf.Add(page));
     }
 
@@ -2734,12 +4337,19 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, int styleIdx, int 
     return true;
 }
 
-bool BuildPdfBytes(const std::string& markdown, int styleIdx, int marginIdx, std::string& pdfBytes) {
+bool BuildPdfBytes(const std::string& markdown, const BuildOptions& options, std::string& pdfBytes) {
     g_lastError = 0;
     if (IsAsciiDocument(markdown)) {
-        return BuildStandardPdfBytes(markdown, styleIdx, marginIdx, pdfBytes);
+        return BuildStandardPdfBytes(markdown, options, pdfBytes);
     }
-    return BuildUnicodePdfBytes(markdown, styleIdx, marginIdx, pdfBytes);
+    return BuildUnicodePdfBytes(markdown, options, pdfBytes);
+}
+
+bool BuildPdfBytes(const std::string& markdown, int styleIdx, int marginIdx, std::string& pdfBytes) {
+    BuildOptions options;
+    options.styleIdx = styleIdx;
+    options.marginIdx = marginIdx;
+    return BuildPdfBytes(markdown, options, pdfBytes);
 }
 
 } // namespace TinyPdf

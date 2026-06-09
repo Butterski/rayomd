@@ -53,8 +53,11 @@ Notes:
 - Pipe tables with basic left, center, and right alignment
 - Inline math marker cleanup and `$$` math blocks rendered as formula boxes
 - Horizontal rules
+- Explicit page breaks with `\pagebreak`, `\newpage`, or `<!-- pagebreak -->`
+- Standalone local and HTTP/HTTPS images with alt-text fallback
+- Clickable Markdown links in native PDFs
 - Faux bold, italic, and strikethrough for inline emphasis
-- Basic inline cleanup for code spans, links, and images
+- Basic inline cleanup for code spans and inline images
 - Common status emoji fallback text
 - YAML front matter ignored
 
@@ -64,7 +67,6 @@ Not supported in native mode:
 - Syntax highlighting
 - Footnotes
 - Citations
-- Image embedding
 - Custom Pandoc filters/templates
 - Full CommonMark/Pandoc extension compatibility
 
@@ -99,13 +101,14 @@ Requirements:
 
 - `g++` or `clang++` with C++17 support
 - CMake
+- libcurl development headers for HTTP/HTTPS image URLs
 - A system TrueType font for Unicode output, such as DejaVu Sans
 
 Ubuntu/WSL dependencies:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y g++ cmake fonts-dejavu-core
+sudo apt-get install -y g++ cmake fonts-dejavu-core libcurl4-openssl-dev
 ```
 
 Build:

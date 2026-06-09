@@ -93,6 +93,7 @@ std::atomic<bool> g_isExporting{false};
 std::atomic<bool> g_isFileLoading{false};
 std::atomic<int> g_forcedRenderFrames{0};
 std::string g_statusText = "Ready";
+std::wstring g_currentMarkdownPath;
 int g_lineCount = 1;
 int g_wordCount = 0;
 int g_charCount = 0;
@@ -357,11 +358,16 @@ bool WriteBinaryFile(const std::wstring& path, const std::string& content) {
 }
 #endif
 
-bool ExportNativePdf(const std::string& markdown, const std::wstring& outputPath, int styleIdx, int marginIdx) {
+bool ExportNativePdf(const std::string& markdown, const std::wstring& outputPath,
+    int styleIdx, int marginIdx, const std::wstring& sourcePath = L"") {
     static thread_local std::string pdfBytes;
     pdfBytes.clear();
     pdfBytes.reserve(1024 * 1024);
-    if (!TinyPdf::BuildPdfBytes(markdown, styleIdx, marginIdx, pdfBytes)) {
+    TinyPdf::BuildOptions options;
+    options.styleIdx = styleIdx;
+    options.marginIdx = marginIdx;
+    options.sourcePath = WideToUtf8(sourcePath);
+    if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBytes)) {
         return false;
     }
     if (!WriteBinaryFile(outputPath, pdfBytes)) {
@@ -371,8 +377,13 @@ bool ExportNativePdf(const std::string& markdown, const std::wstring& outputPath
     return true;
 }
 
-bool BuildNativePdfBytes(const std::string& markdown, int styleIdx, int marginIdx, std::string& pdfBytes) {
-    return TinyPdf::BuildPdfBytes(markdown, styleIdx, marginIdx, pdfBytes);
+bool BuildNativePdfBytes(const std::string& markdown, int styleIdx, int marginIdx,
+    std::string& pdfBytes, const std::wstring& sourcePath = L"") {
+    TinyPdf::BuildOptions options;
+    options.styleIdx = styleIdx;
+    options.marginIdx = marginIdx;
+    options.sourcePath = WideToUtf8(sourcePath);
+    return TinyPdf::BuildPdfBytes(markdown, options, pdfBytes);
 }
 
 int GetNativePdfLastError() {
@@ -499,7 +510,7 @@ std::wstring PdfNameForMarkdown(const std::wstring& name) {
 bool ExportOneFile(const std::wstring& inputPath, const std::wstring& outputPath, int engine, int style, int margin) {
     if (engine == 0) {
         std::string markdown;
-        return ReadUtf8File(inputPath, markdown) && ExportNativePdf(markdown, outputPath, style, margin);
+        return ReadUtf8File(inputPath, markdown) && ExportNativePdf(markdown, outputPath, style, margin, inputPath);
     }
     return RunPandoc(inputPath, outputPath, style, margin);
 }
@@ -508,7 +519,7 @@ bool ExportNativeFileWithBuffer(const std::wstring& inputPath, const std::wstrin
     std::string markdown;
     if (!ReadUtf8File(inputPath, markdown)) return false;
     pdfBuffer.clear();
-    if (!BuildNativePdfBytes(markdown, style, margin, pdfBuffer)) return false;
+    if (!BuildNativePdfBytes(markdown, style, margin, pdfBuffer, inputPath)) return false;
     return WriteBinaryFile(outputPath, pdfBuffer);
 }
 
@@ -658,7 +669,7 @@ int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
     if (!ReadUtf8File(inputPath, markdown)) return 3;
 
     std::string pdfBytes;
-    if (!BuildNativePdfBytes(markdown, style, margin, pdfBytes)) {
+    if (!BuildNativePdfBytes(markdown, style, margin, pdfBytes, inputPath)) {
         return 10 + GetNativePdfLastError();
     }
     WriteBinaryFile(JoinPath(outputDir, L"sample.pdf"), pdfBytes);
@@ -670,7 +681,7 @@ int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
     size_t totalBytes = 0;
     for (int i = 0; i < iterations; i++) {
         pdfBytes.clear();
-        if (!BuildNativePdfBytes(markdown, style, margin, pdfBytes)) {
+        if (!BuildNativePdfBytes(markdown, style, margin, pdfBytes, inputPath)) {
             return 10 + GetNativePdfLastError();
         }
         totalBytes += pdfBytes.size();
@@ -773,7 +784,7 @@ int TryCommandLineExport() {
             LocalFree(argv);
             return 3;
         }
-        ok = ExportNativePdf(markdown, outputPath, style, margin);
+        ok = ExportNativePdf(markdown, outputPath, style, margin, inputPath);
     } else {
         ok = RunPandoc(inputPath, outputPath, style, margin);
     }
@@ -788,6 +799,7 @@ int TryCommandLineExport() {
 // ============================================================================
 struct ExportParams {
     std::string markdown;
+    std::wstring sourcePath;
     std::wstring outputPath;
     int engineIdx;
     int styleIdx;
@@ -809,7 +821,7 @@ DWORD WINAPI ExportThread(LPVOID lp) {
     QueryPerformanceCounter(&start);
 
     if (p->engineIdx == 0) {
-        ok = ExportNativePdf(p->markdown, p->outputPath, p->styleIdx, p->marginIdx);
+        ok = ExportNativePdf(p->markdown, p->outputPath, p->styleIdx, p->marginIdx, p->sourcePath);
     } else {
         std::wstring tmp = GetTempFilePath();
         ok = WriteUtf8File(tmp, p->markdown) && RunPandoc(tmp, p->outputPath, p->styleIdx, p->marginIdx);
@@ -851,7 +863,7 @@ void DoExport(HWND hWnd) {
     int marginSetting = g_selectedMargin == 3
         ? 1000 + (int)(std::max(0.25f, std::min(2.0f, g_customMarginInches)) * 72.0f + 0.5f)
         : g_selectedMargin;
-    auto* params = new ExportParams{ g_markdownText, outPath, g_selectedEngine, g_selectedStyle, marginSetting, g_openAfterExport, hWnd };
+    auto* params = new ExportParams{ g_markdownText, g_currentMarkdownPath, outPath, g_selectedEngine, g_selectedStyle, marginSetting, g_openAfterExport, hWnd };
     HANDLE hThread = CreateThread(nullptr, 0, ExportThread, params, 0, nullptr);
     if (hThread) CloseHandle(hThread);
 }
@@ -863,6 +875,7 @@ struct FileLoadParams {
 
 struct FileLoadResult {
     bool ok = false;
+    std::wstring path;
     std::string content;
     MarkdownStats stats;
     double elapsedMs = 0.0;
@@ -876,6 +889,7 @@ DWORD WINAPI FileLoadThread(LPVOID lp) {
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&start);
 
+    result->path = p->path;
     result->ok = ReadUtf8File(p->path, result->content);
     if (result->ok) {
         result->stats = CalculateMarkdownStats(result->content);
@@ -1114,6 +1128,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         auto* result = (FileLoadResult*)lParam;
         if (result) {
             if (result->ok) {
+                g_currentMarkdownPath = std::move(result->path);
                 g_markdownText = std::move(result->content);
                 g_lineCount = result->stats.lines;
                 g_wordCount = result->stats.words;

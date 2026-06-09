@@ -43,3 +43,26 @@ $$
 2. Kolejny element
 
 > "To jest cytat (blockquote). Powinien mieć wcięcie i inny styl, np. szary pasek z boku w stylu Modern."
+
+---
+
+\pagebreak
+
+## 5. Wymuszony Podział Strony
+
+Ta sekcja powinna zacząć się na nowej stronie po znaczniku `\pagebreak`.
+
+<!-- pagebreak -->
+
+## 6. Linki i Obrazy
+
+![Logo Fast Markdown](catto.png)
+
+![Zdjęcie z internetu](https://picsum.photos/200/300)
+
+![Fail obrazu](https://example.com/fail.jpg)
+
+![Fail obrazu local](nonexistent.png)
+
+[Google](https://www.google.com)
+

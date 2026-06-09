@@ -68,6 +68,10 @@ bool WriteUtf8FilePortable(const fs::path& path, const std::string& content) {
     return WriteBinaryFilePortable(path, content);
 }
 
+std::string PathToUtf8(const fs::path& path) {
+    return path.u8string();
+}
+
 std::string Lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
         [](unsigned char c) { return (char)std::tolower(c); });
@@ -141,7 +145,11 @@ bool BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath,
     std::string markdown;
     if (!ReadUtf8FilePortable(inputPath, markdown)) return false;
     pdfBuffer.clear();
-    if (!TinyPdf::BuildPdfBytes(markdown, style, margin, pdfBuffer)) return false;
+    TinyPdf::BuildOptions options;
+    options.styleIdx = style;
+    options.marginIdx = margin;
+    options.sourcePath = PathToUtf8(inputPath);
+    if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBuffer)) return false;
     return WriteBinaryFilePortable(outputPath, pdfBuffer);
 }
 
@@ -211,14 +219,18 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     if (!ReadUtf8FilePortable(inputPath, markdown)) return 3;
 
     std::string pdfBytes;
-    if (!TinyPdf::BuildPdfBytes(markdown, style, margin, pdfBytes)) return 10 + TinyPdf::g_lastError;
+    TinyPdf::BuildOptions options;
+    options.styleIdx = style;
+    options.marginIdx = margin;
+    options.sourcePath = PathToUtf8(inputPath);
+    if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBytes)) return 10 + TinyPdf::g_lastError;
     WriteBinaryFilePortable(outputDir / "sample.pdf", pdfBytes);
 
     auto start = std::chrono::steady_clock::now();
     size_t totalBytes = 0;
     for (int i = 0; i < iterations; i++) {
         pdfBytes.clear();
-        if (!TinyPdf::BuildPdfBytes(markdown, style, margin, pdfBytes)) return 10 + TinyPdf::g_lastError;
+        if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBytes)) return 10 + TinyPdf::g_lastError;
         totalBytes += pdfBytes.size();
     }
     auto end = std::chrono::steady_clock::now();

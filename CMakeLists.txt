@@ -12,8 +12,22 @@ set(FAST_MARKDOWN_SIMDUTF_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simdu
 
 function(fast_markdown_release_flags target)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-O3>)
-        target_link_options(${target} PRIVATE $<$<CONFIG:Release>:-s>)
+        if(WIN32)
+            target_compile_options(${target} PRIVATE
+                $<$<CONFIG:Release>:-Os>
+                $<$<CONFIG:Release>:-fno-exceptions>
+                $<$<CONFIG:Release>:-fno-rtti>
+                $<$<CONFIG:Release>:-ffunction-sections>
+                $<$<CONFIG:Release>:-fdata-sections>)
+            target_link_options(${target} PRIVATE
+                $<$<CONFIG:Release>:-s>
+                $<$<CONFIG:Release>:-static-libgcc>
+                $<$<CONFIG:Release>:-static-libstdc++>
+                $<$<CONFIG:Release>:-Wl,--gc-sections>)
+        else()
+            target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-O3>)
+            target_link_options(${target} PRIVATE $<$<CONFIG:Release>:-s>)
+        endif()
     endif()
 endfunction()
 
@@ -42,16 +56,27 @@ if(WIN32)
     target_compile_definitions(fast-markdown-imgui PRIVATE UNICODE _UNICODE)
     target_include_directories(fast-markdown-imgui PRIVATE include . imgui)
     target_link_libraries(fast-markdown-imgui PRIVATE
-        d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi
+        d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi winhttp windowscodecs
     )
     fast_markdown_simdutf(fast-markdown-imgui)
     fast_markdown_release_flags(fast-markdown-imgui)
 else()
+    find_package(CURL REQUIRED)
+    find_package(ZLIB QUIET)
+
     add_executable(fast-markdown
         src/core/tiny_pdf.cpp
         src/cli/main_cli.cpp
     )
     target_include_directories(fast-markdown PRIVATE include)
+    if(CURL_FOUND)
+        target_link_libraries(fast-markdown PRIVATE CURL::libcurl)
+        target_compile_definitions(fast-markdown PRIVATE FAST_MARKDOWN_USE_CURL=1)
+    endif()
+    if(ZLIB_FOUND)
+        target_link_libraries(fast-markdown PRIVATE ZLIB::ZLIB)
+        target_compile_definitions(fast-markdown PRIVATE FAST_MARKDOWN_USE_ZLIB=1)
+    endif()
     fast_markdown_simdutf(fast-markdown)
     fast_markdown_release_flags(fast-markdown)
 endif()
