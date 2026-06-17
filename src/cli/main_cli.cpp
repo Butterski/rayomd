@@ -1,4 +1,4 @@
-﻿#include "fast_markdown/tiny_pdf.h"
+#include "rayomd/tiny_pdf.h"
 
 #include <algorithm>
 #include <chrono>
@@ -22,8 +22,8 @@ namespace {
 
 namespace fs = std::filesystem;
 
-#ifndef FAST_MARKDOWN_VERSION
-#define FAST_MARKDOWN_VERSION "0.0.0"
+#ifndef RAYOMD_VERSION
+#define RAYOMD_VERSION "0.0.0"
 #endif
 
 constexpr long long kMaxMarkdownInputBytes = 128LL * 1024LL * 1024LL;
@@ -255,14 +255,14 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
 
 void PrintUsage() {
     std::cerr
-        << "Fast Markdown portable CLI " << FAST_MARKDOWN_VERSION << "\n"
+        << "RayoMD portable CLI " << RAYOMD_VERSION << "\n"
         << "Usage:\n"
-        << "  fast-markdown --version\n"
-        << "  fast-markdown --export input.md output.pdf [native] [style] [margin]\n"
-        << "  fast-markdown --batch input-folder output-folder [native] [style] [margin]\n"
-        << "  fast-markdown --stdin-batch output-folder [native] [style] [margin]\n"
-        << "  fast-markdown --serve output-folder [native] [style] [margin]\n"
-        << "  fast-markdown --bench input.md output-folder iterations [style] [margin]\n";
+        << "  rayomd --version\n"
+        << "  rayomd --export input.md output.pdf [native] [style] [margin]\n"
+        << "  rayomd --batch input-folder output-folder [native] [style] [margin]\n"
+        << "  rayomd --stdin-batch output-folder [native] [style] [margin]\n"
+        << "  rayomd --serve output-folder [native] [style] [margin]\n"
+        << "  rayomd --bench input.md output-folder iterations [style] [margin]\n";
 }
 
 } // namespace
@@ -279,7 +279,7 @@ int main(int argc, char** argv) {
     int margin = 1;
 
     if (command == "--version" || command == "-v") {
-        std::cout << "fast-markdown " << FAST_MARKDOWN_VERSION << "\n";
+        std::cout << "rayomd " << RAYOMD_VERSION << "\n";
         return 0;
     }
 

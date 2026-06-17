@@ -1,4 +1,4 @@
-﻿#include "fast_markdown/tiny_pdf.h"
+#include "rayomd/tiny_pdf.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -30,15 +30,15 @@
 #include <unordered_map>
 #include <vector>
 
-#ifdef FAST_MARKDOWN_USE_CURL
+#ifdef RAYOMD_USE_CURL
 #include <curl/curl.h>
 #endif
 
-#ifdef FAST_MARKDOWN_USE_ZLIB
+#ifdef RAYOMD_USE_ZLIB
 #include <zlib.h>
 #endif
 
-#ifdef FAST_MARKDOWN_USE_SIMDUTF
+#ifdef RAYOMD_USE_SIMDUTF
 #include "simdutf.h"
 #endif
 
@@ -67,7 +67,7 @@ static std::wstring Utf8ToWideFallback(std::string_view str) {
 
 static std::wstring Utf8ToWide(std::string_view str) {
     if (str.empty()) return L"";
-#ifdef FAST_MARKDOWN_USE_SIMDUTF
+#ifdef RAYOMD_USE_SIMDUTF
 #if defined(_WIN32)
     const size_t units = simdutf::utf16_length_from_utf8(str.data(), str.size());
     if (units == 0) return Utf8ToWideFallback(str);
@@ -937,7 +937,7 @@ struct TtfFont {
         candidates.push_back(fontsDir + L"tahoma.ttf");
 #else
         std::vector<std::string> candidates;
-        if (const char* explicitFont = std::getenv("FAST_MARKDOWN_FONT")) {
+        if (const char* explicitFont = std::getenv("RAYOMD_FONT")) {
             candidates.push_back(explicitFont);
         }
         candidates.push_back("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
@@ -1575,7 +1575,7 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
     std::wstring currentUrl = Utf8ToWide(url);
     if (currentUrl.empty()) return false;
 
-    HINTERNET session = WinHttpOpen(L"FastMarkdown/1.0",
+    HINTERNET session = WinHttpOpen(L"RayoMD/1.0",
 #ifdef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
 #else
@@ -1664,7 +1664,7 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
     WinHttpCloseHandle(session);
     return ok;
 }
-#elif defined(FAST_MARKDOWN_USE_CURL)
+#elif defined(RAYOMD_USE_CURL)
 struct CurlImageBuffer {
     std::vector<uint8_t>* bytes = nullptr;
     bool tooLarge = false;
@@ -1696,7 +1696,7 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 15000L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "FastMarkdown/1.0");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "RayoMD/1.0");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteImageBytes);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
 
@@ -1911,7 +1911,7 @@ static bool PngUnfilter(const std::vector<uint8_t>& filtered, size_t width, size
     return true;
 }
 
-#ifdef FAST_MARKDOWN_USE_ZLIB
+#ifdef RAYOMD_USE_ZLIB
 static bool InflatePngRows(const PngInfo& png, size_t rowBytes, std::vector<uint8_t>& filtered) {
     if (png.height == 0 || rowBytes == 0) return false;
     size_t expected = (rowBytes + 1) * (size_t)png.height;
@@ -3457,7 +3457,7 @@ static const std::string& MakeToUnicodeCMap(const CidList& used, const std::stri
     out += "/CIDInit /ProcSet findresource begin\n"
            "12 dict begin\nbegincmap\n"
            "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
-           "/CMapName /FastMarkdownUnicode def\n"
+           "/CMapName /RayoMDUnicode def\n"
            "/CMapType 2 def\n"
            "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n";
 
@@ -4175,7 +4175,7 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const BuildOption
     AppendInt(catalog, pagesId);
     catalog += " 0 R >>";
     int catalogId = pdf.Add(catalog);
-    int infoId = pdf.Add("<< /Producer (Fast Markdown Native Standard PDF) /Creator (Fast Markdown) /Title (" +
+    int infoId = pdf.Add("<< /Producer (RayoMD Native Standard PDF) /Creator (RayoMD) /Title (" +
         EscapeLiteral("Markdown Export") + ") >>");
 
     pdfBytes = pdf.Build(catalogId, infoId);
@@ -4245,7 +4245,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const BuildOptions
 
     std::string desc;
     desc.reserve(224);
-    desc += "<< /Type /FontDescriptor /FontName /FastMarkdownSegoe /Flags 32 /FontBBox [";
+    desc += "<< /Type /FontDescriptor /FontName /RayoMDSegoe /Flags 32 /FontBBox [";
     AppendInt(desc, font.Metric(font.xMin));
     desc += " ";
     AppendInt(desc, font.Metric(font.yMin));
@@ -4266,7 +4266,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const BuildOptions
 
     std::string cidFont;
     cidFont.reserve(256);
-    cidFont += "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /FastMarkdownSegoe"
+    cidFont += "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /RayoMDSegoe"
         " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
         " /FontDescriptor ";
     AppendInt(cidFont, descriptorId);
@@ -4279,7 +4279,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const BuildOptions
 
     std::string type0;
     type0.reserve(160);
-    type0 += "<< /Type /Font /Subtype /Type0 /BaseFont /FastMarkdownSegoe"
+    type0 += "<< /Type /Font /Subtype /Type0 /BaseFont /RayoMDSegoe"
         " /Encoding /Identity-H /DescendantFonts [";
     AppendInt(type0, cidFontId);
     type0 += " 0 R] /ToUnicode ";
@@ -4330,7 +4330,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const BuildOptions
     AppendInt(catalog, pagesId);
     catalog += " 0 R >>";
     int catalogId = pdf.Add(catalog);
-    int infoId = pdf.Add("<< /Producer (Fast Markdown Native Tiny PDF) /Creator (Fast Markdown) /Title (" +
+    int infoId = pdf.Add("<< /Producer (RayoMD Native Tiny PDF) /Creator (RayoMD) /Title (" +
         EscapeLiteral("Markdown Export") + ") >>");
 
     pdfBytes = pdf.Build(catalogId, infoId);

@@ -1,11 +1,11 @@
 # Brand Asset Prompt
 
-Use this prompt when regenerating the Fast Markdown mascot or app icon.
+Use this prompt when regenerating the RayoMD mascot or app icon.
 
 ```text
 Use case: logo-brand
 Asset type: open-source project mascot, README hero graphic, and app icon source
-Primary request: Create a flat vector-style modern mascot mark for a lightweight Markdown-to-PDF tool named Fast Markdown.
+Primary request: Create a flat vector-style modern mascot mark for a lightweight Markdown-to-PDF tool named RayoMD.
 Subject: A friendly minimal cat mascot integrated with a simple document/PDF sheet and subtle speed lines or a speed gauge cue. The cat must be clearly recognizable, charming, and professional, but simple enough to work as an app icon.
 Style/medium: clean flat vector illustration, crisp geometric shapes, minimal gradients if any, logo-like, modern developer-tool branding, high contrast, scalable icon feel.
 Composition/framing: centered square composition, generous padding, strong silhouette, readable at small sizes. Cat and document should form one cohesive mark.
@@ -17,5 +17,5 @@ Constraints: do not use #00ff00 anywhere in the subject; no cast shadow, no cont
 
 Post-process the generated image by removing the chroma-key background, then export:
 
-- `docs/assets/catto.png`: transparent 1024 x 1024 PNG
-- `docs/assets/catto.ico`: multi-size Windows icon with 16, 32, 48, 64, 128, and 256 px entries
+- `docs/assets/rayomd.png`: transparent 1024 x 1024 PNG
+- `docs/assets/rayomd.ico`: multi-size Windows icon with 16, 32, 48, 64, 128, and 256 px entries

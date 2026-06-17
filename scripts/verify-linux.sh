@@ -24,7 +24,7 @@ fi
 cmake -S . -B build/linux-verify -DCMAKE_BUILD_TYPE=Release
 cmake --build build/linux-verify --config Release
 
-BIN=build/linux-verify/fast-markdown
+BIN=build/linux-verify/rayomd
 
 mkdir -p benchmark-output/linux-verify
 

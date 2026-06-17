@@ -1,4 +1,4 @@
-﻿// Fast Markdown - ImGui + DirectX11 Edition
+// RayoMD - ImGui + DirectX11 Edition
 // Clean modern UI with minimal footprint
 // SPDX-License-Identifier: Apache-2.0
 
@@ -37,8 +37,8 @@
 #include <codecvt>
 #include <locale>
 
-#ifndef FAST_MARKDOWN_VERSION
-#define FAST_MARKDOWN_VERSION "0.0.0"
+#ifndef RAYOMD_VERSION
+#define RAYOMD_VERSION "0.0.0"
 #endif
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_IX86)
@@ -57,7 +57,7 @@
 #include "imgui/backends/imgui_impl_win32.h"
 #include "imgui/backends/imgui_impl_dx11.h"
 #include "imgui/misc/cpp/imgui_stdlib.h"
-#include "fast_markdown/tiny_pdf.h"
+#include "rayomd/tiny_pdf.h"
 
 // Forward declare message handler from imgui_impl_win32.cpp
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -126,8 +126,8 @@ const char* BASE_ARGS = "--highlight-style=tango -V colorlinks=true "
 constexpr long long kMaxMarkdownInputBytes = 128LL * 1024LL * 1024LL;
 
 #ifdef _WIN32
-constexpr UINT WM_FAST_MARKDOWN_FILE_LOADED = WM_APP + 1;
-constexpr UINT WM_FAST_MARKDOWN_EXPORT_DONE = WM_APP + 2;
+constexpr UINT WM_RAYOMD_FILE_LOADED = WM_APP + 1;
+constexpr UINT WM_RAYOMD_EXPORT_DONE = WM_APP + 2;
 #endif
 
 // ============================================================================
@@ -713,7 +713,7 @@ int TryCommandLineExport() {
     if (!argv) return -1;
 
     if (argc >= 2 && (lstrcmpiW(argv[1], L"--version") == 0 || lstrcmpiW(argv[1], L"-v") == 0)) {
-        WriteStdoutLine(std::string("fast-markdown-imgui ") + FAST_MARKDOWN_VERSION);
+        WriteStdoutLine(std::string("rayomd ") + RAYOMD_VERSION);
         LocalFree(argv);
         return 0;
     }
@@ -849,7 +849,7 @@ DWORD WINAPI ExportThread(LPVOID lp) {
     }
     
     auto* result = new ExportResult{ ok, elapsedMs };
-    PostMessageW(p->hWnd, WM_FAST_MARKDOWN_EXPORT_DONE, 0, (LPARAM)result);
+    PostMessageW(p->hWnd, WM_RAYOMD_EXPORT_DONE, 0, (LPARAM)result);
     delete p;
     return 0;
 }
@@ -910,7 +910,7 @@ DWORD WINAPI FileLoadThread(LPVOID lp) {
         ? (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart
         : 0.0;
 
-    PostMessageW(p->hWnd, WM_FAST_MARKDOWN_FILE_LOADED, 0, (LPARAM)result);
+    PostMessageW(p->hWnd, WM_RAYOMD_FILE_LOADED, 0, (LPARAM)result);
     delete p;
     return 0;
 }
@@ -1115,14 +1115,14 @@ static bool DrawActionButton(const char* id, const char* label, ImVec2 size, boo
 // ============================================================================
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg != WM_DROPFILES &&
-        msg != WM_FAST_MARKDOWN_EXPORT_DONE &&
-        msg != WM_FAST_MARKDOWN_FILE_LOADED &&
+        msg != WM_RAYOMD_EXPORT_DONE &&
+        msg != WM_RAYOMD_FILE_LOADED &&
         ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) {
         return true;
     }
 
     switch (msg) {
-    case WM_FAST_MARKDOWN_EXPORT_DONE: {
+    case WM_RAYOMD_EXPORT_DONE: {
         auto* result = (ExportResult*)lParam;
         if (result) {
             g_statusText = result->ok
@@ -1134,7 +1134,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_forcedRenderFrames = 2;
         return 0;
     }
-    case WM_FAST_MARKDOWN_FILE_LOADED: {
+    case WM_RAYOMD_FILE_LOADED: {
         auto* result = (FileLoadResult*)lParam;
         if (result) {
             if (result->ok) {
@@ -1198,18 +1198,18 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     int cliResult = TryCommandLineExport();
     if (cliResult >= 0) return cliResult;
 
-    // Load custom icon
-    HICON hIcon = (HICON)LoadImageW(nullptr, L"catto.ico", IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
+    // Load embedded app icon from src/win32/rayomd.rc.
+    HICON hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
     if (!hIcon) hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     
     // Register window class
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, 
         hIcon, LoadCursor(nullptr, IDC_ARROW), 
-        nullptr, nullptr, L"FastMarkdownImGui", hIcon };
+        nullptr, nullptr, L"RayoMDImGui", hIcon };
     RegisterClassExW(&wc);
     
     // Create window
-    HWND hWnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Fast Markdown",
+    HWND hWnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"RayoMD",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1100, 760,
         nullptr, nullptr, hInstance, nullptr);
     DragAcceptFiles(hWnd, TRUE);
@@ -1314,7 +1314,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
         ImVec2 titlePos(win.x + pad + 10.0f, win.y + 16.0f);
         draw->AddRectFilled(ImVec2(win.x + pad, win.y + 22.0f), ImVec2(win.x + pad + 3.0f, win.y + 56.0f), Rgba32(94, 218, 242), 2.0f);
-        draw->AddText(titleFont, titleSizePx, titlePos, Rgba32(238, 244, 249), "Fast Markdown");
+        draw->AddText(titleFont, titleSizePx, titlePos, Rgba32(238, 244, 249), "RayoMD");
         char headerDetail[160];
         snprintf(headerDetail, sizeof(headerDetail), "%s / %s / %s", g_engines[g_selectedEngine], g_styles[g_selectedStyle], g_margins[g_selectedMargin]);
         draw->AddText(ImVec2(titlePos.x, titlePos.y + 35.0f), Rgba32(126, 139, 155), headerDetail);

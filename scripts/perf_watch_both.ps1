@@ -1,6 +1,6 @@
 param(
-    [string]$WindowsBinary = "build/windows/fast-markdown-imgui.exe",
-    [string]$LinuxBinary = "build/linux/fast-markdown",
+    [string]$WindowsBinary = "build/windows/rayomd.exe",
+    [string]$LinuxBinary = "build/linux/rayomd",
     [ValidateSet("quick", "watch", "full")]
     [string]$Suite = "watch",
     [int]$Seed = 1337,

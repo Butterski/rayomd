@@ -45,7 +45,7 @@ Expected impact:
 Measured result:
 
 - Tested on 2026-06-06 with vendored `simdutf` v9.0.0.
-- Slower on the generated stress suite, so `FAST_MARKDOWN_USE_SIMDUTF` is available but defaults OFF.
+- Slower on the generated stress suite, so `RAYOMD_USE_SIMDUTF` is available but defaults OFF.
 - The current workload appears to spend more time in layout/PDF/font work than in UTF conversion.
 - Focused large-Unicode follow-up was mixed: `unicode_1mb` improved 2.92%, `unicode_5mb` improved 8.99%, but `unicode_2_5mb` regressed 22.05% and `unicode_10mb` regressed 6.02%. This is not stable enough to enable by default.
 
@@ -228,7 +228,7 @@ Expected impact:
 ## Practical Next Steps
 
 1. Use WSL ext4 for Linux batch benchmarks/conversion when possible; `/mnt/e` is much slower for large batches.
-2. Leave `FAST_MARKDOWN_USE_SIMDUTF` OFF by default; the measured stress suite was slower with it enabled.
+2. Leave `RAYOMD_USE_SIMDUTF` OFF by default; the measured stress suite was slower with it enabled.
 3. Prototype parser/renderer arena allocation with `std::pmr` only if profiling shows allocation churn after the filesystem issue is removed.
 4. Treat full TTF glyph remapping as a separate correctness-heavy project with PDF-viewer regression tests.
 5. Do not pursue io_uring now; the main I/O win came from avoiding the WSL Windows mount, not changing write APIs.

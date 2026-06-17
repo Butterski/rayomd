@@ -31,8 +31,8 @@ jobs:
           test -f AGENTS.md
           test -f CONTRIBUTING.md
           test -f VERSION
-          test -f docs/assets/catto.png
-          test -f docs/assets/catto.ico
+          test -f docs/assets/rayomd.png
+          test -f docs/assets/rayomd.ico
           test -f third_party/imgui/LICENSE.txt
           test -f third_party/simdutf/LICENSE-APACHE
           test -f third_party/simdutf/LICENSE-MIT
@@ -44,14 +44,14 @@ jobs:
 
       - name: Keep generated outputs out of source
         run: |
-          if git ls-files | grep -E '(^build/|^benchmark-output/|\.exe$|\.dll$|\.so$|\.dylib$|\.pdf$|^fast-markdown$)'; then
+          if git ls-files | grep -E '(^build/|^benchmark-output/|\.exe$|\.dll$|\.so$|\.dylib$|\.pdf$|^rayomd$)'; then
             echo "Generated output or local binary is tracked." >&2
             exit 1
           fi
 
       - name: README local link targets
         run: |
-          test -f docs/assets/catto.png
+          test -f docs/assets/rayomd.png
           test -f docs/benchmarks/commercial_benchmark_summary.md
-          test -f include/fast_markdown/tiny_pdf.h
+          test -f include/rayomd/tiny_pdf.h
           test -f third_party/imgui/LICENSE.txt

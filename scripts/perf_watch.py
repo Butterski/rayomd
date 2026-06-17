@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Watch Fast Markdown conversion speed across versions.
+"""Watch RayoMD conversion speed across versions.
 
 It generates a deterministic supported-Markdown corpus, runs the existing
 no-UI CLI modes, appends one JSONL history record, and reports deltas against
@@ -353,7 +353,7 @@ Paragraph after a dense block tests transitions between tables, code blocks, lis
 
 This paragraph is plain ASCII text for the standard-font fast path. It includes
 **bold text**, *italic spans*, ~~strike markers~~, `inline_code()`,
-[a link](https://example.com/product/fast-markdown), and enough normal words to
+[a link](https://example.com/product/rayomd), and enough normal words to
 exercise wrapping, width calculation, page splitting, and PDF text output.
 
 - Bullet item one with short operational text.
@@ -867,7 +867,7 @@ def build_comparison(current: dict[str, Any], previous: dict[str, Any] | None) -
 
 def write_summary(path: Path, record: dict[str, Any], previous: dict[str, Any] | None, comparison: list[dict[str, Any]]) -> None:
     lines = [
-        "# Fast Markdown Perf Watch",
+        "# RayoMD Perf Watch",
         "",
         f"- run: `{record['run_id']}`",
         f"- platform: `{record['platform']}`",
@@ -945,7 +945,7 @@ def detect_platform() -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", required=True, type=Path, help="fast-markdown CLI-capable binary")
+    parser.add_argument("--binary", required=True, type=Path, help="rayomd CLI-capable binary")
     parser.add_argument("--platform", default=detect_platform(), help="history key, for example windows or linux-wsl")
     parser.add_argument("--suite", choices=sorted(SUITES), default="watch")
     parser.add_argument("--seed", type=int, default=1337)

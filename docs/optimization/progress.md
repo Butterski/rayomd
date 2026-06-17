@@ -10,7 +10,7 @@ Objective: process all `todo*.md` optimization notes, implement viable speedups,
 
 ## Benchmark Evidence
 
-WSL Release benchmarks using `build/linux-verify/fast-markdown --bench ... elegant normal`.
+WSL Release benchmarks using `build/linux-verify/rayomd --bench ... elegant normal`.
 
 | Input | Baseline avg | Final avg | Notes |
 |---|---:|---:|---|
@@ -32,7 +32,7 @@ Verification notes:
 - Windows benchmark mode initially failed for nested output paths because Win32 used one-level `CreateDirectoryW`; fixed with recursive directory creation.
 - Windows GUI-subsystem executable benchmarks were run hidden with `Start-Process -Wait`.
 
-Windows Release benchmarks using `build/windows-fix/fast-markdown-imgui.exe --bench ... elegant normal`.
+Windows Release benchmarks using `build/windows-fix/rayomd.exe --bench ... elegant normal`.
 
 | Input | Windows final avg | Notes |
 |---|---:|---|
@@ -96,7 +96,7 @@ Rejected experiments from this round:
 
 Focused large-Unicode `simdutf` follow-up:
 
-- Used a legacy large-Unicode WSL ext4 helper to compare `FAST_MARKDOWN_USE_SIMDUTF=OFF` vs `ON` on native WSL ext4. This helper was later removed after consolidation into `scripts/perf_watch.py`.
+- Used a legacy large-Unicode WSL ext4 helper to compare `RAYOMD_USE_SIMDUTF=OFF` vs `ON` on native WSL ext4. This helper was later removed after consolidation into `scripts/perf_watch.py`.
 - Raw report: `benchmark-output/simdutf-large-unicode/simdutf_20260606/simdutf_large_unicode.md`.
 - Result remained mixed, so default stays OFF:
 
@@ -111,7 +111,7 @@ Windows verification:
 
 - Fresh Windows Release build succeeded in `build/windows-final2`.
 - Hidden Windows `--bench tester.md` smoke test: 100 iterations, 0.34 ms average, 100395 average PDF bytes.
-- `FAST_MARKDOWN_USE_SIMDUTF=ON` Windows build was not verified because the escalation request hit the session usage limit; the option is OFF by default and Linux `ON` build was verified.
+- `RAYOMD_USE_SIMDUTF=ON` Windows build was not verified because the escalation request hit the session usage limit; the option is OFF by default and Linux `ON` build was verified.
 
 ## Commercial Benchmark Campaign
 
@@ -218,7 +218,7 @@ Final post-revert stress sanity run:
 ### `todo_v3.md`
 
 - Streaming parser / incremental read+parse: deferred as larger architecture work; current gains came from low-risk parser/rendering changes.
-- `simdutf`: vendored as optional `FAST_MARKDOWN_USE_SIMDUTF`; measured slower on stress benchmarks and left OFF by default.
+- `simdutf`: vendored as optional `RAYOMD_USE_SIMDUTF`; measured slower on stress benchmarks and left OFF by default.
 - Arena allocator: deferred with `todo.md` 1.4.
 - SIMD ascii/line scan: already present.
 - Knuth-Plass: skipped for speed goal because it is a quality/layout feature.

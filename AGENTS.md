@@ -1,4 +1,4 @@
-# Fast Markdown Agent Guide
+# RayoMD Agent Guide
 
 Read this file before changing the project. It records the product goal,
 architecture, release hygiene, and benchmark guardrails that are easy to lose
@@ -6,7 +6,7 @@ between sessions.
 
 ## Product Goal
 
-Fast Markdown is a tiny native Markdown-to-PDF converter. The default value is:
+RayoMD is a tiny native Markdown-to-PDF converter. The default value is:
 
 - very small packaged binaries
 - fast startup and conversion
@@ -45,8 +45,8 @@ Important image/link details:
   when the caller provides an input file path.
 - URL images are controlled by `BuildOptions::enableUrlImages`.
 - Windows image support uses WinHTTP/WIC through the Win32 build.
-- Linux URL images use libcurl when `FAST_MARKDOWN_USE_CURL` is defined.
-- PNG alpha support can use zlib when `FAST_MARKDOWN_USE_ZLIB` is defined.
+- Linux URL images use libcurl when `RAYOMD_USE_CURL` is defined.
+- PNG alpha support can use zlib when `RAYOMD_USE_ZLIB` is defined.
 - Failed images should degrade to useful fallback text instead of failing the
   whole conversion.
 - Links are emitted as PDF annotations; keep visible text and annotation rects
@@ -54,7 +54,7 @@ Important image/link details:
 
 ## Architecture Map
 
-- `include/fast_markdown/tiny_pdf.h`
+- `include/rayomd/tiny_pdf.h`
   Public native exporter API. Keep this small and stable.
 
 - `src/core/tiny_pdf.cpp`
@@ -70,12 +70,12 @@ Important image/link details:
   Windows Dear ImGui + DirectX 11 app, Windows CLI glue, drag/drop, Pandoc mode,
   and native export integration.
 
-- `src/win32/fast_markdown.rc`
+- `src/win32/rayomd.rc`
   Windows manifest and app icon resources. Keep resource changes localized here.
 
 - `CMakeLists.txt`
-  Cross-platform build. Windows builds `fast-markdown-imgui`; non-Windows builds
-  `fast-markdown`.
+  Cross-platform build. Windows and non-Windows builds produce `rayomd`
+  (`rayomd.exe` on Windows).
 
 - `VERSION`
   Single source for the release version. CMake compiles it into both command-line
@@ -142,15 +142,15 @@ sh scripts/verify-linux.sh
 Native benchmark examples:
 
 ```sh
-build/linux/fast-markdown --bench tester.md benchmark-output/manual 1000 modern normal
-build/windows/fast-markdown-imgui.exe --bench tester.md benchmark-output/manual 1000 modern normal
+build/linux/rayomd --bench tester.md benchmark-output/manual 1000 modern normal
+build/windows/rayomd.exe --bench tester.md benchmark-output/manual 1000 modern normal
 ```
 
 Performance watcher examples:
 
 ```sh
-python scripts/perf_watch.py --binary build/windows/fast-markdown-imgui.exe --platform windows --suite watch --label local
-python3 scripts/perf_watch.py --binary build/linux/fast-markdown --platform linux-wsl --suite watch --label local
+python scripts/perf_watch.py --binary build/windows/rayomd.exe --platform windows --suite watch --label local
+python3 scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --label local
 ```
 
 When performance is part of the task, record before/after numbers. Do not keep a
@@ -222,15 +222,15 @@ The Windows app should feel like a compact utility, not a landing page.
 - Use Dear ImGui idioms and keep custom drawing localized in `main_win32.cpp`.
 - Avoid UI changes that make the binary much larger or require shipping assets
   beyond the icon/mascot unless the value is clear.
-- The icon source is `docs/assets/catto.ico`; `docs/assets/catto.png` is the
+- The icon source is `docs/assets/rayomd.ico`; `docs/assets/rayomd.png` is the
   transparent source graphic used in docs/branding.
 
 ## Packaging And Licensing
 
-- Default Windows release should be a single `fast-markdown-imgui.exe` where
+- Default Windows release should be a single `rayomd.exe` where
   possible.
-- Default Linux release should be a compact `fast-markdown` CLI binary.
-- Fast Markdown's own code is licensed under Apache-2.0. Keep `LICENSE`,
+- Default Linux release should be a compact `rayomd` CLI binary.
+- RayoMD's own code is licensed under Apache-2.0. Keep `LICENSE`,
   `NOTICE`, README license wording, and SPDX headers aligned when changing
   licensing metadata.
 - Do not bundle Pandoc unless deliberately producing a larger compatibility

@@ -3,8 +3,8 @@
 *.dll
 *.so
 *.dylib
-/fast-markdown
-/fast-markdown-cli
+/rayomd
+/rayomd-cli
 
 # Object files
 *.o

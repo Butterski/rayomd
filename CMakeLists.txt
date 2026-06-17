@@ -1,17 +1,17 @@
 cmake_minimum_required(VERSION 3.16)
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" FAST_MARKDOWN_VERSION LIMIT_COUNT 1)
-project(fast_markdown VERSION ${FAST_MARKDOWN_VERSION} LANGUAGES CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" RAYOMD_VERSION LIMIT_COUNT 1)
+project(rayomd VERSION ${RAYOMD_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(FAST_MARKDOWN_USE_SIMDUTF "Use vendored simdutf for UTF conversion" OFF)
+option(RAYOMD_USE_SIMDUTF "Use vendored simdutf for UTF conversion" OFF)
 
-set(FAST_MARKDOWN_SIMDUTF_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simdutf/singleheader/simdutf.cpp")
-set(FAST_MARKDOWN_SIMDUTF_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simdutf/singleheader")
+set(RAYOMD_SIMDUTF_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simdutf/singleheader/simdutf.cpp")
+set(RAYOMD_SIMDUTF_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simdutf/singleheader")
 
-function(fast_markdown_release_flags target)
+function(rayomd_release_flags target)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         if(WIN32)
             target_compile_options(${target} PRIVATE
@@ -32,24 +32,24 @@ function(fast_markdown_release_flags target)
     endif()
 endfunction()
 
-function(fast_markdown_simdutf target)
-    if(FAST_MARKDOWN_USE_SIMDUTF AND EXISTS "${FAST_MARKDOWN_SIMDUTF_SOURCE}")
-        target_sources(${target} PRIVATE "${FAST_MARKDOWN_SIMDUTF_SOURCE}")
-        target_include_directories(${target} PRIVATE "${FAST_MARKDOWN_SIMDUTF_INCLUDE}")
-        target_compile_definitions(${target} PRIVATE FAST_MARKDOWN_USE_SIMDUTF=1)
+function(rayomd_simdutf target)
+    if(RAYOMD_USE_SIMDUTF AND EXISTS "${RAYOMD_SIMDUTF_SOURCE}")
+        target_sources(${target} PRIVATE "${RAYOMD_SIMDUTF_SOURCE}")
+        target_include_directories(${target} PRIVATE "${RAYOMD_SIMDUTF_INCLUDE}")
+        target_compile_definitions(${target} PRIVATE RAYOMD_USE_SIMDUTF=1)
     endif()
 endfunction()
 
-function(fast_markdown_common_definitions target)
-    target_compile_definitions(${target} PRIVATE FAST_MARKDOWN_VERSION="${PROJECT_VERSION}")
+function(rayomd_common_definitions target)
+    target_compile_definitions(${target} PRIVATE RAYOMD_VERSION="${PROJECT_VERSION}")
 endfunction()
 
 if(WIN32)
     enable_language(RC)
-    add_executable(fast-markdown-imgui WIN32
+    add_executable(rayomd WIN32
         src/core/tiny_pdf.cpp
         src/win32/main_win32.cpp
-        src/win32/fast_markdown.rc
+        src/win32/rayomd.rc
         third_party/imgui/imgui.cpp
         third_party/imgui/imgui_draw.cpp
         third_party/imgui/imgui_tables.cpp
@@ -58,32 +58,32 @@ if(WIN32)
         third_party/imgui/backends/imgui_impl_win32.cpp
         third_party/imgui/backends/imgui_impl_dx11.cpp
     )
-    target_compile_definitions(fast-markdown-imgui PRIVATE UNICODE _UNICODE)
-    target_include_directories(fast-markdown-imgui PRIVATE include . third_party third_party/imgui)
-    target_link_libraries(fast-markdown-imgui PRIVATE
+    target_compile_definitions(rayomd PRIVATE UNICODE _UNICODE)
+    target_include_directories(rayomd PRIVATE include . third_party third_party/imgui)
+    target_link_libraries(rayomd PRIVATE
         d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi winhttp windowscodecs
     )
-    fast_markdown_simdutf(fast-markdown-imgui)
-    fast_markdown_common_definitions(fast-markdown-imgui)
-    fast_markdown_release_flags(fast-markdown-imgui)
+    rayomd_simdutf(rayomd)
+    rayomd_common_definitions(rayomd)
+    rayomd_release_flags(rayomd)
 else()
     find_package(CURL REQUIRED)
     find_package(ZLIB QUIET)
 
-    add_executable(fast-markdown
+    add_executable(rayomd
         src/core/tiny_pdf.cpp
         src/cli/main_cli.cpp
     )
-    target_include_directories(fast-markdown PRIVATE include)
+    target_include_directories(rayomd PRIVATE include)
     if(CURL_FOUND)
-        target_link_libraries(fast-markdown PRIVATE CURL::libcurl)
-        target_compile_definitions(fast-markdown PRIVATE FAST_MARKDOWN_USE_CURL=1)
+        target_link_libraries(rayomd PRIVATE CURL::libcurl)
+        target_compile_definitions(rayomd PRIVATE RAYOMD_USE_CURL=1)
     endif()
     if(ZLIB_FOUND)
-        target_link_libraries(fast-markdown PRIVATE ZLIB::ZLIB)
-        target_compile_definitions(fast-markdown PRIVATE FAST_MARKDOWN_USE_ZLIB=1)
+        target_link_libraries(rayomd PRIVATE ZLIB::ZLIB)
+        target_compile_definitions(rayomd PRIVATE RAYOMD_USE_ZLIB=1)
     endif()
-    fast_markdown_simdutf(fast-markdown)
-    fast_markdown_common_definitions(fast-markdown)
-    fast_markdown_release_flags(fast-markdown)
+    rayomd_simdutf(rayomd)
+    rayomd_common_definitions(rayomd)
+    rayomd_release_flags(rayomd)
 endif()

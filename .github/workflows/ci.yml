@@ -39,7 +39,7 @@ jobs:
       - name: Perf watcher quick smoke
         run: |
           python3 -B scripts/perf_watch.py \
-            --binary build/linux-verify/fast-markdown \
+            --binary build/linux-verify/rayomd \
             --platform linux-ci \
             --suite quick \
             --label ci \
@@ -78,7 +78,7 @@ jobs:
 
       - name: Benchmark smoke
         run: |
-          ./build/windows/fast-markdown-imgui.exe \
+          ./build/windows/rayomd.exe \
             --bench tester.md benchmark-output/windows-ci 50 modern normal
           test -s benchmark-output/windows-ci/sample.pdf
 

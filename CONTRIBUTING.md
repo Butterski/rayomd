@@ -1,6 +1,6 @@
 # Contributing
 
-Fast Markdown is meant to stay small, fast, and easy to ship. Contributions are
+RayoMD is meant to stay small, fast, and easy to ship. Contributions are
 welcome when they preserve that shape.
 
 ## Project Priorities
@@ -41,7 +41,7 @@ sh scripts/verify-linux.sh
 For Windows changes, build the release target and run a benchmark smoke:
 
 ```sh
-build/windows/fast-markdown-imgui.exe --bench tester.md benchmark-output/manual 100 modern normal
+build/windows/rayomd.exe --bench tester.md benchmark-output/manual 100 modern normal
 ```
 
 For performance-sensitive work, run `scripts/perf_watch.py` before and after the
@@ -53,8 +53,8 @@ The project version lives in `VERSION` and is compiled into both binaries.
 Update it when preparing a tagged release, and verify:
 
 ```sh
-build/linux/fast-markdown --version
-build/windows/fast-markdown-imgui.exe --version
+build/linux/rayomd --version
+build/windows/rayomd.exe --version
 ```
 
 Use semantic versioning where practical:

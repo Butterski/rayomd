@@ -1,68 +1,75 @@
-# Raport Testowy: Konwerter Markdown
+# RayoMD Test Report
 
-## 1. Test Polskich Znaków i Typografii
-Zażółć gęślą jaźń. To jest test kodowania UTF-8: ą, ć, ę, ł, ń, ó, ś, ź, ż.
-Sprawdzamy style: **pogrubienie**, *kursywa*, ***bold italic*** oraz ~~przekreślenie~~.
+## 1. Unicode And Typography
 
-## 2. Sekcja Techniczna (Code Blocks)
-Poniżej test kolorowania składni i czcionki monospaced (kluczowe dla stylu "Tech").
+This section checks UTF-8 text, diacritics, and mixed writing systems:
+resume, naive, cafe, facade, Krakow, Lodz, Tokyo, Москва, Δοκιμή, and Zażółć
+gęślą jaźń.
 
-```
+Inline formatting should stay readable: **bold text**, *italic text*,
+***bold italic text***, ~~strikethrough text~~, and `inline_code()`.
+
+## 2. Technical Section
+
+The fenced code block should preserve indentation and use a monospaced style.
+
+```go
 package main
 
 import "fmt"
 
 func main() {
-    // Sprawdzamy czy wcięcia są zachowane
+    // Indentation should be preserved.
     fmt.Println("System Ready")
 }
 ```
 
-## 3. Matematyka i LaTeX (Style Elegant)
-To jest test renderowania wzorów, ważny do Twojej inżynierki.
-Równanie w tekście: $E = mc^2$.
+## 3. Math And Formula Boxes
 
-Równanie w bloku (całka Gaussa):
+Inline math markers should be cleaned up: $E = mc^2$.
+
+A block formula should render as a formula box:
+
 $$
 \int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
 $$
 
-## 4. Tabela i Listy (Style Modern)
+## 4. Tables And Lists
 
-| Usługa | Status | Latency |
+| Service | Status | Latency |
 | :--- | :---: | ---: |
-| API Gateway | ✅ Online | 45ms |
-| Database | ⚠️ Warning | 120ms |
-| Auth Service | ❌ Offline | Timeout |
+| API Gateway | :) Online | 45 ms |
+| Database | :warning: Warning | 120 ms |
+| Auth Service | Offline | Timeout |
 
-* Punkt pierwszy
-* Punkt drugi
-    * Zagnieżdżenie A
-    * Zagnieżdżenie B
-1. Lista numerowana
-2. Kolejny element
+- First bullet item
+- Second bullet item
+  - Nested item A
+  - Nested item B
+1. First numbered item
+2. Second numbered item
 
-> "To jest cytat (blockquote). Powinien mieć wcięcie i inny styl, np. szary pasek z boku w stylu Modern."
+> This is a block quote. It should be indented and visually distinct from the
+> surrounding paragraph text.
 
 ---
 
 \pagebreak
 
-## 5. Wymuszony Podział Strony
+## 5. Explicit Page Break
 
-Ta sekcja powinna zacząć się na nowej stronie po znaczniku `\pagebreak`.
+This section should start on a new page after the `\pagebreak` marker.
 
 <!-- pagebreak -->
 
-## 6. Linki i Obrazy
+## 6. Links And Images
 
-![Logo Fast Markdown](catto.png)
+![RayoMD mascot](docs/assets/rayomd.png)
 
-![Zdjęcie z internetu](https://picsum.photos/200/300)
+![Remote placeholder image](https://picsum.photos/200/300)
 
-![Fail obrazu](https://example.com/fail.jpg)
+![Remote image fallback](https://example.com/fail.jpg)
 
-![Fail obrazu local](nonexistent.png)
+![Local image fallback](nonexistent.png)
 
-[Google](https://www.google.com)
-
+[OpenAI](https://www.openai.com)
