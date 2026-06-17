@@ -30,7 +30,7 @@ Experiment to try:
 - Vendor `simdutf` single-header in `third_party/` or add an optional CMake dependency.
 - Replace non-Windows `Utf8ToWide`.
 - On Windows, compare `simdutf` UTF-8->UTF-16LE against `MultiByteToWideChar`.
-- Benchmark with `scripts/stress_benchmark.py`.
+- Benchmark with `scripts/perf_watch.py --suite full` and targeted Unicode documents.
 
 Risk:
 

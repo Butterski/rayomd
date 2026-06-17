@@ -1,11 +1,12 @@
 # Fast Markdown Agent Guide
 
-Read this file before changing the project. It captures the project goals,
-architecture, and guardrails that are easy to lose between sessions.
+Read this file before changing the project. It records the product goal,
+architecture, release hygiene, and benchmark guardrails that are easy to lose
+between sessions.
 
 ## Product Goal
 
-Fast Markdown is a tiny native Markdown-to-PDF converter. The main value is:
+Fast Markdown is a tiny native Markdown-to-PDF converter. The default value is:
 
 - very small packaged binaries
 - fast startup and conversion
@@ -14,8 +15,21 @@ Fast Markdown is a tiny native Markdown-to-PDF converter. The main value is:
 - a polished Windows Dear ImGui app plus a compact cross-platform CLI
 
 Treat the native renderer as a fast Markdown subset, not a full Pandoc clone.
-Pandoc compatibility may exist as an optional mode, but it must not become a
-required dependency for the default lightweight package.
+Pandoc compatibility may exist as an optional Windows mode, but it must not
+become a required dependency for the default lightweight package.
+
+## Release Readiness Priorities
+
+- Keep the repository root clean: source entry points, `README.md`, `LICENSE`,
+  `CMakeLists.txt`, `AGENTS.md`, `CONTRIBUTING.md`, `VERSION`, and the main
+  smoke document belong there.
+- Put supporting material under `docs/`, not in the root.
+- Keep generated build trees, generated PDFs, benchmark corpora, local binaries,
+  caches, and one-off scratch files out of source.
+- Prefer reproducible helper scripts under `scripts/` over ad hoc command blobs.
+- Keep README claims accurate, conservative, and easy to reproduce.
+- Do not advertise native mode as full CommonMark, Pandoc, LaTeX math, or
+  syntax-highlight compatible unless those features are actually implemented.
 
 ## Current Feature Surface
 
@@ -57,19 +71,27 @@ Important image/link details:
   and native export integration.
 
 - `src/win32/fast_markdown.rc`
-  Windows resources, including the app icon.
+  Windows manifest and app icon resources. Keep resource changes localized here.
 
 - `CMakeLists.txt`
   Cross-platform build. Windows builds `fast-markdown-imgui`; non-Windows builds
   `fast-markdown`.
 
-- `imgui/`
+- `VERSION`
+  Single source for the release version. CMake compiles it into both command-line
+  entry points; update it only for release/versioning work.
+
+- `CONTRIBUTING.md`
+  Short contributor guide with project priorities, build/verify commands,
+  performance expectations, and versioning rules.
+
+- `third_party/imgui/`
   Vendored Dear ImGui. Do not edit vendored ImGui files unless the task
   explicitly requires it.
 
 - `third_party/simdutf/`
-  Optional vendored simdutf experiment. It is OFF by default because prior
-  benchmarks were mixed or slower.
+  Optional vendored simdutf experiment. It is OFF by default because measured
+  results were mixed or slower.
 
 - `tester.md`
   Main hand-written smoke/regression document. It covers Unicode text, inline
@@ -77,11 +99,23 @@ Important image/link details:
   remote images, and failed image fallbacks.
 
 - `scripts/`
-  Verification and benchmark helpers. Prefer adding reproducible scripts here
-  instead of one-off command blobs.
+  Verification helper and the performance watcher. Keep scripts deterministic,
+  documented, and non-root.
 
-- `docs/brand_asset_prompt.md`, `catto.png`, `catto.ico`
-  Project mascot/branding assets.
+- `.github/workflows/`
+  GitHub Actions for Linux/Windows CI, repository hygiene, and CodeQL. Keep
+  README badges aligned with workflow filenames when adding or renaming checks.
+
+- `docs/assets/`
+  Project mascot and icon source assets.
+
+- `docs/benchmarks/`
+  Archived benchmark summaries and caveats. Do not treat archival headline
+  numbers as current without rerunning or clearly dating them.
+
+- `docs/optimization/`
+  Optimization progress and research notes. These are context, not a mandate to
+  keep old experiments alive.
 
 ## Build And Verify
 
@@ -112,16 +146,43 @@ build/linux/fast-markdown --bench tester.md benchmark-output/manual 1000 modern 
 build/windows/fast-markdown-imgui.exe --bench tester.md benchmark-output/manual 1000 modern normal
 ```
 
-Commercial/stress benchmark helpers:
+Performance watcher examples:
 
 ```sh
-python3 scripts/stress_benchmark.py --help
-python3 scripts/commercial_benchmark.py --help
+python scripts/perf_watch.py --binary build/windows/fast-markdown-imgui.exe --platform windows --suite watch --label local
+python3 scripts/perf_watch.py --binary build/linux/fast-markdown --platform linux-wsl --suite watch --label local
 ```
 
 When performance is part of the task, record before/after numbers. Do not keep a
 change that improves one tiny case but clearly regresses larger documents,
 batching, or memory without calling out the tradeoff.
+
+GitHub CI entry points:
+
+- `.github/workflows/ci.yml`
+  Builds and smokes Linux native CLI plus Windows MinGW ImGui app.
+
+- `.github/workflows/hygiene.yml`
+  Checks release files, script syntax, local README targets, and generated
+  output exclusions.
+
+- `.github/workflows/codeql.yml`
+  Runs C++ CodeQL analysis on the Linux native build path.
+
+## Benchmark And Documentation Rules
+
+- Update `README.md` when user-visible behavior, commands, build requirements,
+  supported Markdown features, or benchmark workflows change.
+- Update `VERSION` and the README version badge together when preparing a
+  release.
+- Keep benchmark claims dated and scoped.
+- Distinguish warm `--bench` timings from end-to-end export and batch timings.
+- Mention Linux storage location when reporting WSL/Linux batch numbers.
+- Keep raw generated reports under ignored `benchmark-output/`, not source.
+- `docs/benchmarks/commercial_benchmark_summary.md` is archival
+  marketing-safe wording and caveats. Do not copy raw headline numbers without
+  the caveats about synthetic corpora, warm `--bench` versus end-to-end I/O,
+  and Linux storage location.
 
 ## Performance Guardrails
 
@@ -148,8 +209,8 @@ batching, or memory without calling out the tradeoff.
   link annotations must remain consistent.
 - `BuildOptions::sourcePath` matters for relative images; pass it from every
   file-based caller.
-- Do not report native mode as full CommonMark, full Pandoc, full LaTeX math, or
-  syntax-highlight compatible unless those features are actually implemented.
+- Keep visible link text and annotation rectangles aligned when changing text
+  wrapping, painting, or page splitting.
 
 ## UI Guidance
 
@@ -161,36 +222,32 @@ The Windows app should feel like a compact utility, not a landing page.
 - Use Dear ImGui idioms and keep custom drawing localized in `main_win32.cpp`.
 - Avoid UI changes that make the binary much larger or require shipping assets
   beyond the icon/mascot unless the value is clear.
-- The icon source is `catto.ico`; `catto.png` is the transparent source graphic
-  used in docs/branding.
+- The icon source is `docs/assets/catto.ico`; `docs/assets/catto.png` is the
+  transparent source graphic used in docs/branding.
 
 ## Packaging And Licensing
 
 - Default Windows release should be a single `fast-markdown-imgui.exe` where
   possible.
 - Default Linux release should be a compact `fast-markdown` CLI binary.
+- Fast Markdown's own code is licensed under Apache-2.0. Keep `LICENSE`,
+  `NOTICE`, README license wording, and SPDX headers aligned when changing
+  licensing metadata.
 - Do not bundle Pandoc unless deliberately producing a larger compatibility
   package and accounting for Pandoc's GPL license terms.
 - Keep Dear ImGui license attribution intact.
 - Keep generated build trees, benchmark outputs, PDFs, and temporary corpora out
   of source unless the user explicitly asks to track a specific artifact.
 
-## Documentation And Benchmarks
-
-- Update `README.md` when user-visible behavior, commands, build requirements,
-  or supported Markdown features change.
-- Keep benchmark claims conservative and reproducible.
-- `commercial_benchmark_summary.md` contains marketing-safe wording and caveats.
-  Do not copy raw headline numbers without the caveats about synthetic corpora,
-  warm `--bench` versus end-to-end I/O, and Linux storage location.
-
 ## Change Style
 
 - Match the existing C++17 style.
 - Keep changes scoped to the touched subsystem.
-- Prefer standard library and platform APIs already in use over new dependencies.
+- Prefer standard library and platform APIs already in use over new
+  dependencies.
 - Add small helper functions when they reduce repeated PDF/string/layout logic.
 - Avoid broad refactors unless needed for a measured performance or correctness
   issue.
+- Use structured parsers/APIs when available instead of ad hoc string surgery.
 - Protect user changes in the working tree. Check `git status --short` before
   editing and do not revert unrelated work.

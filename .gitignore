@@ -23,6 +23,8 @@ benchmark-output/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
+compile_commands.json
+Testing/
 
 # IDE and editor files
 .vs/
@@ -38,3 +40,9 @@ imgui.ini
 *.tmp
 *.temp
 *.log
+*.pyc
+__pycache__/
+
+# OS generated files
+.DS_Store
+Thumbs.db

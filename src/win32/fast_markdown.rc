@@ -1,3 +1,4 @@
 #include <windows.h>
 
 1 RT_MANIFEST "fast_markdown.manifest"
+1 ICON "../../docs/assets/catto.ico"

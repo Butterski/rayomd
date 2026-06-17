@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
-project(fast_markdown LANGUAGES CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" FAST_MARKDOWN_VERSION LIMIT_COUNT 1)
+project(fast_markdown VERSION ${FAST_MARKDOWN_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,26 +40,31 @@ function(fast_markdown_simdutf target)
     endif()
 endfunction()
 
+function(fast_markdown_common_definitions target)
+    target_compile_definitions(${target} PRIVATE FAST_MARKDOWN_VERSION="${PROJECT_VERSION}")
+endfunction()
+
 if(WIN32)
     enable_language(RC)
     add_executable(fast-markdown-imgui WIN32
         src/core/tiny_pdf.cpp
         src/win32/main_win32.cpp
         src/win32/fast_markdown.rc
-        imgui/imgui.cpp
-        imgui/imgui_draw.cpp
-        imgui/imgui_tables.cpp
-        imgui/imgui_widgets.cpp
-        imgui/misc/cpp/imgui_stdlib.cpp
-        imgui/backends/imgui_impl_win32.cpp
-        imgui/backends/imgui_impl_dx11.cpp
+        third_party/imgui/imgui.cpp
+        third_party/imgui/imgui_draw.cpp
+        third_party/imgui/imgui_tables.cpp
+        third_party/imgui/imgui_widgets.cpp
+        third_party/imgui/misc/cpp/imgui_stdlib.cpp
+        third_party/imgui/backends/imgui_impl_win32.cpp
+        third_party/imgui/backends/imgui_impl_dx11.cpp
     )
     target_compile_definitions(fast-markdown-imgui PRIVATE UNICODE _UNICODE)
-    target_include_directories(fast-markdown-imgui PRIVATE include . imgui)
+    target_include_directories(fast-markdown-imgui PRIVATE include . third_party third_party/imgui)
     target_link_libraries(fast-markdown-imgui PRIVATE
         d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi winhttp windowscodecs
     )
     fast_markdown_simdutf(fast-markdown-imgui)
+    fast_markdown_common_definitions(fast-markdown-imgui)
     fast_markdown_release_flags(fast-markdown-imgui)
 else()
     find_package(CURL REQUIRED)
@@ -78,5 +84,6 @@ else()
         target_compile_definitions(fast-markdown PRIVATE FAST_MARKDOWN_USE_ZLIB=1)
     endif()
     fast_markdown_simdutf(fast-markdown)
+    fast_markdown_common_definitions(fast-markdown)
     fast_markdown_release_flags(fast-markdown)
 endif()

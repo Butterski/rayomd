@@ -1,6 +1,6 @@
 ﻿// Fast Markdown - ImGui + DirectX11 Edition
 // Clean modern UI with minimal footprint
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -36,6 +36,10 @@
 #include <filesystem>
 #include <codecvt>
 #include <locale>
+
+#ifndef FAST_MARKDOWN_VERSION
+#define FAST_MARKDOWN_VERSION "0.0.0"
+#endif
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_IX86)
 #include <emmintrin.h>
@@ -707,6 +711,12 @@ int TryCommandLineExport() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv) return -1;
+
+    if (argc >= 2 && (lstrcmpiW(argv[1], L"--version") == 0 || lstrcmpiW(argv[1], L"-v") == 0)) {
+        WriteStdoutLine(std::string("fast-markdown-imgui ") + FAST_MARKDOWN_VERSION);
+        LocalFree(argv);
+        return 0;
+    }
 
     if (argc < 2 || (lstrcmpiW(argv[1], L"--export") != 0 &&
         lstrcmpiW(argv[1], L"--batch") != 0 && lstrcmpiW(argv[1], L"--stdin-batch") != 0 &&

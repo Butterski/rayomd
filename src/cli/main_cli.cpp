@@ -22,6 +22,10 @@ namespace {
 
 namespace fs = std::filesystem;
 
+#ifndef FAST_MARKDOWN_VERSION
+#define FAST_MARKDOWN_VERSION "0.0.0"
+#endif
+
 constexpr long long kMaxMarkdownInputBytes = 128LL * 1024LL * 1024LL;
 
 bool ReadUtf8FilePortable(const fs::path& path, std::string& content) {
@@ -251,8 +255,9 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
 
 void PrintUsage() {
     std::cerr
-        << "Fast Markdown portable CLI\n"
+        << "Fast Markdown portable CLI " << FAST_MARKDOWN_VERSION << "\n"
         << "Usage:\n"
+        << "  fast-markdown --version\n"
         << "  fast-markdown --export input.md output.pdf [native] [style] [margin]\n"
         << "  fast-markdown --batch input-folder output-folder [native] [style] [margin]\n"
         << "  fast-markdown --stdin-batch output-folder [native] [style] [margin]\n"
@@ -272,6 +277,11 @@ int main(int argc, char** argv) {
     int engine = 0;
     int style = 0;
     int margin = 1;
+
+    if (command == "--version" || command == "-v") {
+        std::cout << "fast-markdown " << FAST_MARKDOWN_VERSION << "\n";
+        return 0;
+    }
 
     if (command == "--stdin-batch") {
         if (argc < 3) return 2;
