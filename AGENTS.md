@@ -86,8 +86,8 @@ Important image/link details:
   performance expectations, and versioning rules.
 
 - `third_party/imgui/`
-  Vendored Dear ImGui. Do not edit vendored ImGui files unless the task
-  explicitly requires it.
+  Vendored Dear ImGui, currently v1.92.8. Do not edit vendored ImGui files
+  unless the task explicitly requires it.
 
 - `third_party/simdutf/`
   Optional vendored simdutf experiment. It is OFF by default because measured

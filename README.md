@@ -82,7 +82,7 @@ Release binary sizes from local release builds:
 
 | Target | Size |
 |---|---:|
-| `fast-markdown-imgui.exe` Windows app | `2,341,888 bytes` |
+| `fast-markdown-imgui.exe` Windows app | `2,364,928 bytes` |
 | `fast-markdown` Linux CLI | `199,088 bytes` |
 
 ### Larger Synthetic Runs
@@ -338,7 +338,7 @@ scripts/                     Verification and benchmark helper scripts
 docs/assets/                 Mascot and icon source assets
 docs/benchmarks/             Archived benchmark summaries and caveats
 docs/optimization/           Optimization notes and research follow-up
-third_party/imgui/           Vendored Dear ImGui
+third_party/imgui/           Vendored Dear ImGui v1.92.8
 third_party/simdutf/         Optional simdutf experiment, OFF by default
 tester.md                    Hand-written smoke/regression Markdown document
 CMakeLists.txt               Cross-platform build definition

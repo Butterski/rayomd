@@ -3,6 +3,6 @@ Copyright 2026 Fast Markdown contributors
 
 This product includes third-party software:
 
-- Dear ImGui, licensed under the MIT License. See third_party/imgui/LICENSE.txt.
+- Dear ImGui v1.92.8, licensed under the MIT License. See third_party/imgui/LICENSE.txt.
 - simdutf, licensed under the Apache License 2.0 or the MIT License.
   See third_party/simdutf/LICENSE-APACHE and third_party/simdutf/LICENSE-MIT.
