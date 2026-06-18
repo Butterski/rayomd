@@ -21,6 +21,14 @@ small releases, and predictable deployment.
   <img src="docs/ui.png" alt="RayoMD Windows app screenshot" width="780">
 </p>
 
+<p align="center">
+  <video src="docs/show.mp4" controls width="780"></video>
+</p>
+
+<p align="center">
+  <a href="docs/show.mp4">Watch the RayoMD demo video</a>
+</p>
+
 The default renderer parses Markdown and writes PDF bytes directly from C++17.
 It does not start a browser, bundle a runtime, or require Pandoc or LaTeX on
 the fast path. Windows builds a compact Dear ImGui + DirectX 11 desktop app
@@ -372,6 +380,7 @@ src/win32/                   Windows Dear ImGui app, CLI glue, and resources
 scripts/                     Verification and benchmark helper scripts
 docs/assets/                 Mascot and icon source assets
 docs/ui.png                  Windows app screenshot
+docs/show.mp4                Windows app demo video
 docs/benchmarks/             Archived benchmark summaries and caveats
 docs/optimization/           Optimization notes and research follow-up
 third_party/imgui/           Vendored Dear ImGui v1.92.8
