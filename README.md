@@ -22,11 +22,11 @@ small releases, and predictable deployment.
 </p>
 
 <p align="center">
-  <video src="docs/show.mp4" controls width="780"></video>
+  <img src="docs/show.gif" alt="RayoMD Windows app demo" width="780">
 </p>
 
 <p align="center">
-  <a href="docs/show.mp4">Watch the RayoMD demo video</a>
+  <a href="docs/show.mp4">Download the MP4 demo</a>
 </p>
 
 The default renderer parses Markdown and writes PDF bytes directly from C++17.
@@ -380,6 +380,7 @@ src/win32/                   Windows Dear ImGui app, CLI glue, and resources
 scripts/                     Verification and benchmark helper scripts
 docs/assets/                 Mascot and icon source assets
 docs/ui.png                  Windows app screenshot
+docs/show.gif                Windows app demo animation
 docs/show.mp4                Windows app demo video
 docs/benchmarks/             Archived benchmark summaries and caveats
 docs/optimization/           Optimization notes and research follow-up

@@ -34,6 +34,7 @@ jobs:
           test -f docs/assets/rayomd.png
           test -f docs/assets/rayomd.ico
           test -f docs/ui.png
+          test -f docs/show.gif
           test -f docs/show.mp4
           test -f third_party/imgui/LICENSE.txt
           test -f third_party/simdutf/LICENSE-APACHE
@@ -59,6 +60,7 @@ jobs:
         run: |
           test -f docs/assets/rayomd.png
           test -f docs/ui.png
+          test -f docs/show.gif
           test -f docs/show.mp4
           test -f docs/tester.pdf
           test -f docs/benchmarks/commercial_benchmark_summary.md
