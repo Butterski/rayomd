@@ -17,6 +17,10 @@ small releases, and predictable deployment.
   <img src="docs/assets/rayomd.png" alt="RayoMD mascot" width="180">
 </p>
 
+<p align="center">
+  <img src="docs/ui.png" alt="RayoMD Windows app screenshot" width="780">
+</p>
+
 The default renderer parses Markdown and writes PDF bytes directly from C++17.
 It does not start a browser, bundle a runtime, or require Pandoc or LaTeX on
 the fast path. Windows builds a compact Dear ImGui + DirectX 11 desktop app
@@ -90,6 +94,24 @@ Release binary sizes from local release builds:
 
 Example output from `tester.md` is tracked as
 [`docs/tester.pdf`](docs/tester.pdf) for quick release-page previews.
+
+### Local Pandoc Comparison
+
+On 2026-06-18, a local Windows end-to-end export comparison against
+Pandoc 3.9.0.1 + XeLaTeX showed the native RayoMD path about `182x` to `322x`
+faster on simple synthetic Markdown cases covering a 500-row table, nested lists
+with code, and a mixed 100 KiB report.
+
+| Case | RayoMD median | Pandoc median |
+|---|---:|---:|
+| 500-row pipe table | `38.98 ms` | `7113.89 ms` |
+| Nested lists and code | `20.21 ms` | `6504.84 ms` |
+| Mixed 100 KiB report | `52.45 ms` | `10614.53 ms` |
+
+This compares a narrow native Markdown subset with a much more complete Pandoc
+document pipeline, so it is a scope comparison as much as a speed comparison.
+See [`docs/benchmarks/pandoc_comparison_2026-06-18.md`](docs/benchmarks/pandoc_comparison_2026-06-18.md)
+for methodology and caveats.
 
 ### Larger Synthetic Runs
 
@@ -316,6 +338,13 @@ Windows:
 python scripts/perf_watch.py --binary build/windows/rayomd.exe --platform windows --suite watch --label local
 ```
 
+Compare end-to-end native export against Pandoc when Pandoc and XeLaTeX are
+available:
+
+```sh
+python scripts/compare_pandoc.py --rayomd build/windows/rayomd.exe --root benchmark-output/pandoc-comparison-windows --runs 5
+```
+
 WSL/Linux:
 
 ```sh
@@ -342,10 +371,12 @@ src/cli/                     Portable CLI entry point
 src/win32/                   Windows Dear ImGui app, CLI glue, and resources
 scripts/                     Verification and benchmark helper scripts
 docs/assets/                 Mascot and icon source assets
+docs/ui.png                  Windows app screenshot
 docs/benchmarks/             Archived benchmark summaries and caveats
 docs/optimization/           Optimization notes and research follow-up
 third_party/imgui/           Vendored Dear ImGui v1.92.8
 third_party/simdutf/         Optional simdutf experiment, OFF by default
+scripts/compare_pandoc.py    Local RayoMD vs Pandoc comparison helper
 tester.md                    Hand-written smoke/regression Markdown document
 CMakeLists.txt               Cross-platform build definition
 ```

@@ -33,6 +33,7 @@ jobs:
           test -f VERSION
           test -f docs/assets/rayomd.png
           test -f docs/assets/rayomd.ico
+          test -f docs/ui.png
           test -f third_party/imgui/LICENSE.txt
           test -f third_party/simdutf/LICENSE-APACHE
           test -f third_party/simdutf/LICENSE-MIT
@@ -40,7 +41,9 @@ jobs:
       - name: Python helper syntax
         run: |
           python3 -B -c "import ast, pathlib; ast.parse(pathlib.Path('scripts/perf_watch.py').read_text(encoding='utf-8'))"
+          python3 -B -c "import ast, pathlib; ast.parse(pathlib.Path('scripts/compare_pandoc.py').read_text(encoding='utf-8'))"
           python3 -B scripts/perf_watch.py --help >/dev/null
+          python3 -B scripts/compare_pandoc.py --help >/dev/null
 
       - name: Keep generated outputs out of source
         run: |
@@ -54,7 +57,9 @@ jobs:
       - name: README local link targets
         run: |
           test -f docs/assets/rayomd.png
+          test -f docs/ui.png
           test -f docs/tester.pdf
           test -f docs/benchmarks/commercial_benchmark_summary.md
+          test -f docs/benchmarks/pandoc_comparison_2026-06-18.md
           test -f include/rayomd/tiny_pdf.h
           test -f third_party/imgui/LICENSE.txt
