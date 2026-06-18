@@ -59,32 +59,34 @@ That boundary keeps the binary small and the default path dependency-light.
 
 These are local CMake Release results kept as reproducible baselines for this
 repository. Treat them as engineering numbers, not universal performance claims:
-hardware, storage, fonts, compiler, and document shape all matter. The Windows
-smoke row was refreshed on 2026-06-17 after translating `tester.md` and fixing
-its mascot image path.
+hardware, storage, fonts, compiler, and document shape all matter. The small
+document smoke rows were refreshed on 2026-06-18 after making the remote image
+in `tester.md` deterministic.
 
 Warm `--bench` rows measure in-process PDF byte generation after startup. Export
-and batch rows include process and file I/O. Linux batch numbers below came from
-native WSL ext4 storage; `/mnt/*` Windows-mounted paths are much slower for many
-small files.
+and batch rows include process and file I/O. Linux small-document rows below
+were run from a Windows-mounted WSL path (`/mnt/e`); Linux batch numbers in the
+larger synthetic table came from native WSL ext4 storage. `/mnt/*`
+Windows-mounted paths are much slower for many small files.
 
 ### Small Document Smoke
 
 The `tester.md` rows use `modern normal`; the ASCII smoke row uses the verifier
-default shown in `scripts/verify-linux.sh`.
+default shown in `scripts/verify-linux.sh`. PDF byte counts can differ by
+platform because native builds use platform font and image pipelines.
 
 | Build | Input | Iterations | Avg conversion | Output PDF |
 |---|---:|---:|---:|---:|
-| Windows GUI/CLI | `tester.md`, Unicode | 100 | `1.23 ms` | `730,289 bytes` |
-| Linux CLI | `tester.md`, Unicode | 100 | `0.22 ms` | `168,749 bytes` |
-| Linux CLI | ASCII smoke doc | 1,000 | `0.02 ms` | `1,899 bytes` |
+| Windows GUI/CLI | `tester.md`, Unicode | 100 | `1.26 ms` | `730,223 bytes` |
+| Linux CLI | `tester.md`, Unicode | 100 | `5.38 ms` | `884,768 bytes` |
+| Linux CLI | ASCII smoke doc | 1,000 | `0.02 ms` | `1,885 bytes` |
 
 Release binary sizes from local release builds:
 
 | Target | Size |
 |---|---:|
-| `rayomd.exe` Windows app | `2,365,952 bytes` |
-| `rayomd` Linux CLI | `199,088 bytes` |
+| `rayomd.exe` Windows app | `2,364,928 bytes` |
+| `rayomd` Linux CLI | `276,912 bytes` |
 
 ### Larger Synthetic Runs
 

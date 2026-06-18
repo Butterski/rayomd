@@ -66,7 +66,7 @@ This section should start on a new page after the `\pagebreak` marker.
 
 ![RayoMD mascot](docs/assets/rayomd.png)
 
-![Remote placeholder image](https://picsum.photos/200/300)
+![Remote placeholder image](https://picsum.photos/seed/rayomd/200/300)
 
 ![Remote image fallback](https://example.com/fail.jpg)
 
