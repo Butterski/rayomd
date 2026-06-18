@@ -1,3 +1,5 @@
+# If you are an artist and wanna contribute your art - I am willing to pay to draw the cat.
+
 # Brand Asset Prompt
 
 Use this prompt when regenerating the RayoMD mascot or app icon.
