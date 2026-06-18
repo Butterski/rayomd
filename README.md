@@ -88,6 +88,9 @@ Release binary sizes from local release builds:
 | `rayomd.exe` Windows app | `2,364,928 bytes` |
 | `rayomd` Linux CLI | `276,912 bytes` |
 
+Example output from `tester.md` is tracked as
+[`docs/tester.pdf`](docs/tester.pdf) for quick release-page previews.
+
 ### Larger Synthetic Runs
 
 Run date: 2026-06-06. Full caveats and source report pointers are in
@@ -347,7 +350,8 @@ tester.md                    Hand-written smoke/regression Markdown document
 CMakeLists.txt               Cross-platform build definition
 ```
 
-Generated build trees, generated PDFs, benchmark corpora, and local binaries are
+Generated build trees, benchmark corpora, local binaries, and generated PDFs
+other than the intentional [`docs/tester.pdf`](docs/tester.pdf) sample are
 ignored and should not be committed.
 
 ## Packaging
