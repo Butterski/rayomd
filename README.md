@@ -432,8 +432,9 @@ Default native releases are intentionally small:
 - Linux/WSL CLI release: ship `rayomd-<version>-linux-x64.tar.gz` with the default no-curl `rayomd`.
 - Linux curl edition: ship `rayomd-<version>-linux-x64-curl.tar.gz` with URL image fetching enabled through libcurl.
 
-The release workflow publishes these assets for `v<VERSION>` tags and can be
-rerun manually to replace the release files in place.
+The release workflow publishes these assets when `VERSION` changes on `master`/`main`,
+for `v<VERSION>` tags, or from a manual workflow run. Manual reruns replace the
+release files in place.
 
 Do not bundle Pandoc unless deliberately producing a larger compatibility
 package and accounting for Pandoc's GPL license terms. Keep the native package

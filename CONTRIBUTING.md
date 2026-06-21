@@ -51,7 +51,8 @@ change and report the platform, storage location, suite, and headline deltas.
 ## Versioning
 
 The project version lives in `VERSION` and is compiled into both binaries.
-Update it when preparing a tagged release, and verify:
+Changing `VERSION` on `master`/`main` runs the release workflow; `v<VERSION>`
+tags and manual workflow dispatch are also supported. Verify:
 
 ```sh
 build/linux/rayomd --version
