@@ -49,6 +49,41 @@ if "$BIN" --export benchmark-output/linux-verify/missing.md benchmark-output/lin
 fi
 grep -q "could not read input Markdown file" benchmark-output/linux-verify/export-missing-input.txt
 
+SECURITY_DIR=benchmark-output/linux-verify/security
+mkdir -p "$SECURITY_DIR/doc" "$SECURITY_DIR/out"
+cp docs/assets/rayomd.png "$SECURITY_DIR/doc/allowed.png"
+cp docs/assets/rayomd.png "$SECURITY_DIR/outside.png"
+
+cat > "$SECURITY_DIR/doc/allowed.md" <<'EOF'
+# Allowed Local Image
+
+![allowed-local](allowed.png)
+EOF
+"$BIN" --export "$SECURITY_DIR/doc/allowed.md" "$SECURITY_DIR/out/allowed.pdf"
+test -s "$SECURITY_DIR/out/allowed.pdf"
+if grep -a -q "allowed-local" "$SECURITY_DIR/out/allowed.pdf"; then
+    echo "Expected in-directory local image to render instead of fallback text." >&2
+    exit 1
+fi
+
+cat > "$SECURITY_DIR/doc/escape.md" <<'EOF'
+# Escaping Local Image
+
+![blocked-local](../outside.png)
+EOF
+"$BIN" --export "$SECURITY_DIR/doc/escape.md" "$SECURITY_DIR/out/escape.pdf"
+grep -a -q "blocked-local" "$SECURITY_DIR/out/escape.pdf"
+
+cat > "$SECURITY_DIR/doc/url.md" <<'EOF'
+# URL Image
+
+![blocked-url](http://127.0.0.1:9/image.png)
+EOF
+"$BIN" --export "$SECURITY_DIR/doc/url.md" "$SECURITY_DIR/out/url-default.pdf"
+grep -a -q "blocked-url" "$SECURITY_DIR/out/url-default.pdf"
+"$BIN" --export "$SECURITY_DIR/doc/url.md" "$SECURITY_DIR/out/url-loopback.pdf" native elegant normal --allow-url-images
+grep -a -q "blocked-url" "$SECURITY_DIR/out/url-loopback.pdf"
+
 "$BIN" --export tester.md benchmark-output/linux-verify/tester.pdf native elegant normal
 "$BIN" --bench tester.md benchmark-output/linux-verify/bench-unicode 100 elegant normal
 

@@ -11,7 +11,8 @@ struct BuildOptions {
     int styleIdx = 0;
     int marginIdx = 1;
     std::string sourcePath;
-    bool enableUrlImages = true;
+    bool enableUrlImages = false;
+    bool allowUnsafeLocalImages = false;
 };
 
 std::string Trim(std::string s);

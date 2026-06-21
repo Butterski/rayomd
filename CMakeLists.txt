@@ -62,7 +62,7 @@ if(WIN32)
     target_compile_definitions(rayomd PRIVATE UNICODE _UNICODE)
     target_include_directories(rayomd PRIVATE include . third_party third_party/imgui)
     target_link_libraries(rayomd PRIVATE
-        d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi winhttp windowscodecs
+        d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi winhttp windowscodecs ws2_32
     )
     rayomd_simdutf(rayomd)
     rayomd_common_definitions(rayomd)

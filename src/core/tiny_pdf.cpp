@@ -5,6 +5,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
 #include <wincodec.h>
@@ -31,6 +33,11 @@
 #include <vector>
 
 #ifdef RAYOMD_USE_CURL
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
 #include <curl/curl.h>
 #endif
 
@@ -1507,10 +1514,62 @@ static std::string PathToUtf8(const std::filesystem::path& path) {
     return path.u8string();
 }
 
-static bool ResolveLocalImagePath(const std::string& src, const BuildOptions& options,
-    std::string& key, std::string& pathUtf8) {
-    if (src.empty() || IsHttpUrl(src)) return false;
+static bool HasUriScheme(std::string_view src) {
+    if (src.empty() || !std::isalpha((unsigned char)src[0])) return false;
+    for (size_t i = 1; i < src.size(); i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == ':') return true;
+        if (c == '/' || c == '\\' || c == '?' || c == '#') return false;
+        if (!std::isalnum(c) && c != '+' && c != '-' && c != '.') return false;
+    }
+    return false;
+}
 
+static bool HasUnsafeWindowsPathPrefix(std::string_view src) {
+    if (src.size() >= 1 && (src[0] == '/' || src[0] == '\\')) return true;
+    if (src.size() >= 2 && std::isalpha((unsigned char)src[0]) && src[1] == ':') return true;
+    return false;
+}
+
+static bool IsUnsafeLocalImageSource(std::string_view src) {
+    if (src.empty() || src.find('\0') != std::string_view::npos) return true;
+    if (HasUnsafeWindowsPathPrefix(src) || HasUriScheme(src)) return true;
+    std::filesystem::path path = PathFromUtf8(src);
+    return path.is_absolute();
+}
+
+static std::filesystem::path CanonicalForPolicy(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::path absolute = path.is_absolute() ? path : std::filesystem::absolute(path, ec);
+    if (ec) absolute = path;
+
+    std::filesystem::path normalized = std::filesystem::weakly_canonical(absolute, ec);
+    if (ec) normalized = absolute.lexically_normal();
+    return normalized.lexically_normal();
+}
+
+static bool PathPartEqualForPolicy(const std::filesystem::path& a, const std::filesystem::path& b) {
+    std::string left = a.u8string();
+    std::string right = b.u8string();
+#ifdef _WIN32
+    std::transform(left.begin(), left.end(), left.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    std::transform(right.begin(), right.end(), right.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+#endif
+    return left == right;
+}
+
+static bool IsPathContainedInRoot(const std::filesystem::path& child, const std::filesystem::path& root) {
+    std::filesystem::path childNorm = child.lexically_normal();
+    std::filesystem::path rootNorm = root.lexically_normal();
+    auto childIt = childNorm.begin();
+    for (auto rootIt = rootNorm.begin(); rootIt != rootNorm.end(); ++rootIt, ++childIt) {
+        if (childIt == childNorm.end() || !PathPartEqualForPolicy(*childIt, *rootIt)) return false;
+    }
+    return true;
+}
+
+static bool ResolveUnsafeLocalImagePath(const std::string& src, const BuildOptions& options,
+    std::string& key, std::string& pathUtf8) {
     std::filesystem::path path = PathFromUtf8(src);
     if (path.is_relative() && !options.sourcePath.empty()) {
         std::filesystem::path base = PathFromUtf8(options.sourcePath);
@@ -1518,12 +1577,25 @@ static bool ResolveLocalImagePath(const std::string& src, const BuildOptions& op
         path = base / path;
     }
 
-    std::error_code ec;
-    std::filesystem::path absolute = path.is_absolute() ? path : std::filesystem::absolute(path, ec);
-    if (ec) absolute = path;
+    std::filesystem::path normalized = CanonicalForPolicy(path);
+    pathUtf8 = PathToUtf8(normalized);
+    key = "file:" + pathUtf8;
+    return true;
+}
 
-    std::filesystem::path normalized = std::filesystem::weakly_canonical(absolute, ec);
-    if (ec) normalized = absolute.lexically_normal();
+static bool ResolveLocalImagePath(const std::string& src, const BuildOptions& options,
+    std::string& key, std::string& pathUtf8) {
+    if (src.empty() || IsHttpUrl(src)) return false;
+    if (options.allowUnsafeLocalImages) return ResolveUnsafeLocalImagePath(src, options, key, pathUtf8);
+    if (options.sourcePath.empty() || IsUnsafeLocalImageSource(src)) return false;
+
+    std::filesystem::path base = PathFromUtf8(options.sourcePath);
+    if (base.has_filename()) base = base.parent_path();
+    if (base.empty()) base = ".";
+
+    std::filesystem::path root = CanonicalForPolicy(base);
+    std::filesystem::path normalized = CanonicalForPolicy(root / PathFromUtf8(src));
+    if (!IsPathContainedInRoot(normalized, root)) return false;
 
     pathUtf8 = PathToUtf8(normalized);
     key = "file:" + pathUtf8;
@@ -1538,7 +1610,89 @@ static bool ReadLocalImageFile(const std::string& pathUtf8, std::vector<uint8_t>
 #endif
 }
 
+#if defined(_WIN32) || defined(RAYOMD_USE_CURL)
+static bool IsUnsafeIpv4Address(uint32_t hostOrder) {
+    return (hostOrder >> 24) == 0 ||
+        (hostOrder >> 24) == 10 ||
+        (hostOrder >> 24) == 127 ||
+        (hostOrder >> 16) == 0xA9FEu ||
+        (hostOrder >> 20) == 0xAC1u ||
+        (hostOrder >> 16) == 0xC0A8u ||
+        (hostOrder >> 22) == 0x0192u ||
+        (hostOrder >> 28) == 0xEu ||
+        (hostOrder >> 28) == 0xFu ||
+        hostOrder == 0xFFFFFFFFu;
+}
+
+static bool IsUnsafeIpv6Address(const unsigned char* b) {
+    bool allZero = true;
+    for (int i = 0; i < 16; i++) allZero = allZero && b[i] == 0;
+    if (allZero) return true;
+
+    bool loopback = true;
+    for (int i = 0; i < 15; i++) loopback = loopback && b[i] == 0;
+    if (loopback && b[15] == 1) return true;
+
+    bool mappedV4 = true;
+    for (int i = 0; i < 10; i++) mappedV4 = mappedV4 && b[i] == 0;
+    if (mappedV4 && b[10] == 0xff && b[11] == 0xff) {
+        uint32_t mapped = ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16) |
+            ((uint32_t)b[14] << 8) | (uint32_t)b[15];
+        return IsUnsafeIpv4Address(mapped);
+    }
+
+    return (b[0] & 0xfe) == 0xfc ||
+        (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) ||
+        b[0] == 0xff;
+}
+
+static bool IsUnsafeSocketAddress(const sockaddr* address) {
+    if (!address) return true;
+    if (address->sa_family == AF_INET) {
+        const sockaddr_in* ipv4 = reinterpret_cast<const sockaddr_in*>(address);
+        return IsUnsafeIpv4Address(ntohl(ipv4->sin_addr.s_addr));
+    }
+    if (address->sa_family == AF_INET6) {
+        const sockaddr_in6* ipv6 = reinterpret_cast<const sockaddr_in6*>(address);
+        return IsUnsafeIpv6Address(reinterpret_cast<const unsigned char*>(&ipv6->sin6_addr));
+    }
+    return true;
+}
+#endif
+
 #ifdef _WIN32
+static bool EnsureWinsockReady() {
+    static bool ready = []() {
+        WSADATA data = {};
+        return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    }();
+    return ready;
+}
+
+static bool IsFetchHostAllowed(const std::wstring& host) {
+    if (host.empty() || !EnsureWinsockReady()) return false;
+
+    ADDRINFOW hints = {};
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    ADDRINFOW* result = nullptr;
+    int rc = GetAddrInfoW(host.c_str(), nullptr, &hints, &result);
+    if (rc != 0 || !result) return false;
+
+    bool sawAddress = false;
+    bool allowed = true;
+    for (ADDRINFOW* current = result; current; current = current->ai_next) {
+        sawAddress = true;
+        if (IsUnsafeSocketAddress(current->ai_addr)) {
+            allowed = false;
+            break;
+        }
+    }
+    FreeAddrInfoW(result);
+    return sawAddress && allowed;
+}
+
 static std::wstring ResolveRedirectUrl(const std::wstring& currentUrl, const std::wstring& location) {
     if (location.empty()) return L"";
     if (location.rfind(L"http://", 0) == 0 || location.rfind(L"https://", 0) == 0) return location;
@@ -1575,12 +1729,7 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
     std::wstring currentUrl = Utf8ToWide(url);
     if (currentUrl.empty()) return false;
 
-    HINTERNET session = WinHttpOpen(L"RayoMD/1.0",
-#ifdef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
-        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-#else
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-#endif
+    HINTERNET session = WinHttpOpen(L"RayoMD/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return false;
     WinHttpSetTimeouts(session, 5000, 5000, 8000, 15000);
@@ -1600,6 +1749,7 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
         std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
         if (parts.dwExtraInfoLength > 0) path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
         if (path.empty()) path = L"/";
+        if (!IsFetchHostAllowed(host)) break;
 
         HINTERNET connect = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
         if (!connect) break;
@@ -1682,6 +1832,14 @@ static size_t CurlWriteImageBytes(char* ptr, size_t size, size_t nmemb, void* us
     return count;
 }
 
+static curl_socket_t CurlOpenSocketChecked(void*, curlsocktype purpose, struct curl_sockaddr* address) {
+    if (!address) return CURL_SOCKET_BAD;
+    if (purpose == CURLSOCKTYPE_IPCXN && IsUnsafeSocketAddress(address->addr)) {
+        return CURL_SOCKET_BAD;
+    }
+    return socket(address->family, address->socktype, address->protocol);
+}
+
 static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& bytes) {
     static bool curlReady = []() { return curl_global_init(CURL_GLOBAL_DEFAULT) == 0; }();
     if (!curlReady) return false;
@@ -1692,6 +1850,10 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
     bytes.clear();
     CurlImageBuffer buffer{ &bytes, false };
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    curl_easy_setopt(curl, CURLOPT_PROXY, "");
+    curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, CurlOpenSocketChecked);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);

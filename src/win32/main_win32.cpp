@@ -93,6 +93,7 @@ int g_selectedStyle = 0;
 int g_selectedMargin = 1;
 float g_customMarginInches = 1.0f;
 bool g_openAfterExport = true;
+bool g_enableUrlImages = false;
 std::atomic<bool> g_isExporting{false};
 std::atomic<bool> g_isFileLoading{false};
 std::atomic<int> g_forcedRenderFrames{0};
@@ -124,6 +125,15 @@ const char* BASE_ARGS = "--highlight-style=tango -V colorlinks=true "
     "\\renewenvironment{quote}{\\begin{shaded*}}{\\end{shaded*}}\"";
 
 constexpr long long kMaxMarkdownInputBytes = 128LL * 1024LL * 1024LL;
+constexpr DWORD kPandocTimeoutMs = 120000;
+
+struct WinExportOptions {
+    int engine = 0;
+    int style = 0;
+    int margin = 1;
+    bool enableUrlImages = false;
+    bool allowUnsafeLocalImages = false;
+};
 
 #ifdef _WIN32
 constexpr UINT WM_RAYOMD_FILE_LOADED = WM_APP + 1;
@@ -254,13 +264,12 @@ std::wstring GetDocumentsPath() {
 }
 
 std::wstring GetTempFilePath() {
-    wchar_t tempDir[MAX_PATH], tempFile[MAX_PATH];
-    GetTempPathW(MAX_PATH, tempDir);
-    GetTempFileNameW(tempDir, L"fmd", 0, tempFile);
-    std::wstring path(tempFile);
-    auto pos = path.rfind(L'.');
-    if (pos != std::wstring::npos) path = path.substr(0, pos);
-    return path + L".md";
+    wchar_t tempDir[MAX_PATH] = {};
+    wchar_t tempFile[MAX_PATH] = {};
+    DWORD len = GetTempPathW(MAX_PATH, tempDir);
+    if (len == 0 || len >= MAX_PATH) return L"";
+    if (!GetTempFileNameW(tempDir, L"rmd", 0, tempFile)) return L"";
+    return tempFile;
 }
 
 std::wstring ShowSaveDialog(HWND hWnd) {
@@ -363,14 +372,16 @@ bool WriteBinaryFile(const std::wstring& path, const std::string& content) {
 #endif
 
 bool ExportNativePdf(const std::string& markdown, const std::wstring& outputPath,
-    int styleIdx, int marginIdx, const std::wstring& sourcePath = L"") {
+    const WinExportOptions& exportOptions, const std::wstring& sourcePath = L"") {
     static thread_local std::string pdfBytes;
     pdfBytes.clear();
     pdfBytes.reserve(1024 * 1024);
     TinyPdf::BuildOptions options;
-    options.styleIdx = styleIdx;
-    options.marginIdx = marginIdx;
+    options.styleIdx = exportOptions.style;
+    options.marginIdx = exportOptions.margin;
     options.sourcePath = WideToUtf8(sourcePath);
+    options.enableUrlImages = exportOptions.enableUrlImages;
+    options.allowUnsafeLocalImages = exportOptions.allowUnsafeLocalImages;
     if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBytes)) {
         return false;
     }
@@ -381,51 +392,100 @@ bool ExportNativePdf(const std::string& markdown, const std::wstring& outputPath
     return true;
 }
 
-bool BuildNativePdfBytes(const std::string& markdown, int styleIdx, int marginIdx,
+bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& exportOptions,
     std::string& pdfBytes, const std::wstring& sourcePath = L"") {
     TinyPdf::BuildOptions options;
-    options.styleIdx = styleIdx;
-    options.marginIdx = marginIdx;
+    options.styleIdx = exportOptions.style;
+    options.marginIdx = exportOptions.margin;
     options.sourcePath = WideToUtf8(sourcePath);
+    options.enableUrlImages = exportOptions.enableUrlImages;
+    options.allowUnsafeLocalImages = exportOptions.allowUnsafeLocalImages;
     return TinyPdf::BuildPdfBytes(markdown, options, pdfBytes);
 }
-
 int GetNativePdfLastError() {
     return TinyPdf::g_lastError;
 }
 
-bool RunPandoc(const std::wstring& input, const std::wstring& output, int styleIdx, int marginIdx) {
+static bool IsExistingAbsoluteFile(const std::wstring& path) {
+    std::error_code ec;
+    std::filesystem::path fsPath(path);
+    return fsPath.is_absolute() && std::filesystem::is_regular_file(fsPath, ec) && !ec;
+}
+
+static bool ResolvePandocExecutable(std::wstring& executable, std::string* warning) {
+    wchar_t configured[32768];
+    DWORD configuredLen = GetEnvironmentVariableW(L"RAYOMD_PANDOC", configured, (DWORD)std::size(configured));
+    if (configuredLen > 0 && configuredLen < std::size(configured)) {
+        std::wstring configuredPath(configured, configuredLen);
+        if (IsExistingAbsoluteFile(configuredPath)) {
+            executable = std::move(configuredPath);
+            return true;
+        }
+        if (warning) *warning = "RAYOMD_PANDOC is not an existing absolute pandoc.exe path; falling back to PATH lookup.";
+    }
+
+    DWORD needed = SearchPathW(nullptr, L"pandoc.exe", nullptr, 0, nullptr, nullptr);
+    if (needed == 0) return false;
+    std::wstring found(needed, L'\0');
+    DWORD written = SearchPathW(nullptr, L"pandoc.exe", nullptr, (DWORD)found.size(), &found[0], nullptr);
+    if (written == 0 || written >= found.size()) return false;
+    found.resize(written);
+    executable = std::move(found);
+    if (warning && warning->empty()) {
+        *warning = "Pandoc was resolved from PATH; set RAYOMD_PANDOC to an absolute path.";
+    }
+    return true;
+}
+
+bool RunPandoc(const std::wstring& input, const std::wstring& output,
+    const WinExportOptions& options, std::string* warning = nullptr) {
     std::string marginArg;
-    if (marginIdx >= 0 && marginIdx <= 2) {
-        marginArg = g_marginArgs[marginIdx];
-    } else if (marginIdx >= 1000) {
+    if (options.margin >= 0 && options.margin <= 2) {
+        marginArg = g_marginArgs[options.margin];
+    } else if (options.margin >= 1000) {
         char buf[96];
-        double inches = (double)(marginIdx - 1000) / 72.0;
+        double inches = (double)(options.margin - 1000) / 72.0;
         snprintf(buf, sizeof(buf), "-V geometry:margin=%.2fin", inches);
         marginArg = buf;
     } else {
         marginArg = g_marginArgs[1];
     }
 
-    std::wstring cmd = L"pandoc \"" + input + L"\" -o \"" + output + L"\" " + 
-        Utf8ToWide(BASE_ARGS) + L" " + Utf8ToWide(g_styleArgs[styleIdx]) + L" " + Utf8ToWide(marginArg);
-    
+    std::wstring pandocExe;
+    if (!ResolvePandocExecutable(pandocExe, warning)) return false;
+
+    std::wstring cmd = L"\"" + pandocExe + L"\" --from=markdown \"" + input + L"\" -o \"" + output + L"\" " +
+        Utf8ToWide(BASE_ARGS) + L" " + Utf8ToWide(g_styleArgs[options.style]) + L" " + Utf8ToWide(marginArg);
+
     STARTUPINFOW si = { sizeof(si) };
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION pi = {};
-    
-    if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+
+    if (!CreateProcessW(pandocExe.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
         return false;
-    
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exitCode;
+    }
+
+    DWORD wait = WaitForSingleObject(pi.hProcess, kPandocTimeoutMs);
+    if (wait == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 20);
+        WaitForSingleObject(pi.hProcess, 5000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return false;
+    }
+    if (wait != WAIT_OBJECT_0) {
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return false;
+    }
+
+    DWORD exitCode = 1;
     GetExitCodeProcess(pi.hProcess, &exitCode);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     return exitCode == 0;
 }
-
 int ParseStyleArg(const wchar_t* arg) {
     if (!arg) return 0;
     if (lstrcmpiW(arg, L"modern") == 0) return 1;
@@ -474,20 +534,27 @@ bool IsMarginArg(const wchar_t* arg) {
         lstrcmpiW(arg, L"wide") == 0 || _wcsnicmp(arg, L"margin=", 7) == 0;
 }
 
-void ParseExportOptions(int argc, LPWSTR* argv, int start, int& engine, int& style, int& margin) {
+bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& options, std::wstring& error) {
     for (int i = start; i < argc; i++) {
         if (lstrcmpiW(argv[i], L"pandoc") == 0) {
-            engine = 1;
+            options.engine = 1;
         } else if (lstrcmpiW(argv[i], L"native") == 0) {
-            engine = 0;
+            options.engine = 0;
+        } else if (lstrcmpiW(argv[i], L"--allow-url-images") == 0) {
+            options.enableUrlImages = true;
+        } else if (lstrcmpiW(argv[i], L"--allow-unsafe-local-images") == 0 || lstrcmpiW(argv[i], L"--unsafe-local-images") == 0) {
+            options.allowUnsafeLocalImages = true;
         } else if (IsMarginArg(argv[i])) {
-            margin = ParseMarginArg(argv[i]);
+            options.margin = ParseMarginArg(argv[i]);
         } else if (IsStyleArg(argv[i])) {
-            style = ParseStyleArg(argv[i]);
+            options.style = ParseStyleArg(argv[i]);
+        } else {
+            error = L"unrecognized export option '" + std::wstring(argv[i]) + L"'";
+            return false;
         }
     }
+    return true;
 }
-
 std::wstring JoinPath(const std::wstring& a, const std::wstring& b) {
     if (a.empty()) return b;
     wchar_t last = a.back();
@@ -503,6 +570,8 @@ bool EnsureDirectoryRecursive(const std::wstring& path) {
     return std::filesystem::exists(std::filesystem::path(path));
 }
 
+void WriteStdoutLine(const std::string& line);
+
 std::wstring PdfNameForMarkdown(const std::wstring& name) {
     size_t slash = name.find_last_of(L"\\/");
     std::wstring base = slash == std::wstring::npos ? name : name.substr(slash + 1);
@@ -511,23 +580,25 @@ std::wstring PdfNameForMarkdown(const std::wstring& name) {
     return base + L".pdf";
 }
 
-bool ExportOneFile(const std::wstring& inputPath, const std::wstring& outputPath, int engine, int style, int margin) {
-    if (engine == 0) {
+bool ExportOneFile(const std::wstring& inputPath, const std::wstring& outputPath,
+    const WinExportOptions& options, std::string* warning = nullptr) {
+    if (options.engine == 0) {
         std::string markdown;
-        return ReadUtf8File(inputPath, markdown) && ExportNativePdf(markdown, outputPath, style, margin, inputPath);
+        return ReadUtf8File(inputPath, markdown) && ExportNativePdf(markdown, outputPath, options, inputPath);
     }
-    return RunPandoc(inputPath, outputPath, style, margin);
+    return RunPandoc(inputPath, outputPath, options, warning);
 }
 
-bool ExportNativeFileWithBuffer(const std::wstring& inputPath, const std::wstring& outputPath, int style, int margin, std::string& pdfBuffer) {
+bool ExportNativeFileWithBuffer(const std::wstring& inputPath, const std::wstring& outputPath,
+    const WinExportOptions& options, std::string& pdfBuffer) {
     std::string markdown;
     if (!ReadUtf8File(inputPath, markdown)) return false;
     pdfBuffer.clear();
-    if (!BuildNativePdfBytes(markdown, style, margin, pdfBuffer, inputPath)) return false;
+    if (!BuildNativePdfBytes(markdown, options, pdfBuffer, inputPath)) return false;
     return WriteBinaryFile(outputPath, pdfBuffer);
 }
 
-int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, int engine, int style, int margin) {
+int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, const WinExportOptions& options) {
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
     WIN32_FIND_DATAW findData = {};
@@ -535,16 +606,18 @@ int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, 
     if (hFind == INVALID_HANDLE_VALUE) return 3;
 
     int failures = 0;
+    std::string warning;
     do {
         if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         std::wstring name = findData.cFileName;
         std::wstring inputPath = JoinPath(inputDir, name);
         std::wstring outputPath = JoinPath(outputDir, PdfNameForMarkdown(name));
-        if (!ExportOneFile(inputPath, outputPath, engine, style, margin)) failures++;
+        if (!ExportOneFile(inputPath, outputPath, options, &warning)) failures++;
     } while (FindNextFileW(hFind, &findData));
 
+    if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
     FindClose(hFind);
-    return failures == 0 ? 0 : (engine == 0 ? 10 + GetNativePdfLastError() : 20);
+    return failures == 0 ? 0 : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20);
 }
 
 bool ReadAllStdin(std::string& input) {
@@ -552,11 +625,14 @@ bool ReadAllStdin(std::string& input) {
     if (hIn == INVALID_HANDLE_VALUE || hIn == nullptr) return false;
 
     char buf[4096];
-    DWORD read = 0;
-    while (ReadFile(hIn, buf, sizeof(buf), &read, nullptr) && read > 0) {
+    for (;;) {
+        DWORD read = 0;
+        if (!ReadFile(hIn, buf, sizeof(buf), &read, nullptr)) {
+            return GetLastError() == ERROR_BROKEN_PIPE;
+        }
+        if (read == 0) return true;
         input.append(buf, buf + read);
     }
-    return !input.empty();
 }
 
 void WriteStdoutLine(const std::string& line) {
@@ -567,27 +643,28 @@ void WriteStdoutLine(const std::string& line) {
     WriteFile(hOut, output.data(), (DWORD)output.size(), &written, nullptr);
 }
 
-int RunStdinBatchExport(const std::wstring& outputDir, int engine, int style, int margin) {
+int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& options) {
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
     std::string list;
     if (!ReadAllStdin(list)) return 3;
 
     int failures = 0;
+    std::string warning;
     std::vector<std::string> lines = TinyPdf::SplitLines(list);
     for (std::string line : lines) {
         line = TinyPdf::Trim(line);
         if (line.empty()) continue;
         std::wstring inputPath = Utf8ToWide(line);
         std::wstring outputPath = JoinPath(outputDir, PdfNameForMarkdown(inputPath));
-        if (!ExportOneFile(inputPath, outputPath, engine, style, margin)) failures++;
+        if (!ExportOneFile(inputPath, outputPath, options, &warning)) failures++;
     }
 
-    return failures == 0 ? 0 : (engine == 0 ? 10 + GetNativePdfLastError() : 20);
+    if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
+    return failures == 0 ? 0 : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20);
 }
 
-std::string FormatDurationMs(double ms) {
-    char buf[64];
+std::string FormatDurationMs(double ms) {    char buf[64];
     if (ms < 0.0) {
         ms = 0.0;
     }
@@ -613,7 +690,7 @@ std::string FormatDurationMs(double ms) {
     return buf;
 }
 
-int RunServeExport(const std::wstring& outputDir, int engine, int style, int margin) {
+int RunServeExport(const std::wstring& outputDir, const WinExportOptions& options) {
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
     HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
@@ -625,6 +702,7 @@ int RunServeExport(const std::wstring& outputDir, int engine, int style, int mar
     std::string pdfBuffer;
     pdfBuffer.reserve(1024 * 1024);
     std::string pending;
+    std::string warning;
     char buf[4096];
     DWORD read = 0;
     int failures = 0;
@@ -639,14 +717,18 @@ int RunServeExport(const std::wstring& outputDir, int engine, int style, int mar
 
         LARGE_INTEGER start = {}, end = {};
         QueryPerformanceCounter(&start);
-        bool ok = engine == 0
-            ? ExportNativeFileWithBuffer(inputPath, outputPath, style, margin, pdfBuffer)
-            : ExportOneFile(inputPath, outputPath, engine, style, margin);
+        bool ok = options.engine == 0
+            ? ExportNativeFileWithBuffer(inputPath, outputPath, options, pdfBuffer)
+            : ExportOneFile(inputPath, outputPath, options, &warning);
         QueryPerformanceCounter(&end);
 
         double ms = (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
         if (!ok) failures++;
         WriteStdoutLine(std::string(ok ? "OK\t" : "ERR\t") + TinyPdf::F(ms) + "\t" + WideToUtf8(outputPath));
+        if (!warning.empty()) {
+            WriteStdoutLine("Warning: " + warning);
+            warning.clear();
+        }
         return true;
     };
 
@@ -662,10 +744,11 @@ int RunServeExport(const std::wstring& outputDir, int engine, int style, int mar
     }
 
     if (!pending.empty()) processLine(pending);
-    return failures == 0 ? 0 : (engine == 0 ? 10 + GetNativePdfLastError() : 20);
+    return failures == 0 ? 0 : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20);
 }
 
-int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir, int iterations, int style, int margin) {
+int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
+    int iterations, const WinExportOptions& options) {
     if (iterations < 1) iterations = 1;
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
@@ -673,7 +756,7 @@ int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
     if (!ReadUtf8File(inputPath, markdown)) return 3;
 
     std::string pdfBytes;
-    if (!BuildNativePdfBytes(markdown, style, margin, pdfBytes, inputPath)) {
+    if (!BuildNativePdfBytes(markdown, options, pdfBytes, inputPath)) {
         return 10 + GetNativePdfLastError();
     }
     WriteBinaryFile(JoinPath(outputDir, L"sample.pdf"), pdfBytes);
@@ -685,7 +768,7 @@ int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
     size_t totalBytes = 0;
     for (int i = 0; i < iterations; i++) {
         pdfBytes.clear();
-        if (!BuildNativePdfBytes(markdown, style, margin, pdfBytes, inputPath)) {
+        if (!BuildNativePdfBytes(markdown, options, pdfBytes, inputPath)) {
             return 10 + GetNativePdfLastError();
         }
         totalBytes += pdfBytes.size();
@@ -706,7 +789,6 @@ int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
     if (!WriteUtf8File(JoinPath(outputDir, L"bench-results.txt"), report.str())) return 12;
     return 0;
 }
-
 int TryCommandLineExport() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -725,25 +807,25 @@ int TryCommandLineExport() {
         return -1;
     }
 
-    if (argc < 4 && lstrcmpiW(argv[1], L"--stdin-batch") != 0 && lstrcmpiW(argv[1], L"--serve") != 0) {
-        LocalFree(argv);
-        return 2;
-    }
-
-    int engine = 0;
-    int style = 0;
-    int margin = 1;
-    ParseExportOptions(argc, argv, 4, engine, style, margin);
+    WinExportOptions options;
+    std::wstring error;
+    auto parseOrReport = [&](int start) -> bool {
+        error.clear();
+        if (ParseExportOptions(argc, argv, start, options, error)) return true;
+        WriteStdoutLine("Error: " + WideToUtf8(error));
+        return false;
+    };
 
     if (lstrcmpiW(argv[1], L"--stdin-batch") == 0) {
         if (argc < 3) {
             LocalFree(argv);
             return 2;
         }
-        style = 0;
-        margin = 1;
-        ParseExportOptions(argc, argv, 3, engine, style, margin);
-        int result = RunStdinBatchExport(argv[2], engine, style, margin);
+        if (!parseOrReport(3)) {
+            LocalFree(argv);
+            return 2;
+        }
+        int result = RunStdinBatchExport(argv[2], options);
         LocalFree(argv);
         return result;
     }
@@ -753,10 +835,11 @@ int TryCommandLineExport() {
             LocalFree(argv);
             return 2;
         }
-        style = 0;
-        margin = 1;
-        ParseExportOptions(argc, argv, 3, engine, style, margin);
-        int result = RunServeExport(argv[2], engine, style, margin);
+        if (!parseOrReport(3)) {
+            LocalFree(argv);
+            return 2;
+        }
+        int result = RunServeExport(argv[2], options);
         LocalFree(argv);
         return result;
     }
@@ -766,17 +849,28 @@ int TryCommandLineExport() {
             LocalFree(argv);
             return 2;
         }
-        style = 0;
-        margin = 1;
-        ParseExportOptions(argc, argv, 5, engine, style, margin);
+        if (!parseOrReport(5)) {
+            LocalFree(argv);
+            return 2;
+        }
         int iterations = _wtoi(argv[4]);
-        int result = RunNativeBench(argv[2], argv[3], iterations, style, margin);
+        int result = RunNativeBench(argv[2], argv[3], iterations, options);
         LocalFree(argv);
         return result;
     }
 
+    if (argc < 4) {
+        LocalFree(argv);
+        return 2;
+    }
+
+    if (!parseOrReport(4)) {
+        LocalFree(argv);
+        return 2;
+    }
+
     if (lstrcmpiW(argv[1], L"--batch") == 0) {
-        int result = RunBatchExport(argv[2], argv[3], engine, style, margin);
+        int result = RunBatchExport(argv[2], argv[3], options);
         LocalFree(argv);
         return result;
     }
@@ -788,22 +882,23 @@ int TryCommandLineExport() {
     }
 
     bool ok = false;
-    if (engine == 0) {
+    if (options.engine == 0) {
         std::string markdown;
         if (!ReadUtf8File(inputPath, markdown)) {
             LocalFree(argv);
             return 3;
         }
-        ok = ExportNativePdf(markdown, outputPath, style, margin, inputPath);
+        ok = ExportNativePdf(markdown, outputPath, options, inputPath);
     } else {
-        ok = RunPandoc(inputPath, outputPath, style, margin);
+        std::string warning;
+        ok = RunPandoc(inputPath, outputPath, options, &warning);
+        if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
     }
 
     LocalFree(argv);
     if (ok) return 0;
-    return engine == 0 ? 10 + GetNativePdfLastError() : 20;
+    return options.engine == 0 ? 10 + GetNativePdfLastError() : 20;
 }
-
 // ============================================================================
 // Export Thread
 // ============================================================================
@@ -811,9 +906,7 @@ struct ExportParams {
     std::string markdown;
     std::wstring sourcePath;
     std::wstring outputPath;
-    int engineIdx;
-    int styleIdx;
-    int marginIdx;
+    WinExportOptions options;
     bool openAfter;
     HWND hWnd;
 };
@@ -821,21 +914,23 @@ struct ExportParams {
 struct ExportResult {
     bool ok = false;
     double elapsedMs = 0.0;
+    std::string warning;
 };
 
 DWORD WINAPI ExportThread(LPVOID lp) {
     auto* p = (ExportParams*)lp;
     bool ok = false;
+    std::string warning;
     LARGE_INTEGER freq = {}, start = {}, end = {};
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&start);
 
-    if (p->engineIdx == 0) {
-        ok = ExportNativePdf(p->markdown, p->outputPath, p->styleIdx, p->marginIdx, p->sourcePath);
+    if (p->options.engine == 0) {
+        ok = ExportNativePdf(p->markdown, p->outputPath, p->options, p->sourcePath);
     } else {
         std::wstring tmp = GetTempFilePath();
-        ok = WriteUtf8File(tmp, p->markdown) && RunPandoc(tmp, p->outputPath, p->styleIdx, p->marginIdx);
-        DeleteFileW(tmp.c_str());
+        ok = !tmp.empty() && WriteUtf8File(tmp, p->markdown) && RunPandoc(tmp, p->outputPath, p->options, &warning);
+        if (!tmp.empty()) DeleteFileW(tmp.c_str());
     }
     QueryPerformanceCounter(&end);
     double elapsedMs = freq.QuadPart > 0
@@ -848,7 +943,7 @@ DWORD WINAPI ExportThread(LPVOID lp) {
         }
     }
     
-    auto* result = new ExportResult{ ok, elapsedMs };
+    auto* result = new ExportResult{ ok, elapsedMs, warning };
     PostMessageW(p->hWnd, WM_RAYOMD_EXPORT_DONE, 0, (LPARAM)result);
     delete p;
     return 0;
@@ -873,9 +968,20 @@ void DoExport(HWND hWnd) {
     int marginSetting = g_selectedMargin == 3
         ? 1000 + (int)(std::max(0.25f, std::min(2.0f, g_customMarginInches)) * 72.0f + 0.5f)
         : g_selectedMargin;
-    auto* params = new ExportParams{ g_markdownText, g_currentMarkdownPath, outPath, g_selectedEngine, g_selectedStyle, marginSetting, g_openAfterExport, hWnd };
+    WinExportOptions options;
+    options.engine = g_selectedEngine;
+    options.style = g_selectedStyle;
+    options.margin = marginSetting;
+    options.enableUrlImages = g_enableUrlImages;
+    auto* params = new ExportParams{ g_markdownText, g_currentMarkdownPath, outPath, options, g_openAfterExport, hWnd };
     HANDLE hThread = CreateThread(nullptr, 0, ExportThread, params, 0, nullptr);
-    if (hThread) CloseHandle(hThread);
+    if (hThread) {
+        CloseHandle(hThread);
+    } else {
+        delete params;
+        g_isExporting = false;
+        g_statusText = "Export failed to start.";
+    }
 }
 
 struct FileLoadParams {
@@ -1128,6 +1234,9 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_statusText = result->ok
                 ? "Export complete in " + FormatDurationMs(result->elapsedMs) + "."
                 : "Export failed after " + FormatDurationMs(result->elapsedMs) + ".";
+            if (!result->warning.empty()) {
+                g_statusText += " Warning: " + result->warning;
+            }
             delete result;
         }
         g_isExporting = false;
@@ -1420,10 +1529,14 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         }
 
         float actionY = inspectorMax.y - 68.0f;
-        float switchY = actionY - 46.0f;
-        draw->AddLine(ImVec2(panelX, switchY - 14.0f), ImVec2(panelX + panelW, switchY - 14.0f), Rgba32(39, 49, 66, 160));
-        draw->AddText(ImVec2(panelX, switchY + 4.0f), Rgba32(174, 185, 198), "Open after export");
-        ImGui::SetCursorScreenPos(ImVec2(panelX + panelW - 46.0f, switchY));
+        float openSwitchY = actionY - 46.0f;
+        float urlSwitchY = openSwitchY - 38.0f;
+        draw->AddLine(ImVec2(panelX, urlSwitchY - 14.0f), ImVec2(panelX + panelW, urlSwitchY - 14.0f), Rgba32(39, 49, 66, 160));
+        draw->AddText(ImVec2(panelX, urlSwitchY + 4.0f), Rgba32(174, 185, 198), "URL images");
+        ImGui::SetCursorScreenPos(ImVec2(panelX + panelW - 46.0f, urlSwitchY));
+        DrawSwitch("url_images", &g_enableUrlImages);
+        draw->AddText(ImVec2(panelX, openSwitchY + 4.0f), Rgba32(174, 185, 198), "Open after export");
+        ImGui::SetCursorScreenPos(ImVec2(panelX + panelW - 46.0f, openSwitchY));
         DrawSwitch("open_after_export", &g_openAfterExport);
 
         bool exportDisabled = g_isExporting.load() || g_isFileLoading.load();

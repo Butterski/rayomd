@@ -45,9 +45,11 @@ CLI.
 - Batch, stdin batch, warm serve, and benchmark modes.
 - Unicode output through subset embedded system fonts.
 - Standard PDF font path for ASCII documents.
-- Local image support with fallback text; HTTP/HTTPS images on Windows and curl-enabled Linux builds.
+- Safe local image support with fallback text; HTTP/HTTPS images are explicit opt-in on Windows and curl-enabled Linux builds.
 - Clickable Markdown links emitted as PDF annotations.
 - Optional Windows Pandoc mode for full-document compatibility.
+
+Pandoc mode resolves `pandoc.exe` to an executable path before launch. During the transition it may still resolve from `PATH`, but it warns when `RAYOMD_PANDOC` is not set to an absolute executable path.
 
 ## When To Use It
 
@@ -153,7 +155,7 @@ and git metadata, keeps JSONL history, and compares matching runs.
 | Explicit page breaks | `\pagebreak`, `\newpage`, and `<!-- pagebreak -->` |
 | Inline emphasis | Cleanup/rendering for bold, italic, strikethrough, and code spans |
 | Links | Clickable PDF annotations for Markdown links |
-| Images | Standalone local images; HTTP/HTTPS images on Windows and curl-enabled Linux builds; alt-text fallback |
+| Images | Standalone local images contained to the Markdown file directory by default; HTTP/HTTPS images with explicit opt-in on Windows and curl-enabled Linux builds; alt-text fallback |
 | Math markers | Inline cleanup and `$$` blocks rendered as formula boxes |
 | Unicode | Embedded subset system font when needed |
 | YAML front matter | Ignored |
@@ -258,11 +260,14 @@ GitHub Actions run the release-critical checks on every push and pull request:
 3. Choose `Native Tiny PDF` or `Pandoc (full)`.
 4. Choose style and margin.
 5. Export with the button or `Ctrl+E`.
+6. Enable `URL images` only for documents that should fetch remote images.
 
 ### CLI
 
 Only the input and output paths are required for `--export`; engine, style, and
-margin default to `native`, `elegant`, and `normal`.
+margin default to `native`, `elegant`, and `normal`. Local images are
+contained to the input Markdown file directory by default, and URL images are
+disabled unless `--allow-url-images` is passed or the Windows GUI checkbox is enabled.
 
 Windows:
 
@@ -303,6 +308,11 @@ Styles:
 - `modern`
 - `tech`
 
+Resource flags:
+
+- `--allow-url-images` enables HTTP/HTTPS image fetching and still blocks loopback, private, link-local, multicast, and non-HTTP(S) redirect targets.
+- `--allow-unsafe-local-images` restores legacy local-image path behavior for trusted documents only.
+
 Margins:
 
 - `compact`
@@ -338,7 +348,7 @@ TinyPdf::BuildOptions options;
 options.styleIdx = 1;      // modern
 options.marginIdx = 1;     // normal
 options.sourcePath = "input.md";
-options.enableUrlImages = true;
+options.enableUrlImages = false;  // set true only for trusted URL image fetches
 
 if (!TinyPdf::BuildPdfBytes(markdownText, options, pdfBytes)) {
     return TinyPdf::g_lastError;
@@ -346,7 +356,10 @@ if (!TinyPdf::BuildPdfBytes(markdownText, options, pdfBytes)) {
 ```
 
 Set `BuildOptions::sourcePath` for file-based conversions so relative local
-images resolve next to the input Markdown file.
+images resolve next to the input Markdown file. By default, local image targets
+must remain inside that source directory after canonicalization. Set
+`allowUnsafeLocalImages` only for trusted documents that deliberately need
+absolute, UNC/device, or parent-escaping paths.
 
 ## Performance Watcher
 

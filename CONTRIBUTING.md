@@ -8,7 +8,8 @@ welcome when they preserve that shape.
 - Keep the native path dependency-light.
 - Keep startup, conversion time, and release size visible when changing hot code.
 - Treat native rendering as a fast Markdown subset, not a full Pandoc clone.
-- Make missing images, unsupported inputs, and unavailable URLs degrade cleanly.
+- Make missing images, unsupported inputs, unavailable URLs, and blocked image paths degrade cleanly.
+- Keep external resource access explicit: URL images are opt-in, and local images should stay contained to the Markdown source directory by default.
 - Keep generated PDFs, benchmark corpora, build trees, and local binaries out of
   source.
 

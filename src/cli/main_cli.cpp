@@ -128,14 +128,24 @@ bool IsMarginArg(const char* arg) {
         value.rfind("margin=", 0) == 0;
 }
 
-bool ParseExportOptions(int argc, char** argv, int start, int& engine, int& style, int& margin,
+struct CliExportOptions {
+    int engine = 0;
+    int style = 0;
+    int margin = 1;
+    bool enableUrlImages = false;
+    bool allowUnsafeLocalImages = false;
+};
+
+bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& options,
     std::string& error) {
     for (int i = start; i < argc; i++) {
         std::string value = Lower(argv[i]);
-        if (value == "pandoc") engine = 1;
-        else if (value == "native") engine = 0;
-        else if (IsMarginArg(argv[i])) margin = ParseMarginArg(argv[i]);
-        else if (IsStyleArg(argv[i])) style = ParseStyleArg(argv[i]);
+        if (value == "pandoc") options.engine = 1;
+        else if (value == "native") options.engine = 0;
+        else if (value == "--allow-url-images") options.enableUrlImages = true;
+        else if (value == "--allow-unsafe-local-images" || value == "--unsafe-local-images") options.allowUnsafeLocalImages = true;
+        else if (IsMarginArg(argv[i])) options.margin = ParseMarginArg(argv[i]);
+        else if (IsStyleArg(argv[i])) options.style = ParseStyleArg(argv[i]);
         else {
             error = "unrecognized export option '" + std::string(argv[i]) + "'";
             return false;
@@ -151,18 +161,20 @@ fs::path PdfNameForMarkdown(const fs::path& path) {
 }
 
 int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath,
-    int style, int margin, std::string& pdfBuffer) {
+    const CliExportOptions& options, std::string& pdfBuffer) {
     std::string markdown;
     if (!ReadUtf8FilePortable(inputPath, markdown)) {
         std::cerr << "Error: could not read input Markdown file: " << PathToUtf8(inputPath) << "\n";
         return 3;
     }
     pdfBuffer.clear();
-    TinyPdf::BuildOptions options;
-    options.styleIdx = style;
-    options.marginIdx = margin;
-    options.sourcePath = PathToUtf8(inputPath);
-    if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBuffer)) {
+    TinyPdf::BuildOptions pdfOptions;
+    pdfOptions.styleIdx = options.style;
+    pdfOptions.marginIdx = options.margin;
+    pdfOptions.sourcePath = PathToUtf8(inputPath);
+    pdfOptions.enableUrlImages = options.enableUrlImages;
+    pdfOptions.allowUnsafeLocalImages = options.allowUnsafeLocalImages;
+    if (!TinyPdf::BuildPdfBytes(markdown, pdfOptions, pdfBuffer)) {
         int code = 10 + TinyPdf::g_lastError;
         std::cerr << "Error: native PDF export failed for " << PathToUtf8(inputPath)
             << " (code " << code << ").\n";
@@ -175,8 +187,8 @@ int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath,
     return 0;
 }
 
-int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, int engine, int style, int margin) {
-    if (engine != 0) {
+int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const CliExportOptions& options) {
+    if (options.engine != 0) {
         std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
         return 20;
     }
@@ -189,7 +201,7 @@ int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, int engi
     for (const auto& entry : fs::directory_iterator(inputDir)) {
         if (!entry.is_regular_file() || entry.path().extension() != ".md") continue;
         fs::path outputPath = outputDir / PdfNameForMarkdown(entry.path());
-        int result = BuildNativePdfFile(entry.path(), outputPath, style, margin, pdfBuffer);
+        int result = BuildNativePdfFile(entry.path(), outputPath, options, pdfBuffer);
         if (result != 0) {
             failures++;
             lastResult = result;
@@ -202,8 +214,8 @@ int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, int engi
     return 0;
 }
 
-int RunStdinBatchExport(const fs::path& outputDir, int engine, int style, int margin) {
-    if (engine != 0) {
+int RunStdinBatchExport(const fs::path& outputDir, const CliExportOptions& options) {
+    if (options.engine != 0) {
         std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
         return 20;
     }
@@ -219,7 +231,7 @@ int RunStdinBatchExport(const fs::path& outputDir, int engine, int style, int ma
         if (line.empty()) continue;
         fs::path inputPath(line);
         fs::path outputPath = outputDir / PdfNameForMarkdown(inputPath);
-        int result = BuildNativePdfFile(inputPath, outputPath, style, margin, pdfBuffer);
+        int result = BuildNativePdfFile(inputPath, outputPath, options, pdfBuffer);
         if (result != 0) {
             failures++;
             lastResult = result;
@@ -232,8 +244,8 @@ int RunStdinBatchExport(const fs::path& outputDir, int engine, int style, int ma
     return 0;
 }
 
-int RunServeExport(const fs::path& outputDir, int engine, int style, int margin) {
-    if (engine != 0) {
+int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
+    if (options.engine != 0) {
         std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
         return 20;
     }
@@ -252,7 +264,7 @@ int RunServeExport(const fs::path& outputDir, int engine, int style, int margin)
         fs::path inputPath(line);
         fs::path outputPath = outputDir / PdfNameForMarkdown(inputPath);
         auto start = std::chrono::steady_clock::now();
-        int result = BuildNativePdfFile(inputPath, outputPath, style, margin, pdfBuffer);
+        int result = BuildNativePdfFile(inputPath, outputPath, options, pdfBuffer);
         auto end = std::chrono::steady_clock::now();
         double ms = std::chrono::duration<double, std::milli>(end - start).count();
         if (result != 0) {
@@ -264,7 +276,7 @@ int RunServeExport(const fs::path& outputDir, int engine, int style, int margin)
     return failures == 0 ? 0 : lastResult;
 }
 
-int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int iterations, int style, int margin) {
+int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int iterations, const CliExportOptions& cliOptions) {
     if (iterations < 1) iterations = 1;
     fs::create_directories(outputDir);
 
@@ -276,9 +288,11 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
 
     std::string pdfBytes;
     TinyPdf::BuildOptions options;
-    options.styleIdx = style;
-    options.marginIdx = margin;
+    options.styleIdx = cliOptions.style;
+    options.marginIdx = cliOptions.margin;
     options.sourcePath = PathToUtf8(inputPath);
+    options.enableUrlImages = cliOptions.enableUrlImages;
+    options.allowUnsafeLocalImages = cliOptions.allowUnsafeLocalImages;
     if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBytes)) {
         int code = 10 + TinyPdf::g_lastError;
         std::cerr << "Error: native PDF benchmark export failed for " << PathToUtf8(inputPath)
@@ -332,8 +346,9 @@ void PrintUsage() {
         << "  rayomd --serve <output-folder> [native] [style] [margin]\n"
         << "  rayomd --bench <input.md> <output-folder> <iterations> [style] [margin]\n"
         << "\n"
-        << "Defaults: native elegant normal.\n"
-        << "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n";
+        << "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
+        << "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
+        << "Resource flags: --allow-url-images, --allow-unsafe-local-images.\n";
 }
 
 int PrintArgumentError(const std::string& message) {
@@ -351,9 +366,7 @@ int main(int argc, char** argv) {
     }
 
     std::string command = Lower(argv[1]);
-    int engine = 0;
-    int style = 0;
-    int margin = 1;
+    CliExportOptions options;
 
     if (command == "--version" || command == "-v") {
         std::cout << "rayomd " << RAYOMD_VERSION << "\n";
@@ -363,36 +376,36 @@ int main(int argc, char** argv) {
     if (command == "--stdin-batch") {
         if (argc < 3) return PrintArgumentError("--stdin-batch requires <output-folder>.");
         std::string error;
-        if (!ParseExportOptions(argc, argv, 3, engine, style, margin, error)) return PrintArgumentError(error);
-        return RunStdinBatchExport(argv[2], engine, style, margin);
+        if (!ParseExportOptions(argc, argv, 3, options, error)) return PrintArgumentError(error);
+        return RunStdinBatchExport(argv[2], options);
     }
 
     if (command == "--serve") {
         if (argc < 3) return PrintArgumentError("--serve requires <output-folder>.");
         std::string error;
-        if (!ParseExportOptions(argc, argv, 3, engine, style, margin, error)) return PrintArgumentError(error);
-        return RunServeExport(argv[2], engine, style, margin);
+        if (!ParseExportOptions(argc, argv, 3, options, error)) return PrintArgumentError(error);
+        return RunServeExport(argv[2], options);
     }
 
     if (command == "--bench") {
         if (argc < 5) return PrintArgumentError("--bench requires <input.md> <output-folder> <iterations>.");
         std::string error;
-        if (!ParseExportOptions(argc, argv, 5, engine, style, margin, error)) return PrintArgumentError(error);
-        return RunNativeBench(argv[2], argv[3], std::atoi(argv[4]), style, margin);
+        if (!ParseExportOptions(argc, argv, 5, options, error)) return PrintArgumentError(error);
+        return RunNativeBench(argv[2], argv[3], std::atoi(argv[4]), options);
     }
 
     if (command == "--batch") {
         if (argc < 4) return PrintArgumentError("--batch requires <input-folder> <output-folder>.");
         std::string error;
-        if (!ParseExportOptions(argc, argv, 4, engine, style, margin, error)) return PrintArgumentError(error);
-        return RunBatchExport(argv[2], argv[3], engine, style, margin);
+        if (!ParseExportOptions(argc, argv, 4, options, error)) return PrintArgumentError(error);
+        return RunBatchExport(argv[2], argv[3], options);
     }
 
     if (command == "--export") {
         if (argc < 4) return PrintArgumentError("--export requires <input.md> <output.pdf>.");
         std::string error;
-        if (!ParseExportOptions(argc, argv, 4, engine, style, margin, error)) return PrintArgumentError(error);
-        if (engine != 0) {
+        if (!ParseExportOptions(argc, argv, 4, options, error)) return PrintArgumentError(error);
+        if (options.engine != 0) {
             std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
             return 20;
         }
@@ -401,7 +414,7 @@ int main(int argc, char** argv) {
         if (outputPath.extension() != ".pdf") outputPath += ".pdf";
         std::string pdfBuffer;
         pdfBuffer.reserve(1024 * 1024);
-        return BuildNativePdfFile(argv[2], outputPath, style, margin, pdfBuffer);
+        return BuildNativePdfFile(argv[2], outputPath, options, pdfBuffer);
     }
 
     return PrintArgumentError("unknown command '" + std::string(argv[1]) + "'.");
