@@ -3,9 +3,10 @@
 <p align="center">
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Butterski/md2pdf/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/hygiene.yml"><img alt="Repository Hygiene" src="https://github.com/Butterski/md2pdf/actions/workflows/hygiene.yml/badge.svg"></a>
+  <a href="https://github.com/Butterski/md2pdf/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/md2pdf/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 0.1.0" src="https://img.shields.io/badge/version-0.1.0-informational">
+  <img alt="Version: 1.1.0" src="https://img.shields.io/badge/version-1.1.0-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
@@ -245,6 +246,7 @@ GitHub Actions run the release-critical checks on every push and pull request:
 |---|---|
 | `CI` | Linux native CLI build/export/bench, Windows MinGW ImGui build, and a Windows benchmark smoke |
 | `Repository Hygiene` | Required release files, Python helper syntax, local README targets, and no generated binaries/PDFs in source |
+| `Release` | Tag/manual release packaging for Windows, default Linux, and curl-enabled Linux assets |
 | `CodeQL` | Weekly and PR C++ static analysis for the Linux native build path |
 
 ## Usage
@@ -413,8 +415,12 @@ ignored and should not be committed.
 
 Default native releases are intentionally small:
 
-- Windows GUI release: ship `rayomd.exe`.
-- Linux/WSL CLI release: ship `rayomd`.
+- Windows GUI release: ship `rayomd-<version>-windows-x64.zip` with `rayomd.exe`.
+- Linux/WSL CLI release: ship `rayomd-<version>-linux-x64.tar.gz` with the default no-curl `rayomd`.
+- Linux curl edition: ship `rayomd-<version>-linux-x64-curl.tar.gz` with URL image fetching enabled through libcurl.
+
+The release workflow publishes these assets for `v<VERSION>` tags and can be
+rerun manually to replace the release files in place.
 
 Do not bundle Pandoc unless deliberately producing a larger compatibility
 package and accounting for Pandoc's GPL license terms. Keep the native package

@@ -1,0 +1,192 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Version metadata
+    runs-on: ubuntu-22.04
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(head -n 1 VERSION | tr -d '\r\n ')"
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+(\.[0-9]+){1,3}$'; then
+            echo "VERSION must be a numeric CMake project version, got: $version" >&2
+            exit 1
+          fi
+          tag="v${version}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "$tag" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match VERSION ${version}; expected ${tag}." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux release binaries
+    needs: version
+    runs-on: ubuntu-22.04
+
+    env:
+      RAYOMD_VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            g++ \
+            fonts-dejavu-core \
+            libcurl4-openssl-dev \
+            zlib1g-dev
+
+      - name: Build default Linux CLI
+        run: |
+          cmake -S . -B build/linux -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/linux --config Release
+          ./build/linux/rayomd --version
+          ./build/linux/rayomd --bench tester.md benchmark-output/linux-release 50 modern normal
+          test -s benchmark-output/linux-release/sample.pdf
+
+      - name: Build curl-enabled Linux CLI
+        run: |
+          cmake -S . -B build/linux-curl -DCMAKE_BUILD_TYPE=Release -DRAYOMD_USE_CURL=ON
+          cmake --build build/linux-curl --config Release
+          ./build/linux-curl/rayomd --version
+          ./build/linux-curl/rayomd --bench tester.md benchmark-output/linux-curl-release 50 modern normal
+          test -s benchmark-output/linux-curl-release/sample.pdf
+
+      - name: Package Linux assets
+        run: |
+          default_name="rayomd-${RAYOMD_VERSION}-linux-x64"
+          curl_name="rayomd-${RAYOMD_VERSION}-linux-x64-curl"
+
+          mkdir -p "dist/${default_name}" "dist/${curl_name}"
+          cp build/linux/rayomd "dist/${default_name}/rayomd"
+          cp build/linux-curl/rayomd "dist/${curl_name}/rayomd"
+          cp README.md LICENSE NOTICE VERSION "dist/${default_name}/"
+          cp README.md LICENSE NOTICE VERSION "dist/${curl_name}/"
+
+          tar -czf "${default_name}.tar.gz" -C dist "${default_name}"
+          tar -czf "${curl_name}.tar.gz" -C dist "${curl_name}"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rayomd-linux-release
+          path: |
+            rayomd-${{ needs.version.outputs.version }}-linux-x64.tar.gz
+            rayomd-${{ needs.version.outputs.version }}-linux-x64-curl.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: Windows release binary
+    needs: version
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2 MinGW
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+
+      - name: Build Windows app
+        run: |
+          cmake -S . -B build/windows -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/windows --config Release
+          ./build/windows/rayomd.exe --version
+          ./build/windows/rayomd.exe --bench tester.md benchmark-output/windows-release 50 modern normal
+          test -s benchmark-output/windows-release/sample.pdf
+
+      - name: Package Windows asset
+        shell: pwsh
+        run: |
+          $version = "${{ needs.version.outputs.version }}"
+          $name = "rayomd-$version-windows-x64"
+          New-Item -ItemType Directory -Force -Path "dist\$name" | Out-Null
+          Copy-Item "build\windows\rayomd.exe" "dist\$name\rayomd.exe"
+          Copy-Item README.md, LICENSE, NOTICE, VERSION "dist\$name\"
+          Compress-Archive -Path "dist\$name" -DestinationPath "$name.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rayomd-windows-release
+          path: rayomd-${{ needs.version.outputs.version }}-windows-x64.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [version, linux, windows]
+    runs-on: ubuntu-22.04
+
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      RAYOMD_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create or update release assets
+        run: |
+          files=(
+            "rayomd-linux-release/rayomd-${RAYOMD_VERSION}-linux-x64.tar.gz"
+            "rayomd-linux-release/rayomd-${RAYOMD_VERSION}-linux-x64-curl.tar.gz"
+            "rayomd-windows-release/rayomd-${RAYOMD_VERSION}-windows-x64.zip"
+          )
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "RayoMD ${RAYOMD_VERSION} curl edition" \
+              --latest
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${files[@]}" \
+              --title "RayoMD ${RAYOMD_VERSION} curl edition" \
+              --target "$GITHUB_SHA" \
+              --generate-notes \
+              --latest
+          fi
