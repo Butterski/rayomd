@@ -44,7 +44,7 @@ CLI.
 - Batch, stdin batch, warm serve, and benchmark modes.
 - Unicode output through subset embedded system fonts.
 - Standard PDF font path for ASCII documents.
-- Local and HTTP/HTTPS image support with fallback text.
+- Local image support with fallback text; HTTP/HTTPS images on Windows and curl-enabled Linux builds.
 - Clickable Markdown links emitted as PDF annotations.
 - Optional Windows Pandoc mode for full-document compatibility.
 
@@ -73,7 +73,8 @@ These are local CMake Release results kept as reproducible baselines for this
 repository. Treat them as engineering numbers, not universal performance claims:
 hardware, storage, fonts, compiler, and document shape all matter. The small
 document smoke rows were refreshed on 2026-06-18 after making the remote image
-in `tester.md` deterministic.
+in `tester.md` deterministic. The Linux `tester.md` row was refreshed on
+2026-06-21 for the default no-curl Linux build.
 
 Warm `--bench` rows measure in-process PDF byte generation after startup. Export
 and batch rows include process and file I/O. Linux small-document rows below
@@ -85,12 +86,12 @@ Windows-mounted paths are much slower for many small files.
 
 The `tester.md` rows use `modern normal`; the ASCII smoke row uses the verifier
 default shown in `scripts/verify-linux.sh`. PDF byte counts can differ by
-platform because native builds use platform font and image pipelines.
+platform because native builds use platform font and optional image pipelines.
 
 | Build | Input | Iterations | Avg conversion | Output PDF |
 |---|---:|---:|---:|---:|
 | Windows GUI/CLI | `tester.md`, Unicode | 100 | `1.26 ms` | `730,223 bytes` |
-| Linux CLI | `tester.md`, Unicode | 100 | `5.38 ms` | `884,768 bytes` |
+| Linux CLI | `tester.md`, Unicode | 100 | `5.03 ms` | `878,079 bytes` |
 | Linux CLI | ASCII smoke doc | 1,000 | `0.02 ms` | `1,885 bytes` |
 
 Release binary sizes from local release builds:
@@ -151,7 +152,7 @@ and git metadata, keeps JSONL history, and compares matching runs.
 | Explicit page breaks | `\pagebreak`, `\newpage`, and `<!-- pagebreak -->` |
 | Inline emphasis | Cleanup/rendering for bold, italic, strikethrough, and code spans |
 | Links | Clickable PDF annotations for Markdown links |
-| Images | Standalone local and HTTP/HTTPS images with alt-text fallback |
+| Images | Standalone local images; HTTP/HTTPS images on Windows and curl-enabled Linux builds; alt-text fallback |
 | Math markers | Inline cleanup and `$$` blocks rendered as formula boxes |
 | Unicode | Embedded subset system font when needed |
 | YAML front matter | Ignored |
@@ -196,15 +197,15 @@ Requirements:
 
 - `g++` or `clang++` with C++17 support.
 - CMake.
-- libcurl development headers for HTTP/HTTPS image URLs.
 - A system TrueType font for Unicode output, such as DejaVu Sans.
 - zlib development headers are optional and enable PNG alpha support when found.
+- libcurl development headers are optional and enable HTTP/HTTPS image fetching when `RAYOMD_USE_CURL=ON`.
 
 Ubuntu/WSL dependencies:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y g++ cmake fonts-dejavu-core libcurl4-openssl-dev zlib1g-dev
+sudo apt-get install -y g++ cmake fonts-dejavu-core zlib1g-dev
 ```
 
 Build:
@@ -212,6 +213,16 @@ Build:
 ```sh
 cmake -S . -B build/linux -DCMAKE_BUILD_TYPE=Release
 cmake --build build/linux --config Release
+```
+
+This default Linux build does not link libcurl, avoiding distro-specific
+`libcurl.so.4` symbol-version requirements in portable binaries. HTTP/HTTPS
+images degrade to fallback text in that build. To enable Linux URL image
+fetching, install libcurl development headers and configure with:
+
+```sh
+cmake -S . -B build/linux-curl -DCMAKE_BUILD_TYPE=Release -DRAYOMD_USE_CURL=ON
+cmake --build build/linux-curl --config Release
 ```
 
 Output:
@@ -247,6 +258,9 @@ GitHub Actions run the release-critical checks on every push and pull request:
 5. Export with the button or `Ctrl+E`.
 
 ### CLI
+
+Only the input and output paths are required for `--export`; engine, style, and
+margin default to `native`, `elegant`, and `normal`.
 
 Windows:
 
@@ -300,7 +314,7 @@ Exit codes:
 | Code | Meaning |
 |---:|---|
 | `0` | Success |
-| `2` | Missing CLI arguments |
+| `2` | Missing or invalid CLI arguments |
 | `3` | Input file could not be read |
 | `11` | Native exporter could not load a system font |
 | `12` | Native exporter could not write the PDF |

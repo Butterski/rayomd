@@ -36,8 +36,8 @@ become a required dependency for the default lightweight package.
 Native PDF mode supports the core document features listed in `README.md`,
 including headings, paragraphs, lists, block quotes, fenced code blocks, pipe
 tables, rule lines, simple math cleanup/boxes, inline emphasis cleanup,
-clickable Markdown links, and standalone local or HTTP/HTTPS images with
-fallback text.
+clickable Markdown links, standalone local images, and HTTP/HTTPS images on
+Windows or curl-enabled Linux builds with fallback text.
 
 Important image/link details:
 
@@ -132,6 +132,10 @@ Linux release build:
 cmake -S . -B build/linux -DCMAKE_BUILD_TYPE=Release
 cmake --build build/linux --config Release
 ```
+
+The default Linux build intentionally avoids a libcurl runtime dependency. Use
+`-DRAYOMD_USE_CURL=ON` only when producing a Linux build that should fetch
+HTTP/HTTPS images and can target a known distro/libcurl baseline.
 
 Linux verification:
 

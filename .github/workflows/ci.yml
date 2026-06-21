@@ -36,6 +36,11 @@ jobs:
       - name: Verify Linux build and exporter
         run: sh scripts/verify-linux.sh
 
+      - name: Build Linux CLI with optional libcurl
+        run: |
+          cmake -S . -B build/linux-curl -DCMAKE_BUILD_TYPE=Release -DRAYOMD_USE_CURL=ON
+          cmake --build build/linux-curl --config Release
+
       - name: Perf watcher quick smoke
         run: |
           python3 -B scripts/perf_watch.py \

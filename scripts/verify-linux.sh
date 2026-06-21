@@ -21,12 +21,33 @@ if [ ! -f tester.md ]; then
     exit 1
 fi
 
-cmake -S . -B build/linux-verify -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build/linux-verify -DCMAKE_BUILD_TYPE=Release -DRAYOMD_USE_CURL=OFF
 cmake --build build/linux-verify --config Release
 
 BIN=build/linux-verify/rayomd
 
+if command -v ldd >/dev/null 2>&1 && ldd "$BIN" 2>/dev/null | grep -q 'libcurl'; then
+    echo "Default Linux verification build should not link libcurl; use -DRAYOMD_USE_CURL=ON only for URL image support." >&2
+    exit 1
+fi
+
 mkdir -p benchmark-output/linux-verify
+
+"$BIN" --export tester.md benchmark-output/linux-verify/defaults.pdf
+test -s benchmark-output/linux-verify/defaults.pdf
+
+if "$BIN" --export tester.md > benchmark-output/linux-verify/export-missing-args.txt 2>&1; then
+    echo "Expected --export with a missing output path to fail." >&2
+    exit 1
+fi
+grep -q -- "--export requires" benchmark-output/linux-verify/export-missing-args.txt
+grep -q "Usage:" benchmark-output/linux-verify/export-missing-args.txt
+
+if "$BIN" --export benchmark-output/linux-verify/missing.md benchmark-output/linux-verify/missing.pdf > benchmark-output/linux-verify/export-missing-input.txt 2>&1; then
+    echo "Expected --export with a missing input file to fail." >&2
+    exit 1
+fi
+grep -q "could not read input Markdown file" benchmark-output/linux-verify/export-missing-input.txt
 
 "$BIN" --export tester.md benchmark-output/linux-verify/tester.pdf native elegant normal
 "$BIN" --bench tester.md benchmark-output/linux-verify/bench-unicode 100 elegant normal

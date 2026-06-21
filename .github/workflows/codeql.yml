@@ -44,7 +44,7 @@ jobs:
 
       - name: Build Linux CLI for analysis
         run: |
-          cmake -S . -B build/codeql -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build/codeql -DCMAKE_BUILD_TYPE=Release -DRAYOMD_USE_CURL=ON
           cmake --build build/codeql --config Release
 
       - name: Perform CodeQL Analysis

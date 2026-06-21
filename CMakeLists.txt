@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(RAYOMD_USE_SIMDUTF "Use vendored simdutf for UTF conversion" OFF)
+option(RAYOMD_USE_CURL "Use libcurl for HTTP/HTTPS image URLs on non-Windows" OFF)
 
 set(RAYOMD_SIMDUTF_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simdutf/singleheader/simdutf.cpp")
 set(RAYOMD_SIMDUTF_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simdutf/singleheader")
@@ -67,7 +68,9 @@ if(WIN32)
     rayomd_common_definitions(rayomd)
     rayomd_release_flags(rayomd)
 else()
-    find_package(CURL REQUIRED)
+    if(RAYOMD_USE_CURL)
+        find_package(CURL REQUIRED)
+    endif()
     find_package(ZLIB QUIET)
 
     add_executable(rayomd
@@ -75,7 +78,7 @@ else()
         src/cli/main_cli.cpp
     )
     target_include_directories(rayomd PRIVATE include)
-    if(CURL_FOUND)
+    if(RAYOMD_USE_CURL)
         target_link_libraries(rayomd PRIVATE CURL::libcurl)
         target_compile_definitions(rayomd PRIVATE RAYOMD_USE_CURL=1)
     endif()
