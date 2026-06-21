@@ -1834,7 +1834,7 @@ static size_t CurlWriteImageBytes(char* ptr, size_t size, size_t nmemb, void* us
 
 static curl_socket_t CurlOpenSocketChecked(void*, curlsocktype purpose, struct curl_sockaddr* address) {
     if (!address) return CURL_SOCKET_BAD;
-    if (purpose == CURLSOCKTYPE_IPCXN && IsUnsafeSocketAddress(address->addr)) {
+    if (purpose == CURLSOCKTYPE_IPCXN && IsUnsafeSocketAddress(&address->addr)) {
         return CURL_SOCKET_BAD;
     }
     return socket(address->family, address->socktype, address->protocol);
@@ -1850,8 +1850,13 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
     bytes.clear();
     CurlImageBuffer buffer{ &bytes, false };
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
     curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+#endif
     curl_easy_setopt(curl, CURLOPT_PROXY, "");
     curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, CurlOpenSocketChecked);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
