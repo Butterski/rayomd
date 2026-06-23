@@ -6,7 +6,7 @@
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/md2pdf/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 1.1.1" src="https://img.shields.io/badge/version-1.1.1-informational">
+  <img alt="Version: 1.1.2" src="https://img.shields.io/badge/version-1.1.2-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
@@ -42,7 +42,7 @@ CLI.
 - Single Windows GUI executable for the default release.
 - Compact non-Windows CLI binary.
 - Fast warm conversion for small and medium documents.
-- Batch, stdin batch, warm serve, and benchmark modes.
+- Batch, stdin Markdown export, stdin batch, warm serve, and benchmark modes.
 - Unicode output through subset embedded system fonts.
 - Standard PDF font path for ASCII documents.
 - Safe local image support with fallback text; HTTP/HTTPS images are explicit opt-in on Windows and curl-enabled Linux builds.
@@ -264,16 +264,21 @@ GitHub Actions run the release-critical checks on every push and pull request:
 
 ### CLI
 
-Only the input and output paths are required for `--export`; engine, style, and
-margin default to `native`, `elegant`, and `normal`. Local images are
-contained to the input Markdown file directory by default, and URL images are
-disabled unless `--allow-url-images` is passed or the Windows GUI checkbox is enabled.
+Only the input and output paths are required for `--export`; use
+`--stdin <output.pdf>` when piping Markdown content from another program.
+Engine, style, and margin default to `native`, `elegant`, and `normal`. Local
+images are contained to the input Markdown file directory by default, and URL
+images are disabled unless `--allow-url-images` is passed or the Windows GUI
+checkbox is enabled. Stdin exports have no input-file directory, so relative
+local images render as fallback text unless `--allow-unsafe-local-images` is
+explicitly used for trusted content.
 
 Windows:
 
 ```batch
 rayomd.exe --version
 rayomd.exe --export input.md output.pdf native elegant normal
+type input.md | rayomd.exe --stdin output.pdf native elegant normal
 rayomd.exe --batch input-folder output-folder native modern normal
 type files.txt | rayomd.exe --stdin-batch output-folder native modern normal
 rayomd.exe --serve output-folder native modern normal
@@ -285,6 +290,7 @@ Linux / WSL:
 ```sh
 ./rayomd --version
 ./rayomd --export input.md output.pdf native elegant normal
+cat input.md | ./rayomd --stdin output.pdf native elegant normal
 ./rayomd --batch input-folder output-folder native modern normal
 cat files.txt | ./rayomd --stdin-batch output-folder native modern normal
 ./rayomd --serve output-folder native modern normal
@@ -297,8 +303,9 @@ Modes:
 |---|---|
 | `--version` | Print the compiled project version |
 | `--export` | Convert one Markdown file |
+| `--stdin` | Convert Markdown content read from stdin into one PDF |
 | `--batch` | Convert every `.md` file in a folder |
-| `--stdin-batch` | Feed file paths from another process |
+| `--stdin-batch` | Feed Markdown file paths from another process |
 | `--serve` | Keep one process warm and convert paths sent over stdin |
 | `--bench` | Measure native PDF generation time and output size |
 
@@ -327,7 +334,7 @@ Exit codes:
 |---:|---|
 | `0` | Success |
 | `2` | Missing or invalid CLI arguments |
-| `3` | Input file could not be read |
+| `3` | Input file or stdin Markdown could not be read |
 | `11` | Native exporter could not load a system font |
 | `12` | Native exporter could not write the PDF |
 | `20` | Pandoc export failed or is unsupported in this build |

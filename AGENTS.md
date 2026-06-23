@@ -64,7 +64,8 @@ Important image/link details:
 
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single
-  export, folder batch, stdin batch, warm serve mode, and benchmarks.
+  export, stdin Markdown export, folder batch, stdin batch, warm serve mode,
+  and benchmarks.
 
 - `src/win32/main_win32.cpp`
   Windows Dear ImGui + DirectX 11 app, Windows CLI glue, drag/drop, Pandoc mode,

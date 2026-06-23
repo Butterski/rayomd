@@ -36,6 +36,27 @@ mkdir -p benchmark-output/linux-verify
 "$BIN" --export tester.md benchmark-output/linux-verify/defaults.pdf
 test -s benchmark-output/linux-verify/defaults.pdf
 
+printf '# Stdin Verify
+
+Hello **stdin**.
+' | "$BIN" --stdin benchmark-output/linux-verify/stdin.pdf native modern normal
+test -s benchmark-output/linux-verify/stdin.pdf
+
+printf '# Stdin Image Fallback
+
+![stdin-local](relative.png)
+' | "$BIN" --stdin benchmark-output/linux-verify/stdin-no-extension native elegant normal
+test -s benchmark-output/linux-verify/stdin-no-extension.pdf
+grep -a -q "stdin-local" benchmark-output/linux-verify/stdin-no-extension.pdf
+
+if printf '# Missing Output
+' | "$BIN" --stdin > benchmark-output/linux-verify/stdin-missing-args.txt 2>&1; then
+    echo "Expected --stdin with a missing output path to fail." >&2
+    exit 1
+fi
+grep -q -- "--stdin requires" benchmark-output/linux-verify/stdin-missing-args.txt
+grep -q "Usage:" benchmark-output/linux-verify/stdin-missing-args.txt
+
 if "$BIN" --export tester.md > benchmark-output/linux-verify/export-missing-args.txt 2>&1; then
     echo "Expected --export with a missing output path to fail." >&2
     exit 1

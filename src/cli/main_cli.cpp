@@ -61,6 +61,24 @@ bool ReadUtf8FilePortable(const fs::path& path, std::string& content) {
     return size == 0 || (bool)file.read(content.data(), size);
 }
 
+bool ReadStdinPortable(std::string& content) {
+    content.clear();
+    char buffer[64 * 1024];
+    while (std::cin) {
+        std::cin.read(buffer, sizeof(buffer));
+        std::streamsize read = std::cin.gcount();
+        if (read > 0) {
+            if ((long long)content.size() + read > kMaxMarkdownInputBytes) return false;
+            content.append(buffer, buffer + read);
+        }
+        if (!std::cin) {
+            if (std::cin.eof()) break;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool WriteBinaryFilePortable(const fs::path& path, const std::string& content) {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) return false;
@@ -160,24 +178,21 @@ fs::path PdfNameForMarkdown(const fs::path& path) {
     return out;
 }
 
-int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath,
-    const CliExportOptions& options, std::string& pdfBuffer) {
-    std::string markdown;
-    if (!ReadUtf8FilePortable(inputPath, markdown)) {
-        std::cerr << "Error: could not read input Markdown file: " << PathToUtf8(inputPath) << "\n";
-        return 3;
-    }
+int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourcePath,
+    const fs::path& outputPath, const CliExportOptions& options, std::string& pdfBuffer,
+    const std::string& inputLabel) {
     pdfBuffer.clear();
     TinyPdf::BuildOptions pdfOptions;
     pdfOptions.styleIdx = options.style;
     pdfOptions.marginIdx = options.margin;
-    pdfOptions.sourcePath = PathToUtf8(inputPath);
+    pdfOptions.sourcePath = sourcePath;
     pdfOptions.enableUrlImages = options.enableUrlImages;
     pdfOptions.allowUnsafeLocalImages = options.allowUnsafeLocalImages;
     if (!TinyPdf::BuildPdfBytes(markdown, pdfOptions, pdfBuffer)) {
         int code = 10 + TinyPdf::g_lastError;
-        std::cerr << "Error: native PDF export failed for " << PathToUtf8(inputPath)
-            << " (code " << code << ").\n";
+        std::cerr << "Error: native PDF export failed";
+        if (!inputLabel.empty()) std::cerr << " for " << inputLabel;
+        std::cerr << " (code " << code << ").\n";
         return code;
     }
     if (!WriteBinaryFilePortable(outputPath, pdfBuffer)) {
@@ -185,6 +200,35 @@ int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath,
         return 12;
     }
     return 0;
+}
+
+int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath,
+    const CliExportOptions& options, std::string& pdfBuffer) {
+    std::string markdown;
+    if (!ReadUtf8FilePortable(inputPath, markdown)) {
+        std::cerr << "Error: could not read input Markdown file: " << PathToUtf8(inputPath) << "\n";
+        return 3;
+    }
+    return BuildNativePdfMarkdown(markdown, PathToUtf8(inputPath), outputPath, options,
+        pdfBuffer, PathToUtf8(inputPath));
+}
+
+int RunStdinExport(const fs::path& outputPath, const CliExportOptions& options) {
+    if (options.engine != 0) {
+        std::cerr << "Error: stdin export only supports native mode.\n";
+        return 20;
+    }
+
+    std::string markdown;
+    if (!ReadStdinPortable(markdown)) {
+        std::cerr << "Error: could not read Markdown from stdin or input exceeded "
+            << kMaxMarkdownInputBytes << " bytes.\n";
+        return 3;
+    }
+
+    std::string pdfBuffer;
+    pdfBuffer.reserve(1024 * 1024);
+    return BuildNativePdfMarkdown(markdown, std::string(), outputPath, options, pdfBuffer, std::string());
 }
 
 int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const CliExportOptions& options) {
@@ -341,6 +385,7 @@ void PrintUsage() {
         << "Usage:\n"
         << "  rayomd --version\n"
         << "  rayomd --export <input.md> <output.pdf> [native] [style] [margin]\n"
+        << "  rayomd --stdin <output.pdf> [native] [style] [margin]\n"
         << "  rayomd --batch <input-folder> <output-folder> [native] [style] [margin]\n"
         << "  rayomd --stdin-batch <output-folder> [native] [style] [margin]\n"
         << "  rayomd --serve <output-folder> [native] [style] [margin]\n"
@@ -371,6 +416,15 @@ int main(int argc, char** argv) {
     if (command == "--version" || command == "-v") {
         std::cout << "rayomd " << RAYOMD_VERSION << "\n";
         return 0;
+    }
+
+    if (command == "--stdin") {
+        if (argc < 3) return PrintArgumentError("--stdin requires <output.pdf>.");
+        std::string error;
+        if (!ParseExportOptions(argc, argv, 3, options, error)) return PrintArgumentError(error);
+        fs::path outputPath(argv[2]);
+        if (outputPath.extension() != ".pdf") outputPath += ".pdf";
+        return RunStdinExport(outputPath, options);
     }
 
     if (command == "--stdin-batch") {

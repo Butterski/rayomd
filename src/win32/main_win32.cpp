@@ -620,7 +620,8 @@ int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, 
     return failures == 0 ? 0 : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20);
 }
 
-bool ReadAllStdin(std::string& input) {
+bool ReadAllStdin(std::string& input, size_t maxBytes = (size_t)kMaxMarkdownInputBytes) {
+    input.clear();
     HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
     if (hIn == INVALID_HANDLE_VALUE || hIn == nullptr) return false;
 
@@ -631,6 +632,7 @@ bool ReadAllStdin(std::string& input) {
             return GetLastError() == ERROR_BROKEN_PIPE;
         }
         if (read == 0) return true;
+        if (maxBytes != 0 && input.size() + read > maxBytes) return false;
         input.append(buf, buf + read);
     }
 }
@@ -647,7 +649,7 @@ int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& o
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
     std::string list;
-    if (!ReadAllStdin(list)) return 3;
+    if (!ReadAllStdin(list, 0)) return 3;
 
     int failures = 0;
     std::string warning;
@@ -662,6 +664,22 @@ int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& o
 
     if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
     return failures == 0 ? 0 : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20);
+}
+
+int RunStdinExport(const std::wstring& outputPath, const WinExportOptions& options) {
+    if (options.engine != 0) {
+        WriteStdoutLine("Error: stdin export only supports native mode.");
+        return 20;
+    }
+
+    std::string markdown;
+    if (!ReadAllStdin(markdown)) {
+        WriteStdoutLine("Error: could not read Markdown from stdin or input exceeded " +
+            std::to_string(kMaxMarkdownInputBytes) + " bytes.");
+        return 3;
+    }
+
+    return ExportNativePdf(markdown, outputPath, options, L"") ? 0 : 10 + GetNativePdfLastError();
 }
 
 std::string FormatDurationMs(double ms) {    char buf[64];
@@ -801,8 +819,9 @@ int TryCommandLineExport() {
     }
 
     if (argc < 2 || (lstrcmpiW(argv[1], L"--export") != 0 &&
-        lstrcmpiW(argv[1], L"--batch") != 0 && lstrcmpiW(argv[1], L"--stdin-batch") != 0 &&
-        lstrcmpiW(argv[1], L"--serve") != 0 && lstrcmpiW(argv[1], L"--bench") != 0)) {
+        lstrcmpiW(argv[1], L"--stdin") != 0 && lstrcmpiW(argv[1], L"--batch") != 0 &&
+        lstrcmpiW(argv[1], L"--stdin-batch") != 0 && lstrcmpiW(argv[1], L"--serve") != 0 &&
+        lstrcmpiW(argv[1], L"--bench") != 0)) {
         LocalFree(argv);
         return -1;
     }
@@ -815,6 +834,24 @@ int TryCommandLineExport() {
         WriteStdoutLine("Error: " + WideToUtf8(error));
         return false;
     };
+
+    if (lstrcmpiW(argv[1], L"--stdin") == 0) {
+        if (argc < 3) {
+            LocalFree(argv);
+            return 2;
+        }
+        if (!parseOrReport(3)) {
+            LocalFree(argv);
+            return 2;
+        }
+        std::wstring outputPath = argv[2];
+        if (outputPath.size() < 4 || _wcsicmp(outputPath.c_str() + outputPath.size() - 4, L".pdf") != 0) {
+            outputPath += L".pdf";
+        }
+        int result = RunStdinExport(outputPath, options);
+        LocalFree(argv);
+        return result;
+    }
 
     if (lstrcmpiW(argv[1], L"--stdin-batch") == 0) {
         if (argc < 3) {
