@@ -1568,39 +1568,60 @@ static bool IsPathContainedInRoot(const std::filesystem::path& child, const std:
     return true;
 }
 
-static bool ResolveUnsafeLocalImagePath(const std::string& src, const BuildOptions& options,
-    std::string& key, std::string& pathUtf8) {
-    std::filesystem::path path = PathFromUtf8(src);
-    if (path.is_relative() && !options.sourcePath.empty()) {
-        std::filesystem::path base = PathFromUtf8(options.sourcePath);
-        if (base.has_filename()) base = base.parent_path();
-        path = base / path;
+class LocalImagePolicy {
+public:
+    explicit LocalImagePolicy(const BuildOptions& options)
+        : allowUnsafe(options.allowUnsafeLocalImages),
+          hasSourcePath(!options.sourcePath.empty()) {
+        if (!hasSourcePath) return;
+
+        sourceBase = PathFromUtf8(options.sourcePath);
+        if (sourceBase.has_filename()) sourceBase = sourceBase.parent_path();
+
+        safeBase = sourceBase;
+        if (safeBase.empty()) safeBase = ".";
     }
 
-    std::filesystem::path normalized = CanonicalForPolicy(path);
-    pathUtf8 = PathToUtf8(normalized);
-    key = "file:" + pathUtf8;
-    return true;
-}
+    bool Resolve(const std::string& src, std::string& key, std::string& pathUtf8) {
+        if (src.empty() || IsHttpUrl(src)) return false;
+        if (allowUnsafe) return ResolveUnsafe(src, key, pathUtf8);
+        if (!hasSourcePath || IsUnsafeLocalImageSource(src)) return false;
 
-static bool ResolveLocalImagePath(const std::string& src, const BuildOptions& options,
-    std::string& key, std::string& pathUtf8) {
-    if (src.empty() || IsHttpUrl(src)) return false;
-    if (options.allowUnsafeLocalImages) return ResolveUnsafeLocalImagePath(src, options, key, pathUtf8);
-    if (options.sourcePath.empty() || IsUnsafeLocalImageSource(src)) return false;
+        const std::filesystem::path& root = SafeRoot();
+        std::filesystem::path normalized = CanonicalForPolicy(root / PathFromUtf8(src));
+        if (!IsPathContainedInRoot(normalized, root)) return false;
 
-    std::filesystem::path base = PathFromUtf8(options.sourcePath);
-    if (base.has_filename()) base = base.parent_path();
-    if (base.empty()) base = ".";
+        pathUtf8 = PathToUtf8(normalized);
+        key = "file:" + pathUtf8;
+        return true;
+    }
 
-    std::filesystem::path root = CanonicalForPolicy(base);
-    std::filesystem::path normalized = CanonicalForPolicy(root / PathFromUtf8(src));
-    if (!IsPathContainedInRoot(normalized, root)) return false;
+private:
+    const std::filesystem::path& SafeRoot() {
+        if (!safeRootReady) {
+            safeRoot = CanonicalForPolicy(safeBase);
+            safeRootReady = true;
+        }
+        return safeRoot;
+    }
 
-    pathUtf8 = PathToUtf8(normalized);
-    key = "file:" + pathUtf8;
-    return true;
-}
+    bool ResolveUnsafe(const std::string& src, std::string& key, std::string& pathUtf8) const {
+        std::filesystem::path path = PathFromUtf8(src);
+        if (path.is_relative() && hasSourcePath) path = sourceBase / path;
+
+        std::filesystem::path normalized = CanonicalForPolicy(path);
+        pathUtf8 = PathToUtf8(normalized);
+        key = "file:" + pathUtf8;
+        return true;
+    }
+
+    bool allowUnsafe = false;
+    bool hasSourcePath = false;
+    bool safeRootReady = false;
+    std::filesystem::path sourceBase;
+    std::filesystem::path safeBase;
+    std::filesystem::path safeRoot;
+};
 
 static bool ReadLocalImageFile(const std::string& pathUtf8, std::vector<uint8_t>& bytes) {
 #ifdef _WIN32
@@ -2548,7 +2569,7 @@ static bool DecodeImageBytes(const std::vector<uint8_t>& bytes, PdfImage& image)
 
 class ImageRegistry {
 public:
-    explicit ImageRegistry(const BuildOptions& opts) : options(opts) {}
+    explicit ImageRegistry(const BuildOptions& opts) : options(opts), localPolicy(opts) {}
 
     bool Resolve(const std::string& src, const std::string& alt, int& index) {
         std::string key;
@@ -2556,7 +2577,7 @@ public:
         bool isUrl = IsHttpUrl(src);
         if (isUrl) {
             key = "url:" + src;
-        } else if (!ResolveLocalImagePath(src, options, key, localPathUtf8)) {
+        } else if (!localPolicy.Resolve(src, key, localPathUtf8)) {
             return false;
         }
 
@@ -2597,6 +2618,7 @@ public:
 
 private:
     const BuildOptions& options;
+    LocalImagePolicy localPolicy;
     std::vector<PdfImage> images;
     std::unordered_map<std::string, int> indexByKey;
 
