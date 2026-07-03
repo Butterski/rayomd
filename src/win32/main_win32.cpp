@@ -719,6 +719,10 @@ int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, 
     return failures == 0 ? 0 : (lastResult != 0 ? lastResult : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20));
 }
 
+bool IsCleanStdinEof(DWORD error) {
+    return error == ERROR_BROKEN_PIPE || error == ERROR_HANDLE_EOF || error == ERROR_NO_DATA;
+}
+
 bool ReadAllStdin(std::string& input, size_t maxBytes = (size_t)kMaxMarkdownInputBytes) {
     input.clear();
     HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
@@ -728,7 +732,7 @@ bool ReadAllStdin(std::string& input, size_t maxBytes = (size_t)kMaxMarkdownInpu
     for (;;) {
         DWORD read = 0;
         if (!ReadFile(hIn, buf, sizeof(buf), &read, nullptr)) {
-            return GetLastError() == ERROR_BROKEN_PIPE;
+            return IsCleanStdinEof(GetLastError());
         }
         if (read == 0) return true;
         if (maxBytes != 0 && input.size() + read > maxBytes) return false;

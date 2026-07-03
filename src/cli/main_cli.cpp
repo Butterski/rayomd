@@ -94,6 +94,40 @@ std::string PathToUtf8(const fs::path& path) {
     return path.u8string();
 }
 
+bool IsDirectoryPortable(const fs::path& path, std::string& error) {
+    std::error_code ec;
+    bool exists = fs::exists(path, ec);
+    if (ec) {
+        error = ec.message();
+        return false;
+    }
+    if (!exists) {
+        error = "does not exist";
+        return false;
+    }
+    bool isDirectory = fs::is_directory(path, ec);
+    if (ec) {
+        error = ec.message();
+        return false;
+    }
+    if (!isDirectory) {
+        error = "not a directory";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool EnsureDirectoryPortable(const fs::path& path, std::string& error) {
+    std::error_code ec;
+    fs::create_directories(path, ec);
+    if (ec) {
+        error = ec.message();
+        return false;
+    }
+    return IsDirectoryPortable(path, error);
+}
+
 std::string Lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
         [](unsigned char c) { return (char)std::tolower(c); });
@@ -236,14 +270,51 @@ int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const Cl
         std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
         return 20;
     }
-    fs::create_directories(outputDir);
+
+    std::string fsError;
+    if (!IsDirectoryPortable(inputDir, fsError)) {
+        std::cerr << "Error: input folder is not a readable directory: " << PathToUtf8(inputDir);
+        if (!fsError.empty()) std::cerr << " (" << fsError << ")";
+        std::cerr << "\n";
+        return 3;
+    }
+    if (!EnsureDirectoryPortable(outputDir, fsError)) {
+        std::cerr << "Error: could not create output folder: " << PathToUtf8(outputDir);
+        if (!fsError.empty()) std::cerr << " (" << fsError << ")";
+        std::cerr << "\n";
+        return 12;
+    }
+
+    std::error_code iterError;
+    fs::directory_iterator it(inputDir, iterError);
+    if (iterError) {
+        std::cerr << "Error: could not read input folder: " << PathToUtf8(inputDir)
+            << " (" << iterError.message() << ")\n";
+        return 3;
+    }
 
     std::string pdfBuffer;
     pdfBuffer.reserve(1024 * 1024);
     int failures = 0;
     int lastResult = 0;
-    for (const auto& entry : fs::directory_iterator(inputDir)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".md") continue;
+    for (fs::directory_iterator end; it != end; it.increment(iterError)) {
+        if (iterError) {
+            std::cerr << "Error: could not continue reading input folder: " << PathToUtf8(inputDir)
+                << " (" << iterError.message() << ")\n";
+            return 3;
+        }
+        const fs::directory_entry& entry = *it;
+        std::error_code entryError;
+        if (!entry.is_regular_file(entryError)) {
+            if (entryError) {
+                failures++;
+                lastResult = 3;
+                std::cerr << "Error: could not inspect batch entry: " << PathToUtf8(entry.path())
+                    << " (" << entryError.message() << ")\n";
+            }
+            continue;
+        }
+        if (entry.path().extension() != ".md") continue;
         fs::path outputPath = outputDir / PdfNameForMarkdown(entry.path());
         int result = BuildNativePdfFile(entry.path(), outputPath, options, pdfBuffer);
         if (result != 0) {
@@ -263,7 +334,13 @@ int RunStdinBatchExport(const fs::path& outputDir, const CliExportOptions& optio
         std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
         return 20;
     }
-    fs::create_directories(outputDir);
+    std::string fsError;
+    if (!EnsureDirectoryPortable(outputDir, fsError)) {
+        std::cerr << "Error: could not create output folder: " << PathToUtf8(outputDir);
+        if (!fsError.empty()) std::cerr << " (" << fsError << ")";
+        std::cerr << "\n";
+        return 12;
+    }
 
     std::string pdfBuffer;
     pdfBuffer.reserve(1024 * 1024);
@@ -293,7 +370,13 @@ int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
         std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
         return 20;
     }
-    fs::create_directories(outputDir);
+    std::string fsError;
+    if (!EnsureDirectoryPortable(outputDir, fsError)) {
+        std::cerr << "Error: could not create output folder: " << PathToUtf8(outputDir);
+        if (!fsError.empty()) std::cerr << " (" << fsError << ")";
+        std::cerr << "\n";
+        return 12;
+    }
 
     std::string pdfBuffer;
     pdfBuffer.reserve(1024 * 1024);
@@ -322,7 +405,13 @@ int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
 
 int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int iterations, const CliExportOptions& cliOptions) {
     if (iterations < 1) iterations = 1;
-    fs::create_directories(outputDir);
+    std::string fsError;
+    if (!EnsureDirectoryPortable(outputDir, fsError)) {
+        std::cerr << "Error: could not create benchmark output folder: " << PathToUtf8(outputDir);
+        if (!fsError.empty()) std::cerr << " (" << fsError << ")";
+        std::cerr << "\n";
+        return 12;
+    }
 
     std::string markdown;
     if (!ReadUtf8FilePortable(inputPath, markdown)) {

@@ -307,6 +307,15 @@ static bool IsPageBreakLine(std::string_view trimmed) {
         EqualsAsciiInsensitive(marker, "page-break");
 }
 
+static std::string_view TrimHeadingClosingSequence(std::string_view view) {
+    view = RTrimView(view);
+    size_t hashStart = view.size();
+    while (hashStart > 0 && view[hashStart - 1] == '#') hashStart--;
+    if (hashStart == view.size()) return view;
+    if (hashStart == 0 || !IsSpace(view[hashStart - 1])) return view;
+    return RTrimView(view.substr(0, hashStart));
+}
+
 static bool ParseHeading(std::string_view line, int& level, std::string& text) {
     std::string_view s = LTrimView(line);
     int count = 0;
@@ -314,9 +323,7 @@ static bool ParseHeading(std::string_view line, int& level, std::string& text) {
     if (count < 1 || count > 6) return false;
     if ((int)s.size() > count && !IsSpace(s[count])) return false;
     level = count;
-    std::string_view view = TrimView(s.substr(count));
-    while (!view.empty() && view.back() == '#') view.remove_suffix(1);
-    view = RTrimView(view);
+    std::string_view view = TrimHeadingClosingSequence(TrimView(s.substr(count)));
     text = ToString(view);
     return true;
 }
@@ -328,9 +335,7 @@ static bool ParseHeadingView(std::string_view line, int& level, std::string_view
     if (count < 1 || count > 6) return false;
     if ((int)s.size() > count && !IsSpace(s[count])) return false;
     level = count;
-    text = TrimView(s.substr(count));
-    while (!text.empty() && text.back() == '#') text.remove_suffix(1);
-    text = RTrimView(text);
+    text = TrimHeadingClosingSequence(TrimView(s.substr(count)));
     return true;
 }
 
@@ -487,6 +492,65 @@ static std::string NormalizeSymbols(std::string s) {
     return s;
 }
 
+struct MarkdownInlineLink {
+    std::string_view label;
+    std::string_view target;
+    size_t end = std::string_view::npos;
+};
+
+static size_t FindInlineDestinationEnd(std::string_view source, size_t openParen) {
+    if (openParen >= source.size() || source[openParen] != '(') return std::string_view::npos;
+
+    int parenDepth = 0;
+    bool escaped = false;
+    bool inAngleDestination = false;
+    for (size_t i = openParen + 1; i < source.size(); i++) {
+        char ch = source[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (inAngleDestination) {
+            if (ch == '>') inAngleDestination = false;
+            continue;
+        }
+        if (ch == '<') {
+            inAngleDestination = true;
+            continue;
+        }
+        if (ch == '(') {
+            parenDepth++;
+            continue;
+        }
+        if (ch == ')') {
+            if (parenDepth == 0) return i;
+            parenDepth--;
+        }
+    }
+    return std::string_view::npos;
+}
+
+static bool ParseInlineLinkSyntaxAt(std::string_view source, size_t start, size_t labelOffset,
+    MarkdownInlineLink& link) {
+    if (start + labelOffset >= source.size()) return false;
+    size_t close = source.find("](", start + labelOffset);
+    if (close == std::string_view::npos) return false;
+    size_t openParen = close + 1;
+    size_t end = FindInlineDestinationEnd(source, openParen);
+    if (end == std::string_view::npos) return false;
+
+    link.label = source.substr(start + labelOffset, close - (start + labelOffset));
+    link.target = source.substr(openParen + 1, end - (openParen + 1));
+    link.end = end + 1;
+    return true;
+}
+
+static bool ExtractMarkdownDestination(std::string_view target, std::string& dest);
+
 static std::string StripInlineMarkdown(std::string_view input) {
     if (input.find_first_of("!*_~`$[\\") == std::string_view::npos &&
         input.find('\xE2') == std::string_view::npos) {
@@ -499,28 +563,26 @@ static std::string StripInlineMarkdown(std::string_view input) {
 
     for (size_t i = 0; i < source.size();) {
         if (source[i] == '!' && i + 1 < source.size() && source[i + 1] == '[') {
-            size_t close = source.find("](", i + 2);
-            size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
-            if (close != std::string::npos && end != std::string::npos) {
+            MarkdownInlineLink link;
+            if (ParseInlineLinkSyntaxAt(source, i, 2, link)) {
                 out += "image: ";
-                out += source.substr(i + 2, close - (i + 2));
-                i = end + 1;
+                out.append(link.label.data(), link.label.size());
+                i = link.end;
                 continue;
             }
         }
 
         if (source[i] == '[') {
-            size_t close = source.find("](", i + 1);
-            size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
-            if (close != std::string::npos && end != std::string::npos) {
-                out += source.substr(i + 1, close - (i + 1));
-                std::string url = source.substr(close + 2, end - (close + 2));
-                if (!url.empty()) {
+            MarkdownInlineLink link;
+            if (ParseInlineLinkSyntaxAt(source, i, 1, link)) {
+                out.append(link.label.data(), link.label.size());
+                std::string url;
+                if (ExtractMarkdownDestination(link.target, url)) {
                     out += " <";
-                    out += url;
+                    out.append(url.data(), url.size());
                     out += ">";
                 }
-                i = end + 1;
+                i = link.end;
                 continue;
             }
         }
@@ -579,21 +641,37 @@ struct ImageSyntax {
     std::string src;
 };
 
-static bool ExtractMarkdownDestination(std::string_view target, std::string_view& dest) {
+static std::string UnescapeMarkdownDestination(std::string_view dest) {
+    std::string out;
+    out.reserve(dest.size());
+    for (size_t i = 0; i < dest.size(); i++) {
+        if (dest[i] == '\\' && i + 1 < dest.size() && std::ispunct((unsigned char)dest[i + 1])) {
+            out.push_back(dest[i + 1]);
+            i++;
+            continue;
+        }
+        out.push_back(dest[i]);
+    }
+    return out;
+}
+
+static bool ExtractMarkdownDestination(std::string_view target, std::string& dest) {
     target = TrimView(target);
     if (target.empty()) return false;
 
+    std::string_view view;
     if (target.front() == '<') {
         size_t end = target.find('>');
         if (end == std::string_view::npos || end == 1) return false;
-        dest = target.substr(1, end - 1);
+        view = target.substr(1, end - 1);
     } else {
         size_t end = 0;
         while (end < target.size() && !IsSpace(target[end])) end++;
-        dest = target.substr(0, end);
+        view = target.substr(0, end);
     }
 
-    dest = TrimView(dest);
+    view = TrimView(view);
+    dest = UnescapeMarkdownDestination(view);
     return !dest.empty();
 }
 
@@ -601,20 +679,16 @@ static bool ParseStandaloneImage(std::string_view line, ImageSyntax* image) {
     std::string_view s = TrimView(line);
     if (s.size() < 5 || s[0] != '!' || s[1] != '[') return false;
 
-    size_t closeAlt = s.find("](", 2);
-    if (closeAlt == std::string_view::npos) return false;
-    size_t closeParen = s.rfind(')');
-    if (closeParen == std::string_view::npos || closeParen <= closeAlt + 2) return false;
-    if (!TrimView(s.substr(closeParen + 1)).empty()) return false;
+    MarkdownInlineLink link;
+    if (!ParseInlineLinkSyntaxAt(s, 0, 2, link)) return false;
+    if (!TrimView(s.substr(link.end)).empty()) return false;
 
-    std::string_view alt = s.substr(2, closeAlt - 2);
-    std::string_view target = TrimView(s.substr(closeAlt + 2, closeParen - (closeAlt + 2)));
-    std::string_view src;
-    if (!ExtractMarkdownDestination(target, src)) return false;
+    std::string src;
+    if (!ExtractMarkdownDestination(link.target, src)) return false;
 
     if (image) {
-        image->alt = StripInlineMarkdown(alt);
-        image->src = ToString(src);
+        image->alt = StripInlineMarkdown(link.label);
+        image->src = std::move(src);
     }
     return true;
 }
@@ -642,6 +716,22 @@ struct LineInfo {
     int number = 0;
 };
 
+static std::string_view ParseFenceMarker(std::string_view trimmed) {
+    if (trimmed.empty()) return {};
+    char marker = trimmed[0];
+    if (marker != '`' && marker != '~') return {};
+    size_t count = 0;
+    while (count < trimmed.size() && trimmed[count] == marker) count++;
+    if (count < 3) return {};
+    return trimmed.substr(0, count);
+}
+
+static bool IsMatchingClosingFence(const LineInfo& info, std::string_view openingFence) {
+    if (info.kind != LineKind::Fence || openingFence.empty() || info.text.empty()) return false;
+    if (info.text[0] != openingFence[0] || info.text.size() < openingFence.size()) return false;
+    return info.trimmed.size() == info.text.size();
+}
+
 static LineInfo ClassifyLine(std::string_view line) {
     LineInfo info;
     info.raw = line;
@@ -650,9 +740,10 @@ static LineInfo ClassifyLine(std::string_view line) {
         info.kind = LineKind::Empty;
         return info;
     }
-    if (StartsWith(info.trimmed, "```") || StartsWith(info.trimmed, "~~~")) {
+    std::string_view fence = ParseFenceMarker(info.trimmed);
+    if (!fence.empty()) {
         info.kind = LineKind::Fence;
-        info.text = info.trimmed.substr(0, 3);
+        info.text = fence;
         return info;
     }
     if (StartsWith(info.trimmed, "$$")) {
@@ -732,7 +823,7 @@ static std::vector<Block> ParseMarkdown(const std::string& markdown) {
             std::string_view fence = info.text;
             std::string text;
             i++;
-            while (i < lines.size() && !(infos[i].kind == LineKind::Fence && infos[i].text == fence)) {
+            while (i < lines.size() && !IsMatchingClosingFence(infos[i], fence)) {
                 text.append(lines[i].data(), lines[i].size());
                 if (i + 1 < lines.size()) text += "\n";
                 i++;
@@ -2927,30 +3018,26 @@ private:
 
         for (size_t i = 0; i < source.size();) {
             if (source[i] == '!' && i + 1 < source.size() && source[i + 1] == '[') {
-                size_t close = source.find("](", i + 2);
-                size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
-                if (close != std::string::npos && end != std::string::npos) {
+                MarkdownInlineLink link;
+                if (ParseInlineLinkSyntaxAt(source, i, 2, link)) {
                     buf += "image: ";
-                    buf += source.substr(i + 2, close - (i + 2));
-                    i = end + 1;
+                    buf.append(link.label.data(), link.label.size());
+                    i = link.end;
                     continue;
                 }
             }
 
             if (source[i] == '[') {
-                size_t close = source.find("](", i + 1);
-                size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
-                if (close != std::string::npos && end != std::string::npos) {
+                MarkdownInlineLink link;
+                if (ParseInlineLinkSyntaxAt(source, i, 1, link)) {
                     flush();
-                    std::string_view label(source.data() + i + 1, close - (i + 1));
-                    std::string_view target(source.data() + close + 2, end - (close + 2));
-                    std::string_view url;
-                    if (ExtractMarkdownDestination(target, url)) {
-                        PushSpan(spans, label, bold, italic, strike, url);
+                    std::string url;
+                    if (ExtractMarkdownDestination(link.target, url)) {
+                        PushSpan(spans, link.label, bold, italic, strike, url);
                     } else {
-                        PushSpan(spans, label, bold, italic, strike);
+                        PushSpan(spans, link.label, bold, italic, strike);
                     }
-                    i = end + 1;
+                    i = link.end;
                     continue;
                 }
             }
@@ -3842,6 +3929,29 @@ static std::vector<std::string> WrapAsciiText(const std::string& raw, double max
     return lines;
 }
 
+static std::vector<std::string> WrapAsciiLiteral(std::string_view raw, double maxWidth, double size, bool mono = false) {
+    std::vector<std::string> lines;
+    std::string line;
+    line.reserve(std::min<size_t>(raw.size(), 256));
+    double lineWidth = 0.0;
+
+    for (char ch : raw) {
+        if (ch == '\t') ch = ' ';
+        if ((unsigned char)ch < 32 || (unsigned char)ch >= 127) continue;
+        double charWidth = AsciiCharWidth(ch, size, mono);
+        if (!line.empty() && lineWidth + charWidth > maxWidth) {
+            lines.push_back(line);
+            line.clear();
+            lineWidth = 0.0;
+        }
+        line.push_back(ch);
+        lineWidth += charWidth;
+    }
+
+    lines.push_back(line);
+    return lines;
+}
+
 class StandardRenderer {
 public:
     StandardRenderer(int styleIndex, int marginIndex, ImageRegistry* imageRegistry) : images(imageRegistry), style(styleIndex) {
@@ -3998,19 +4108,16 @@ private:
 
         for (size_t i = 0; i < source.size();) {
             if (source[i] == '[') {
-                size_t close = source.find("](", i + 1);
-                size_t end = close == std::string::npos ? std::string::npos : source.find(')', close + 2);
-                if (close != std::string::npos && end != std::string::npos) {
+                MarkdownInlineLink link;
+                if (ParseInlineLinkSyntaxAt(source, i, 1, link)) {
                     flush();
-                    std::string_view label(source.data() + i + 1, close - (i + 1));
-                    std::string_view target(source.data() + close + 2, end - (close + 2));
-                    std::string_view url;
-                    if (ExtractMarkdownDestination(target, url)) {
-                        PushAsciiSpan(spans, label, url);
+                    std::string url;
+                    if (ExtractMarkdownDestination(link.target, url)) {
+                        PushAsciiSpan(spans, link.label, url);
                     } else {
-                        PushAsciiSpan(spans, label);
+                        PushAsciiSpan(spans, link.label);
                     }
-                    i = end + 1;
+                    i = link.end;
                     continue;
                 }
             }
@@ -4225,7 +4332,7 @@ private:
         double x = margin + 8.0;
         double width = PAGE_W - margin * 2.0 - 16.0;
         for (const auto& rawLine : raw) {
-            for (const auto& line : WrapAsciiText(rawLine, width, size, true)) {
+            for (const auto& line : WrapAsciiLiteral(rawLine, width, size, true)) {
                 Ensure(lh + 4.0);
                 Rect(margin, y + 3.0, PAGE_W - margin * 2.0, lh + 5.0, "0.95 0.95 0.93");
                 DrawTextLine(x, size, line, "F3", "0.12 0.12 0.12", true);
@@ -4238,7 +4345,7 @@ private:
         double size = 10.5;
         double lh = size * 1.45;
         for (const auto& rawLine : SplitLines(text)) {
-            for (const auto& line : WrapAsciiText(rawLine, PAGE_W - margin * 2.0 - 24.0, size, true)) {
+            for (const auto& line : WrapAsciiLiteral(rawLine, PAGE_W - margin * 2.0 - 24.0, size, true)) {
                 Ensure(lh + 6.0);
                 Rect(margin, y + 4.0, PAGE_W - margin * 2.0, lh + 7.0, "0.97 0.97 0.95");
                 Rect(margin, y + 4.0, PAGE_W - margin * 2.0, lh + 7.0, "0.82 0.78 0.62", true);
