@@ -11,6 +11,22 @@ Generate or refresh a version record with:
 python scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --label release --version-log-dir docs/benchmarks/versions --storage-note "WSL ext4"
 ```
 
+Archive published Linux release binaries from v1.1.0 onward with:
+
+```sh
+python scripts/archive_release_benchmarks.py --from-version 1.1.0 --suite quick
+```
+
+If `gh` is only available outside WSL, download and extract assets first, then
+run the helper with `--skip-download --binary-root <extracted-root>`.
+
 ## Highlights
 
-No version benchmark records have been committed yet.
+| Version | Platform | Suite | Storage | Warm ms | Cold ms | Batch ms/file | Stdin ms/file | Serve ms |
+|---|---|---|---|---:|---:|---:|---:|---:|
+| [`v1.1.5`](v1.1.5/linux-wsl-release-quick-modern-normal-local.json) | linux-wsl-release | quick | WSL /mnt/e Windows-mounted storage; release linux-x64 tarball; quick suite | `57.975` | `102.2202` | `23.0149` | `80.1839` | `66.395` |
+| [`v1.1.4`](v1.1.4/linux-wsl-release-quick-modern-normal-local.json) | linux-wsl-release | quick | WSL /mnt/e Windows-mounted storage; release linux-x64 tarball; quick suite | `53.695` | `74.2658` | `16.5023` | `64.7487` | `59.605` |
+| [`v1.1.3`](v1.1.3/linux-wsl-release-quick-modern-normal-local.json) | linux-wsl-release | quick | WSL /mnt/e Windows-mounted storage; release linux-x64 tarball; quick suite | `63.3` | `90.4318` | `18.7193` | `73.4122` | `78.0` |
+| [`v1.1.2`](v1.1.2/linux-wsl-release-quick-modern-normal-local.json) | linux-wsl-release | quick | WSL /mnt/e Windows-mounted storage; release linux-x64 tarball; quick suite | `73.865` | `112.8524` | `19.4519` | `91.686` | `77.365` |
+| [`v1.1.1`](v1.1.1/linux-wsl-release-quick-modern-normal-local.json) | linux-wsl-release | quick | WSL /mnt/e Windows-mounted storage; release linux-x64 tarball; quick suite | `65.155` | `88.9142` | `16.5228` | `79.5942` | `83.2` |
+| [`v1.1.0`](v1.1.0/linux-wsl-release-quick-modern-normal-local.json) | linux-wsl-release | quick | WSL /mnt/e Windows-mounted storage; release linux-x64 tarball; quick suite | `56.015` | `69.3949` | `17.7104` | `60.6296` | `56.06` |

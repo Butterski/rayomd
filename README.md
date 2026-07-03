@@ -417,6 +417,14 @@ regenerates [`docs/benchmarks/versions/README.md`](docs/benchmarks/versions/READ
 python scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --label release --version-log-dir docs/benchmarks/versions --storage-note "WSL ext4"
 ```
 
+When archiving downloaded historical release binaries, pass
+`--benchmark-version <version>` so the record is keyed by the release version
+being measured rather than the current checkout version. Use
+`scripts/archive_release_benchmarks.py --from-version 1.1.0 --suite quick` from
+Linux/WSL to download published Linux release tarballs and refresh the archive.
+If `gh` is only available outside WSL, pre-extract the tarballs and pass
+`--skip-download --binary-root <extracted-root>`.
+
 Remote image timing is intentionally excluded because network timing is not a
 stable performance signal. CI and release benchmark smokes use
 [`docs/benchmark_smoke.md`](docs/benchmark_smoke.md), which contains no remote

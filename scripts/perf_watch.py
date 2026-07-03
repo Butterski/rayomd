@@ -938,10 +938,12 @@ def comparison_key_mismatches(current: dict[str, Any], baseline: dict[str, Any])
 
 
 def compact_version_record(record: dict[str, Any], storage_note: str) -> dict[str, Any]:
+    benchmark_version = record.get("benchmark_version") or record.get("binary_version") or record.get("project_version") or "unknown"
     return {
         "schema": "rayomd-version-benchmark-v1",
-        "project_version": record.get("project_version") or record.get("binary_version") or "unknown",
+        "project_version": benchmark_version,
         "binary_version": record.get("binary_version") or "",
+        "benchmark_version": benchmark_version,
         "created_at": record["created_at"],
         "run_id": record["run_id"],
         "platform": record["platform"],
@@ -1048,6 +1050,15 @@ def write_version_index(log_dir: Path) -> None:
         "python scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --label release --version-log-dir docs/benchmarks/versions --storage-note \"WSL ext4\"",
         "```",
         "",
+        "Archive published Linux release binaries from v1.1.0 onward with:",
+        "",
+        "```sh",
+        "python scripts/archive_release_benchmarks.py --from-version 1.1.0 --suite quick",
+        "```",
+        "",
+        "If `gh` is only available outside WSL, download and extract assets first, then",
+        "run the helper with `--skip-download --binary-root <extracted-root>`.",
+        "",
         "## Highlights",
         "",
     ]
@@ -1056,17 +1067,14 @@ def write_version_index(log_dir: Path) -> None:
     else:
         lines.extend(
             [
-                "| Version | Platform | Suite | Storage | Warm ms | Cold ms | Batch ms/file | Stdin ms/file | Serve ms | Git |",
-                "|---|---|---|---|---:|---:|---:|---:|---:|---|",
+                "| Version | Platform | Suite | Storage | Warm ms | Cold ms | Batch ms/file | Stdin ms/file | Serve ms |",
+                "|---|---|---|---|---:|---:|---:|---:|---:|",
             ]
         )
         for record in records:
             version = table_cell(record.get("project_version") or "unknown")
             rel_path = table_cell(record.get("_relative_path") or "")
             version_link = f"[`v{version}`]({rel_path})" if rel_path else f"`v{version}`"
-            git_commit = table_cell(record.get("git_commit") or "")
-            if git_commit:
-                git_commit = f"`{git_commit}`"
             lines.append(
                 "| "
                 + " | ".join(
@@ -1080,7 +1088,6 @@ def write_version_index(log_dir: Path) -> None:
                         metric_cell(record, "batch_ms_per_file"),
                         metric_cell(record, "stdin_batch_ms_per_file"),
                         metric_cell(record, "serve_reported_ms_median"),
-                        git_commit,
                     ]
                 )
                 + " |"
@@ -1113,6 +1120,7 @@ def write_summary(
         f"- binary: `{record['binary']}`",
         f"- project version: `{record.get('project_version') or 'unknown'}`",
         f"- binary version: `{record.get('binary_version') or 'unknown'}`",
+        f"- benchmark version: `{record.get('benchmark_version') or 'unknown'}`",
         f"- git: `{record.get('git_commit') or 'unknown'}`",
         f"- generated corpus bytes: {record['counts']['corpus_bytes']}",
     ]
@@ -1235,6 +1243,7 @@ def main() -> int:
     parser.add_argument("--baseline-record", default=None, type=Path, help="explicit record.json or version benchmark JSON for pass/fail comparisons")
     parser.add_argument("--fail-on-slower-pct", default=None, type=float, help="exit nonzero if explicit-baseline time metrics regress by this percent")
     parser.add_argument("--version-log-dir", default=None, type=Path, help="write a compact version benchmark record and refresh README.md in this directory")
+    parser.add_argument("--benchmark-version", default="", help="version label to use for archived benchmark records, for example 1.1.0")
     parser.add_argument("--storage-note", default="", help="short storage/environment note for version benchmark records, for example WSL ext4")
     args = parser.parse_args()
 
@@ -1279,6 +1288,9 @@ def main() -> int:
     run_root.mkdir(parents=True, exist_ok=True)
 
     previous_records = read_history(history_path)
+    binary_version = read_binary_version(binary)
+    project_version = read_project_version()
+    benchmark_version = args.benchmark_version or binary_version or project_version
     record: dict[str, Any] = {
         "run_id": run_id,
         "created_at": now_utc(),
@@ -1289,8 +1301,9 @@ def main() -> int:
         "margin": args.margin,
         "image_mode": args.image_mode,
         "watch_version": WATCH_VERSION,
-        "project_version": read_project_version(),
-        "binary_version": read_binary_version(binary),
+        "project_version": project_version,
+        "binary_version": binary_version,
+        "benchmark_version": benchmark_version,
         "binary": str(binary),
         "binary_bytes": binary.stat().st_size,
         "python": sys.version.split()[0],

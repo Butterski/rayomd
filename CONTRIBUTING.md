@@ -49,6 +49,7 @@ For performance-sensitive work, run `scripts/perf_watch.py` before and after the
 change and report the platform, storage location, suite, and headline deltas.
 Use `--baseline-record` with `--fail-on-slower-pct` for deterministic gates, and
 `--version-log-dir docs/benchmarks/versions` when recording release benchmarks.
+Use `--benchmark-version` when archiving downloaded binaries from older releases.
 
 ## Versioning
 
