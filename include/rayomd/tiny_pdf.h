@@ -5,7 +5,8 @@
 
 namespace TinyPdf {
 
-extern int g_lastError;
+extern thread_local int g_lastError;
+int GetLastError();
 
 struct BuildOptions {
     int styleIdx = 0;

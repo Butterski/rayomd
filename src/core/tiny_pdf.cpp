@@ -27,6 +27,7 @@
 #include <locale>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -104,7 +105,12 @@ static std::wstring Utf8ToWide(std::string_view str) {
 
 constexpr double PAGE_W = 595.0;  // A4, points
 constexpr double PAGE_H = 842.0;
-int g_lastError = 0;
+thread_local int g_lastError = 0;
+static std::mutex g_buildMutex;
+
+int GetLastError() {
+    return g_lastError;
+}
 
 static double ResolveMarginPoints(int marginSetting) {
     static const double presets[] = { 34.0, 54.0, 72.0 };
@@ -4527,6 +4533,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const BuildOptions
 }
 
 bool BuildPdfBytes(const std::string& markdown, const BuildOptions& options, std::string& pdfBytes) {
+    std::lock_guard<std::mutex> buildLock(g_buildMutex);
     g_lastError = 0;
     if (IsAsciiDocument(markdown)) {
         return BuildStandardPdfBytes(markdown, options, pdfBytes);

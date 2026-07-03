@@ -189,7 +189,7 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     pdfOptions.enableUrlImages = options.enableUrlImages;
     pdfOptions.allowUnsafeLocalImages = options.allowUnsafeLocalImages;
     if (!TinyPdf::BuildPdfBytes(markdown, pdfOptions, pdfBuffer)) {
-        int code = 10 + TinyPdf::g_lastError;
+        int code = 10 + TinyPdf::GetLastError();
         std::cerr << "Error: native PDF export failed";
         if (!inputLabel.empty()) std::cerr << " for " << inputLabel;
         std::cerr << " (code " << code << ").\n";
@@ -338,7 +338,7 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     options.enableUrlImages = cliOptions.enableUrlImages;
     options.allowUnsafeLocalImages = cliOptions.allowUnsafeLocalImages;
     if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBytes)) {
-        int code = 10 + TinyPdf::g_lastError;
+        int code = 10 + TinyPdf::GetLastError();
         std::cerr << "Error: native PDF benchmark export failed for " << PathToUtf8(inputPath)
             << " (code " << code << ").\n";
         return code;
@@ -353,7 +353,7 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     for (int i = 0; i < iterations; i++) {
         pdfBytes.clear();
         if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBytes)) {
-            int code = 10 + TinyPdf::g_lastError;
+            int code = 10 + TinyPdf::GetLastError();
             std::cerr << "Error: native PDF benchmark export failed for " << PathToUtf8(inputPath)
                 << " (code " << code << ").\n";
             return code;

@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <cwctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -96,6 +97,8 @@ bool g_openAfterExport = true;
 bool g_enableUrlImages = false;
 std::atomic<bool> g_isExporting{false};
 std::atomic<bool> g_isFileLoading{false};
+HANDLE g_exportThread = nullptr;
+HANDLE g_fileLoadThread = nullptr;
 std::atomic<int> g_forcedRenderFrames{0};
 std::string g_statusText = "Ready";
 std::wstring g_currentMarkdownPath;
@@ -291,10 +294,19 @@ std::wstring ShowSaveDialog(HWND hWnd) {
 bool WriteUtf8File(const std::wstring& path, const std::string& content) {
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return false;
-    DWORD written;
-    WriteFile(hFile, content.c_str(), (DWORD)content.size(), &written, nullptr);
+    size_t offset = 0;
+    bool ok = true;
+    while (offset < content.size()) {
+        DWORD chunk = (DWORD)std::min<size_t>(content.size() - offset, 1024 * 1024);
+        DWORD written = 0;
+        if (!WriteFile(hFile, content.data() + offset, chunk, &written, nullptr) || written == 0) {
+            ok = false;
+            break;
+        }
+        offset += written;
+    }
     CloseHandle(hFile);
-    return true;
+    return ok;
 }
 
 bool ReadUtf8File(const std::wstring& path, std::string& content) {
@@ -344,30 +356,61 @@ bool ReadUtf8File(const std::wstring& path, std::string& content) {
     return true;
 }
 
-bool WriteBinaryFile(const std::wstring& path, const std::string& content) {
-    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+std::wstring MakeTempSiblingPath(const std::wstring& path, const wchar_t* finalExtension = L".tmp") {
+    size_t slash = path.find_last_of(L"\\/");
+    std::wstring dir = slash == std::wstring::npos ? L"" : path.substr(0, slash + 1);
+    std::wstring filename = slash == std::wstring::npos ? path : path.substr(slash + 1);
+    if (filename.empty()) filename = L"output.pdf";
+
+    static std::atomic<unsigned long> counter{0};
+    unsigned long id = counter.fetch_add(1, std::memory_order_relaxed);
+    wchar_t suffix[128];
+    swprintf(suffix, 128, L".rayomd-%lu-%lu-%lu-%llu%s",
+        (unsigned long)GetCurrentProcessId(),
+        (unsigned long)GetCurrentThreadId(),
+        id,
+        (unsigned long long)GetTickCount64(),
+        finalExtension ? finalExtension : L".tmp");
+    return dir + L"." + filename + suffix;
+}
+
+bool WriteBinaryTempFile(const std::wstring& tempPath, const std::string& content) {
+    HANDLE hFile = CreateFileW(tempPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return false;
 
-    if (content.size() <= 4 * 1024 * 1024) {
-        DWORD written = 0;
-        bool ok = WriteFile(hFile, content.data(), (DWORD)content.size(), &written, nullptr) && written == content.size();
-        CloseHandle(hFile);
-        return ok;
-    }
-
     size_t offset = 0;
+    bool ok = true;
     while (offset < content.size()) {
         DWORD chunk = (DWORD)std::min<size_t>(content.size() - offset, 1024 * 1024);
         DWORD written = 0;
         if (!WriteFile(hFile, content.data() + offset, chunk, &written, nullptr) || written == 0) {
-            CloseHandle(hFile);
-            return false;
+            ok = false;
+            break;
         }
         offset += written;
     }
 
     CloseHandle(hFile);
-    return true;
+    if (!ok) DeleteFileW(tempPath.c_str());
+    return ok;
+}
+
+bool ReplaceWithTempFile(const std::wstring& tempPath, const std::wstring& finalPath) {
+    if (MoveFileExW(tempPath.c_str(), finalPath.c_str(), MOVEFILE_REPLACE_EXISTING)) return true;
+    DeleteFileW(tempPath.c_str());
+    return false;
+}
+
+bool WriteBinaryFile(const std::wstring& path, const std::string& content) {
+    for (int attempt = 0; attempt < 16; attempt++) {
+        std::wstring tempPath = MakeTempSiblingPath(path);
+        if (WriteBinaryTempFile(tempPath, content)) {
+            return ReplaceWithTempFile(tempPath, path);
+        }
+        if (GetLastError() != ERROR_FILE_EXISTS) return false;
+    }
+    return false;
 }
 #endif
 
@@ -403,7 +446,7 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
     return TinyPdf::BuildPdfBytes(markdown, options, pdfBytes);
 }
 int GetNativePdfLastError() {
-    return TinyPdf::g_lastError;
+    return TinyPdf::GetLastError();
 }
 
 static bool IsExistingAbsoluteFile(const std::wstring& path) {
@@ -454,7 +497,17 @@ bool RunPandoc(const std::wstring& input, const std::wstring& output,
     std::wstring pandocExe;
     if (!ResolvePandocExecutable(pandocExe, warning)) return false;
 
-    std::wstring cmd = L"\"" + pandocExe + L"\" --from=markdown \"" + input + L"\" -o \"" + output + L"\" " +
+    std::wstring pandocOutput;
+    for (int attempt = 0; attempt < 16; attempt++) {
+        std::wstring candidate = MakeTempSiblingPath(output, L".pdf");
+        if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            pandocOutput = std::move(candidate);
+            break;
+        }
+    }
+    if (pandocOutput.empty()) return false;
+
+    std::wstring cmd = L"\"" + pandocExe + L"\" --from=markdown \"" + input + L"\" -o \"" + pandocOutput + L"\" " +
         Utf8ToWide(BASE_ARGS) + L" " + Utf8ToWide(g_styleArgs[options.style]) + L" " + Utf8ToWide(marginArg);
 
     STARTUPINFOW si = { sizeof(si) };
@@ -463,6 +516,7 @@ bool RunPandoc(const std::wstring& input, const std::wstring& output,
     PROCESS_INFORMATION pi = {};
 
     if (!CreateProcessW(pandocExe.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        DeleteFileW(pandocOutput.c_str());
         return false;
     }
 
@@ -472,11 +526,13 @@ bool RunPandoc(const std::wstring& input, const std::wstring& output,
         WaitForSingleObject(pi.hProcess, 5000);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
+        DeleteFileW(pandocOutput.c_str());
         return false;
     }
     if (wait != WAIT_OBJECT_0) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
+        DeleteFileW(pandocOutput.c_str());
         return false;
     }
 
@@ -484,7 +540,11 @@ bool RunPandoc(const std::wstring& input, const std::wstring& output,
     GetExitCodeProcess(pi.hProcess, &exitCode);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    return exitCode == 0;
+    if (exitCode != 0) {
+        DeleteFileW(pandocOutput.c_str());
+        return false;
+    }
+    return ReplaceWithTempFile(pandocOutput, output);
 }
 int ParseStyleArg(const wchar_t* arg) {
     if (!arg) return 0;
@@ -580,6 +640,35 @@ std::wstring PdfNameForMarkdown(const std::wstring& name) {
     return base + L".pdf";
 }
 
+std::wstring OutputPathKey(const std::wstring& path) {
+    DWORD needed = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    std::wstring key;
+    if (needed > 0) {
+        key.assign(needed, L'\0');
+        DWORD written = GetFullPathNameW(path.c_str(), needed, &key[0], nullptr);
+        if (written > 0 && written < needed) key.resize(written);
+        else key = path;
+    } else {
+        key = path;
+    }
+    for (wchar_t& ch : key) {
+        if (ch == L'/') ch = L'\\';
+        ch = (wchar_t)std::towlower(ch);
+    }
+    return key;
+}
+
+bool RegisterBatchOutputPath(const std::wstring& outputPath, std::set<std::wstring>& seen,
+    const std::wstring& inputLabel) {
+    std::wstring key = OutputPathKey(outputPath);
+    if (seen.insert(key).second) return true;
+    std::string message = "Error: multiple inputs map to the same output PDF";
+    if (!inputLabel.empty()) message += " near " + WideToUtf8(inputLabel);
+    message += ": " + WideToUtf8(outputPath);
+    WriteStdoutLine(message);
+    return false;
+}
+
 bool ExportOneFile(const std::wstring& inputPath, const std::wstring& outputPath,
     const WinExportOptions& options, std::string* warning = nullptr) {
     if (options.engine == 0) {
@@ -606,18 +695,28 @@ int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, 
     if (hFind == INVALID_HANDLE_VALUE) return 3;
 
     int failures = 0;
+    int lastResult = 0;
+    std::set<std::wstring> seenOutputs;
     std::string warning;
     do {
         if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         std::wstring name = findData.cFileName;
         std::wstring inputPath = JoinPath(inputDir, name);
         std::wstring outputPath = JoinPath(outputDir, PdfNameForMarkdown(name));
-        if (!ExportOneFile(inputPath, outputPath, options, &warning)) failures++;
+        if (!RegisterBatchOutputPath(outputPath, seenOutputs, inputPath)) {
+            failures++;
+            lastResult = 12;
+            continue;
+        }
+        if (!ExportOneFile(inputPath, outputPath, options, &warning)) {
+            failures++;
+            lastResult = options.engine == 0 ? 10 + GetNativePdfLastError() : 20;
+        }
     } while (FindNextFileW(hFind, &findData));
 
     if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
     FindClose(hFind);
-    return failures == 0 ? 0 : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20);
+    return failures == 0 ? 0 : (lastResult != 0 ? lastResult : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20));
 }
 
 bool ReadAllStdin(std::string& input, size_t maxBytes = (size_t)kMaxMarkdownInputBytes) {
@@ -652,6 +751,8 @@ int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& o
     if (!ReadAllStdin(list, 0)) return 3;
 
     int failures = 0;
+    int lastResult = 0;
+    std::set<std::wstring> seenOutputs;
     std::string warning;
     std::vector<std::string> lines = TinyPdf::SplitLines(list);
     for (std::string line : lines) {
@@ -659,13 +760,20 @@ int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& o
         if (line.empty()) continue;
         std::wstring inputPath = Utf8ToWide(line);
         std::wstring outputPath = JoinPath(outputDir, PdfNameForMarkdown(inputPath));
-        if (!ExportOneFile(inputPath, outputPath, options, &warning)) failures++;
+        if (!RegisterBatchOutputPath(outputPath, seenOutputs, inputPath)) {
+            failures++;
+            lastResult = 12;
+            continue;
+        }
+        if (!ExportOneFile(inputPath, outputPath, options, &warning)) {
+            failures++;
+            lastResult = options.engine == 0 ? 10 + GetNativePdfLastError() : 20;
+        }
     }
 
     if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
-    return failures == 0 ? 0 : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20);
+    return failures == 0 ? 0 : (lastResult != 0 ? lastResult : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20));
 }
-
 int RunStdinExport(const std::wstring& outputPath, const WinExportOptions& options) {
     if (options.engine != 0) {
         WriteStdoutLine("Error: stdin export only supports native mode.");
@@ -954,6 +1062,13 @@ struct ExportResult {
     std::string warning;
 };
 
+void CloseWorkerThreadHandle(HANDLE& threadHandle, bool wait) {
+    if (!threadHandle) return;
+    if (wait) WaitForSingleObject(threadHandle, INFINITE);
+    CloseHandle(threadHandle);
+    threadHandle = nullptr;
+}
+
 DWORD WINAPI ExportThread(LPVOID lp) {
     auto* p = (ExportParams*)lp;
     bool ok = false;
@@ -981,12 +1096,18 @@ DWORD WINAPI ExportThread(LPVOID lp) {
     }
     
     auto* result = new ExportResult{ ok, elapsedMs, warning };
-    PostMessageW(p->hWnd, WM_RAYOMD_EXPORT_DONE, 0, (LPARAM)result);
+    if (!PostMessageW(p->hWnd, WM_RAYOMD_EXPORT_DONE, 0, (LPARAM)result)) {
+        delete result;
+    }
     delete p;
     return 0;
 }
 
 void DoExport(HWND hWnd) {
+    if (g_isExporting.load()) {
+        g_statusText = "Still exporting the previous PDF.";
+        return;
+    }
     if (g_markdownText.empty()) {
         MessageBoxW(hWnd, L"No content to export.", L"Error", MB_ICONERROR);
         return;
@@ -999,7 +1120,10 @@ void DoExport(HWND hWnd) {
     if (outPath.size() < 4 || _wcsicmp(outPath.c_str() + outPath.size() - 4, L".pdf") != 0)
         outPath += L".pdf";
     
-    g_isExporting = true;
+    if (g_isExporting.exchange(true)) {
+        g_statusText = "Still exporting the previous PDF.";
+        return;
+    }
     g_statusText = g_selectedEngine == 0 ? "Converting with native PDF..." : "Converting with Pandoc...";
     
     int marginSetting = g_selectedMargin == 3
@@ -1013,7 +1137,7 @@ void DoExport(HWND hWnd) {
     auto* params = new ExportParams{ g_markdownText, g_currentMarkdownPath, outPath, options, g_openAfterExport, hWnd };
     HANDLE hThread = CreateThread(nullptr, 0, ExportThread, params, 0, nullptr);
     if (hThread) {
-        CloseHandle(hThread);
+        g_exportThread = hThread;
     } else {
         delete params;
         g_isExporting = false;
@@ -1053,7 +1177,9 @@ DWORD WINAPI FileLoadThread(LPVOID lp) {
         ? (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart
         : 0.0;
 
-    PostMessageW(p->hWnd, WM_RAYOMD_FILE_LOADED, 0, (LPARAM)result);
+    if (!PostMessageW(p->hWnd, WM_RAYOMD_FILE_LOADED, 0, (LPARAM)result)) {
+        delete result;
+    }
     delete p;
     return 0;
 }
@@ -1068,7 +1194,7 @@ void LoadMarkdownFileAsync(HWND hWnd, const std::wstring& path) {
     auto* params = new FileLoadParams{ path, hWnd };
     HANDLE hThread = CreateThread(nullptr, 0, FileLoadThread, params, 0, nullptr);
     if (hThread) {
-        CloseHandle(hThread);
+        g_fileLoadThread = hThread;
     } else {
         delete params;
         g_isFileLoading = false;
@@ -1276,6 +1402,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             delete result;
         }
+        CloseWorkerThreadHandle(g_exportThread, true);
         g_isExporting = false;
         g_forcedRenderFrames = 2;
         return 0;
@@ -1295,6 +1422,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             delete result;
         }
+        CloseWorkerThreadHandle(g_fileLoadThread, true);
         g_isFileLoading = false;
         g_forcedRenderFrames = 2;
         return 0;
@@ -1330,7 +1458,17 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         DragFinish((HDROP)wParam);
         return 0;
     }
+    case WM_CLOSE:
+        if (g_isExporting.load() || g_isFileLoading.load()) {
+            g_statusText = g_isExporting.load() ? "Export is still finishing." : "File load is still finishing.";
+            g_forcedRenderFrames = 2;
+            return 0;
+        }
+        DestroyWindow(hWnd);
+        return 0;
     case WM_DESTROY:
+        CloseWorkerThreadHandle(g_exportThread, true);
+        CloseWorkerThreadHandle(g_fileLoadThread, true);
         PostQuitMessage(0);
         return 0;
     }
@@ -1621,6 +1759,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     }
     
     // Cleanup
+    CloseWorkerThreadHandle(g_exportThread, true);
+    CloseWorkerThreadHandle(g_fileLoadThread, true);
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
