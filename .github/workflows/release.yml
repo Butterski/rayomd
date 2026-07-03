@@ -74,7 +74,7 @@ jobs:
           cmake -S . -B build/linux -DCMAKE_BUILD_TYPE=Release
           cmake --build build/linux --config Release
           ./build/linux/rayomd --version
-          ./build/linux/rayomd --bench tester.md benchmark-output/linux-release 50 modern normal
+          ./build/linux/rayomd --bench docs/benchmark_smoke.md benchmark-output/linux-release 50 modern normal
           test -s benchmark-output/linux-release/sample.pdf
 
       - name: Build curl-enabled Linux CLI
@@ -82,7 +82,7 @@ jobs:
           cmake -S . -B build/linux-curl -DCMAKE_BUILD_TYPE=Release -DRAYOMD_USE_CURL=ON
           cmake --build build/linux-curl --config Release
           ./build/linux-curl/rayomd --version
-          ./build/linux-curl/rayomd --bench tester.md benchmark-output/linux-curl-release 50 modern normal
+          ./build/linux-curl/rayomd --bench docs/benchmark_smoke.md benchmark-output/linux-curl-release 50 modern normal
           test -s benchmark-output/linux-curl-release/sample.pdf
 
       - name: Package Linux assets
@@ -139,7 +139,7 @@ jobs:
           cmake -S . -B build/windows -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
           cmake --build build/windows --config Release
           ./build/windows/rayomd.exe --version
-          ./build/windows/rayomd.exe --bench tester.md benchmark-output/windows-release 50 modern normal
+          ./build/windows/rayomd.exe --bench docs/benchmark_smoke.md benchmark-output/windows-release 50 modern normal
           test -s benchmark-output/windows-release/sample.pdf
 
       - name: Package Windows asset

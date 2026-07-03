@@ -2,8 +2,9 @@
 """Watch RayoMD conversion speed across versions.
 
 It generates a deterministic supported-Markdown corpus, runs the existing
-no-UI CLI modes, appends one JSONL history record, and reports deltas against
-the previous matching run.
+no-UI CLI modes, appends one JSONL history record for local reporting, compares
+against explicit baseline records for pass/fail gates, and can write compact
+version benchmark records for release tracking.
 """
 
 from __future__ import annotations
@@ -75,7 +76,8 @@ MARGINS = ("compact", "normal", "wide", "margin=0.75in")
 FEATURE_MODES = ("baseline", "rules", "pagebreaks", "comments")
 SIZED_KINDS = ("ascii", "unicode", "table")
 KIB = 1024
-WATCH_VERSION = 2
+WATCH_VERSION = 3
+COMPARISON_KEY_FIELDS = ("platform", "suite", "seed", "style", "margin", "image_mode", "watch_version")
 
 SUITES = {
     "quick": {
@@ -140,6 +142,14 @@ TIME_METRICS = [
     "serve_reported_ms_p95",
 ]
 
+VERSION_INDEX_METRICS = [
+    "warm_avg_ms_median",
+    "cold_export_ms_median",
+    "batch_ms_per_file",
+    "stdin_batch_ms_per_file",
+    "serve_reported_ms_median",
+]
+
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -150,6 +160,13 @@ def safe_name(value: str) -> str:
     for ch in value.lower():
         keep.append(ch if ch.isalnum() or ch in ("-", "_") else "-")
     return "".join(keep).strip("-") or "run"
+
+
+def safe_version_name(value: str) -> str:
+    keep = []
+    for ch in value.lower().lstrip("v"):
+        keep.append(ch if ch.isalnum() or ch in ("-", "_", ".") else "-")
+    return "".join(keep).strip("-.") or "unknown"
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -167,6 +184,38 @@ def percentile(values: list[float], pct: float) -> float:
 
 def f2(value: float) -> float:
     return round(value, 4)
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def read_project_version() -> str:
+    version_path = repo_root() / "VERSION"
+    if not version_path.exists():
+        return ""
+    lines = version_path.read_text(encoding="utf-8").splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def read_binary_version(binary: Path) -> str:
+    try:
+        proc = subprocess.run(
+            [str(binary), "--version"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+        )
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    text = proc.stdout.strip() or proc.stderr.strip()
+    parts = text.split()
+    if len(parts) >= 2 and parts[0].lower() == "rayomd":
+        return parts[1]
+    return text
 
 
 def sentence(rng: random.Random, min_words: int = 10, max_words: int = 28) -> str:
@@ -809,11 +858,10 @@ def write_history(path: Path, record: dict[str, Any]) -> None:
 
 
 def matching_previous(records: list[dict[str, Any]], current: dict[str, Any]) -> dict[str, Any] | None:
-    key_fields = ("platform", "suite", "seed", "style", "margin", "image_mode", "watch_version")
     for record in reversed(records):
         if not record.get("success"):
             continue
-        if all(record.get(field) == current.get(field) for field in key_fields):
+        if all(record.get(field) == current.get(field) for field in COMPARISON_KEY_FIELDS):
             return record
     return None
 
@@ -865,7 +913,197 @@ def build_comparison(current: dict[str, Any], previous: dict[str, Any] | None) -
     return rows
 
 
-def write_summary(path: Path, record: dict[str, Any], previous: dict[str, Any] | None, comparison: list[dict[str, Any]]) -> None:
+def read_json_record(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise RuntimeError(f"could not read benchmark record {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid JSON benchmark record {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"benchmark record must be a JSON object: {path}")
+    if not isinstance(data.get("metrics"), dict):
+        raise RuntimeError(f"benchmark record is missing a metrics object: {path}")
+    return data
+
+
+def comparison_key_mismatches(current: dict[str, Any], baseline: dict[str, Any]) -> list[str]:
+    mismatches: list[str] = []
+    for field in COMPARISON_KEY_FIELDS:
+        current_value = current.get(field)
+        baseline_value = baseline.get(field)
+        if baseline_value != current_value:
+            mismatches.append(f"{field}: baseline={baseline_value!r}, current={current_value!r}")
+    return mismatches
+
+
+def compact_version_record(record: dict[str, Any], storage_note: str) -> dict[str, Any]:
+    return {
+        "schema": "rayomd-version-benchmark-v1",
+        "project_version": record.get("project_version") or record.get("binary_version") or "unknown",
+        "binary_version": record.get("binary_version") or "",
+        "created_at": record["created_at"],
+        "run_id": record["run_id"],
+        "platform": record["platform"],
+        "suite": record["suite"],
+        "seed": record["seed"],
+        "style": record["style"],
+        "margin": record["margin"],
+        "image_mode": record["image_mode"],
+        "watch_version": record["watch_version"],
+        "binary_bytes": record["binary_bytes"],
+        "git_commit": record.get("git_commit") or "",
+        "git_dirty": record.get("git_dirty", False),
+        "system": record.get("system") or "",
+        "storage_note": storage_note,
+        "counts": record.get("counts", {}),
+        "metrics": record.get("metrics", {}),
+    }
+
+
+def version_record_filename(record: dict[str, Any]) -> str:
+    parts = [
+        safe_name(str(record.get("platform") or "platform")),
+        safe_name(str(record.get("suite") or "suite")),
+        safe_name(str(record.get("style") or "style")),
+        safe_name(str(record.get("margin") or "margin")),
+        safe_name(str(record.get("image_mode") or "images")),
+    ]
+    return "-".join(parts) + ".json"
+
+
+def write_version_benchmark(log_dir: Path, record: dict[str, Any], storage_note: str) -> Path:
+    compact = compact_version_record(record, storage_note)
+    version = safe_version_name(str(compact["project_version"]))
+    version_dir = log_dir / f"v{version}"
+    version_dir.mkdir(parents=True, exist_ok=True)
+    out_path = version_dir / version_record_filename(compact)
+    out_path.write_text(
+        json.dumps(compact, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    write_version_index(log_dir)
+    return out_path
+
+
+def version_sort_key(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for part in version.lstrip("vV").split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            parts.append(-1)
+    return tuple(parts)
+
+
+def load_version_benchmarks(log_dir: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if not log_dir.exists():
+        return records
+    for path in sorted(log_dir.glob("v*/*.json")):
+        try:
+            record = read_json_record(path)
+        except RuntimeError:
+            continue
+        try:
+            record["_relative_path"] = path.relative_to(log_dir).as_posix()
+        except ValueError:
+            record["_relative_path"] = path.as_posix()
+        records.append(record)
+    records.sort(
+        key=lambda record: (
+            version_sort_key(str(record.get("project_version") or "0")),
+            str(record.get("created_at") or ""),
+            str(record.get("platform") or ""),
+            str(record.get("suite") or ""),
+        ),
+        reverse=True,
+    )
+    return records
+
+
+def metric_cell(record: dict[str, Any], metric: str) -> str:
+    value = record.get("metrics", {}).get(metric, "")
+    return f"`{value}`" if value != "" else ""
+
+
+def table_cell(value: Any) -> str:
+    return str(value or "").replace("|", "/")
+
+
+def write_version_index(log_dir: Path) -> None:
+    records = load_version_benchmarks(log_dir)
+    lines = [
+        "# RayoMD Version Benchmarks",
+        "",
+        "Compact release benchmark records generated by `scripts/perf_watch.py`.",
+        "Raw run artifacts stay under ignored `benchmark-output/`; these tracked",
+        "records keep only comparison keys, environment notes, and headline metrics",
+        "needed for release-to-release review.",
+        "",
+        "Generate or refresh a version record with:",
+        "",
+        "```sh",
+        "python scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --label release --version-log-dir docs/benchmarks/versions --storage-note \"WSL ext4\"",
+        "```",
+        "",
+        "## Highlights",
+        "",
+    ]
+    if not records:
+        lines.append("No version benchmark records have been committed yet.")
+    else:
+        lines.extend(
+            [
+                "| Version | Platform | Suite | Storage | Warm ms | Cold ms | Batch ms/file | Stdin ms/file | Serve ms | Git |",
+                "|---|---|---|---|---:|---:|---:|---:|---:|---|",
+            ]
+        )
+        for record in records:
+            version = table_cell(record.get("project_version") or "unknown")
+            rel_path = table_cell(record.get("_relative_path") or "")
+            version_link = f"[`v{version}`]({rel_path})" if rel_path else f"`v{version}`"
+            git_commit = table_cell(record.get("git_commit") or "")
+            if git_commit:
+                git_commit = f"`{git_commit}`"
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        version_link,
+                        table_cell(record.get("platform")),
+                        table_cell(record.get("suite")),
+                        table_cell(record.get("storage_note")),
+                        metric_cell(record, "warm_avg_ms_median"),
+                        metric_cell(record, "cold_export_ms_median"),
+                        metric_cell(record, "batch_ms_per_file"),
+                        metric_cell(record, "stdin_batch_ms_per_file"),
+                        metric_cell(record, "serve_reported_ms_median"),
+                        git_commit,
+                    ]
+                )
+                + " |"
+            )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
+def append_comparison_table(lines: list[str], comparison: list[dict[str, Any]]) -> None:
+    lines.extend(["| Metric | Previous | Current | Delta |", "|---|---:|---:|---:|"])
+    for row in comparison:
+        lines.append(f"| {row['metric']} | {row['previous']} | {row['current']} | {row['delta_pct']}% |")
+
+
+def write_summary(
+    path: Path,
+    record: dict[str, Any],
+    previous: dict[str, Any] | None,
+    comparison: list[dict[str, Any]],
+    baseline: dict[str, Any] | None,
+    baseline_comparison: list[dict[str, Any]],
+    baseline_path: Path | None,
+) -> None:
     lines = [
         "# RayoMD Perf Watch",
         "",
@@ -873,18 +1111,22 @@ def write_summary(path: Path, record: dict[str, Any], previous: dict[str, Any] |
         f"- platform: `{record['platform']}`",
         f"- suite: `{record['suite']}`",
         f"- binary: `{record['binary']}`",
+        f"- project version: `{record.get('project_version') or 'unknown'}`",
+        f"- binary version: `{record.get('binary_version') or 'unknown'}`",
         f"- git: `{record.get('git_commit') or 'unknown'}`",
         f"- generated corpus bytes: {record['counts']['corpus_bytes']}",
-        "",
-        "## Current",
-        "",
-        "| Metric | Value |",
-        "|---|---:|",
     ]
+    if record.get("storage_note"):
+        lines.append(f"- storage: `{record['storage_note']}`")
+    if record.get("version_benchmark_path"):
+        lines.append(f"- version benchmark: `{record['version_benchmark_path']}`")
+    lines.extend(["", "## Current", "", "| Metric | Value |", "|---|---:|"])
     for key, value in record["metrics"].items():
         lines.append(f"| {key} | {value} |")
 
-    lines.extend(["", "## Previous Match", ""])
+    lines.extend(["", "## Previous Local History Match", ""])
+    lines.append("Local history comparison is report-only and is not used for pass/fail gating.")
+    lines.append("")
     if previous is None:
         lines.append("No previous matching run in the history file.")
     else:
@@ -894,23 +1136,48 @@ def write_summary(path: Path, record: dict[str, Any], previous: dict[str, Any] |
                 f"- created: `{previous['created_at']}`",
                 f"- git: `{previous.get('git_commit') or 'unknown'}`",
                 "",
-                "| Metric | Previous | Current | Delta |",
-                "|---|---:|---:|---:|",
             ]
         )
-        for row in comparison:
-            lines.append(
-                f"| {row['metric']} | {row['previous']} | {row['current']} | {row['delta_pct']}% |"
-            )
+        append_comparison_table(lines, comparison)
+
+    lines.extend(["", "## Explicit Baseline Gate", ""])
+    if baseline is None:
+        lines.append("No explicit baseline record was provided.")
+    else:
+        lines.extend(
+            [
+                f"- record: `{baseline_path}`",
+                f"- run: `{baseline.get('run_id') or 'unknown'}`",
+                f"- created: `{baseline.get('created_at') or 'unknown'}`",
+                f"- git: `{baseline.get('git_commit') or 'unknown'}`",
+                "",
+            ]
+        )
+        if record.get("baseline_mismatches"):
+            lines.append("Baseline keys do not match the current run:")
+            for mismatch in record["baseline_mismatches"]:
+                lines.append(f"- `{mismatch}`")
+        elif baseline_comparison:
+            append_comparison_table(lines, baseline_comparison)
+        else:
+            lines.append("No comparable metrics were found in the explicit baseline record.")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
-def print_console_summary(record: dict[str, Any], previous: dict[str, Any] | None, comparison: list[dict[str, Any]]) -> None:
+def print_console_summary(
+    record: dict[str, Any],
+    previous: dict[str, Any] | None,
+    comparison: list[dict[str, Any]],
+    baseline: dict[str, Any] | None,
+    baseline_comparison: list[dict[str, Any]],
+) -> None:
     print(f"Perf watch run: {record['run_id']}")
     print(f"Platform: {record['platform']}  Suite: {record['suite']}")
     print(f"Summary: {record['summary_path']}")
+    if record.get("version_benchmark_path"):
+        print(f"Version benchmark: {record['version_benchmark_path']}")
     print("")
     for metric in (
         "warm_avg_ms_median",
@@ -923,11 +1190,21 @@ def print_console_summary(record: dict[str, Any], previous: dict[str, Any] | Non
 
     print("")
     if previous is None:
-        print("No previous matching run found.")
+        print("No previous matching run found. Local history is report-only.")
+    else:
+        print(f"Report-only history comparison: {previous['run_id']} ({previous['created_at']})")
+        for row in comparison:
+            if row["metric"] not in TIME_METRICS:
+                continue
+            sign = "+" if row["delta_pct"] >= 0 else ""
+            print(f"{row['metric']}: {sign}{row['delta_pct']}%")
+
+    if baseline is None:
         return
 
-    print(f"Compared with: {previous['run_id']} ({previous['created_at']})")
-    for row in comparison:
+    print("")
+    print(f"Explicit baseline gate: {baseline.get('run_id') or 'unknown'} ({baseline.get('created_at') or 'unknown'})")
+    for row in baseline_comparison:
         if row["metric"] not in TIME_METRICS:
             continue
         sign = "+" if row["delta_pct"] >= 0 else ""
@@ -954,9 +1231,39 @@ def main() -> int:
     parser.add_argument("--image-mode", choices=("off", "local"), default="local")
     parser.add_argument("--label", default="", help="optional run label")
     parser.add_argument("--root", default=Path("benchmark-output/perf-watch"), type=Path)
-    parser.add_argument("--history", default=None, type=Path, help="JSONL history path")
-    parser.add_argument("--fail-on-slower-pct", default=None, type=float, help="exit nonzero if any time metric regresses by this percent")
+    parser.add_argument("--history", default=None, type=Path, help="JSONL history path for report-only local comparisons")
+    parser.add_argument("--baseline-record", default=None, type=Path, help="explicit record.json or version benchmark JSON for pass/fail comparisons")
+    parser.add_argument("--fail-on-slower-pct", default=None, type=float, help="exit nonzero if explicit-baseline time metrics regress by this percent")
+    parser.add_argument("--version-log-dir", default=None, type=Path, help="write a compact version benchmark record and refresh README.md in this directory")
+    parser.add_argument("--storage-note", default="", help="short storage/environment note for version benchmark records, for example WSL ext4")
     args = parser.parse_args()
+
+    if args.fail_on_slower_pct is not None and args.baseline_record is None:
+        print("--fail-on-slower-pct requires --baseline-record; local history is report-only.", file=sys.stderr)
+        return 2
+
+    baseline_record: dict[str, Any] | None = None
+    if args.baseline_record is not None:
+        try:
+            baseline_record = read_json_record(args.baseline_record)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        requested = {
+            "platform": args.platform,
+            "suite": args.suite,
+            "seed": args.seed,
+            "style": args.style,
+            "margin": args.margin,
+            "image_mode": args.image_mode,
+            "watch_version": WATCH_VERSION,
+        }
+        requested_mismatches = comparison_key_mismatches(requested, baseline_record)
+        if requested_mismatches:
+            print("Explicit baseline record is not comparable to the requested run:", file=sys.stderr)
+            for mismatch in requested_mismatches:
+                print(f"  {mismatch}", file=sys.stderr)
+            return 2
 
     binary = args.binary.resolve()
     if not binary.exists():
@@ -982,10 +1289,13 @@ def main() -> int:
         "margin": args.margin,
         "image_mode": args.image_mode,
         "watch_version": WATCH_VERSION,
+        "project_version": read_project_version(),
+        "binary_version": read_binary_version(binary),
         "binary": str(binary),
         "binary_bytes": binary.stat().st_size,
         "python": sys.version.split()[0],
         "system": platform_module.platform(),
+        "storage_note": args.storage_note,
         "cwd": str(Path.cwd()),
         "run_root": str(run_root),
         "git_commit": git_value(["rev-parse", "--short", "HEAD"]),
@@ -1005,10 +1315,24 @@ def main() -> int:
 
     previous = matching_previous(previous_records, record)
     comparison = build_comparison(record, previous)
+    baseline_comparison: list[dict[str, Any]] = []
+    baseline_mismatches: list[str] = []
+    if baseline_record is not None:
+        baseline_mismatches = comparison_key_mismatches(record, baseline_record)
+        baseline_comparison = build_comparison(record, baseline_record)
+        record["baseline_record"] = str(args.baseline_record)
+        record["baseline_comparison"] = baseline_comparison
+        if baseline_mismatches:
+            record["baseline_mismatches"] = baseline_mismatches
+
+    if args.version_log_dir is not None:
+        version_path = write_version_benchmark(args.version_log_dir, record, args.storage_note)
+        record["version_benchmark_path"] = str(version_path)
+
     summary_path = run_root / "summary.md"
     record["summary_path"] = str(summary_path)
     record["comparison"] = comparison
-    write_summary(summary_path, record, previous, comparison)
+    write_summary(summary_path, record, previous, comparison, baseline_record, baseline_comparison, args.baseline_record)
     write_history(history_path, record)
     (run_root / "record.json").write_text(
         json.dumps(record, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
@@ -1017,13 +1341,22 @@ def main() -> int:
     )
     shutil.copyfile(summary_path, root / f"latest-{safe_name(args.platform)}-{args.suite}.md")
 
-    print_console_summary(record, previous, comparison)
+    print_console_summary(record, previous, comparison, baseline_record, baseline_comparison)
+
+    if baseline_mismatches:
+        print("Explicit baseline record is not comparable to the current run:", file=sys.stderr)
+        for mismatch in baseline_mismatches:
+            print(f"  {mismatch}", file=sys.stderr)
+        return 2
 
     if args.fail_on_slower_pct is not None:
+        if not baseline_comparison:
+            print("Explicit baseline record has no comparable metrics.", file=sys.stderr)
+            return 2
         threshold = args.fail_on_slower_pct
-        slower = [row for row in comparison if is_time_metric(row["metric"]) and row["delta_pct"] >= threshold]
+        slower = [row for row in baseline_comparison if is_time_metric(row["metric"]) and row["delta_pct"] >= threshold]
         if slower:
-            print(f"Performance regression threshold hit: {threshold}%", file=sys.stderr)
+            print(f"Performance regression threshold hit against explicit baseline: {threshold}%", file=sys.stderr)
             for row in slower:
                 print(f"{row['metric']}: +{row['delta_pct']}%", file=sys.stderr)
             return 3

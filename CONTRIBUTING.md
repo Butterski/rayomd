@@ -42,11 +42,13 @@ sh scripts/verify-linux.sh
 For Windows changes, build the release target and run a benchmark smoke:
 
 ```sh
-build/windows/rayomd.exe --bench tester.md benchmark-output/manual 100 modern normal
+build/windows/rayomd.exe --bench docs/benchmark_smoke.md benchmark-output/manual 100 modern normal
 ```
 
 For performance-sensitive work, run `scripts/perf_watch.py` before and after the
 change and report the platform, storage location, suite, and headline deltas.
+Use `--baseline-record` with `--fail-on-slower-pct` for deterministic gates, and
+`--version-log-dir docs/benchmarks/versions` when recording release benchmarks.
 
 ## Versioning
 

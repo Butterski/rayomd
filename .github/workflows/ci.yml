@@ -84,6 +84,6 @@ jobs:
       - name: Benchmark smoke
         run: |
           ./build/windows/rayomd.exe \
-            --bench tester.md benchmark-output/windows-ci 50 modern normal
+            --bench docs/benchmark_smoke.md benchmark-output/windows-ci 50 modern normal
           test -s benchmark-output/windows-ci/sample.pdf
 

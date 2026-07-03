@@ -6,7 +6,7 @@
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/md2pdf/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 1.1.4" src="https://img.shields.io/badge/version-1.1.4-informational">
+  <img alt="Version: 1.1.5" src="https://img.shields.io/badge/version-1.1.5-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
@@ -140,7 +140,8 @@ Run date: 2026-06-06. Full caveats and source report pointers are in
 | Windows Pandoc compatibility smoke | `8.11 s` | External Pandoc/LaTeX path, 100 KB ASCII input |
 
 Use `scripts/perf_watch.py` for current before/after work. It records machine
-and git metadata, keeps JSONL history, and compares matching runs.
+and git metadata, keeps JSONL history for report-only local comparisons, and
+can compare against explicit baseline records for deterministic gates.
 
 ## Native Markdown Support
 
@@ -372,9 +373,9 @@ absolute, UNC/device, or parent-escaping paths.
 
 Use `scripts/perf_watch.py` when you want a repeatable "did this version get
 slower?" check. It creates a deterministic random Markdown corpus using the
-native feature subset, runs no-UI CLI modes, appends a JSONL history record, and
-reports percent deltas against the previous matching platform/suite/seed/options
-run.
+native feature subset, runs no-UI CLI modes, and appends a JSONL history record
+under ignored `benchmark-output/`. Local history comparisons are report-only
+because they depend on host load, storage location, and prior run provenance.
 
 Windows:
 
@@ -401,10 +402,25 @@ Run both from PowerShell when both binaries are already built:
 scripts/perf_watch_both.ps1 -Suite watch -Label local
 ```
 
-Suites are `quick`, `watch`, and `full`. Add `--fail-on-slower-pct 10` when the
-watcher should return a nonzero exit code if any time metric is at least 10%
-slower than the previous matching run. Remote image timing is intentionally
-excluded because network timing is not a stable performance signal.
+Suites are `quick`, `watch`, and `full`. For a pass/fail performance gate, pass
+an explicit baseline record instead of relying on mutable local history:
+
+```sh
+python scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --baseline-record docs/benchmarks/versions/v1.1.5/linux-wsl-watch-modern-normal-local.json --fail-on-slower-pct 10
+```
+
+For release-quality benchmark logging, add a version log directory and storage
+note. This writes compact JSON under `docs/benchmarks/versions/v<VERSION>/` and
+regenerates [`docs/benchmarks/versions/README.md`](docs/benchmarks/versions/README.md):
+
+```sh
+python scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --label release --version-log-dir docs/benchmarks/versions --storage-note "WSL ext4"
+```
+
+Remote image timing is intentionally excluded because network timing is not a
+stable performance signal. CI and release benchmark smokes use
+[`docs/benchmark_smoke.md`](docs/benchmark_smoke.md), which contains no remote
+image inputs.
 
 ## Project Layout
 
@@ -414,11 +430,13 @@ src/core/                    Portable Markdown parser and PDF writer
 src/cli/                     Portable CLI entry point
 src/win32/                   Windows Dear ImGui app, CLI glue, and resources
 scripts/                     Verification and benchmark helper scripts
+docs/benchmark_smoke.md      No-network benchmark smoke fixture
 docs/assets/                 Mascot and icon source assets
 docs/ui.png                  Windows app screenshot
 docs/show.gif                Windows app demo animation
 docs/show.mp4                Windows app demo video
 docs/benchmarks/             Archived benchmark summaries and caveats
+docs/benchmarks/versions/    Curated version benchmark records and index
 docs/optimization/           Optimization notes and research follow-up
 third_party/imgui/           Vendored Dear ImGui v1.92.8
 third_party/simdutf/         Optional simdutf experiment, OFF by default

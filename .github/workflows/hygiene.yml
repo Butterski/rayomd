@@ -59,11 +59,13 @@ jobs:
       - name: README local link targets
         run: |
           test -f docs/assets/rayomd.png
+          test -f docs/benchmark_smoke.md
           test -f docs/ui.png
           test -f docs/show.gif
           test -f docs/show.mp4
           test -f docs/tester.pdf
           test -f docs/benchmarks/commercial_benchmark_summary.md
           test -f docs/benchmarks/pandoc_comparison_2026-06-18.md
+          test -f docs/benchmarks/versions/README.md
           test -f include/rayomd/tiny_pdf.h
           test -f third_party/imgui/LICENSE.txt

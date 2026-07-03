@@ -16,8 +16,8 @@ if ! command -v g++ >/dev/null 2>&1 && ! command -v clang++ >/dev/null 2>&1; the
     exit 1
 fi
 
-if [ ! -f tester.md ]; then
-    echo "tester.md is required for the Unicode verification benchmark." >&2
+if [ ! -f tester.md ] || [ ! -f docs/benchmark_smoke.md ]; then
+    echo "tester.md and docs/benchmark_smoke.md are required for verification." >&2
     exit 1
 fi
 
@@ -106,7 +106,7 @@ grep -a -q "blocked-url" "$SECURITY_DIR/out/url-default.pdf"
 grep -a -q "blocked-url" "$SECURITY_DIR/out/url-loopback.pdf"
 
 "$BIN" --export tester.md benchmark-output/linux-verify/tester.pdf native elegant normal
-"$BIN" --bench tester.md benchmark-output/linux-verify/bench-unicode 100 elegant normal
+"$BIN" --bench docs/benchmark_smoke.md benchmark-output/linux-verify/bench-unicode 100 elegant normal
 
 cat > benchmark-output/linux-verify/ascii.md <<'EOF'
 # Linux Verify
@@ -125,7 +125,7 @@ EOF
 "$BIN" --bench benchmark-output/linux-verify/ascii.md benchmark-output/linux-verify/bench-ascii 1000 elegant normal
 
 echo
-echo "Unicode benchmark:"
+echo "No-network benchmark:"
 cat benchmark-output/linux-verify/bench-unicode/bench-results.txt
 echo
 echo "ASCII benchmark:"
