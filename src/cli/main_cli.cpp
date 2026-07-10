@@ -1,4 +1,6 @@
 #include "rayomd/tiny_pdf.h"
+#include "../common/text_utils.h"
+#include "../core/export_options.h"
 
 #include <algorithm>
 #include <chrono>
@@ -134,56 +136,10 @@ std::string Lower(std::string value) {
     return value;
 }
 
-int ParseStyleArg(const char* arg) {
-    if (!arg) return 0;
-    std::string value = Lower(arg);
-    if (value == "modern") return 1;
-    if (value == "tech") return 2;
-    if (value == "elegant") return 0;
-    int style = std::atoi(arg);
-    if (style < 0) style = 0;
-    if (style > 2) style = 2;
-    return style;
-}
-
-bool IsStyleArg(const char* arg) {
-    if (!arg) return false;
-    std::string value = Lower(arg);
-    return value == "elegant" || value == "modern" || value == "tech" ||
-        (value.size() == 1 && value[0] >= '0' && value[0] <= '2');
-}
-
-int ParseMarginArg(const char* arg) {
-    if (!arg) return 1;
-    std::string value = Lower(arg);
-    if (value == "compact") return 0;
-    if (value == "normal") return 1;
-    if (value == "wide") return 2;
-    if (value.rfind("margin=", 0) == 0) value.erase(0, 7);
-
-    char* end = nullptr;
-    double number = std::strtod(value.c_str(), &end);
-    if (number <= 0.0) return 1;
-
-    double points = number * 72.0;
-    if (end && std::strncmp(end, "pt", 2) == 0) points = number;
-    else if (end && std::strncmp(end, "in", 2) == 0) points = number * 72.0;
-
-    points = std::max(18.0, std::min(144.0, points));
-    return 1000 + (int)(points + 0.5);
-}
-
-bool IsMarginArg(const char* arg) {
-    if (!arg) return false;
-    std::string value = Lower(arg);
-    return value == "compact" || value == "normal" || value == "wide" ||
-        value.rfind("margin=", 0) == 0;
-}
-
 struct CliExportOptions {
     int engine = 0;
-    int style = 0;
-    int margin = 1;
+    TinyPdf::PdfStyle style = TinyPdf::PdfStyle::Elegant;
+    TinyPdf::PdfMargin margin = TinyPdf::PdfMargin::Normal();
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
 };
@@ -196,16 +152,19 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "native") options.engine = 0;
         else if (value == "--allow-url-images") options.enableUrlImages = true;
         else if (value == "--allow-unsafe-local-images" || value == "--unsafe-local-images") options.allowUnsafeLocalImages = true;
-        else if (IsMarginArg(argv[i])) options.margin = ParseMarginArg(argv[i]);
-        else if (IsStyleArg(argv[i])) options.style = ParseStyleArg(argv[i]);
         else {
-            error = "unrecognized export option '" + std::string(argv[i]) + "'";
-            return false;
+            TinyPdf::PdfMargin margin;
+            TinyPdf::PdfStyle style;
+            if (TinyPdf::Internal::ParsePdfMargin(argv[i], margin)) options.margin = margin;
+            else if (TinyPdf::Internal::ParsePdfStyle(argv[i], style)) options.style = style;
+            else {
+                error = "unrecognized export option '" + std::string(argv[i]) + "'";
+                return false;
+            }
         }
     }
     return true;
 }
-
 fs::path PdfNameForMarkdown(const fs::path& path) {
     fs::path out = path.filename();
     out.replace_extension(".pdf");
@@ -216,14 +175,15 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     const fs::path& outputPath, const CliExportOptions& options, std::string& pdfBuffer,
     const std::string& inputLabel) {
     pdfBuffer.clear();
-    TinyPdf::BuildOptions pdfOptions;
-    pdfOptions.styleIdx = options.style;
-    pdfOptions.marginIdx = options.margin;
+    TinyPdf::PdfOptions pdfOptions;
+    pdfOptions.style = options.style;
+    pdfOptions.margin = options.margin;
     pdfOptions.sourcePath = sourcePath;
     pdfOptions.enableUrlImages = options.enableUrlImages;
     pdfOptions.allowUnsafeLocalImages = options.allowUnsafeLocalImages;
-    if (!TinyPdf::BuildPdfBytes(markdown, pdfOptions, pdfBuffer)) {
-        int code = 10 + TinyPdf::GetLastError();
+    TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, pdfOptions, pdfBuffer);
+    if (!buildResult) {
+        int code = 10 + static_cast<int>(buildResult.error);
         std::cerr << "Error: native PDF export failed";
         if (!inputLabel.empty()) std::cerr << " for " << inputLabel;
         std::cerr << " (code " << code << ").\n";
@@ -348,7 +308,7 @@ int RunStdinBatchExport(const fs::path& outputDir, const CliExportOptions& optio
     int lastResult = 0;
     std::string line;
     while (std::getline(std::cin, line)) {
-        line = TinyPdf::Trim(line);
+        line = RayoMd::Text::Trim(line);
         if (line.empty()) continue;
         fs::path inputPath(line);
         fs::path outputPath = outputDir / PdfNameForMarkdown(inputPath);
@@ -384,7 +344,7 @@ int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
     int lastResult = 0;
     std::string line;
     while (std::getline(std::cin, line)) {
-        line = TinyPdf::Trim(line);
+        line = RayoMd::Text::Trim(line);
         if (line.empty()) continue;
         if (line == "quit" || line == "exit") break;
 
@@ -398,7 +358,7 @@ int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
             failures++;
             lastResult = result;
         }
-        std::cout << (result == 0 ? "OK\t" : "ERR\t") << TinyPdf::F(ms) << "\t" << outputPath.string() << "\n";
+        std::cout << (result == 0 ? "OK\t" : "ERR\t") << RayoMd::Text::FormatDouble(ms) << "\t" << outputPath.string() << "\n";
     }
     return failures == 0 ? 0 : lastResult;
 }
@@ -420,14 +380,15 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     }
 
     std::string pdfBytes;
-    TinyPdf::BuildOptions options;
-    options.styleIdx = cliOptions.style;
-    options.marginIdx = cliOptions.margin;
+    TinyPdf::PdfOptions options;
+    options.style = cliOptions.style;
+    options.margin = cliOptions.margin;
     options.sourcePath = PathToUtf8(inputPath);
     options.enableUrlImages = cliOptions.enableUrlImages;
     options.allowUnsafeLocalImages = cliOptions.allowUnsafeLocalImages;
-    if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBytes)) {
-        int code = 10 + TinyPdf::GetLastError();
+    TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
+    if (!buildResult) {
+        int code = 10 + static_cast<int>(buildResult.error);
         std::cerr << "Error: native PDF benchmark export failed for " << PathToUtf8(inputPath)
             << " (code " << code << ").\n";
         return code;
@@ -441,8 +402,9 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     size_t totalBytes = 0;
     for (int i = 0; i < iterations; i++) {
         pdfBytes.clear();
-        if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBytes)) {
-            int code = 10 + TinyPdf::GetLastError();
+        TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
+    if (!buildResult) {
+            int code = 10 + static_cast<int>(buildResult.error);
             std::cerr << "Error: native PDF benchmark export failed for " << PathToUtf8(inputPath)
                 << " (code " << code << ").\n";
             return code;
@@ -456,10 +418,10 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     std::ostringstream report;
     report << "input_bytes=" << markdown.size() << "\n";
     report << "iterations=" << iterations << "\n";
-    report << "total_ms=" << TinyPdf::F(totalMs) << "\n";
-    report << "avg_ms=" << TinyPdf::F(avgMs) << "\n";
+    report << "total_ms=" << RayoMd::Text::FormatDouble(totalMs) << "\n";
+    report << "avg_ms=" << RayoMd::Text::FormatDouble(avgMs) << "\n";
     report << "avg_pdf_bytes=" << (totalBytes / (size_t)iterations) << "\n";
-    report << "path=" << (TinyPdf::IsAsciiDocument(markdown) ? "standard-font-ascii" : "unicode-embedded-font") << "\n";
+    report << "path=" << (RayoMd::Text::IsAsciiDocument(markdown) ? "standard-font-ascii" : "unicode-embedded-font") << "\n";
 
     if (!WriteUtf8FilePortable(outputDir / "bench-results.txt", report.str())) {
         std::cerr << "Error: could not write benchmark results in " << PathToUtf8(outputDir) << "\n";

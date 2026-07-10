@@ -49,6 +49,10 @@ if(WIN32)
     enable_language(RC)
     add_executable(rayomd WIN32
         src/core/tiny_pdf.cpp
+        src/core/export_options.cpp
+        src/core/inline_markdown.cpp
+        src/core/markdown_parser.cpp
+        src/common/text_utils.cpp
         src/win32/main_win32.cpp
         src/win32/rayomd.rc
         third_party/imgui/imgui.cpp
@@ -75,6 +79,10 @@ else()
 
     add_executable(rayomd
         src/core/tiny_pdf.cpp
+        src/core/export_options.cpp
+        src/core/inline_markdown.cpp
+        src/core/markdown_parser.cpp
+        src/common/text_utils.cpp
         src/cli/main_cli.cpp
     )
     target_include_directories(rayomd PRIVATE include)

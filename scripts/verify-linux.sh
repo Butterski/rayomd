@@ -124,6 +124,35 @@ EOF
 
 "$BIN" --bench benchmark-output/linux-verify/ascii.md benchmark-output/linux-verify/bench-ascii 1000 elegant normal
 
+LINK_DIR=benchmark-output/linux-verify/links
+mkdir -p "$LINK_DIR"
+
+cat > "$LINK_DIR/ascii.md" <<'EOF'
+# ASCII Link Regression
+
+[one](https://example.com/one) with a long [wrapped destination](https://example.com/two?query=alpha) that must stay clickable after wrapping.
+EOF
+
+cat > "$LINK_DIR/unicode.md" <<'EOF'
+# Unicode Link Regression
+
+Za???? g??l? ja??: [unicode destination](https://example.com/unicode) and [second destination](https://example.com/second).
+EOF
+
+"$BIN" --export "$LINK_DIR/ascii.md" "$LINK_DIR/ascii.pdf" native tech margin=54pt
+"$BIN" --export "$LINK_DIR/unicode.md" "$LINK_DIR/unicode.pdf" native modern normal
+test -s "$LINK_DIR/ascii.pdf"
+test -s "$LINK_DIR/unicode.pdf"
+grep -a -q 'https://example.com/one' "$LINK_DIR/ascii.pdf"
+grep -a -q 'https://example.com/two?query=alpha' "$LINK_DIR/ascii.pdf"
+grep -a -q 'https://example.com/unicode' "$LINK_DIR/unicode.pdf"
+link_count="$(grep -a -o '/Subtype /Link' "$LINK_DIR/ascii.pdf" "$LINK_DIR/unicode.pdf" | wc -l | tr -d ' ')"
+if [ "$link_count" -lt 4 ]; then
+    echo "Expected four link annotations across ASCII and Unicode exports." >&2
+    exit 1
+fi
+grep -a -q '/Subtype /Link /Rect \[' "$LINK_DIR/ascii.pdf"
+grep -a -q '/Subtype /Link /Rect \[' "$LINK_DIR/unicode.pdf"
 echo
 echo "No-network benchmark:"
 cat benchmark-output/linux-verify/bench-unicode/bench-results.txt

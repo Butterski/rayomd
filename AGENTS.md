@@ -58,9 +58,18 @@ Important image/link details:
   Public native exporter API. Keep this small and stable.
 
 - `src/core/tiny_pdf.cpp`
-  Portable Markdown parser, native PDF writer, font handling, image decoding,
-  image cache, link annotations, and renderers. This is the performance-critical
-  engine.
+  Native PDF assembly, font handling, image decoding/cache, link annotations, and the
+  standard/Unicode renderers. This remains the performance-critical export facade.
+
+- `src/core/markdown_parser.cpp`
+  Internal Markdown block model and parser; keep renderer-independent document cleanup here.
+
+- `src/core/inline_markdown.cpp`
+  Renderer-neutral inline span parsing for emphasis, code, images, and links. Both renderers
+  consume this model so visible text and link annotations cannot drift.
+
+- `src/core/export_options.cpp` and `src/common/text_utils.cpp`
+  Shared typed style/margin conversion, CLI option parsing primitives, and non-public text helpers.
 
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single
@@ -173,6 +182,10 @@ GitHub CI entry points:
 
 - `.github/workflows/codeql.yml`
   Runs C++ CodeQL analysis on the Linux native build path.
+
+- `.github/workflows/release.yml`
+  Packages default Linux, curl-enabled Linux, and Windows artifacts for matching version
+  bumps, `v<VERSION>` tags, and manual dispatch; keep `VERSION` and package contents aligned.
 
 ## Benchmark And Documentation Rules
 

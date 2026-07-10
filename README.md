@@ -6,7 +6,7 @@
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/md2pdf/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 1.1.7" src="https://img.shields.io/badge/version-1.1.7-informational">
+  <img alt="Version: 2.0.0" src="https://img.shields.io/badge/version-2.0.0-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
@@ -352,18 +352,19 @@ The public native API is intentionally small and lives in
 
 std::string pdfBytes;
 
-TinyPdf::BuildOptions options;
-options.styleIdx = 1;      // modern
-options.marginIdx = 1;     // normal
+TinyPdf::PdfOptions options;
+options.style = TinyPdf::PdfStyle::Modern;
+options.margin = TinyPdf::PdfMargin::Normal();
 options.sourcePath = "input.md";
 options.enableUrlImages = false;  // set true only for trusted URL image fetches
 
-if (!TinyPdf::BuildPdfBytes(markdownText, options, pdfBytes)) {
-    return TinyPdf::g_lastError;
+TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdownText, options, pdfBytes);
+if (!result) {
+    return static_cast<int>(result.error);
 }
 ```
 
-Set `BuildOptions::sourcePath` for file-based conversions so relative local
+Set `PdfOptions::sourcePath` for file-based conversions so relative local
 images resolve next to the input Markdown file. By default, local image targets
 must remain inside that source directory after canonicalization. Set
 `allowUnsafeLocalImages` only for trusted documents that deliberately need

@@ -59,6 +59,8 @@
 #include "imgui/backends/imgui_impl_dx11.h"
 #include "imgui/misc/cpp/imgui_stdlib.h"
 #include "rayomd/tiny_pdf.h"
+#include "../common/text_utils.h"
+#include "../core/export_options.h"
 
 // Forward declare message handler from imgui_impl_win32.cpp
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -100,6 +102,7 @@ std::atomic<bool> g_isFileLoading{false};
 HANDLE g_exportThread = nullptr;
 HANDLE g_fileLoadThread = nullptr;
 std::atomic<int> g_forcedRenderFrames{0};
+thread_local int g_nativePdfLastError = 0;
 std::string g_statusText = "Ready";
 std::wstring g_currentMarkdownPath;
 int g_lineCount = 1;
@@ -132,8 +135,8 @@ constexpr DWORD kPandocTimeoutMs = 120000;
 
 struct WinExportOptions {
     int engine = 0;
-    int style = 0;
-    int margin = 1;
+    TinyPdf::PdfStyle style = TinyPdf::PdfStyle::Elegant;
+    TinyPdf::PdfMargin margin = TinyPdf::PdfMargin::Normal();
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
 };
@@ -166,8 +169,8 @@ bool CreateDeviceD3D(HWND hWnd) {
     UINT createDeviceFlags = 0;
     D3D_FEATURE_LEVEL featureLevel;
     const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
-    if (D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags, 
-        featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, 
+    if (D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags,
+        featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel,
         &g_pd3dDeviceContext) != S_OK)
         return false;
 
@@ -414,41 +417,35 @@ bool WriteBinaryFile(const std::wstring& path, const std::string& content) {
 }
 #endif
 
+bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& exportOptions,
+    std::string& pdfBytes, const std::wstring& sourcePath = L"") {
+    TinyPdf::PdfOptions options;
+    options.style = exportOptions.style;
+    options.margin = exportOptions.margin;
+    options.sourcePath = WideToUtf8(sourcePath);
+    options.enableUrlImages = exportOptions.enableUrlImages;
+    options.allowUnsafeLocalImages = exportOptions.allowUnsafeLocalImages;
+    TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdfBytes);
+    g_nativePdfLastError = static_cast<int>(result.error);
+    return result.Ok();
+}
+
 bool ExportNativePdf(const std::string& markdown, const std::wstring& outputPath,
     const WinExportOptions& exportOptions, const std::wstring& sourcePath = L"") {
     static thread_local std::string pdfBytes;
     pdfBytes.clear();
     pdfBytes.reserve(1024 * 1024);
-    TinyPdf::BuildOptions options;
-    options.styleIdx = exportOptions.style;
-    options.marginIdx = exportOptions.margin;
-    options.sourcePath = WideToUtf8(sourcePath);
-    options.enableUrlImages = exportOptions.enableUrlImages;
-    options.allowUnsafeLocalImages = exportOptions.allowUnsafeLocalImages;
-    if (!TinyPdf::BuildPdfBytes(markdown, options, pdfBytes)) {
-        return false;
-    }
+    if (!BuildNativePdfBytes(markdown, exportOptions, pdfBytes, sourcePath)) return false;
     if (!WriteBinaryFile(outputPath, pdfBytes)) {
-        TinyPdf::g_lastError = 2;
+        g_nativePdfLastError = 2;
         return false;
     }
     return true;
 }
 
-bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& exportOptions,
-    std::string& pdfBytes, const std::wstring& sourcePath = L"") {
-    TinyPdf::BuildOptions options;
-    options.styleIdx = exportOptions.style;
-    options.marginIdx = exportOptions.margin;
-    options.sourcePath = WideToUtf8(sourcePath);
-    options.enableUrlImages = exportOptions.enableUrlImages;
-    options.allowUnsafeLocalImages = exportOptions.allowUnsafeLocalImages;
-    return TinyPdf::BuildPdfBytes(markdown, options, pdfBytes);
-}
 int GetNativePdfLastError() {
-    return TinyPdf::GetLastError();
+    return g_nativePdfLastError;
 }
-
 static bool IsExistingAbsoluteFile(const std::wstring& path) {
     std::error_code ec;
     std::filesystem::path fsPath(path);
@@ -483,15 +480,23 @@ static bool ResolvePandocExecutable(std::wstring& executable, std::string* warni
 bool RunPandoc(const std::wstring& input, const std::wstring& output,
     const WinExportOptions& options, std::string* warning = nullptr) {
     std::string marginArg;
-    if (options.margin >= 0 && options.margin <= 2) {
-        marginArg = g_marginArgs[options.margin];
-    } else if (options.margin >= 1000) {
-        char buf[96];
-        double inches = (double)(options.margin - 1000) / 72.0;
-        snprintf(buf, sizeof(buf), "-V geometry:margin=%.2fin", inches);
-        marginArg = buf;
-    } else {
+    switch (options.margin.preset) {
+    case TinyPdf::MarginPreset::Compact:
+        marginArg = g_marginArgs[0];
+        break;
+    case TinyPdf::MarginPreset::Normal:
         marginArg = g_marginArgs[1];
+        break;
+    case TinyPdf::MarginPreset::Wide:
+        marginArg = g_marginArgs[2];
+        break;
+    case TinyPdf::MarginPreset::Custom: {
+        char buffer[96];
+        std::snprintf(buffer, sizeof(buffer), "-V geometry:margin=%.2fin",
+            TinyPdf::Internal::ResolveMarginPoints(options.margin) / 72.0);
+        marginArg = buffer;
+        break;
+    }
     }
 
     std::wstring pandocExe;
@@ -508,7 +513,7 @@ bool RunPandoc(const std::wstring& input, const std::wstring& output,
     if (pandocOutput.empty()) return false;
 
     std::wstring cmd = L"\"" + pandocExe + L"\" --from=markdown \"" + input + L"\" -o \"" + pandocOutput + L"\" " +
-        Utf8ToWide(BASE_ARGS) + L" " + Utf8ToWide(g_styleArgs[options.style]) + L" " + Utf8ToWide(marginArg);
+        Utf8ToWide(BASE_ARGS) + L" " + Utf8ToWide(g_styleArgs[static_cast<int>(options.style)]) + L" " + Utf8ToWide(marginArg);
 
     STARTUPINFOW si = { sizeof(si) };
     si.dwFlags = STARTF_USESHOWWINDOW;
@@ -546,54 +551,6 @@ bool RunPandoc(const std::wstring& input, const std::wstring& output,
     }
     return ReplaceWithTempFile(pandocOutput, output);
 }
-int ParseStyleArg(const wchar_t* arg) {
-    if (!arg) return 0;
-    if (lstrcmpiW(arg, L"modern") == 0) return 1;
-    if (lstrcmpiW(arg, L"tech") == 0) return 2;
-    if (lstrcmpiW(arg, L"elegant") == 0) return 0;
-    int style = _wtoi(arg);
-    if (style < 0) style = 0;
-    if (style > 2) style = 2;
-    return style;
-}
-
-bool IsEngineArg(const wchar_t* arg) {
-    return arg && (lstrcmpiW(arg, L"native") == 0 || lstrcmpiW(arg, L"pandoc") == 0);
-}
-
-bool IsStyleArg(const wchar_t* arg) {
-    if (!arg) return false;
-    return lstrcmpiW(arg, L"elegant") == 0 || lstrcmpiW(arg, L"modern") == 0 ||
-        lstrcmpiW(arg, L"tech") == 0 || (arg[0] >= L'0' && arg[0] <= L'2' && arg[1] == 0);
-}
-
-int ParseMarginArg(const wchar_t* arg) {
-    if (!arg) return 1;
-    if (lstrcmpiW(arg, L"compact") == 0) return 0;
-    if (lstrcmpiW(arg, L"normal") == 0) return 1;
-    if (lstrcmpiW(arg, L"wide") == 0) return 2;
-
-    const wchar_t* value = arg;
-    if (_wcsnicmp(arg, L"margin=", 7) == 0) value = arg + 7;
-
-    wchar_t* end = nullptr;
-    double number = wcstod(value, &end);
-    if (number <= 0.0) return 1;
-
-    double points = number * 72.0;
-    if (end && _wcsnicmp(end, L"pt", 2) == 0) points = number;
-    else if (end && _wcsnicmp(end, L"in", 2) == 0) points = number * 72.0;
-
-    points = std::max(18.0, std::min(144.0, points));
-    return 1000 + (int)(points + 0.5);
-}
-
-bool IsMarginArg(const wchar_t* arg) {
-    if (!arg) return false;
-    return lstrcmpiW(arg, L"compact") == 0 || lstrcmpiW(arg, L"normal") == 0 ||
-        lstrcmpiW(arg, L"wide") == 0 || _wcsnicmp(arg, L"margin=", 7) == 0;
-}
-
 bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& options, std::wstring& error) {
     for (int i = start; i < argc; i++) {
         if (lstrcmpiW(argv[i], L"pandoc") == 0) {
@@ -604,13 +561,16 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.enableUrlImages = true;
         } else if (lstrcmpiW(argv[i], L"--allow-unsafe-local-images") == 0 || lstrcmpiW(argv[i], L"--unsafe-local-images") == 0) {
             options.allowUnsafeLocalImages = true;
-        } else if (IsMarginArg(argv[i])) {
-            options.margin = ParseMarginArg(argv[i]);
-        } else if (IsStyleArg(argv[i])) {
-            options.style = ParseStyleArg(argv[i]);
         } else {
-            error = L"unrecognized export option '" + std::wstring(argv[i]) + L"'";
-            return false;
+            std::string token = WideToUtf8(argv[i]);
+            TinyPdf::PdfMargin margin;
+            TinyPdf::PdfStyle style;
+            if (TinyPdf::Internal::ParsePdfMargin(token, margin)) options.margin = margin;
+            else if (TinyPdf::Internal::ParsePdfStyle(token, style)) options.style = style;
+            else {
+                error = L"unrecognized export option '" + std::wstring(argv[i]) + L"'";
+                return false;
+            }
         }
     }
     return true;
@@ -758,9 +718,9 @@ int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& o
     int lastResult = 0;
     std::set<std::wstring> seenOutputs;
     std::string warning;
-    std::vector<std::string> lines = TinyPdf::SplitLines(list);
+    std::vector<std::string> lines = RayoMd::Text::SplitLines(list);
     for (std::string line : lines) {
-        line = TinyPdf::Trim(line);
+        line = RayoMd::Text::Trim(line);
         if (line.empty()) continue;
         std::wstring inputPath = Utf8ToWide(line);
         std::wstring outputPath = JoinPath(outputDir, PdfNameForMarkdown(inputPath));
@@ -838,7 +798,7 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
     int failures = 0;
 
     auto processLine = [&](std::string line) {
-        line = TinyPdf::Trim(line);
+        line = RayoMd::Text::Trim(line);
         if (line.empty()) return true;
         if (line == "quit" || line == "exit") return false;
 
@@ -854,7 +814,7 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
 
         double ms = (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
         if (!ok) failures++;
-        WriteStdoutLine(std::string(ok ? "OK\t" : "ERR\t") + TinyPdf::F(ms) + "\t" + WideToUtf8(outputPath));
+        WriteStdoutLine(std::string(ok ? "OK\t" : "ERR\t") + RayoMd::Text::FormatDouble(ms) + "\t" + WideToUtf8(outputPath));
         if (!warning.empty()) {
             WriteStdoutLine("Warning: " + warning);
             warning.clear();
@@ -911,10 +871,10 @@ int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
     std::ostringstream report;
     report << "input_bytes=" << markdown.size() << "\n";
     report << "iterations=" << iterations << "\n";
-    report << "total_ms=" << TinyPdf::F(totalMs) << "\n";
-    report << "avg_ms=" << TinyPdf::F(avgMs) << "\n";
+    report << "total_ms=" << RayoMd::Text::FormatDouble(totalMs) << "\n";
+    report << "avg_ms=" << RayoMd::Text::FormatDouble(avgMs) << "\n";
     report << "avg_pdf_bytes=" << (totalBytes / (size_t)iterations) << "\n";
-    report << "path=" << (TinyPdf::IsAsciiDocument(markdown) ? "standard-font-ascii" : "unicode-embedded-font") << "\n";
+    report << "path=" << (RayoMd::Text::IsAsciiDocument(markdown) ? "standard-font-ascii" : "unicode-embedded-font") << "\n";
 
     if (!WriteUtf8File(JoinPath(outputDir, L"bench-results.txt"), report.str())) return 12;
     return 0;
@@ -1092,13 +1052,13 @@ DWORD WINAPI ExportThread(LPVOID lp) {
     double elapsedMs = freq.QuadPart > 0
         ? (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart
         : 0.0;
-    
+
     if (ok) {
         if (p->openAfter) {
             ShellExecuteW(nullptr, L"open", p->outputPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
     }
-    
+
     auto* result = new ExportResult{ ok, elapsedMs, warning };
     if (!PostMessageW(p->hWnd, WM_RAYOMD_EXPORT_DONE, 0, (LPARAM)result)) {
         delete result;
@@ -1116,27 +1076,26 @@ void DoExport(HWND hWnd) {
         MessageBoxW(hWnd, L"No content to export.", L"Error", MB_ICONERROR);
         return;
     }
-    
+
     std::wstring outPath = ShowSaveDialog(hWnd);
     if (outPath.empty()) return;
-    
+
     // Ensure .pdf extension
     if (outPath.size() < 4 || _wcsicmp(outPath.c_str() + outPath.size() - 4, L".pdf") != 0)
         outPath += L".pdf";
-    
+
     if (g_isExporting.exchange(true)) {
         g_statusText = "Still exporting the previous PDF.";
         return;
     }
     g_statusText = g_selectedEngine == 0 ? "Converting with native PDF..." : "Converting with Pandoc...";
-    
-    int marginSetting = g_selectedMargin == 3
-        ? 1000 + (int)(std::max(0.25f, std::min(2.0f, g_customMarginInches)) * 72.0f + 0.5f)
-        : g_selectedMargin;
+
     WinExportOptions options;
     options.engine = g_selectedEngine;
-    options.style = g_selectedStyle;
-    options.margin = marginSetting;
+    options.style = TinyPdf::Internal::PdfStyleFromLegacyIndex(g_selectedStyle);
+    options.margin = g_selectedMargin == 3
+        ? TinyPdf::PdfMargin::CustomPoints(std::max(0.25f, std::min(2.0f, g_customMarginInches)) * 72.0)
+        : TinyPdf::Internal::PdfMarginFromLegacySetting(g_selectedMargin);
     options.enableUrlImages = g_enableUrlImages;
     auto* params = new ExportParams{ g_markdownText, g_currentMarkdownPath, outPath, options, g_openAfterExport, hWnd };
     HANDLE hThread = CreateThread(nullptr, 0, ExportThread, params, 0, nullptr);
@@ -1212,7 +1171,7 @@ void LoadMarkdownFileAsync(HWND hWnd, const std::wstring& path) {
 void SetupImGuiStyle() {
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* colors = style.Colors;
-    
+
     colors[ImGuiCol_Text]                   = ImVec4(0.92f, 0.95f, 0.98f, 1.00f);
     colors[ImGuiCol_TextDisabled]           = ImVec4(0.46f, 0.51f, 0.58f, 1.00f);
     colors[ImGuiCol_WindowBg]               = ImVec4(0.04f, 0.05f, 0.07f, 1.00f);
@@ -1261,7 +1220,7 @@ void SetupImGuiStyle() {
     colors[ImGuiCol_NavWindowingHighlight]  = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
     colors[ImGuiCol_NavWindowingDimBg]      = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
     colors[ImGuiCol_ModalWindowDimBg]       = ImVec4(0.00f, 0.00f, 0.00f, 0.60f);
-    
+
     style.WindowRounding = 0.0f;
     style.ChildRounding = 10.0f;
     style.FrameRounding = 8.0f;
@@ -1480,6 +1439,216 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 // ============================================================================
+// Main UI frame
+// ============================================================================
+void RenderMainFrame(HWND hWnd, ImGuiIO& io) {
+    // Start ImGui frame
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    // Get window size
+    RECT rect;
+    GetClientRect(hWnd, &rect);
+    float width = (float)(rect.right - rect.left);
+    float height = (float)(rect.bottom - rect.top);
+
+    // Main window (fullscreen, no decoration)
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+    ImGui::Begin("##main", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    ImVec2 win = ImGui::GetWindowPos();
+    const float pad = width < 760.0f ? 14.0f : 18.0f;
+    const float gap = 14.0f;
+    const float headerH = 76.0f;
+    const float bodyTop = headerH + 12.0f;
+    const float statusH = 34.0f;
+    float sidebarW = std::min(296.0f, std::max(252.0f, width * 0.30f));
+    float editorW = width - pad * 2.0f - gap - sidebarW;
+    if (editorW < 430.0f) {
+        sidebarW = std::max(230.0f, width - pad * 2.0f - gap - 430.0f);
+        editorW = width - pad * 2.0f - gap - sidebarW;
+    }
+    const float editorBottom = height - pad - statusH - 10.0f;
+    const float editorH = std::max(140.0f, editorBottom - bodyTop);
+
+    draw->AddRectFilled(win, ImVec2(win.x + width, win.y + height), Rgba32(7, 9, 13));
+    draw->AddRectFilled(win, ImVec2(win.x + width, win.y + headerH), Rgba32(9, 12, 18));
+    draw->AddLine(ImVec2(win.x, win.y + headerH), ImVec2(win.x + width, win.y + headerH), Rgba32(31, 39, 53, 210));
+
+    ImFont* strongFont = g_fontStrong ? g_fontStrong : ImGui::GetFont();
+    float strongSize = strongFont->LegacySize;
+    ImFont* titleFont = g_fontTitle ? g_fontTitle : ImGui::GetFont();
+    float titleSizePx = titleFont->LegacySize;
+
+    ImVec2 titlePos(win.x + pad + 10.0f, win.y + 16.0f);
+    draw->AddRectFilled(ImVec2(win.x + pad, win.y + 22.0f), ImVec2(win.x + pad + 3.0f, win.y + 56.0f), Rgba32(94, 218, 242), 2.0f);
+    draw->AddText(titleFont, titleSizePx, titlePos, Rgba32(238, 244, 249), "RayoMD");
+    char headerDetail[160];
+    snprintf(headerDetail, sizeof(headerDetail), "%s / %s / %s", g_engines[g_selectedEngine], g_styles[g_selectedStyle], g_margins[g_selectedMargin]);
+    draw->AddText(ImVec2(titlePos.x, titlePos.y + 35.0f), Rgba32(126, 139, 155), headerDetail);
+
+    char headerStats[128];
+    snprintf(headerStats, sizeof(headerStats), "%d lines   %d words   %d chars", g_lineCount, g_wordCount, g_charCount);
+    ImVec2 headerStatsSize = ImGui::CalcTextSize(headerStats);
+    draw->AddText(ImVec2(win.x + width - pad - sidebarW - gap - headerStatsSize.x, win.y + 38.0f), Rgba32(112, 125, 142), headerStats);
+
+    // Keyboard shortcut
+    if (ImGui::IsKeyPressed(ImGuiKey_E) && io.KeyCtrl && !g_isExporting.load() && !g_isFileLoading.load()) {
+        DoExport(hWnd);
+    }
+
+    ImVec2 editorMin(win.x + pad, win.y + bodyTop);
+    ImVec2 editorMax(editorMin.x + editorW, editorMin.y + editorH);
+    const float editorHeaderH = 42.0f;
+    draw->AddRectFilled(ImVec2(editorMin.x, editorMin.y + 6.0f), ImVec2(editorMax.x, editorMax.y + 6.0f), Rgba32(0, 0, 0, 70), 16.0f);
+    draw->AddRectFilled(editorMin, editorMax, Rgba32(10, 13, 19), 16.0f);
+    draw->AddRect(editorMin, editorMax, Rgba32(39, 49, 66, 190), 16.0f);
+    draw->AddRectFilled(editorMin, ImVec2(editorMax.x, editorMin.y + editorHeaderH), Rgba32(13, 17, 24), 16.0f, ImDrawFlags_RoundCornersTop);
+    draw->AddLine(ImVec2(editorMin.x, editorMin.y + editorHeaderH), ImVec2(editorMax.x, editorMin.y + editorHeaderH), Rgba32(37, 47, 64, 150));
+    DrawSectionTitle(draw, "Markdown", ImVec2(editorMin.x + 16.0f, editorMin.y + 11.0f));
+
+    // Draw placeholder if empty
+    bool isEmpty = g_markdownText.empty() || g_markdownText[0] == '\0';
+
+    ImGui::SetCursorScreenPos(ImVec2(editorMin.x + 10.0f, editorMin.y + editorHeaderH + 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 12));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, Rgba(7, 10, 15));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Rgba(8, 12, 18));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Rgba(8, 12, 18));
+    ImGui::PushStyleColor(ImGuiCol_Border, Rgba(31, 40, 55, 220));
+    if (g_fontEditor) ImGui::PushFont(g_fontEditor);
+    if (ImGui::InputTextMultiline("##editor", &g_markdownText,
+        ImVec2(std::max(80.0f, editorW - 20.0f), std::max(80.0f, editorH - editorHeaderH - 20.0f)),
+        ImGuiInputTextFlags_AllowTabInput)) {
+        UpdateMarkdownStats();
+    }
+    if (g_fontEditor) ImGui::PopFont();
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(2);
+
+    // Draw placeholder on top if empty and not focused
+    if (isEmpty && !ImGui::IsItemActive()) {
+        ImVec2 pos = ImGui::GetItemRectMin();
+        ImFont* editorFont = g_fontEditor ? g_fontEditor : ImGui::GetFont();
+        draw->AddText(editorFont, editorFont->LegacySize, ImVec2(pos.x + 14.0f, pos.y + 12.0f), Rgba32(94, 105, 120), "Start typing Markdown, or drop a .md file here.");
+    }
+
+    ImVec2 inspectorMin(editorMax.x + gap, editorMin.y);
+    ImVec2 inspectorMax(win.x + width - pad, win.y + height - pad);
+    draw->AddRectFilled(ImVec2(inspectorMin.x, inspectorMin.y + 6.0f), ImVec2(inspectorMax.x, inspectorMax.y + 6.0f), Rgba32(0, 0, 0, 80), 16.0f);
+    draw->AddRectFilled(inspectorMin, inspectorMax, Rgba32(12, 16, 23), 16.0f);
+    draw->AddRect(inspectorMin, inspectorMax, Rgba32(42, 52, 70, 185), 16.0f);
+
+    const float panelX = inspectorMin.x + 16.0f;
+    const float panelW = inspectorMax.x - inspectorMin.x - 32.0f;
+    float panelY = inspectorMin.y + 18.0f;
+    DrawSectionTitle(draw, "Export", ImVec2(panelX, panelY));
+    draw->AddText(ImVec2(panelX, panelY + 23.0f), Rgba32(117, 131, 149), "PDF settings");
+    panelY += 62.0f;
+
+    draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Engine");
+    panelY += 24.0f;
+    ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+    if (DrawOptionTile("engine_native", "Native Tiny PDF", "Fast local export", g_selectedEngine == 0, ImVec2(panelW, 58.0f))) g_selectedEngine = 0;
+    panelY += 66.0f;
+    ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+    if (DrawOptionTile("engine_pandoc", "Pandoc", "Full document pipeline", g_selectedEngine == 1, ImVec2(panelW, 58.0f))) g_selectedEngine = 1;
+    panelY += 78.0f;
+
+    draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Style");
+    panelY += 24.0f;
+    float styleChipW = (panelW - 10.0f) / 3.0f;
+    ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+    if (DrawQuietChip("style_elegant", "Elegant", g_selectedStyle == 0, ImVec2(styleChipW, 34.0f))) g_selectedStyle = 0;
+    ImGui::SameLine(0.0f, 5.0f);
+    if (DrawQuietChip("style_modern", "Modern", g_selectedStyle == 1, ImVec2(styleChipW, 34.0f))) g_selectedStyle = 1;
+    ImGui::SameLine(0.0f, 5.0f);
+    if (DrawQuietChip("style_tech", "Tech", g_selectedStyle == 2, ImVec2(styleChipW, 34.0f))) g_selectedStyle = 2;
+    panelY += 56.0f;
+
+    draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Margin");
+    panelY += 24.0f;
+    float marginChipW = (panelW - 8.0f) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+    if (DrawQuietChip("margin_compact", "Compact", g_selectedMargin == 0, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 0;
+    ImGui::SameLine(0.0f, 8.0f);
+    if (DrawQuietChip("margin_normal", "Normal", g_selectedMargin == 1, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 1;
+    panelY += 42.0f;
+    ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+    if (DrawQuietChip("margin_wide", "Wide", g_selectedMargin == 2, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 2;
+    ImGui::SameLine(0.0f, 8.0f);
+    if (DrawQuietChip("margin_custom", "Custom", g_selectedMargin == 3, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 3;
+    panelY += 48.0f;
+    if (g_selectedMargin == 3) {
+        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
+        ImGui::SetNextItemWidth(panelW);
+        ImGui::SliderFloat("##customMargin", &g_customMarginInches, 0.25f, 2.0f, "%.2fin", ImGuiSliderFlags_AlwaysClamp);
+        panelY += 42.0f;
+    }
+
+    float actionY = inspectorMax.y - 68.0f;
+    float openSwitchY = actionY - 46.0f;
+    float urlSwitchY = openSwitchY - 38.0f;
+    draw->AddLine(ImVec2(panelX, urlSwitchY - 14.0f), ImVec2(panelX + panelW, urlSwitchY - 14.0f), Rgba32(39, 49, 66, 160));
+    draw->AddText(ImVec2(panelX, urlSwitchY + 4.0f), Rgba32(174, 185, 198), "URL images");
+    ImGui::SetCursorScreenPos(ImVec2(panelX + panelW - 46.0f, urlSwitchY));
+    DrawSwitch("url_images", &g_enableUrlImages);
+    draw->AddText(ImVec2(panelX, openSwitchY + 4.0f), Rgba32(174, 185, 198), "Open after export");
+    ImGui::SetCursorScreenPos(ImVec2(panelX + panelW - 46.0f, openSwitchY));
+    DrawSwitch("open_after_export", &g_openAfterExport);
+
+    bool exportDisabled = g_isExporting.load() || g_isFileLoading.load();
+    const char* exportLabel = g_isFileLoading.load()
+        ? "Loading..."
+        : (g_isExporting.load() ? "Exporting..." : "Export PDF");
+    ImGui::SetCursorScreenPos(ImVec2(panelX, actionY));
+    if (DrawActionButton("export_pdf", exportLabel, ImVec2(panelW, 48.0f), exportDisabled)) {
+        DoExport(hWnd);
+    }
+
+    ImVec2 statusMin(editorMin.x, editorMax.y + 10.0f);
+    ImVec2 statusMax(editorMax.x, statusMin.y + statusH);
+    draw->AddRectFilled(statusMin, statusMax, Rgba32(10, 13, 19), 12.0f);
+    draw->AddRect(statusMin, statusMax, Rgba32(38, 48, 64, 145), 12.0f);
+    bool isBusy = g_isExporting.load() || g_isFileLoading.load();
+    ImU32 statusDot = isBusy ? Rgba32(94, 218, 242) : Rgba32(94, 205, 145);
+    draw->AddCircleFilled(ImVec2(statusMin.x + 18.0f, statusMin.y + statusH * 0.5f), 4.0f, statusDot);
+    draw->AddText(ImVec2(statusMin.x + 30.0f, statusMin.y + 10.0f), Rgba32(168, 180, 194), g_statusText.c_str());
+
+    char stats[128];
+    snprintf(stats, sizeof(stats), "%d lines   %d words   %d chars", g_lineCount, g_wordCount, g_charCount);
+    ImVec2 statsSize = ImGui::CalcTextSize(stats);
+    draw->AddText(ImVec2(statusMax.x - statsSize.x - 16.0f, statusMin.y + 10.0f), Rgba32(122, 134, 150), stats);
+    if (isBusy) {
+        float progressW = std::min(220.0f, (statusMax.x - statusMin.x) * 0.30f);
+        float travel = std::max(1.0f, statusMax.x - statusMin.x - progressW - 12.0f);
+        float x = statusMin.x + 6.0f + fmodf((float)ImGui::GetTime() * 180.0f, travel);
+        draw->AddRectFilled(ImVec2(x, statusMax.y - 4.0f), ImVec2(x + progressW, statusMax.y - 2.0f), Rgba32(94, 218, 242, 210), 999.0f);
+    }
+
+    ImGui::End();
+
+    // Render
+    ImGui::Render();
+    const float clear_color[4] = { 0.027f, 0.035f, 0.051f, 1.0f };
+    g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+    g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+    g_pSwapChain->Present(1, 0); // Present with vsync
+    if (g_forcedRenderFrames.load() > 0) {
+        g_forcedRenderFrames--;
+    }
+}
+
+// ============================================================================
 // Entry Point
 // ============================================================================
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
@@ -1489,58 +1658,58 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Load embedded app icon from src/win32/rayomd.rc.
     HICON hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
     if (!hIcon) hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-    
+
     // Register window class
-    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, 
-        hIcon, LoadCursor(nullptr, IDC_ARROW), 
+    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance,
+        hIcon, LoadCursor(nullptr, IDC_ARROW),
         nullptr, nullptr, L"RayoMDImGui", hIcon };
     RegisterClassExW(&wc);
-    
+
     // Create window
     HWND hWnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"RayoMD",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1100, 760,
         nullptr, nullptr, hInstance, nullptr);
     DragAcceptFiles(hWnd, TRUE);
-    
+
     // Enable dark title bar (Windows 11 style)
     BOOL darkMode = TRUE;
     DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));
-    
+
     // Initialize Direct3D
     if (!CreateDeviceD3D(hWnd)) {
         CleanupDeviceD3D();
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return 1;
     }
-    
+
     // Show window
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
-    
+
     // Setup ImGui
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename = nullptr; // Disable imgui.ini
-    
+
     g_fontBody = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f);
     g_fontTitle = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 28.0f);
     g_fontStrong = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 18.0f);
     g_fontEditor = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\CascadiaMono.ttf", 16.0f);
     if (!g_fontBody) g_fontBody = io.Fonts->AddFontDefault();
     io.FontDefault = g_fontBody;
-    
+
     SetupImGuiStyle();
-    
+
     // Setup Platform/Renderer backends
     ImGui_ImplWin32_Init(hWnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
-    
+
     // Reserve buffer for text
     g_markdownText.reserve(1024 * 1024); // 1MB
     UpdateMarkdownStats();
-    
+
     // Main loop
     MSG msg;
     ZeroMemory(&msg, sizeof(msg));
@@ -1555,223 +1724,20 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             WaitMessage();
             continue;
         }
-        
-        // Start ImGui frame
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-        
-        // Get window size
-        RECT rect;
-        GetClientRect(hWnd, &rect);
-        float width = (float)(rect.right - rect.left);
-        float height = (float)(rect.bottom - rect.top);
-        
-        // Main window (fullscreen, no decoration)
-        ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImVec2(width, height));
-        ImGui::Begin("##main", nullptr, 
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | 
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-            ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-        ImDrawList* draw = ImGui::GetWindowDrawList();
-        ImVec2 win = ImGui::GetWindowPos();
-        const float pad = width < 760.0f ? 14.0f : 18.0f;
-        const float gap = 14.0f;
-        const float headerH = 76.0f;
-        const float bodyTop = headerH + 12.0f;
-        const float statusH = 34.0f;
-        float sidebarW = std::min(296.0f, std::max(252.0f, width * 0.30f));
-        float editorW = width - pad * 2.0f - gap - sidebarW;
-        if (editorW < 430.0f) {
-            sidebarW = std::max(230.0f, width - pad * 2.0f - gap - 430.0f);
-            editorW = width - pad * 2.0f - gap - sidebarW;
-        }
-        const float editorBottom = height - pad - statusH - 10.0f;
-        const float editorH = std::max(140.0f, editorBottom - bodyTop);
-
-        draw->AddRectFilled(win, ImVec2(win.x + width, win.y + height), Rgba32(7, 9, 13));
-        draw->AddRectFilled(win, ImVec2(win.x + width, win.y + headerH), Rgba32(9, 12, 18));
-        draw->AddLine(ImVec2(win.x, win.y + headerH), ImVec2(win.x + width, win.y + headerH), Rgba32(31, 39, 53, 210));
-
-        ImFont* strongFont = g_fontStrong ? g_fontStrong : ImGui::GetFont();
-        float strongSize = strongFont->LegacySize;
-        ImFont* titleFont = g_fontTitle ? g_fontTitle : ImGui::GetFont();
-        float titleSizePx = titleFont->LegacySize;
-
-        ImVec2 titlePos(win.x + pad + 10.0f, win.y + 16.0f);
-        draw->AddRectFilled(ImVec2(win.x + pad, win.y + 22.0f), ImVec2(win.x + pad + 3.0f, win.y + 56.0f), Rgba32(94, 218, 242), 2.0f);
-        draw->AddText(titleFont, titleSizePx, titlePos, Rgba32(238, 244, 249), "RayoMD");
-        char headerDetail[160];
-        snprintf(headerDetail, sizeof(headerDetail), "%s / %s / %s", g_engines[g_selectedEngine], g_styles[g_selectedStyle], g_margins[g_selectedMargin]);
-        draw->AddText(ImVec2(titlePos.x, titlePos.y + 35.0f), Rgba32(126, 139, 155), headerDetail);
-
-        char headerStats[128];
-        snprintf(headerStats, sizeof(headerStats), "%d lines   %d words   %d chars", g_lineCount, g_wordCount, g_charCount);
-        ImVec2 headerStatsSize = ImGui::CalcTextSize(headerStats);
-        draw->AddText(ImVec2(win.x + width - pad - sidebarW - gap - headerStatsSize.x, win.y + 38.0f), Rgba32(112, 125, 142), headerStats);
-        
-        // Keyboard shortcut
-        if (ImGui::IsKeyPressed(ImGuiKey_E) && io.KeyCtrl && !g_isExporting.load() && !g_isFileLoading.load()) {
-            DoExport(hWnd);
-        }
-
-        ImVec2 editorMin(win.x + pad, win.y + bodyTop);
-        ImVec2 editorMax(editorMin.x + editorW, editorMin.y + editorH);
-        const float editorHeaderH = 42.0f;
-        draw->AddRectFilled(ImVec2(editorMin.x, editorMin.y + 6.0f), ImVec2(editorMax.x, editorMax.y + 6.0f), Rgba32(0, 0, 0, 70), 16.0f);
-        draw->AddRectFilled(editorMin, editorMax, Rgba32(10, 13, 19), 16.0f);
-        draw->AddRect(editorMin, editorMax, Rgba32(39, 49, 66, 190), 16.0f);
-        draw->AddRectFilled(editorMin, ImVec2(editorMax.x, editorMin.y + editorHeaderH), Rgba32(13, 17, 24), 16.0f, ImDrawFlags_RoundCornersTop);
-        draw->AddLine(ImVec2(editorMin.x, editorMin.y + editorHeaderH), ImVec2(editorMax.x, editorMin.y + editorHeaderH), Rgba32(37, 47, 64, 150));
-        DrawSectionTitle(draw, "Markdown", ImVec2(editorMin.x + 16.0f, editorMin.y + 11.0f));
-
-        // Draw placeholder if empty
-        bool isEmpty = g_markdownText.empty() || g_markdownText[0] == '\0';
-
-        ImGui::SetCursorScreenPos(ImVec2(editorMin.x + 10.0f, editorMin.y + editorHeaderH + 10.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 12));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, Rgba(7, 10, 15));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, Rgba(8, 12, 18));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, Rgba(8, 12, 18));
-        ImGui::PushStyleColor(ImGuiCol_Border, Rgba(31, 40, 55, 220));
-        if (g_fontEditor) ImGui::PushFont(g_fontEditor);
-        if (ImGui::InputTextMultiline("##editor", &g_markdownText,
-            ImVec2(std::max(80.0f, editorW - 20.0f), std::max(80.0f, editorH - editorHeaderH - 20.0f)),
-            ImGuiInputTextFlags_AllowTabInput)) {
-            UpdateMarkdownStats();
-        }
-        if (g_fontEditor) ImGui::PopFont();
-        ImGui::PopStyleColor(4);
-        ImGui::PopStyleVar(2);
-        
-        // Draw placeholder on top if empty and not focused
-        if (isEmpty && !ImGui::IsItemActive()) {
-            ImVec2 pos = ImGui::GetItemRectMin();
-            ImFont* editorFont = g_fontEditor ? g_fontEditor : ImGui::GetFont();
-            draw->AddText(editorFont, editorFont->LegacySize, ImVec2(pos.x + 14.0f, pos.y + 12.0f), Rgba32(94, 105, 120), "Start typing Markdown, or drop a .md file here.");
-        }
-
-        ImVec2 inspectorMin(editorMax.x + gap, editorMin.y);
-        ImVec2 inspectorMax(win.x + width - pad, win.y + height - pad);
-        draw->AddRectFilled(ImVec2(inspectorMin.x, inspectorMin.y + 6.0f), ImVec2(inspectorMax.x, inspectorMax.y + 6.0f), Rgba32(0, 0, 0, 80), 16.0f);
-        draw->AddRectFilled(inspectorMin, inspectorMax, Rgba32(12, 16, 23), 16.0f);
-        draw->AddRect(inspectorMin, inspectorMax, Rgba32(42, 52, 70, 185), 16.0f);
-
-        const float panelX = inspectorMin.x + 16.0f;
-        const float panelW = inspectorMax.x - inspectorMin.x - 32.0f;
-        float panelY = inspectorMin.y + 18.0f;
-        DrawSectionTitle(draw, "Export", ImVec2(panelX, panelY));
-        draw->AddText(ImVec2(panelX, panelY + 23.0f), Rgba32(117, 131, 149), "PDF settings");
-        panelY += 62.0f;
-
-        draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Engine");
-        panelY += 24.0f;
-        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
-        if (DrawOptionTile("engine_native", "Native Tiny PDF", "Fast local export", g_selectedEngine == 0, ImVec2(panelW, 58.0f))) g_selectedEngine = 0;
-        panelY += 66.0f;
-        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
-        if (DrawOptionTile("engine_pandoc", "Pandoc", "Full document pipeline", g_selectedEngine == 1, ImVec2(panelW, 58.0f))) g_selectedEngine = 1;
-        panelY += 78.0f;
-
-        draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Style");
-        panelY += 24.0f;
-        float styleChipW = (panelW - 10.0f) / 3.0f;
-        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
-        if (DrawQuietChip("style_elegant", "Elegant", g_selectedStyle == 0, ImVec2(styleChipW, 34.0f))) g_selectedStyle = 0;
-        ImGui::SameLine(0.0f, 5.0f);
-        if (DrawQuietChip("style_modern", "Modern", g_selectedStyle == 1, ImVec2(styleChipW, 34.0f))) g_selectedStyle = 1;
-        ImGui::SameLine(0.0f, 5.0f);
-        if (DrawQuietChip("style_tech", "Tech", g_selectedStyle == 2, ImVec2(styleChipW, 34.0f))) g_selectedStyle = 2;
-        panelY += 56.0f;
-
-        draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Margin");
-        panelY += 24.0f;
-        float marginChipW = (panelW - 8.0f) * 0.5f;
-        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
-        if (DrawQuietChip("margin_compact", "Compact", g_selectedMargin == 0, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 0;
-        ImGui::SameLine(0.0f, 8.0f);
-        if (DrawQuietChip("margin_normal", "Normal", g_selectedMargin == 1, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 1;
-        panelY += 42.0f;
-        ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
-        if (DrawQuietChip("margin_wide", "Wide", g_selectedMargin == 2, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 2;
-        ImGui::SameLine(0.0f, 8.0f);
-        if (DrawQuietChip("margin_custom", "Custom", g_selectedMargin == 3, ImVec2(marginChipW, 34.0f))) g_selectedMargin = 3;
-        panelY += 48.0f;
-        if (g_selectedMargin == 3) {
-            ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
-            ImGui::SetNextItemWidth(panelW);
-            ImGui::SliderFloat("##customMargin", &g_customMarginInches, 0.25f, 2.0f, "%.2fin", ImGuiSliderFlags_AlwaysClamp);
-            panelY += 42.0f;
-        }
-
-        float actionY = inspectorMax.y - 68.0f;
-        float openSwitchY = actionY - 46.0f;
-        float urlSwitchY = openSwitchY - 38.0f;
-        draw->AddLine(ImVec2(panelX, urlSwitchY - 14.0f), ImVec2(panelX + panelW, urlSwitchY - 14.0f), Rgba32(39, 49, 66, 160));
-        draw->AddText(ImVec2(panelX, urlSwitchY + 4.0f), Rgba32(174, 185, 198), "URL images");
-        ImGui::SetCursorScreenPos(ImVec2(panelX + panelW - 46.0f, urlSwitchY));
-        DrawSwitch("url_images", &g_enableUrlImages);
-        draw->AddText(ImVec2(panelX, openSwitchY + 4.0f), Rgba32(174, 185, 198), "Open after export");
-        ImGui::SetCursorScreenPos(ImVec2(panelX + panelW - 46.0f, openSwitchY));
-        DrawSwitch("open_after_export", &g_openAfterExport);
-
-        bool exportDisabled = g_isExporting.load() || g_isFileLoading.load();
-        const char* exportLabel = g_isFileLoading.load()
-            ? "Loading..."
-            : (g_isExporting.load() ? "Exporting..." : "Export PDF");
-        ImGui::SetCursorScreenPos(ImVec2(panelX, actionY));
-        if (DrawActionButton("export_pdf", exportLabel, ImVec2(panelW, 48.0f), exportDisabled)) {
-            DoExport(hWnd);
-        }
-
-        ImVec2 statusMin(editorMin.x, editorMax.y + 10.0f);
-        ImVec2 statusMax(editorMax.x, statusMin.y + statusH);
-        draw->AddRectFilled(statusMin, statusMax, Rgba32(10, 13, 19), 12.0f);
-        draw->AddRect(statusMin, statusMax, Rgba32(38, 48, 64, 145), 12.0f);
-        bool isBusy = g_isExporting.load() || g_isFileLoading.load();
-        ImU32 statusDot = isBusy ? Rgba32(94, 218, 242) : Rgba32(94, 205, 145);
-        draw->AddCircleFilled(ImVec2(statusMin.x + 18.0f, statusMin.y + statusH * 0.5f), 4.0f, statusDot);
-        draw->AddText(ImVec2(statusMin.x + 30.0f, statusMin.y + 10.0f), Rgba32(168, 180, 194), g_statusText.c_str());
-
-        char stats[128];
-        snprintf(stats, sizeof(stats), "%d lines   %d words   %d chars", g_lineCount, g_wordCount, g_charCount);
-        ImVec2 statsSize = ImGui::CalcTextSize(stats);
-        draw->AddText(ImVec2(statusMax.x - statsSize.x - 16.0f, statusMin.y + 10.0f), Rgba32(122, 134, 150), stats);
-        if (isBusy) {
-            float progressW = std::min(220.0f, (statusMax.x - statusMin.x) * 0.30f);
-            float travel = std::max(1.0f, statusMax.x - statusMin.x - progressW - 12.0f);
-            float x = statusMin.x + 6.0f + fmodf((float)ImGui::GetTime() * 180.0f, travel);
-            draw->AddRectFilled(ImVec2(x, statusMax.y - 4.0f), ImVec2(x + progressW, statusMax.y - 2.0f), Rgba32(94, 218, 242, 210), 999.0f);
-        }
-        
-        ImGui::End();
-        
-        // Render
-        ImGui::Render();
-        const float clear_color[4] = { 0.027f, 0.035f, 0.051f, 1.0f };
-        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        
-        g_pSwapChain->Present(1, 0); // Present with vsync
-        if (g_forcedRenderFrames.load() > 0) {
-            g_forcedRenderFrames--;
-        }
+        RenderMainFrame(hWnd, io);
     }
-    
+
     // Cleanup
     CloseWorkerThreadHandle(g_exportThread, true);
     CloseWorkerThreadHandle(g_fileLoadThread, true);
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
-    
+
     CleanupDeviceD3D();
     DestroyWindow(hWnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
-    
+
     return 0;
 }
