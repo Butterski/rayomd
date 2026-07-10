@@ -16,7 +16,7 @@ function(rayomd_release_flags target)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         if(WIN32)
             target_compile_options(${target} PRIVATE
-                $<$<CONFIG:Release>:-Os>
+                $<$<CONFIG:Release>:-O2>
                 $<$<CONFIG:Release>:-fno-exceptions>
                 $<$<CONFIG:Release>:-fno-rtti>
                 $<$<CONFIG:Release>:-ffunction-sections>

@@ -228,3 +228,11 @@ Final post-revert stress sanity run:
 - `TextWidth` `Codepoints()` allocation: `TextWidth` uses `ForEachCodepoint`; unused allocating helper removed.
 - `WrapText` normalization copy: no `NormalizeSpaces` hot-path copy exists in current code; wrapping already scans views.
 - Precomputed width scale: implemented.
+
+## Windows `-O2` Release Experiment (2026-07-10)
+
+- Release compiler tuning changed MinGW Windows builds from `-Os` to `-O2` for RayoMD 1.1.7.
+- Five alternating warm `tester.md` runs (1,000 iterations, `modern normal`) had medians of `1.52 ms` for `-Os` and `1.41 ms` for `-O2` (about 7% faster).
+- Earlier three-run checks also favored `-O2`: `README.md` ASCII median `2.74 -> 2.63 ms`; Unicode smoke median `1.83 -> 1.71 ms`; initial `tester.md` median `1.73 -> 1.58 ms`.
+- Tradeoff: Windows executable size increased from `2,374,656` to `2,706,432` bytes (about 14%). The faster setting was retained deliberately and should be rechecked when toolchain or packaging changes.
+- A renderer experiment passing table cells through `string_view` was rejected: direct alternating table benchmarks regressed from `2.30 ms` to `2.61 ms` median.
