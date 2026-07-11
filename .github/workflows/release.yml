@@ -184,12 +184,12 @@ jobs:
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
-              --title "RayoMD ${RAYOMD_VERSION} curl edition" \
+              --title "RayoMD ${RAYOMD_VERSION}" \
               --latest
             gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
           else
             gh release create "$RELEASE_TAG" "${files[@]}" \
-              --title "RayoMD ${RAYOMD_VERSION} curl edition" \
+              --title "RayoMD ${RAYOMD_VERSION}" \
               --target "$GITHUB_SHA" \
               --generate-notes \
               --latest
