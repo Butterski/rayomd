@@ -39,6 +39,9 @@ CLI.
 ## Highlights
 
 - Native Markdown-to-PDF path with no browser engine.
+- Fastest in our July 2026 Windows tests: `74x` to `113x` faster than
+  Pandoc/XeLaTeX and the popular Node `md-to-pdf` converter on three synthetic
+  small-to-medium workloads.
 - Single Windows GUI executable for the default release.
 - Compact non-Windows CLI binary.
 - Fast warm conversion for small and medium documents.
@@ -106,6 +109,41 @@ Release binary sizes from local release builds:
 
 Example output from `tester.md` is tracked as
 [`docs/tester.pdf`](docs/tester.pdf) for quick release-page previews.
+
+### Fastest In Our July 2026 Tests
+
+RayoMD was the fastest converter in every case in a fresh-process Windows
+comparison with Pandoc/XeLaTeX and the Node `md-to-pdf` tool. It finished at
+least `74.2x` faster than the next-fastest comparator across a tiny README, a
+medium feature mix, and a pagination-heavy 500-row table.
+
+| Case | Input | RayoMD | `md-to-pdf` | Pandoc + XeLaTeX | RayoMD vs next fastest |
+|---|---:|---:|---:|---:|---:|
+| Tiny README | `205 B` | **`17.93 ms`** | `1655.77 ms` | `3022.02 ms` | **`92.3x`** |
+| Medium feature mix | `15,102 B` | **`19.74 ms`** | `2238.22 ms` | `3324.44 ms` | **`113.4x`** |
+| 500-row table | `33,353 B` | **`30.64 ms`** | `2272.99 ms` | `3302.67 ms` | **`74.2x`** |
+
+The test machine used an AMD Ryzen 5 5600X (6 cores, 12 threads), 128 GiB RAM,
+and Windows 11 Pro build 26200. The compared software was RayoMD 2.0.0,
+Pandoc 3.9.0.1 with MiKTeX-XeTeX 4.16, and `md-to-pdf` 5.2.5 running on
+Node.js 25.8.1.
+
+Each tool ran as a new process, so timings include program startup, Markdown
+parsing, PDF generation, and output-file writing. Each case had one uncounted
+warm-up followed by seven measured runs; the table reports the median. Inputs
+were deterministic local files with no remote resources, and every output was
+checked for a valid PDF header, EOF marker, and non-trivial size.
+
+See the dated
+[`full benchmark report`](docs/benchmarks/markdown_pdf_speed_comparison_2026-07-11.md)
+for timing ranges, tool-selection rationale, reproduction commands, and feature
+scope caveats. The reusable harness is
+[`scripts/compare_markdown_pdf_tools.py`](scripts/compare_markdown_pdf_tools.py).
+
+This supports the scoped claim that RayoMD was the fastest Markdown-to-PDF
+converter **in these tests**. It is not an unqualified universal claim: Pandoc
+and browser renderers implement broader document and styling features than
+RayoMD's deliberately focused native subset.
 
 ### Local Pandoc Comparison
 
