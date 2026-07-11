@@ -16,6 +16,7 @@ small releases, and predictable deployment.
 
 <p align="center">
   <img src="docs/assets/rayomd.png" alt="RayoMD mascot" width="180">
+  <br><sub><sup>* My graphic designer is working on a proper SVG version.</sup></sub>
 </p>
 
 <p align="center">
