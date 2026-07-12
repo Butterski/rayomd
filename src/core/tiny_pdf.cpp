@@ -2072,6 +2072,32 @@ static void AppendPageAnnotations(std::string& page, const std::vector<int>& ann
     page += "]";
 }
 
+template <typename RendererType>
+static void RenderBlocks(RendererType& renderer, const std::vector<Block>& blocks) {
+    if (blocks.empty()) {
+        renderer.RenderParagraph("Empty document");
+        return;
+    }
+    bool pageBreakPending = false;
+    for (const Block& block : blocks) {
+        if (block.type == BlockType::PageBreak) { pageBreakPending = true; continue; }
+        if (pageBreakPending) { renderer.RenderPageBreak(); pageBreakPending = false; }
+        switch (block.type) {
+        case BlockType::Heading: renderer.RenderHeading(block); break;
+        case BlockType::Paragraph: renderer.RenderParagraph(block.text); break;
+        case BlockType::Bullet: renderer.RenderBullet(block); break;
+        case BlockType::Numbered: renderer.RenderNumbered(block); break;
+        case BlockType::Quote: renderer.RenderQuote(block.text); break;
+        case BlockType::Code: renderer.RenderCode(block.text); break;
+        case BlockType::MathBlock: renderer.RenderMath(block.text); break;
+        case BlockType::Table: renderer.RenderTable(block.rows, block.aligns); break;
+        case BlockType::Rule: renderer.RenderRule(); break;
+        case BlockType::PageBreak: break;
+        case BlockType::Image: renderer.RenderImage(block); break;
+        }
+    }
+}
+
 class Renderer {
 public:
     Renderer(const TtfFont& f, int fontObject, PdfStyle styleValue, const PdfMargin& marginValue, ImageRegistry* imageRegistry)
@@ -2082,73 +2108,16 @@ public:
         NewPage();
     }
 
-    void Render(const std::vector<Block>& blocks) {
-        if (blocks.empty()) {
-            RenderParagraph("Empty document");
-            return;
-        }
-
-        bool pageBreakPending = false;
-        for (const Block& block : blocks) {
-            if (block.type == BlockType::PageBreak) {
-                pageBreakPending = true;
-                continue;
-            }
-            if (pageBreakPending) {
-                RenderPageBreak();
-                pageBreakPending = false;
-            }
-
-            switch (block.type) {
-            case BlockType::Heading:
-                RenderHeading(block);
-                break;
-            case BlockType::Paragraph:
-                RenderParagraph(block.text);
-                break;
-            case BlockType::Bullet:
-                RenderListItem("- ", block);
-                y -= 2.0;
-                break;
-            case BlockType::Numbered:
-            {
-                std::string marker;
-                marker.reserve(8);
-                AppendInt(marker, block.number);
-                marker += ". ";
-                RenderListItem(marker, block);
-                y -= 2.0;
-                break;
-            }
-            case BlockType::Quote:
-                RenderQuote(block.text);
-                break;
-            case BlockType::Code:
-                RenderCode(block.text);
-                break;
-            case BlockType::MathBlock:
-                RenderMath(block.text);
-                break;
-            case BlockType::Table:
-                RenderTable(block.rows, block.aligns);
-                break;
-            case BlockType::Rule:
-                RenderRule();
-                break;
-            case BlockType::PageBreak:
-                break;
-            case BlockType::Image:
-                RenderImage(block);
-                break;
-            }
-        }
-    }
+    void Render(const std::vector<Block>& blocks) { RenderBlocks(*this, blocks); }
 
     const std::vector<std::string>& Pages() const { return pages; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     const CidList& UsedCids() const { return usedCids.Values(); }
 
 private:
+    template <typename RendererType>
+    friend void RenderBlocks(RendererType&, const std::vector<Block>&);
+
     const TtfFont& font;
     int fontId = 0;
     ImageRegistry* images = nullptr;
@@ -2160,6 +2129,20 @@ private:
     std::vector<std::string> pages;
     std::vector<std::vector<LinkRect>> pageLinks;
     UsedCidSet usedCids;
+
+    void RenderBullet(const Block& block) {
+        RenderListItem("- ", block);
+        y -= 2.0;
+    }
+
+    void RenderNumbered(const Block& block) {
+        std::string marker;
+        marker.reserve(8);
+        AppendInt(marker, block.number);
+        marker += ". ";
+        RenderListItem(marker, block);
+        y -= 2.0;
+    }
 
     struct StyledSpan {
         std::wstring text;
@@ -3044,75 +3027,15 @@ public:
         NewPage();
     }
 
-    void Render(const std::vector<Block>& blocks) {
-        if (blocks.empty()) {
-            RenderParagraph("Empty document");
-            return;
-        }
-
-        bool pageBreakPending = false;
-        for (const Block& block : blocks) {
-            if (block.type == BlockType::PageBreak) {
-                pageBreakPending = true;
-                continue;
-            }
-            if (pageBreakPending) {
-                RenderPageBreak();
-                pageBreakPending = false;
-            }
-
-            switch (block.type) {
-            case BlockType::Heading:
-                RenderHeading(block);
-                break;
-            case BlockType::Paragraph:
-                RenderParagraph(block.text);
-                break;
-            case BlockType::Bullet:
-                RenderParagraph("- " + block.text, margin + 16.0 + block.level * 18.0,
-                    PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0);
-                y -= 2.0;
-                break;
-            case BlockType::Numbered:
-            {
-                std::string item;
-                item.reserve(block.text.size() + 8);
-                AppendInt(item, block.number);
-                item += ". ";
-                item += block.text;
-                RenderParagraph(item, margin + 16.0 + block.level * 18.0,
-                    PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0);
-                y -= 2.0;
-                break;
-            }
-            case BlockType::Quote:
-                RenderQuote(block.text);
-                break;
-            case BlockType::Code:
-                RenderCode(block.text);
-                break;
-            case BlockType::MathBlock:
-                RenderMath(block.text);
-                break;
-            case BlockType::Table:
-                RenderTable(block.rows, block.aligns);
-                break;
-            case BlockType::Rule:
-                RenderRule();
-                break;
-            case BlockType::PageBreak:
-                break;
-            case BlockType::Image:
-                RenderImage(block);
-                break;
-            }
-        }
-    }
+    void Render(const std::vector<Block>& blocks) { RenderBlocks(*this, blocks); }
 
     const std::vector<std::string>& Pages() const { return pages; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
 
 private:
+    template <typename RendererType>
+    friend void RenderBlocks(RendererType&, const std::vector<Block>&);
+
     ImageRegistry* images = nullptr;
     PdfStyle style = PdfStyle::Elegant;
     double margin = 54.0;
@@ -3121,6 +3044,23 @@ private:
     double y = 0.0;
     std::vector<std::string> pages;
     std::vector<std::vector<LinkRect>> pageLinks;
+
+    void RenderBullet(const Block& block) {
+        RenderParagraph("- " + block.text, margin + 16.0 + block.level * 18.0,
+            PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0);
+        y -= 2.0;
+    }
+
+    void RenderNumbered(const Block& block) {
+        std::string item;
+        item.reserve(block.text.size() + 8);
+        AppendInt(item, block.number);
+        item += ". ";
+        item += block.text;
+        RenderParagraph(item, margin + 16.0 + block.level * 18.0,
+            PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0);
+        y -= 2.0;
+    }
 
     void NewPage() {
         pages.push_back("");
