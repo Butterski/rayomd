@@ -430,11 +430,73 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     return 0;
 }
 
+int RunDoctor() {
+    std::cout << "RayoMD doctor " << RAYOMD_VERSION << "\n";
+    std::cout << "platform="
+#ifdef _WIN32
+        << "windows\n";
+#else
+        << "linux\n";
+#endif
+    std::cout << "zlib="
+#ifdef RAYOMD_USE_ZLIB
+        << "enabled\n";
+#else
+        << "disabled\n";
+#endif
+    std::cout << "curl="
+#ifdef RAYOMD_USE_CURL
+        << "enabled\n";
+#else
+        << "disabled\n";
+#endif
+    std::cout << "platform_images="
+#ifdef _WIN32
+        << "winhttp,wic\n";
+#else
+        << "native";
+#ifdef RAYOMD_USE_CURL
+    std::cout << ",http";
+#endif
+    std::cout << "\n";
+#endif
+
+    TinyPdf::PdfOptions options;
+    std::string pdfBytes;
+    TinyPdf::BuildResult result = TinyPdf::BuildPdf("# RayoMD Doctor\n\nUnicode: \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E.\n", options, pdfBytes);
+    bool fontOk = result.Ok();
+    std::cout << "unicode_font=" << (fontOk ? "ok" : "unavailable") << "\n";
+
+    std::error_code ec;
+    fs::path tempDir = fs::temp_directory_path(ec);
+    bool tempOk = !ec && fs::is_directory(tempDir, ec) && !ec;
+    fs::path smokePath;
+    if (tempOk && fontOk) {
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        smokePath = tempDir / ("rayomd-doctor-" + std::to_string(stamp) + ".pdf");
+        tempOk = WriteBinaryFilePortable(smokePath, pdfBytes);
+        if (tempOk) {
+            std::error_code sizeError;
+            tempOk = fs::file_size(smokePath, sizeError) > 0 && !sizeError;
+        }
+        std::error_code removeError;
+        fs::remove(smokePath, removeError);
+    }
+    std::cout << "temp_output=" << (tempOk ? "ok" : "failed") << "\n";
+    std::cout << "smoke_export=" << (fontOk && tempOk ? "ok" : "failed") << "\n";
+    if (fontOk && tempOk) {
+        std::cout << "status=ok\n";
+        return 0;
+    }
+    std::cout << "status=failed\n";
+    return 1;
+}
 void PrintUsage() {
     std::cerr
         << "RayoMD portable CLI " << RAYOMD_VERSION << "\n"
         << "Usage:\n"
         << "  rayomd --version\n"
+        << "  rayomd --doctor\n"
         << "  rayomd --export <input.md> <output.pdf> [native] [style] [margin]\n"
         << "  rayomd --stdin <output.pdf> [native] [style] [margin]\n"
         << "  rayomd --batch <input-folder> <output-folder> [native] [style] [margin]\n"
@@ -468,6 +530,8 @@ int main(int argc, char** argv) {
         std::cout << "rayomd " << RAYOMD_VERSION << "\n";
         return 0;
     }
+
+    if (command == "--doctor") return RunDoctor();
 
     if (command == "--stdin") {
         if (argc < 3) return PrintArgumentError("--stdin requires <output.pdf>.");

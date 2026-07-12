@@ -40,7 +40,7 @@ subset is enough.
 ## Reproduce
 
 ```powershell
-python scripts/compare_pandoc.py `
+python tools/benchmark.py compare -- `
   --rayomd build\release-check-windows-escalated\rayomd.exe `
   --root benchmark-output\pandoc-comparison-windows `
   --runs 5

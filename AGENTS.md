@@ -108,22 +108,25 @@ Important image/link details:
   styles, code, math, tables, nested lists, block quotes, links, local images,
   remote images, and failed image fallbacks.
 
-- `scripts/`
-  Verification helper and the performance watcher. Keep scripts deterministic,
-  documented, and non-root.
+- tests/verify_cli.py
+  Cross-platform black-box correctness verification for an already-built binary.
+  Keep building and timing outside this verifier.
 
+- tools/benchmark.py
+  Maintained entry point for run, compare, release, and competitor performance
+  workflows. Focused implementations remain under scripts/.
 - `.github/workflows/`
   GitHub Actions for Linux/Windows CI, repository hygiene, and CodeQL. Keep
   README badges aligned with workflow filenames when adding or renaming checks.
 
-- `docs/assets/`
-  Project mascot and icon source assets.
+- docs/assets/branding/ and docs/assets/demo/
+  Project branding sources and demo media, kept separate.
 
 - `docs/benchmarks/`
   Archived benchmark summaries and caveats. Do not treat archival headline
   numbers as current without rerunning or clearly dating them.
 
-- `docs/optimization/`
+- `docs/development/`
   Optimization progress and research notes. These are context, not a mandate to
   keep old experiments alive.
 
@@ -147,10 +150,11 @@ The default Linux build intentionally avoids a libcurl runtime dependency. Use
 `-DRAYOMD_USE_CURL=ON` only when producing a Linux build that should fetch
 HTTP/HTTPS images and can target a known distro/libcurl baseline.
 
-Linux verification:
+Cross-platform CLI verification (after building):
 
 ```sh
-sh scripts/verify-linux.sh
+python3 tests/verify_cli.py --binary build/linux/rayomd
+python tests/verify_cli.py --binary build/windows/rayomd.exe
 ```
 
 Native benchmark examples:
@@ -163,8 +167,8 @@ build/windows/rayomd.exe --bench tester.md benchmark-output/manual 1000 modern n
 Performance watcher examples:
 
 ```sh
-python scripts/perf_watch.py --binary build/windows/rayomd.exe --platform windows --suite watch --label local
-python3 scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --label local
+python tools/benchmark.py run -- --binary build/windows/rayomd.exe --platform windows --suite watch --label local
+python3 tools/benchmark.py run -- --binary build/linux/rayomd --platform linux-wsl --suite watch --label local
 ```
 
 When performance is part of the task, record before/after numbers. Do not keep a
@@ -240,7 +244,7 @@ The Windows app should feel like a compact utility, not a landing page.
 - Use Dear ImGui idioms and keep custom drawing localized in `main_win32.cpp`.
 - Avoid UI changes that make the binary much larger or require shipping assets
   beyond the icon/mascot unless the value is clear.
-- The icon source is `docs/assets/rayomd.ico`; `docs/assets/rayomd.png` is the
+- The icon source is `docs/assets/branding/rayomd.ico`; `docs/assets/branding/rayomd.png` is the
   transparent source graphic used in docs/branding.
 
 ## Packaging And Licensing

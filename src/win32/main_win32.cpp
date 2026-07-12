@@ -879,6 +879,42 @@ int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
     if (!WriteUtf8File(JoinPath(outputDir, L"bench-results.txt"), report.str())) return 12;
     return 0;
 }
+int RunDoctor() {
+    WriteStdoutLine(std::string("RayoMD doctor ") + RAYOMD_VERSION);
+    WriteStdoutLine("platform=windows");
+#ifdef RAYOMD_USE_ZLIB
+    WriteStdoutLine("zlib=enabled");
+#else
+    WriteStdoutLine("zlib=disabled");
+#endif
+    WriteStdoutLine("curl=disabled");
+    WriteStdoutLine("platform_images=winhttp,wic");
+
+    TinyPdf::PdfOptions options;
+    std::string pdfBytes;
+    TinyPdf::BuildResult result = TinyPdf::BuildPdf(
+        "# RayoMD Doctor\n\nUnicode: \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E.\n", options, pdfBytes);
+    const bool fontOk = result.Ok();
+    WriteStdoutLine(std::string("unicode_font=") + (fontOk ? "ok" : "unavailable"));
+
+    wchar_t tempDir[MAX_PATH] = {};
+    wchar_t smokePath[MAX_PATH] = {};
+    DWORD tempLength = GetTempPathW(MAX_PATH, tempDir);
+    bool tempOk = tempLength > 0 && tempLength < MAX_PATH &&
+        GetTempFileNameW(tempDir, L"rmd", 0, smokePath) != 0;
+    if (tempOk && fontOk) {
+        tempOk = WriteUtf8File(smokePath, pdfBytes);
+        WIN32_FILE_ATTRIBUTE_DATA attributes = {};
+        tempOk = tempOk && GetFileAttributesExW(
+            smokePath, GetFileExInfoStandard, &attributes) &&
+            (attributes.nFileSizeHigh != 0 || attributes.nFileSizeLow != 0);
+    }
+    if (smokePath[0] != L'\0') DeleteFileW(smokePath);
+    WriteStdoutLine(std::string("temp_output=") + (tempOk ? "ok" : "failed"));
+    WriteStdoutLine(std::string("smoke_export=") + (fontOk && tempOk ? "ok" : "failed"));
+    WriteStdoutLine(std::string("status=") + (fontOk && tempOk ? "ok" : "failed"));
+    return fontOk && tempOk ? 0 : 1;
+}
 int TryCommandLineExport() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -890,6 +926,11 @@ int TryCommandLineExport() {
         return 0;
     }
 
+    if (argc >= 2 && lstrcmpiW(argv[1], L"--doctor") == 0) {
+        int result = RunDoctor();
+        LocalFree(argv);
+        return result;
+    }
     if (argc < 2 || (lstrcmpiW(argv[1], L"--export") != 0 &&
         lstrcmpiW(argv[1], L"--stdin") != 0 && lstrcmpiW(argv[1], L"--batch") != 0 &&
         lstrcmpiW(argv[1], L"--stdin-batch") != 0 && lstrcmpiW(argv[1], L"--serve") != 0 &&
@@ -909,6 +950,7 @@ int TryCommandLineExport() {
 
     if (lstrcmpiW(argv[1], L"--stdin") == 0) {
         if (argc < 3) {
+            WriteStdoutLine("Error: --stdin requires <output.pdf>.");
             LocalFree(argv);
             return 2;
         }
@@ -969,6 +1011,9 @@ int TryCommandLineExport() {
     }
 
     if (argc < 4) {
+        WriteStdoutLine(lstrcmpiW(argv[1], L"--export") == 0
+            ? "Error: --export requires <input.md> <output.pdf>."
+            : "Error: --batch requires <input-folder> <output-folder>.");
         LocalFree(argv);
         return 2;
     }
@@ -994,6 +1039,7 @@ int TryCommandLineExport() {
     if (options.engine == 0) {
         std::string markdown;
         if (!ReadUtf8File(inputPath, markdown)) {
+            WriteStdoutLine("Error: could not read input Markdown file: " + WideToUtf8(inputPath));
             LocalFree(argv);
             return 3;
         }

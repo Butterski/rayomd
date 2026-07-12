@@ -1,4 +1,4 @@
 #include <windows.h>
 
 1 RT_MANIFEST "rayomd.manifest"
-1 ICON "../../docs/assets/rayomd.ico"
+1 ICON "../../docs/assets/branding/rayomd.ico"

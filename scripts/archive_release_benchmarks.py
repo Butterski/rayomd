@@ -22,7 +22,7 @@ from typing import Any
 
 DEFAULT_REPO = "Butterski/rayomd"
 DEFAULT_ROOT = Path("benchmark-output/release-benchmark-archive")
-DEFAULT_LOG_DIR = Path("docs/benchmarks/versions")
+DEFAULT_LOG_DIR = Path("docs/benchmarks/releases")
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 

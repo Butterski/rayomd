@@ -6,7 +6,7 @@
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/md2pdf/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 2.0.0" src="https://img.shields.io/badge/version-2.0.0-informational">
+  <img alt="Version: 2.1.0" src="https://img.shields.io/badge/version-2.1.0-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
@@ -15,20 +15,20 @@ RayoMD is a tiny native Markdown-to-PDF converter built for fast startup,
 small releases, and predictable deployment.
 
 <p align="center">
-  <img src="docs/assets/rayomd.png" alt="RayoMD mascot" width="180">
+  <img src="docs/assets/branding/rayomd.png" alt="RayoMD mascot" width="180">
   <br><sub><sup>* My graphic designer is working on a proper SVG version.</sup></sub>
 </p>
 
 <p align="center">
-  <img src="docs/ui.png" alt="RayoMD Windows app screenshot" width="780">
+  <img src="docs/assets/demo/ui.png" alt="RayoMD Windows app screenshot" width="780">
 </p>
 
 <p align="center">
-  <img src="docs/show.gif" alt="RayoMD Windows app demo" width="780">
+  <img src="docs/assets/demo/show.gif" alt="RayoMD Windows app demo" width="780">
 </p>
 
 <p align="center">
-  <a href="docs/show.mp4">Download the MP4 demo</a>
+  <a href="docs/assets/demo/show.mp4">Download the MP4 demo</a>
 </p>
 
 The default renderer parses Markdown and writes PDF bytes directly from C++17.
@@ -92,7 +92,7 @@ Windows-mounted paths are much slower for many small files.
 ### Small Document Smoke
 
 The `tester.md` rows use `modern normal`; the ASCII smoke row uses the verifier
-default shown in `scripts/verify-linux.sh`. PDF byte counts can differ by
+default shown in `tests/verify_cli.py`. PDF byte counts can differ by
 platform because native builds use platform font and optional image pipelines.
 
 | Build | Input | Iterations | Avg conversion | Output PDF |
@@ -107,9 +107,6 @@ Release binary sizes from local release builds:
 |---|---:|
 | `rayomd.exe` Windows app | `2,364,928 bytes` |
 | `rayomd` Linux CLI | `276,912 bytes` |
-
-Example output from `tester.md` is tracked as
-[`docs/tester.pdf`](docs/tester.pdf) for quick release-page previews.
 
 ### Fastest In Our July 2026 Tests
 
@@ -139,7 +136,7 @@ See the dated
 [`full benchmark report`](docs/benchmarks/markdown_pdf_speed_comparison_2026-07-11.md)
 for timing ranges, tool-selection rationale, reproduction commands, and feature
 scope caveats. The reusable harness is
-[`scripts/compare_markdown_pdf_tools.py`](scripts/compare_markdown_pdf_tools.py).
+[`tools/benchmark.py`](tools/benchmark.py).
 
 This supports the scoped claim that RayoMD was the fastest Markdown-to-PDF
 converter **in these tests**. It is not an unqualified universal claim: Pandoc
@@ -178,7 +175,7 @@ Run date: 2026-06-06. Full caveats and source report pointers are in
 | Windows 20-file batch | `0.610 s` | 20 synthetic files around 100 KB each |
 | Windows Pandoc compatibility smoke | `8.11 s` | External Pandoc/LaTeX path, 100 KB ASCII input |
 
-Use `scripts/perf_watch.py` for current before/after work. It records machine
+Use `tools/benchmark.py` for current before/after work. It records machine
 and git metadata, keeps JSONL history for report-only local comparisons, and
 can compare against explicit baseline records for deterministic gates.
 
@@ -277,7 +274,7 @@ build/linux/rayomd
 Linux verification:
 
 ```sh
-sh scripts/verify-linux.sh
+python3 tests/verify_cli.py --binary build/linux/rayomd
 ```
 
 ## Continuous Verification
@@ -286,7 +283,8 @@ GitHub Actions run the release-critical checks on every push and pull request:
 
 | Workflow | What it verifies |
 |---|---|
-| `CI` | Linux native CLI build/export/bench, Windows MinGW ImGui build, and a Windows benchmark smoke |
+| CI | Linux and Windows builds followed by the same cross-platform CLI verifier |
+| Performance smoke | Performance sampling in a separate workflow with no correctness assertions |
 | `Repository Hygiene` | Required release files, Python helper syntax, local README targets, and no generated binaries/PDFs in source |
 | `Release` | Tag/manual release packaging for Windows, default Linux, and curl-enabled Linux assets |
 | `CodeQL` | Weekly and PR C++ static analysis for the Linux native build path |
@@ -317,6 +315,7 @@ Windows:
 
 ```batch
 rayomd.exe --version
+rayomd.exe --doctor
 rayomd.exe --export input.md output.pdf native elegant normal
 type input.md | rayomd.exe --stdin output.pdf native elegant normal
 rayomd.exe --batch input-folder output-folder native modern normal
@@ -329,6 +328,7 @@ Linux / WSL:
 
 ```sh
 ./rayomd --version
+./rayomd --doctor
 ./rayomd --export input.md output.pdf native elegant normal
 cat input.md | ./rayomd --stdin output.pdf native elegant normal
 ./rayomd --batch input-folder output-folder native modern normal
@@ -342,6 +342,7 @@ Modes:
 | Mode | Use case |
 |---|---|
 | `--version` | Print the compiled project version |
+| `--doctor` | Diagnose capabilities, Unicode fonts, temporary output, and a smoke export |
 | `--export` | Convert one Markdown file |
 | `--stdin` | Convert Markdown content read from stdin into one PDF |
 | `--batch` | Convert every `.md` file in a folder |
@@ -409,94 +410,39 @@ must remain inside that source directory after canonicalization. Set
 `allowUnsafeLocalImages` only for trusted documents that deliberately need
 absolute, UNC/device, or parent-escaping paths.
 
-## Performance Watcher
+## Benchmarking
 
-Use `scripts/perf_watch.py` when you want a repeatable "did this version get
-slower?" check. It creates a deterministic random Markdown corpus using the
-native feature subset, runs no-UI CLI modes, and appends a JSONL history record
-under ignored `benchmark-output/`. Local history comparisons are report-only
-because they depend on host load, storage location, and prior run provenance.
+Correctness verification does not run timing loops. Use the maintained
+tools/benchmark.py entry point for performance work; raw reports stay under
+ignored benchmark-output/. Detailed commands and storage caveats are in
+docs/development/performance.md.
 
-Windows:
+    python tools/benchmark.py run -- --binary build/windows/rayomd.exe --platform windows --suite watch --label local
+    python3 tools/benchmark.py run -- --binary build/linux/rayomd --platform linux-wsl --suite watch --label local
+    python tools/benchmark.py compare -- --rayomd build/windows/rayomd.exe --root benchmark-output/pandoc --runs 5
+    python tools/benchmark.py competitors -- --rayomd build/windows/rayomd.exe --root benchmark-output/competitors
+    python3 tools/benchmark.py release -- --from-version 1.1.0 --suite quick
 
-```sh
-python scripts/perf_watch.py --binary build/windows/rayomd.exe --platform windows --suite watch --label local
-```
-
-Compare end-to-end native export against Pandoc when Pandoc and XeLaTeX are
-available:
-
-```sh
-python scripts/compare_pandoc.py --rayomd build/windows/rayomd.exe --root benchmark-output/pandoc-comparison-windows --runs 5
-```
-
-WSL/Linux:
-
-```sh
-python3 scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --label local
-```
-
-Run both from PowerShell when both binaries are already built:
-
-```powershell
-scripts/perf_watch_both.ps1 -Suite watch -Label local
-```
-
-Suites are `quick`, `watch`, and `full`. For a pass/fail performance gate, pass
-an explicit baseline record instead of relying on mutable local history:
-
-```sh
-python scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --baseline-record docs/benchmarks/versions/v1.1.5/linux-wsl-watch-modern-normal-local.json --fail-on-slower-pct 10
-```
-
-For release-quality benchmark logging, add a version log directory and storage
-note. This writes compact JSON under `docs/benchmarks/versions/v<VERSION>/` and
-regenerates [`docs/benchmarks/versions/README.md`](docs/benchmarks/versions/README.md):
-
-```sh
-python scripts/perf_watch.py --binary build/linux/rayomd --platform linux-wsl --suite watch --label release --version-log-dir docs/benchmarks/versions --storage-note "WSL ext4"
-```
-
-When archiving downloaded historical release binaries, pass
-`--benchmark-version <version>` so the record is keyed by the release version
-being measured rather than the current checkout version. Use
-`scripts/archive_release_benchmarks.py --from-version 1.1.0 --suite quick` from
-Linux/WSL to download published Linux release tarballs and refresh the archive.
-If `gh` is only available outside WSL, pre-extract the tarballs and pass
-`--skip-download --binary-root <extracted-root>`.
-
-Remote image timing is intentionally excluded because network timing is not a
-stable performance signal. CI and release benchmark smokes use
-[`docs/benchmark_smoke.md`](docs/benchmark_smoke.md), which contains no remote
-image inputs.
-
+Suites are quick, watch, and full. Release records belong under
+docs/benchmarks/releases/. Remote-image timing is excluded because network
+latency is not a stable performance signal.
 ## Project Layout
 
-```text
-include/rayomd/       Public C++ header for the native exporter
-src/core/                    Portable Markdown parser and PDF writer
-src/cli/                     Portable CLI entry point
-src/win32/                   Windows Dear ImGui app, CLI glue, and resources
-scripts/                     Verification and benchmark helper scripts
-docs/benchmark_smoke.md      No-network benchmark smoke fixture
-docs/assets/                 Mascot and icon source assets
-docs/ui.png                  Windows app screenshot
-docs/show.gif                Windows app demo animation
-docs/show.mp4                Windows app demo video
-docs/benchmarks/             Archived benchmark summaries and caveats
-docs/benchmarks/versions/    Curated version benchmark records and index
-docs/optimization/           Optimization notes and research follow-up
-third_party/imgui/           Vendored Dear ImGui v1.92.8
-third_party/simdutf/         Optional simdutf experiment, OFF by default
-scripts/compare_pandoc.py    Local RayoMD vs Pandoc comparison helper
-tester.md                    Hand-written smoke/regression Markdown document
-CMakeLists.txt               Cross-platform build definition
-```
+    include/rayomd/             Public native exporter API
+    src/core/                   Markdown parser and PDF writer
+    src/cli/                    Portable CLI entry point
+    src/win32/                  Windows app, CLI glue, and resources
+    tests/verify_cli.py         Cross-platform black-box correctness verifier
+    tools/benchmark.py          Maintained performance workflow entry point
+    scripts/                    Focused benchmark implementation helpers
+    docs/assets/branding/       Mascot and icon source assets
+    docs/assets/demo/           Windows screenshot and demo media
+    docs/benchmarks/releases/   Curated, dated release records
+    docs/development/           Performance and optimization notes
+    tester.md                   Hand-written smoke document
 
-Generated build trees, benchmark corpora, local binaries, and generated PDFs
-other than the intentional [`docs/tester.pdf`](docs/tester.pdf) sample are
-ignored and should not be committed.
-
+Generated build trees, benchmark corpora, local binaries, generated PDFs, and
+raw timing reports are ignored and must not be committed.
 ## Packaging
 
 Default native releases are intentionally small:

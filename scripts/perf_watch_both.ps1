@@ -16,7 +16,7 @@ function Quote-Sh([string]$Value) {
     return "'" + $Value + "'"
 }
 
-python scripts/perf_watch.py `
+python tools/benchmark.py run -- `
     --binary $WindowsBinary `
     --platform windows `
     --suite $Suite `
@@ -30,6 +30,6 @@ if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
 
 $repo = (Get-Location).Path
 $wslRepo = (& wsl.exe wslpath -a $repo).Trim()
-$linuxCommand = "cd $(Quote-Sh $wslRepo) && python3 scripts/perf_watch.py --binary $(Quote-Sh $LinuxBinary) --platform linux-wsl --suite $(Quote-Sh $Suite) --seed $Seed --label $(Quote-Sh $Label)"
+$linuxCommand = "cd $(Quote-Sh $wslRepo) && python3 tools/benchmark.py run -- --binary $(Quote-Sh $LinuxBinary) --platform linux-wsl --suite $(Quote-Sh $Suite) --seed $Seed --label $(Quote-Sh $Label)"
 
 & wsl.exe sh -lc $linuxCommand
