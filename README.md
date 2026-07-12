@@ -6,7 +6,7 @@
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/md2pdf/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 2.0.0" src="https://img.shields.io/badge/version-2.0.0-informational">
+  <img alt="Version: 2.0.1" src="https://img.shields.io/badge/version-2.0.1-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
