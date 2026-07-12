@@ -98,3 +98,14 @@ else()
     rayomd_common_definitions(rayomd)
     rayomd_release_flags(rayomd)
 endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(
+            NAME rayomd-cli
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_cli.py"
+                --binary "$<TARGET_FILE:rayomd>")
+    endif()
+endif()

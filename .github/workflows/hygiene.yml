@@ -16,14 +16,11 @@ jobs:
   hygiene:
     name: Docs, scripts, and release layout
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Required release files
+      - name: Required release files and assets
         run: |
           test -f README.md
           test -f LICENSE
@@ -31,43 +28,40 @@ jobs:
           test -f AGENTS.md
           test -f CONTRIBUTING.md
           test -f VERSION
-          test -f docs/assets/rayomd.png
-          test -f docs/assets/rayomd.ico
-          test -f docs/ui.png
-          test -f docs/show.gif
-          test -f docs/show.mp4
+          test -f docs/assets/branding/rayomd.png
+          test -f docs/assets/branding/rayomd.ico
+          test -f docs/assets/demo/ui.png
+          test -f docs/assets/demo/show.gif
+          test -f docs/assets/demo/show.mp4
+          test -f docs/benchmarks/releases/README.md
+          test -f docs/development/performance.md
+          test -f tests/verify_cli.py
+          test -f tools/benchmark.py
           test -f third_party/imgui/LICENSE.txt
           test -f third_party/simdutf/LICENSE-APACHE
           test -f third_party/simdutf/LICENSE-MIT
-
-      - name: Python helper syntax
+      - name: Python helper syntax and entry points
         run: |
-          python3 -B -c "import ast, pathlib; ast.parse(pathlib.Path('scripts/perf_watch.py').read_text(encoding='utf-8'))"
-          python3 -B -c "import ast, pathlib; ast.parse(pathlib.Path('scripts/compare_pandoc.py').read_text(encoding='utf-8'))"
-          python3 -B -c "import ast, pathlib; ast.parse(pathlib.Path('scripts/archive_release_benchmarks.py').read_text(encoding='utf-8'))"
-          python3 -B scripts/perf_watch.py --help >/dev/null
-          python3 -B scripts/compare_pandoc.py --help >/dev/null
-          python3 -B scripts/archive_release_benchmarks.py --help >/dev/null
-
+          python3 -m py_compile tests/verify_cli.py tools/benchmark.py scripts/perf_watch.py scripts/compare_pandoc.py scripts/compare_markdown_pdf_tools.py scripts/archive_release_benchmarks.py
+          python3 -B tests/verify_cli.py --help >/dev/null
+          python3 -B tools/benchmark.py --help >/dev/null
+          python3 -B tools/benchmark.py run -- --help >/dev/null
+          python3 -B tools/benchmark.py compare -- --help >/dev/null
+          python3 -B tools/benchmark.py release -- --help >/dev/null
+          python3 -B tools/benchmark.py competitors -- --help >/dev/null
       - name: Keep generated outputs out of source
         run: |
-          if git ls-files \
-            | grep -v -E '^docs/tester\.pdf$' \
-            | grep -E '(^build/|^benchmark-output/|\.exe$|\.dll$|\.so$|\.dylib$|\.pdf$|^rayomd$)'; then
+          if git ls-files | grep -E '(^build/|^benchmark-output/|\.exe$|\.dll$|\.so$|\.dylib$|\.pdf$|^rayomd$)'; then
             echo "Generated output or local binary is tracked." >&2
             exit 1
           fi
-
       - name: README local link targets
         run: |
-          test -f docs/assets/rayomd.png
+          test -f docs/assets/branding/rayomd.png
+          test -f docs/assets/demo/ui.png
+          test -f docs/assets/demo/show.gif
+          test -f docs/assets/demo/show.mp4
           test -f docs/benchmark_smoke.md
-          test -f docs/ui.png
-          test -f docs/show.gif
-          test -f docs/show.mp4
-          test -f docs/tester.pdf
           test -f docs/benchmarks/commercial_benchmark_summary.md
-          test -f docs/benchmarks/pandoc_comparison_2026-06-18.md
-          test -f docs/benchmarks/versions/README.md
+          test -f docs/benchmarks/releases/README.md
           test -f include/rayomd/tiny_pdf.h
-          test -f third_party/imgui/LICENSE.txt

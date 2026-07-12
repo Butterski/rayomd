@@ -19,5 +19,5 @@ Constraints: do not use #00ff00 anywhere in the subject; no cast shadow, no cont
 
 Post-process the generated image by removing the chroma-key background, then export:
 
-- `docs/assets/rayomd.png`: transparent 1024 x 1024 PNG
-- `docs/assets/rayomd.ico`: multi-size Windows icon with 16, 32, 48, 64, 128, and 256 px entries
+- `docs/assets/branding/rayomd.png`: transparent 1024 x 1024 PNG
+- `docs/assets/branding/rayomd.ico`: multi-size Windows icon with 16, 32, 48, 64, 128, and 256 px entries

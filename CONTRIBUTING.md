@@ -33,24 +33,19 @@ Linux dependencies are listed in `README.md`.
 
 ## Verify
 
-Run the lightweight Linux verifier when possible:
+Build first, then run the same correctness verifier on either platform:
 
-```sh
-sh scripts/verify-linux.sh
-```
+    python3 tests/verify_cli.py --binary build/linux/rayomd
+    python tests/verify_cli.py --binary build/windows/rayomd.exe
 
-For Windows changes, build the release target and run a benchmark smoke:
+CTest exposes the same verifier when Python was found during configuration:
 
-```sh
-build/windows/rayomd.exe --bench docs/benchmark_smoke.md benchmark-output/manual 100 modern normal
-```
+    ctest --test-dir build/linux --output-on-failure
 
-For performance-sensitive work, run `scripts/perf_watch.py` before and after the
-change and report the platform, storage location, suite, and headline deltas.
-Use `--baseline-record` with `--fail-on-slower-pct` for deterministic gates, and
-`--version-log-dir docs/benchmarks/versions` when recording release benchmarks.
-Use `--benchmark-version` when archiving downloaded binaries from older releases.
-
+Correctness verification does not run performance loops. For performance-sensitive
+work, use tools/benchmark.py before and after the change and report platform,
+storage location, suite, binary-size delta, and headline timing deltas. See
+docs/development/performance.md.
 ## Versioning
 
 The project version lives in `VERSION` and is compiled into both binaries.

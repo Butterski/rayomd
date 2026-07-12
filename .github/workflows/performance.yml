@@ -1,0 +1,27 @@
+name: Performance smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/core/**"
+      - "src/cli/**"
+      - "include/**"
+      - "tools/benchmark.py"
+      - "scripts/perf_watch.py"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: sudo apt-get update && sudo apt-get install -y cmake g++ fonts-dejavu-core zlib1g-dev
+      - run: cmake -S . -B build/linux -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build/linux --config Release
+      - name: Performance smoke
+        run: python3 -B tools/benchmark.py run -- --binary build/linux/rayomd --platform linux-ci --suite quick --label ci --root benchmark-output/performance-ci

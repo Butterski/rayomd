@@ -64,7 +64,7 @@ This section should start on a new page after the `\pagebreak` marker.
 
 ## 6. Links And Images
 
-![RayoMD mascot](docs/assets/rayomd.png)
+![RayoMD mascot](docs/assets/branding/rayomd.png)
 
 ![Remote placeholder image](https://picsum.photos/seed/rayomd/200/300)
 
