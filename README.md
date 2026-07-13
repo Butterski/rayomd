@@ -14,6 +14,8 @@
 RayoMD is a tiny native Markdown-to-PDF converter built for fast startup,
 small releases, and predictable deployment.
 
+**[Read the full documentation in the RayoMD wiki.](https://github.com/Butterski/rayomd/wiki)**
+
 <p align="center">
   <img src="docs/assets/branding/rayomd.png" alt="RayoMD mascot" width="180">
   <br><sub><sup>* My graphic designer is working on a proper SVG version.</sup></sub>
@@ -103,7 +105,7 @@ native subset. The results support the scoped claim that RayoMD was fastest in
 this benchmark, not an unqualified claim across every converter or workload.
 
 See the dated
-[`three-tool benchmark report`](docs/benchmarks/markdown_pdf_speed_comparison_2026-07-13.md)
+[`three-tool benchmark report`](https://github.com/Butterski/rayomd/wiki/Markdown-to-PDF-Speed-Comparison-2026-07-13)
 for timing ranges, environment, versions, caveats, and reproduction commands.
 
 ### Native 2.2.0 Release Snapshot
@@ -120,7 +122,7 @@ by `2.7x` on Windows and `4.5x` on Linux at six workers, with the expected RSS
 increase. Automatic worker caps limit memory multiplication for large inputs.
 
 See the full
-[`2.2.0 optimization audit`](docs/benchmarks/optimization_2.2.0_2026-07-13.md)
+[`2.2.0 optimization audit`](https://github.com/Butterski/rayomd/wiki/RayoMD-2.2.0-Optimization-Audit-2026-07-13)
 for p50/p95, peak RSS, correctness checks, and rejected LTO/PGO/streaming
 experiments. Use [`tools/benchmark.py`](tools/benchmark.py) for current runs;
 raw corpora and reports stay under ignored `benchmark-output/`.
@@ -148,7 +150,7 @@ and the source limit were also timed, with rejection peak RSS at or below
 
 The feature added `22,016 B` to Windows (`+0.80%`) and `24,632 B` to Linux
 (`+6.71%`) without a new runtime dependency. See the dated
-[reversible feature benchmark](docs/benchmarks/reversible_pdf_features_2026-07-13.md)
+[reversible feature benchmark](https://github.com/Butterski/rayomd/wiki/Reversible-PDF-Feature-Benchmark-2026-07-13)
 for p50/p95, output sizes, allocations, raw-versus-Flate results, Linux WSL
 `/mnt/e` caveats, and reproduction commands.
 
@@ -545,7 +547,7 @@ used by the 2.2.0 audit.
 Release records belong under docs/benchmarks/releases/. Remote-image timing is
 excluded because network latency is not a stable performance signal. The full
 2.2.0 decisions and measurements are in
-[docs/benchmarks/optimization_2.2.0_2026-07-13.md](docs/benchmarks/optimization_2.2.0_2026-07-13.md).
+[the 2.2.0 optimization audit](https://github.com/Butterski/rayomd/wiki/RayoMD-2.2.0-Optimization-Audit-2026-07-13).
 
 ## Project Layout
 
@@ -559,7 +561,8 @@ excluded because network latency is not a stable performance signal. The full
     docs/assets/branding/       Mascot and icon source assets
     docs/assets/demo/           Windows screenshot and demo media
     docs/benchmarks/releases/   Curated, dated release records
-    docs/development/           Performance and optimization notes
+    docs/development/           Source-coupled performance and format decisions
+    GitHub wiki                 User guides, dated reports, and research archive
     tester.md                   Hand-written smoke document
 
 Generated build trees, benchmark corpora, local binaries, generated PDFs, and

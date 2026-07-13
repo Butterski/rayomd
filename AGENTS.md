@@ -23,7 +23,9 @@ become a required dependency for the default lightweight package.
 - Keep the repository root clean: source entry points, `README.md`, `LICENSE`,
   `CMakeLists.txt`, `AGENTS.md`, `CONTRIBUTING.md`, `VERSION`, and the main
   smoke document belong there.
-- Put supporting material under `docs/`, not in the root.
+- Keep source-coupled fixtures, release records, specifications, and decision
+  documents under docs/; keep longer user guides, dated reports, and research
+  archives in the GitHub wiki.
 - Keep generated build trees, generated PDFs, benchmark corpora, local binaries,
   caches, and one-off scratch files out of source.
 - Prefer reproducible helper scripts under `scripts/` over ad hoc command blobs.
@@ -135,13 +137,15 @@ Important image/link details:
 - docs/assets/branding/ and docs/assets/demo/
   Project branding sources and demo media, kept separate.
 
-- `docs/benchmarks/`
-  Archived benchmark summaries and caveats. Do not treat archival headline
-  numbers as current without rerunning or clearly dating them.
+- `docs/benchmarks/releases/`
+  Script-consumed release benchmark records and their generated index.
 
 - `docs/development/`
-  Optimization progress and research notes. These are context, not a mandate to
-  keep old experiments alive.
+  Source-coupled performance workflow, format profiles, and architecture decisions.
+
+- [GitHub wiki](https://github.com/Butterski/rayomd/wiki)
+  User guides, dated benchmark reports, and optimization research. Wiki history
+  is context, not a mandate to keep old experiments alive.
 
 ## Build And Verify
 
@@ -214,7 +218,7 @@ GitHub CI entry points:
 - Distinguish warm `--bench` timings from end-to-end export and batch timings.
 - Mention Linux storage location when reporting WSL/Linux batch numbers.
 - Keep raw generated reports under ignored `benchmark-output/`, not source.
-- `docs/benchmarks/commercial_benchmark_summary.md` is archival
+- The wiki commercial benchmark campaign is archival
   marketing-safe wording and caveats. Do not copy raw headline numbers without
   the caveats about synthetic corpora, warm `--bench` versus end-to-end I/O,
   and Linux storage location.

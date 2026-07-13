@@ -65,7 +65,5 @@ jobs:
           test -f docs/assets/demo/show.gif
           test -f docs/assets/demo/show.mp4
           test -f docs/benchmark_smoke.md
-          test -f docs/benchmarks/commercial_benchmark_summary.md
-          test -f docs/benchmarks/reversible_pdf_features_2026-07-13.md
           test -f docs/benchmarks/releases/README.md
           test -f include/rayomd/tiny_pdf.h
