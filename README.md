@@ -6,7 +6,7 @@
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/md2pdf/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 2.1.0" src="https://img.shields.io/badge/version-2.1.0-informational">
+  <img alt="Version: 2.2.0" src="https://img.shields.io/badge/version-2.2.0-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
@@ -46,7 +46,7 @@ CLI.
 - Single Windows GUI executable for the default release.
 - Compact non-Windows CLI binary.
 - Fast warm conversion for small and medium documents.
-- Batch, stdin Markdown export, stdin batch, warm serve, and benchmark modes.
+- Bounded parallel folder/stdin batch, stdin Markdown export, warm serve, and benchmark modes.
 - Unicode output through subset embedded system fonts.
 - Standard PDF font path for ASCII documents.
 - Safe local image support with fallback text; HTTP/HTTPS images are explicit opt-in on Windows and curl-enabled Linux builds.
@@ -309,7 +309,11 @@ images are contained to the input Markdown file directory by default, and URL
 images are disabled unless `--allow-url-images` is passed or the Windows GUI
 checkbox is enabled. Stdin exports have no input-file directory, so relative
 local images render as fallback text unless `--allow-unsafe-local-images` is
-explicitly used for trusted content.
+explicitly used for trusted content. Native folder and stdin-batch modes use a
+bounded worker pool: automatic mode uses at most six workers, drops to two when
+the largest input exceeds 16 MiB, and becomes sequential above 64 MiB. Pass
+`--workers=N` (1-64) for an explicit limit. Windows Pandoc batches remain
+sequential because they launch an external compatibility pipeline.
 
 Windows:
 
@@ -318,7 +322,7 @@ rayomd.exe --version
 rayomd.exe --doctor
 rayomd.exe --export input.md output.pdf native elegant normal
 type input.md | rayomd.exe --stdin output.pdf native elegant normal
-rayomd.exe --batch input-folder output-folder native modern normal
+rayomd.exe --batch input-folder output-folder native modern normal --workers=4
 type files.txt | rayomd.exe --stdin-batch output-folder native modern normal
 rayomd.exe --serve output-folder native modern normal
 rayomd.exe --bench input.md bench-output-folder 5000 modern normal
@@ -331,7 +335,7 @@ Linux / WSL:
 ./rayomd --doctor
 ./rayomd --export input.md output.pdf native elegant normal
 cat input.md | ./rayomd --stdin output.pdf native elegant normal
-./rayomd --batch input-folder output-folder native modern normal
+./rayomd --batch input-folder output-folder native modern normal --workers=4
 cat files.txt | ./rayomd --stdin-batch output-folder native modern normal
 ./rayomd --serve output-folder native modern normal
 ./rayomd --bench input.md bench-output-folder 5000 modern normal
@@ -360,6 +364,7 @@ Resource flags:
 
 - `--allow-url-images` enables HTTP/HTTPS image fetching and still blocks loopback, private, link-local, multicast, and non-HTTP(S) redirect targets.
 - `--allow-unsafe-local-images` restores legacy local-image path behavior for trusted documents only.
+- `--workers=N` sets the native folder/stdin-batch worker limit from 1 to 64; omit it for the memory-capped automatic policy.
 
 Margins:
 
@@ -423,9 +428,30 @@ docs/development/performance.md.
     python tools/benchmark.py competitors -- --rayomd build/windows/rayomd.exe --root benchmark-output/competitors
     python3 tools/benchmark.py release -- --from-version 1.1.0 --suite quick
 
-Suites are quick, watch, and full. Release records belong under
-docs/benchmarks/releases/. Remote-image timing is excluded because network
-latency is not a stable performance signal.
+Suites are quick, watch, and full. Use `--workers=N` to keep batch comparisons
+comparable. The dedicated scaling harness records p50/p95, failures, and peak
+RSS at explicit worker counts:
+
+    python scripts/concurrency_benchmark.py --binary build/windows/rayomd.exe --corpus <folder> --output benchmark-output/concurrency
+
+Optimization experiments are opt-in and remain out of normal releases:
+
+    cmake -S . -B build/profile -DRAYOMD_ENABLE_PROFILING=ON
+    cmake -S . -B build/lto -DCMAKE_BUILD_TYPE=Release -DRAYOMD_ENABLE_LTO=ON
+    cmake -S . -B build/pgo -DCMAKE_BUILD_TYPE=Release -DRAYOMD_ENABLE_LTO=ON -DRAYOMD_PGO=GENERATE
+    python scripts/train_pgo.py --binary build/pgo/rayomd --corpus <perf-watch-corpus>
+    cmake -S . -B build/pgo -DCMAKE_BUILD_TYPE=Release -DRAYOMD_ENABLE_LTO=ON -DRAYOMD_PGO=USE
+
+Set `RAYOMD_PROFILE=1` when running a profiling build to emit phase timing and
+allocation deltas. Generate and consume PGO data in the same build tree, and
+refresh it for every source/toolchain release. On Windows, the elevated
+`scripts/capture_windows_profile.ps1` helper records the four WPR CPU traces
+used by the 2.2.0 audit.
+
+Release records belong under docs/benchmarks/releases/. Remote-image timing is
+excluded because network latency is not a stable performance signal. The full
+2.2.0 decisions and measurements are in
+[docs/benchmarks/optimization_2.2.0_2026-07-13.md](docs/benchmarks/optimization_2.2.0_2026-07-13.md).
 ## Project Layout
 
     include/rayomd/             Public native exporter API

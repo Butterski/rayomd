@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import platform as platform_module
 import random
 import shutil
@@ -19,6 +20,7 @@ import statistics
 import subprocess
 import sys
 import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -77,7 +79,7 @@ FEATURE_MODES = ("baseline", "rules", "pagebreaks", "comments")
 SIZED_KINDS = ("ascii", "unicode", "table")
 KIB = 1024
 WATCH_VERSION = 3
-COMPARISON_KEY_FIELDS = ("platform", "suite", "seed", "style", "margin", "image_mode", "watch_version")
+COMPARISON_KEY_FIELDS = ("platform", "suite", "seed", "style", "margin", "image_mode", "workers", "watch_version")
 
 SUITES = {
     "quick": {
@@ -501,22 +503,102 @@ def parse_bench(path: Path) -> dict[str, str]:
     return values
 
 
+_windows_rss_api: tuple[Any, Any, Any] | None = None
+
+
+def windows_rss_api() -> tuple[Any, Any, Any]:
+    global _windows_rss_api
+    if _windows_rss_api is not None:
+        return _windows_rss_api
+
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    psapi.GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD
+    ]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    _windows_rss_api = kernel32, psapi, Counters
+    return _windows_rss_api
+
+
+def process_rss_bytes(pid: int) -> int:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            kernel32, psapi, counters_type = windows_rss_api()
+            handle = kernel32.OpenProcess(0x0400 | 0x0010, False, pid)
+            if not handle:
+                return 0
+            counters = counters_type()
+            counters.cb = ctypes.sizeof(counters)
+            ok = psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+            kernel32.CloseHandle(handle)
+            return int(counters.PeakWorkingSetSize if ok else 0)
+        except Exception:
+            return 0
+
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+        values: dict[str, int] = {}
+        for line in status.splitlines():
+            if line.startswith(("VmHWM:", "VmRSS:")):
+                key, value, *_ = line.split()
+                values[key.rstrip(":")] = int(value) * 1024
+        return values.get("VmHWM", values.get("VmRSS", 0))
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return 0
 def run_command(
     cmd: list[str],
     stdin_text: str | None = None,
     timeout: int = 7200,
-) -> tuple[int, float, str, str]:
+) -> tuple[int, float, str, str, int]:
     start = time.perf_counter()
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
-        input=stdin_text,
+        stdin=subprocess.PIPE if stdin_text is not None else None,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=timeout,
     )
+    peak_rss = process_rss_bytes(proc.pid)
+    stop = threading.Event()
+
+    def sample_memory() -> None:
+        nonlocal peak_rss
+        while not stop.wait(0.002):
+            peak_rss = max(peak_rss, process_rss_bytes(proc.pid))
+
+    sampler = threading.Thread(target=sample_memory, daemon=True)
+    sampler.start()
+    try:
+        stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        raise
+    finally:
+        stop.set()
+        sampler.join()
+    peak_rss = max(peak_rss, process_rss_bytes(proc.pid))
     wall_ms = (time.perf_counter() - start) * 1000.0
-    return proc.returncode, wall_ms, proc.stdout, proc.stderr
+    return proc.returncode, wall_ms, stdout, stderr, peak_rss
 
 
 def check_pdf(path: Path) -> int:
@@ -586,7 +668,7 @@ def run_bench_case(
         style,
         margin,
     ]
-    rc, wall_ms, stdout, stderr = run_command(cmd)
+    rc, wall_ms, stdout, stderr, peak_rss = run_command(cmd)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "stdout.txt").write_text(stdout, encoding="utf-8", newline="\n")
     (out_dir / "stderr.txt").write_text(stderr, encoding="utf-8", newline="\n")
@@ -598,6 +680,7 @@ def run_bench_case(
         "bench": bench,
         "wall_ms": wall_ms,
         "sample_pdf_bytes": sample_size,
+        "peak_rss_bytes": peak_rss,
         "avg_ms": float(bench["avg_ms"]),
     }
 
@@ -610,6 +693,7 @@ def run_watch(
     margin: str,
     seed: int,
     image_mode: str,
+    workers: int,
 ) -> dict[str, Any]:
     cfg = SUITES[suite]
     corpus = generate_corpus(run_root, suite, seed, image_mode)
@@ -707,6 +791,7 @@ def run_watch(
         )
 
     cold_values: list[float] = []
+    cold_rss_values: list[int] = []
     cold_doc = single_paths[0]
     for idx in range(cfg["cold_runs"]):
         out_dir = results_root / "cold"
@@ -721,11 +806,12 @@ def run_watch(
             style,
             margin,
         ]
-        rc, wall_ms, stdout, stderr = run_command(cmd)
+        rc, wall_ms, stdout, stderr, peak_rss = run_command(cmd)
         if rc != 0:
             raise command_failure("cold export", rc, stdout, stderr)
         check_pdf(output_pdf)
         cold_values.append(wall_ms)
+        cold_rss_values.append(peak_rss)
 
     batch_dir = results_root / "batch_pdf"
     batch_cmd = [
@@ -736,8 +822,9 @@ def run_watch(
         "native",
         style,
         margin,
+        f"--workers={workers}",
     ]
-    rc, batch_ms, stdout, stderr = run_command(batch_cmd)
+    rc, batch_ms, stdout, stderr, batch_peak_rss = run_command(batch_cmd)
     (results_root / "batch_stdout.txt").write_text(stdout, encoding="utf-8", newline="\n")
     (results_root / "batch_stderr.txt").write_text(stderr, encoding="utf-8", newline="\n")
     if rc != 0:
@@ -754,8 +841,9 @@ def run_watch(
         "native",
         style,
         margin,
+        f"--workers={workers}",
     ]
-    rc, stdin_ms, stdout, stderr = run_command(stdin_cmd, stdin_payload)
+    rc, stdin_ms, stdout, stderr, stdin_peak_rss = run_command(stdin_cmd, stdin_payload)
     (results_root / "stdin_batch_stdout.txt").write_text(stdout, encoding="utf-8", newline="\n")
     (results_root / "stdin_batch_stderr.txt").write_text(stderr, encoding="utf-8", newline="\n")
     if rc != 0:
@@ -773,7 +861,7 @@ def run_watch(
         style,
         margin,
     ]
-    rc, serve_ms, stdout, stderr = run_command(serve_cmd, serve_payload)
+    rc, serve_ms, stdout, stderr, serve_peak_rss = run_command(serve_cmd, serve_payload)
     (results_root / "serve_stdout.txt").write_text(stdout, encoding="utf-8", newline="\n")
     (results_root / "serve_stderr.txt").write_text(stderr, encoding="utf-8", newline="\n")
     if rc != 0:
@@ -790,6 +878,10 @@ def run_watch(
         "warm_avg_ms_p95": f2(percentile(warm_values, 0.95)),
         "cold_export_ms_median": f2(statistics.median(cold_values)),
         "cold_export_ms_p95": f2(percentile(cold_values, 0.95)),
+        "cold_peak_rss_bytes": max(cold_rss_values),
+        "batch_peak_rss_bytes": batch_peak_rss,
+        "stdin_batch_peak_rss_bytes": stdin_peak_rss,
+        "serve_peak_rss_bytes": serve_peak_rss,
         "batch_ms_total": f2(batch_ms),
         "batch_ms_per_file": f2(batch_ms / file_count),
         "stdin_batch_ms_total": f2(stdin_ms),
@@ -1237,6 +1329,7 @@ def main() -> int:
     parser.add_argument("--style", choices=STYLES, default="modern")
     parser.add_argument("--margin", choices=MARGINS, default="normal")
     parser.add_argument("--image-mode", choices=("off", "local"), default="local")
+    parser.add_argument("--workers", type=int, default=1, choices=range(1, 65), metavar="N")
     parser.add_argument("--label", default="", help="optional run label")
     parser.add_argument("--root", default=Path("benchmark-output/perf-watch"), type=Path)
     parser.add_argument("--history", default=None, type=Path, help="JSONL history path for report-only local comparisons")
@@ -1265,6 +1358,7 @@ def main() -> int:
             "style": args.style,
             "margin": args.margin,
             "image_mode": args.image_mode,
+            "workers": args.workers,
             "watch_version": WATCH_VERSION,
         }
         requested_mismatches = comparison_key_mismatches(requested, baseline_record)
@@ -1300,6 +1394,7 @@ def main() -> int:
         "style": args.style,
         "margin": args.margin,
         "image_mode": args.image_mode,
+        "workers": args.workers,
         "watch_version": WATCH_VERSION,
         "project_version": project_version,
         "binary_version": binary_version,
@@ -1317,7 +1412,7 @@ def main() -> int:
     }
 
     try:
-        result = run_watch(binary, run_root, args.suite, args.style, args.margin, args.seed, args.image_mode)
+        result = run_watch(binary, run_root, args.suite, args.style, args.margin, args.seed, args.image_mode, args.workers)
         record.update(result)
         record["success"] = True
     except Exception as exc:

@@ -1,6 +1,5 @@
 #include "text_utils.h"
 
-#include <cstdio>
 #include <string_view>
 
 namespace RayoMd::Text {
@@ -62,11 +61,10 @@ std::vector<std::string> SplitLines(const std::string& text) {
 }
 
 std::string FormatDouble(double value) {
-    char buffer[32];
-    int length = std::snprintf(buffer, sizeof(buffer), "%.2f", value);
-    while (length > 1 && buffer[length - 1] == '0') length--;
-    if (length > 0 && buffer[length - 1] == '.') length--;
-    return std::string(buffer, (size_t)length);
+    std::string result;
+    result.reserve(16);
+    AppendFixed2(result, value);
+    return result;
 }
 
 bool IsAsciiDocument(const std::string& text) {

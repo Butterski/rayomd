@@ -42,13 +42,15 @@ jobs:
           test -f third_party/simdutf/LICENSE-MIT
       - name: Python helper syntax and entry points
         run: |
-          python3 -m py_compile tests/verify_cli.py tools/benchmark.py scripts/perf_watch.py scripts/compare_pandoc.py scripts/compare_markdown_pdf_tools.py scripts/archive_release_benchmarks.py
+          python3 -m py_compile tests/verify_cli.py tools/benchmark.py scripts/perf_watch.py scripts/compare_pandoc.py scripts/compare_markdown_pdf_tools.py scripts/archive_release_benchmarks.py scripts/concurrency_benchmark.py scripts/train_pgo.py
           python3 -B tests/verify_cli.py --help >/dev/null
           python3 -B tools/benchmark.py --help >/dev/null
           python3 -B tools/benchmark.py run -- --help >/dev/null
           python3 -B tools/benchmark.py compare -- --help >/dev/null
           python3 -B tools/benchmark.py release -- --help >/dev/null
           python3 -B tools/benchmark.py competitors -- --help >/dev/null
+          python3 -B scripts/concurrency_benchmark.py --help >/dev/null
+          python3 -B scripts/train_pgo.py --help >/dev/null
       - name: Keep generated outputs out of source
         run: |
           if git ls-files | grep -E '(^build/|^benchmark-output/|\.exe$|\.dll$|\.so$|\.dylib$|\.pdf$|^rayomd$)'; then
