@@ -98,10 +98,17 @@ function(rayomd_experiments target)
     endif()
 endfunction()
 
+# Recovery is cold, opt-in code. Optimize its translation unit for package size
+# while leaving the performance-critical renderer on the normal release flags.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(src/core/rayomd_pdf_source.cpp PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
+endif()
+
 if(WIN32)
     enable_language(RC)
     add_executable(rayomd WIN32
         src/core/tiny_pdf.cpp
+        src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
@@ -137,6 +144,7 @@ else()
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
         src/common/text_utils.cpp
+        src/core/rayomd_pdf_source.cpp
         src/cli/main_cli.cpp
     )
     target_include_directories(rayomd PRIVATE include)
@@ -161,6 +169,7 @@ if(BUILD_TESTING)
     add_executable(rayomd-core-tests
         tests/core_tests.cpp
         src/core/tiny_pdf.cpp
+        src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp

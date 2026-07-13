@@ -52,6 +52,35 @@ def verify(binary: Path, keep: Path | None) -> None:
         require_pdf(ascii_pdf, b"/Subtype /Link", b"https://example.com/one")
 
         unicode_md = root / "unicode.md"
+        reversible_pdf = root / "reversible.pdf"
+        run(binary, "--export", str(ascii_md), str(reversible_pdf), "native", "tech", "normal", "--embed-source")
+        reversible = require_pdf(
+            reversible_pdf, b"/Type /EmbeddedFile", b"/AFRelationship /Source", b"rayomd-source/1"
+        )
+        if not reversible.startswith(b"%PDF-2.0"):
+            raise AssertionError("reversible output did not select PDF 2.0")
+        inspected = run(binary, "--inspect-source", str(reversible_pdf))
+        if b"status=intact" not in inspected.stdout or b"digest=valid" not in inspected.stdout:
+            raise AssertionError("source inspection did not report an intact profile")
+        recovered_md = root / "recovered.md"
+        run(binary, "--recover-source", str(reversible_pdf), str(recovered_md))
+        if recovered_md.read_bytes() != ascii_md.read_bytes():
+            raise AssertionError("recovered Markdown is not byte-exact")
+        existing = run(binary, "--recover-source", str(reversible_pdf), str(recovered_md), expect=34)
+        if b"already exists" not in existing.stdout:
+            raise AssertionError("existing recovery destination was not protected")
+        not_reversible = run(binary, "--inspect-source", str(ascii_pdf), expect=30)
+        if b"not a reversible" not in not_reversible.stdout:
+            raise AssertionError("ordinary PDF was not distinguished from a reversible PDF")
+        tampered_pdf = root / "tampered.pdf"
+        tampered = bytearray(reversible)
+        payload = tampered.find(ascii_md.read_bytes())
+        if payload < 0:
+            raise AssertionError("embedded source payload was not found")
+        tampered[payload] ^= 1
+        tampered_pdf.write_bytes(tampered)
+        run(binary, "--inspect-source", str(tampered_pdf), expect=32)
+
         unicode_md.write_text("# Unicode\n\nZażółć gęślą jaźń: 日本語.\n", encoding="utf-8")
         unicode_pdf = root / "unicode.pdf"
         run(binary, "--export", str(unicode_md), str(unicode_pdf), "native", "modern", "normal")

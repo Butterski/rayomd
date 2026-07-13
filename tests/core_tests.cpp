@@ -1,5 +1,6 @@
 #include "rayomd/tiny_pdf.h"
 #include "../src/common/text_utils.h"
+#include "../src/core/rayomd_pdf_source.h"
 
 #include <atomic>
 #include <iostream>
@@ -39,6 +40,13 @@ bool Build(const std::string& markdown, std::string& output) {
     options.sourcePath = std::string(RAYOMD_TEST_SOURCE_DIR) + "/tester.md";
     return TinyPdf::BuildPdf(markdown, options, output).Ok() && ValidPdf(output);
 }
+bool BuildReversible(const std::string& markdown, std::string& output) {
+    TinyPdf::PdfOptions options;
+    options.style = TinyPdf::PdfStyle::Modern;
+    options.margin = TinyPdf::PdfMargin::Normal();
+    options.embedSource = true;
+    return TinyPdf::BuildPdf(markdown, options, output).Ok() && ValidPdf(output);
+}
 } // namespace
 
 int main() {
@@ -60,6 +68,45 @@ int main() {
     }
     if (expected[2].find("/Subtype /Link") == std::string::npos) return 3;
     if (expected[3].find("/Subtype /Image") == std::string::npos) return 4;
+    if (RayoMd::PdfSource::Sha256Hex("abc") !=
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") {
+        std::cerr << "SHA-256 test vector failed" << std::endl;
+        return 7;
+    }
+    for (const std::string& source : {
+        std::string(),
+        std::string("# Exact\r\n\r\n<!-- hidden -->\r\n"),
+        std::string("# Unicode\n\nEmoji: \xF0\x9F\x98\x80\n")
+    }) {
+        std::string reversible;
+        if (!BuildReversible(source, reversible) || reversible.rfind("%PDF-2.0", 0) != 0) {
+            std::cerr << "reversible build failed" << std::endl;
+            return 8;
+        }
+        RayoMd::PdfSource::Result recovered = RayoMd::PdfSource::Inspect(reversible, true);
+        if (!recovered.Ok() || recovered.source != source || !recovered.info.digestValid) {
+            std::cerr << "exact recovery failed" << std::endl;
+            return 9;
+        }
+        size_t payload = source.empty() ? std::string::npos : reversible.find(source);
+        if (payload != std::string::npos) {
+            reversible[payload] ^= 1;
+            if (RayoMd::PdfSource::Inspect(reversible, false).status !=
+                RayoMd::PdfSource::Status::IntegrityMismatch) {
+                std::cerr << "tamper detection failed" << std::endl;
+                return 10;
+            }
+        }
+    }
+    if (RayoMd::PdfSource::Inspect(expected.front(), false).status !=
+        RayoMd::PdfSource::Status::NotReversible) return 11;
+    std::string invalidUtf8(1, static_cast<char>(0xff));
+    TinyPdf::PdfOptions invalidOptions;
+    invalidOptions.embedSource = true;
+    std::string ignoredPdf;
+    if (TinyPdf::BuildPdf(invalidUtf8, invalidOptions, ignoredPdf).error !=
+        TinyPdf::BuildError::InvalidSourceUtf8) return 12;
+
     if (expected[4].find("/Subtype /Image") != std::string::npos) return 5;
 
     for (unsigned workerCount : {1u, 2u, 4u, 6u}) {

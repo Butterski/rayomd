@@ -124,6 +124,7 @@ PdfOptions PdfOptionsFromLegacy(const BuildOptions& options) {
     result.sourcePath = options.sourcePath;
     result.enableUrlImages = options.enableUrlImages;
     result.allowUnsafeLocalImages = options.allowUnsafeLocalImages;
+    result.embedSource = options.embedSource;
     return result;
 }
 

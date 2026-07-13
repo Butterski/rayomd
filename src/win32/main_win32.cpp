@@ -11,6 +11,7 @@
 #include <shellapi.h>
 #include <commdlg.h>
 #include <shlobj.h>
+#include "../core/rayomd_pdf_source.h"
 #endif
 #include <algorithm>
 #include <string>
@@ -99,6 +100,7 @@ int g_selectedMargin = 1;
 float g_customMarginInches = 1.0f;
 bool g_openAfterExport = true;
 bool g_enableUrlImages = false;
+bool g_embedSource = false;
 std::atomic<bool> g_isExporting{false};
 std::atomic<bool> g_isFileLoading{false};
 HANDLE g_exportThread = nullptr;
@@ -142,6 +144,7 @@ struct WinExportOptions {
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
     unsigned workers = 0;
+    bool embedSource = false;
 };
 
 #ifdef _WIN32
@@ -315,13 +318,13 @@ bool WriteUtf8File(const std::wstring& path, const std::string& content) {
     return ok;
 }
 
-bool ReadUtf8File(const std::wstring& path, std::string& content) {
+bool ReadFileLimited(const std::wstring& path, long long maximumBytes, std::string& content) {
     RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Io);
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return false;
 
     LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0 || size.QuadPart > kMaxMarkdownInputBytes) {
+    if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0 || size.QuadPart > maximumBytes) {
         CloseHandle(hFile);
         return false;
     }
@@ -362,6 +365,10 @@ bool ReadUtf8File(const std::wstring& path, std::string& content) {
     CloseHandle(hFile);
     return true;
 }
+bool ReadUtf8File(const std::wstring& path, std::string& content) {
+    return ReadFileLimited(path, kMaxMarkdownInputBytes, content);
+}
+
 
 std::wstring MakeTempSiblingPath(const std::wstring& path, const wchar_t* finalExtension = L".tmp") {
     size_t slash = path.find_last_of(L"\\/");
@@ -420,6 +427,28 @@ bool WriteBinaryFile(const std::wstring& path, const std::string& content) {
     }
     return false;
 }
+bool WriteNewBinaryFile(const std::wstring& path, const std::string& content, bool& existed) {
+    existed = false;
+    DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        existed = true;
+        return false;
+    }
+    for (int attempt = 0; attempt < 16; attempt++) {
+        std::wstring temporary = MakeTempSiblingPath(path);
+        if (!WriteBinaryTempFile(temporary, content)) {
+            if (GetLastError() == ERROR_FILE_EXISTS) continue;
+            return false;
+        }
+        if (MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH)) return true;
+        DWORD error = GetLastError();
+        DeleteFileW(temporary.c_str());
+        existed = error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS;
+        return false;
+    }
+    return false;
+}
+
 #endif
 
 bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& exportOptions,
@@ -430,6 +459,7 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
     options.sourcePath = WideToUtf8(sourcePath);
     options.enableUrlImages = exportOptions.enableUrlImages;
     options.allowUnsafeLocalImages = exportOptions.allowUnsafeLocalImages;
+    options.embedSource = exportOptions.embedSource;
     TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     g_nativePdfLastError = static_cast<int>(result.error);
     return result.Ok();
@@ -568,6 +598,8 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.enableUrlImages = true;
         } else if (lstrcmpiW(argv[i], L"--allow-unsafe-local-images") == 0 || lstrcmpiW(argv[i], L"--unsafe-local-images") == 0) {
             options.allowUnsafeLocalImages = true;
+        } else if (lstrcmpiW(argv[i], L"--embed-source") == 0) {
+            options.embedSource = true;
         } else if (_wcsnicmp(argv[i], L"--workers=", 10) == 0) {
             wchar_t* end = nullptr;
             unsigned long parsed = std::wcstoul(argv[i] + 10, &end, 10);
@@ -1002,6 +1034,63 @@ int RunDoctor() {
     WriteStdoutLine(std::string("status=") + (fontOk && tempOk ? "ok" : "failed"));
     return fontOk && tempOk ? 0 : 1;
 }
+int RecoveryExitCode(RayoMd::PdfSource::Status status) {
+    using Status = RayoMd::PdfSource::Status;
+    switch (status) {
+    case Status::Ok: return 0;
+    case Status::NotReversible: return 30;
+    case Status::UnsupportedProfile: return 31;
+    case Status::LimitExceeded: return 33;
+    case Status::CorruptPdf:
+    case Status::IntegrityMismatch:
+    case Status::InvalidUtf8: return 32;
+    }
+    return 32;
+}
+
+int RunInspectSource(const std::wstring& inputPath) {
+    std::string pdf;
+    if (!ReadFileLimited(inputPath, static_cast<long long>(RayoMd::PdfSource::kMaxPdfBytes), pdf)) {
+        WriteStdoutLine("Error: could not read PDF or input exceeds configured limit.");
+        return 3;
+    }
+    RayoMd::PdfSource::Result result = RayoMd::PdfSource::Inspect(pdf, false);
+    if (!result.Ok()) {
+        WriteStdoutLine(std::string("Error: ") + RayoMd::PdfSource::StatusMessage(result.status) + ".");
+        return RecoveryExitCode(result.status);
+    }
+    WriteStdoutLine("status=intact");
+    WriteStdoutLine("profile=" + result.info.profile);
+    WriteStdoutLine("producer_version=" + result.info.producerVersion);
+    WriteStdoutLine("source_bytes=" + std::to_string(result.info.sourceBytes));
+    WriteStdoutLine("encoding=" + result.info.encoding);
+    WriteStdoutLine("digest=valid");
+    WriteStdoutLine("attachment=" + result.info.attachmentName);
+    return 0;
+}
+
+int RunRecoverSource(const std::wstring& inputPath, const std::wstring& outputPath) {
+    std::string pdf;
+    if (!ReadFileLimited(inputPath, static_cast<long long>(RayoMd::PdfSource::kMaxPdfBytes), pdf)) {
+        WriteStdoutLine("Error: could not read PDF or input exceeds configured limit.");
+        return 3;
+    }
+    RayoMd::PdfSource::Result result = RayoMd::PdfSource::Inspect(pdf, true);
+    if (!result.Ok()) {
+        WriteStdoutLine(std::string("Error: ") + RayoMd::PdfSource::StatusMessage(result.status) + ".");
+        return RecoveryExitCode(result.status);
+    }
+    bool existed = false;
+    if (!WriteNewBinaryFile(outputPath, result.source, existed)) {
+        WriteStdoutLine(std::string(existed ? "Error: destination already exists: " :
+            "Error: could not write recovered source: ") + WideToUtf8(outputPath));
+        return existed ? 34 : 12;
+    }
+    WriteStdoutLine("Recovered " + std::to_string(result.info.sourceBytes) +
+        " bytes to " + WideToUtf8(outputPath));
+    return 0;
+}
+
 int TryCommandLineExport() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -1018,6 +1107,27 @@ int TryCommandLineExport() {
         LocalFree(argv);
         return result;
     }
+    if (argc >= 2 && lstrcmpiW(argv[1], L"--inspect-source") == 0) {
+        if (argc != 3) {
+            WriteStdoutLine("Error: --inspect-source requires <input.pdf>.");
+            LocalFree(argv);
+            return 2;
+        }
+        int result = RunInspectSource(argv[2]);
+        LocalFree(argv);
+        return result;
+    }
+    if (argc >= 2 && lstrcmpiW(argv[1], L"--recover-source") == 0) {
+        if (argc != 4) {
+            WriteStdoutLine("Error: --recover-source requires <input.pdf> <output.md>.");
+            LocalFree(argv);
+            return 2;
+        }
+        int result = RunRecoverSource(argv[2], argv[3]);
+        LocalFree(argv);
+        return result;
+    }
+
     if (argc < 2 || (lstrcmpiW(argv[1], L"--export") != 0 &&
         lstrcmpiW(argv[1], L"--stdin") != 0 && lstrcmpiW(argv[1], L"--batch") != 0 &&
         lstrcmpiW(argv[1], L"--stdin-batch") != 0 && lstrcmpiW(argv[1], L"--serve") != 0 &&
@@ -1229,6 +1339,7 @@ void DoExport(HWND hWnd) {
     options.margin = g_selectedMargin == 3
         ? TinyPdf::PdfMargin::CustomPoints(std::max(0.25f, std::min(2.0f, g_customMarginInches)) * 72.0)
         : TinyPdf::Internal::PdfMarginFromLegacySetting(g_selectedMargin);
+    options.embedSource = g_embedSource && g_selectedEngine == 0;
     options.enableUrlImages = g_enableUrlImages;
     auto* params = new ExportParams{ g_markdownText, g_currentMarkdownPath, outPath, options, g_openAfterExport, hWnd };
     HANDLE hThread = CreateThread(nullptr, 0, ExportThread, params, 0, nullptr);
@@ -1251,6 +1362,8 @@ struct FileLoadResult {
     std::wstring path;
     std::string content;
     MarkdownStats stats;
+    bool recoveredPdf = false;
+    std::string error;
     double elapsedMs = 0.0;
 };
 
@@ -1263,10 +1376,20 @@ DWORD WINAPI FileLoadThread(LPVOID lp) {
     QueryPerformanceCounter(&start);
 
     result->path = p->path;
-    result->ok = ReadUtf8File(p->path, result->content);
-    if (result->ok) {
-        result->stats = CalculateMarkdownStats(result->content);
+    bool isPdf = p->path.size() >= 4 && _wcsicmp(p->path.c_str() + p->path.size() - 4, L".pdf") == 0;
+    if (isPdf) {
+        std::string pdf;
+        if (ReadFileLimited(p->path, static_cast<long long>(RayoMd::PdfSource::kMaxPdfBytes), pdf)) {
+            RayoMd::PdfSource::Result recovered = RayoMd::PdfSource::Inspect(pdf, true);
+            result->ok = recovered.Ok();
+            if (result->ok) { result->content = std::move(recovered.source); result->recoveredPdf = true; }
+            else result->error = RayoMd::PdfSource::StatusMessage(recovered.status);
+        } else result->error = "PDF could not be read or exceeds the configured limit";
+    } else {
+        result->ok = ReadUtf8File(p->path, result->content);
+        if (!result->ok) result->error = "Markdown file could not be read";
     }
+    if (result->ok) result->stats = CalculateMarkdownStats(result->content);
 
     QueryPerformanceCounter(&end);
     result->elapsedMs = freq.QuadPart > 0
@@ -1507,14 +1630,16 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         auto* result = (FileLoadResult*)lParam;
         if (result) {
             if (result->ok) {
-                g_currentMarkdownPath = std::move(result->path);
+                g_currentMarkdownPath = result->recoveredPdf ? std::wstring() : std::move(result->path);
                 g_markdownText = std::move(result->content);
                 g_lineCount = result->stats.lines;
                 g_wordCount = result->stats.words;
                 g_charCount = result->stats.chars;
-                g_statusText = "File loaded in " + FormatDurationMs(result->elapsedMs) + ".";
+                g_statusText = result->recoveredPdf
+                    ? "Recovered validated Markdown in " + FormatDurationMs(result->elapsedMs) + "."
+                    : "File loaded in " + FormatDurationMs(result->elapsedMs) + ".";
             } else {
-                g_statusText = "File load failed.";
+                g_statusText = "File load failed: " + result->error + ".";
             }
             delete result;
         }
@@ -1546,8 +1671,11 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (p.size() > 3 && _wcsicmp(p.c_str() + p.size() - 3, L".md") == 0) {
                 LoadMarkdownFileAsync(hWnd, p);
                 g_forcedRenderFrames = 2;
+            } else if (p.size() > 4 && _wcsicmp(p.c_str() + p.size() - 4, L".pdf") == 0) {
+                LoadMarkdownFileAsync(hWnd, p);
+                g_forcedRenderFrames = 2;
             } else {
-                g_statusText = "Drop a .md file.";
+                g_statusText = "Drop a .md or reversible RayoMD .pdf file.";
                 g_forcedRenderFrames = 2;
             }
         }
@@ -1729,7 +1857,14 @@ void RenderMainFrame(HWND hWnd, ImGuiIO& io) {
     float actionY = inspectorMax.y - 68.0f;
     float openSwitchY = actionY - 46.0f;
     float urlSwitchY = openSwitchY - 38.0f;
-    draw->AddLine(ImVec2(panelX, urlSwitchY - 14.0f), ImVec2(panelX + panelW, urlSwitchY - 14.0f), Rgba32(39, 49, 66, 160));
+    float embedSwitchY = urlSwitchY - 38.0f;
+    draw->AddLine(ImVec2(panelX, embedSwitchY - 14.0f), ImVec2(panelX + panelW, embedSwitchY - 14.0f), Rgba32(39, 49, 66, 160));
+    draw->AddText(ImVec2(panelX, embedSwitchY + 4.0f), Rgba32(174, 185, 198), "Embed Markdown source");
+    ImGui::SetCursorScreenPos(ImVec2(panelX + panelW - 46.0f, embedSwitchY));
+    DrawSwitch("embed_source", &g_embedSource);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Anyone receiving the PDF can extract the complete Markdown,\nincluding comments and content not visible on the pages.");
+    }
     draw->AddText(ImVec2(panelX, urlSwitchY + 4.0f), Rgba32(174, 185, 198), "URL images");
     ImGui::SetCursorScreenPos(ImVec2(panelX + panelW - 46.0f, urlSwitchY));
     DrawSwitch("url_images", &g_enableUrlImages);

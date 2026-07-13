@@ -1,5 +1,6 @@
 #include "rayomd/tiny_pdf.h"
 #include "export_options.h"
+#include "rayomd_pdf_source.h"
 #include "inline_markdown.h"
 #include "../common/profiling.h"
 #include "../common/text_utils.h"
@@ -49,7 +50,11 @@
 #include <curl/curl.h>
 #endif
 
+#ifndef RAYOMD_VERSION
+#define RAYOMD_VERSION "0.0.0"
+#endif
 #ifdef RAYOMD_USE_ZLIB
+
 #include <zlib.h>
 #endif
 
@@ -705,12 +710,12 @@ public:
         return Add(body);
     }
 
-    std::string Build(int rootId, int infoId) const {
+    std::string Build(int rootId, int infoId, bool pdf20 = false) const {
         std::string pdf;
         size_t reserveBytes = 64 * 1024;
         for (const auto& object : objects) reserveBytes += object.size() + 64;
         pdf.reserve(reserveBytes);
-        pdf += "%PDF-1.7\n%";
+        pdf += pdf20 ? "%PDF-2.0\n%" : "%PDF-1.7\n%";
         pdf.push_back((char)0xE2);
         pdf.push_back((char)0xE3);
         pdf.push_back((char)0xCF);
@@ -755,6 +760,33 @@ private:
 
 constexpr size_t kMaxImageBytes = 32u * 1024u * 1024u;
 constexpr size_t kMaxDecodedImageBytes = 96u * 1024u * 1024u;
+static void AddReversibleSource(PdfObjects& pdf, std::string& catalog, const std::string& markdown) {
+    std::string sourceDictionary = "/Type /EmbeddedFile /Subtype /text#2Fmarkdown /Params << /Size ";
+    AppendSize(sourceDictionary, markdown.size());
+    sourceDictionary += " >>";
+    int sourceId = pdf.AddStream(sourceDictionary, markdown);
+
+    std::string fileSpec;
+    fileSpec.reserve(144);
+    fileSpec += "<< /Type /Filespec /F (source.md) /UF (source.md) /EF << /F ";
+    AppendInt(fileSpec, sourceId);
+    fileSpec += " 0 R /UF ";
+    AppendInt(fileSpec, sourceId);
+    fileSpec += " 0 R >> /AFRelationship /Source >>";
+    int fileSpecId = pdf.Add(fileSpec);
+
+    std::string metadata = RayoMd::PdfSource::BuildXmpMetadata(markdown, RAYOMD_VERSION);
+    int metadataId = pdf.AddStream("/Type /Metadata /Subtype /XML", metadata);
+
+    catalog += " /Metadata ";
+    AppendInt(catalog, metadataId);
+    catalog += " 0 R /Names << /EmbeddedFiles << /Names [(source.md) ";
+    AppendInt(catalog, fileSpecId);
+    catalog += " 0 R] >> >> /AF [";
+    AppendInt(catalog, fileSpecId);
+    catalog += " 0 R]";
+}
+
 
 struct PdfImage {
     std::string name;
@@ -3540,15 +3572,17 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
     pdf.Set(pagesId, pages);
 
     std::string catalog;
-    catalog.reserve(48);
+    catalog.reserve(options.embedSource ? 256 : 48);
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
-    catalog += " 0 R >>";
+    catalog += " 0 R";
+    if (options.embedSource) AddReversibleSource(pdf, catalog, markdown);
+    catalog += " >>";
     int catalogId = pdf.Add(catalog);
     int infoId = pdf.Add("<< /Producer (RayoMD Native Standard PDF) /Creator (RayoMD) /Title (" +
         EscapeLiteral("Markdown Export") + ") >>");
 
-    pdfBytes = pdf.Build(catalogId, infoId);
+    pdfBytes = pdf.Build(catalogId, infoId, options.embedSource);
     return true;
 }
 
@@ -3705,24 +3739,41 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     pdf.Set(pagesId, pages);
 
     std::string catalog;
-    catalog.reserve(48);
+    catalog.reserve(options.embedSource ? 256 : 48);
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
-    catalog += " 0 R >>";
+    catalog += " 0 R";
+    if (options.embedSource) AddReversibleSource(pdf, catalog, markdown);
+    catalog += " >>";
     int catalogId = pdf.Add(catalog);
     int infoId = pdf.Add("<< /Producer (RayoMD Native Tiny PDF) /Creator (RayoMD) /Title (" +
         EscapeLiteral("Markdown Export") + ") >>");
 
-    pdfBytes = pdf.Build(catalogId, infoId);
+    pdfBytes = pdf.Build(catalogId, infoId, options.embedSource);
     return true;
 }
 
 BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes) {
     const auto profileBefore = RayoMd::Profiling::Capture();
+    if (options.embedSource) {
+        if (markdown.size() > RayoMd::PdfSource::kMaxSourceBytes) {
+            g_lastError = static_cast<int>(BuildError::SourceTooLarge);
+            return { BuildError::SourceTooLarge };
+        }
+        if (!RayoMd::PdfSource::IsValidUtf8(markdown)) {
+            g_lastError = static_cast<int>(BuildError::InvalidSourceUtf8);
+            return { BuildError::InvalidSourceUtf8 };
+        }
+    }
     g_lastError = 0;
     bool built = IsAsciiDocument(markdown)
         ? BuildStandardPdfBytes(markdown, options, pdfBytes)
         : BuildUnicodePdfBytes(markdown, options, pdfBytes);
+    if (built && options.embedSource && pdfBytes.size() > RayoMd::PdfSource::kMaxPdfBytes) {
+        pdfBytes.clear();
+        g_lastError = static_cast<int>(BuildError::ReversiblePdfTooLarge);
+        built = false;
+    }
     RayoMd::Profiling::EmitDelta("build", profileBefore, RayoMd::Profiling::Capture());
     return built ? BuildResult{} : BuildResult{ static_cast<BuildError>(g_lastError) };
 }

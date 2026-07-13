@@ -38,6 +38,12 @@ including headings, paragraphs, lists, block quotes, fenced code blocks, pipe
 tables, rule lines, simple math cleanup/boxes, inline emphasis cleanup,
 clickable Markdown links, standalone local images, and HTTP/HTTPS images on
 Windows or curl-enabled Linux builds with fallback text.
+Native exports can opt into the `rayomd-source/1` reversible PDF profile.
+Embedding is disabled by default because it exposes the complete source,
+including content not visible on rendered pages. Recovery is byte-exact and
+format-specific; it must never silently fall back to heuristic PDF conversion.
+Keep ordinary non-reversible exports on their unchanged PDF 1.7 fast path.
+The profile limits PDFs to 256 MiB and source to 32 MiB.
 
 Important image/link details:
 
@@ -63,6 +69,11 @@ Important image/link details:
 
 - `src/core/markdown_parser.cpp`
   Internal Markdown block model and parser; keep renderer-independent document cleanup here.
+
+- `src/core/rayomd_pdf_source.h` and `src/core/rayomd_pdf_source.cpp`
+  Bounded reversible-profile metadata, SHA-256 integrity, hostile-input
+  inspection, and byte-exact source recovery. Keep this limited to RayoMD's
+  exact classic-xref profile rather than growing a general PDF parser.
 
 - `src/core/inline_markdown.cpp`
   Renderer-neutral inline span parsing for emphasis, code, images, and links. Both renderers

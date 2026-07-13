@@ -2,11 +2,13 @@
 #include "../common/text_utils.h"
 #include "../common/profiling.h"
 #include "../core/export_options.h"
+#include "../core/rayomd_pdf_source.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
@@ -98,6 +100,131 @@ bool WriteBinaryFilePortable(const fs::path& path, const std::string& content) {
 bool WriteUtf8FilePortable(const fs::path& path, const std::string& content) {
     return WriteBinaryFilePortable(path, content);
 }
+std::string PathToUtf8(const fs::path& path);
+
+bool ReadBinaryFileLimited(const fs::path& path, size_t maximum, std::string& content) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    std::streamsize size = file.tellg();
+    if (size < 0 || static_cast<uintmax_t>(size) > maximum) return false;
+    file.seekg(0, std::ios::beg);
+    content.assign(static_cast<size_t>(size), '\0');
+    return size == 0 || static_cast<bool>(file.read(content.data(), size));
+}
+
+bool WriteNewFileAtomicPortable(const fs::path& path, const std::string& content, bool& existed) {
+    existed = false;
+    std::error_code error;
+    if (fs::exists(path, error)) {
+        existed = !error;
+        return false;
+    }
+    static std::atomic<uint64_t> counter{0};
+    for (unsigned attempt = 0; attempt < 16; attempt++) {
+        fs::path temporary = path.parent_path() /
+            ("." + path.filename().string() + ".rayomd-" +
+             std::to_string(counter.fetch_add(1, std::memory_order_relaxed)) + ".tmp");
+#ifndef _WIN32
+        int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0) {
+            if (errno == EEXIST) continue;
+            return false;
+        }
+        size_t written = 0;
+        bool writeOk = true;
+        while (written < content.size()) {
+            ssize_t count = ::write(fd, content.data() + written, content.size() - written);
+            if (count <= 0) {
+                if (count < 0 && errno == EINTR) continue;
+                writeOk = false;
+                break;
+            }
+            written += static_cast<size_t>(count);
+        }
+        if (::close(fd) != 0) writeOk = false;
+        if (!writeOk) {
+            ::unlink(temporary.c_str());
+            return false;
+        }
+        if (::link(temporary.c_str(), path.c_str()) == 0) {
+            ::unlink(temporary.c_str());
+            return true;
+        }
+        int linkError = errno;
+        ::unlink(temporary.c_str());
+        if (linkError == EEXIST) {
+            existed = true;
+            return false;
+        }
+        return false;
+#else
+        if (fs::exists(temporary, error)) continue;
+        if (!WriteBinaryFilePortable(temporary, content)) return false;
+        fs::rename(temporary, path, error);
+        if (!error) return true;
+        fs::remove(temporary, error);
+        return false;
+#endif
+    }
+    return false;
+}
+
+int RecoveryExitCode(RayoMd::PdfSource::Status status) {
+    using Status = RayoMd::PdfSource::Status;
+    switch (status) {
+    case Status::Ok: return 0;
+    case Status::NotReversible: return 30;
+    case Status::UnsupportedProfile: return 31;
+    case Status::LimitExceeded: return 33;
+    case Status::CorruptPdf:
+    case Status::IntegrityMismatch:
+    case Status::InvalidUtf8: return 32;
+    }
+    return 32;
+}
+
+int RunInspectSource(const fs::path& inputPath) {
+    std::string pdf;
+    if (!ReadBinaryFileLimited(inputPath, RayoMd::PdfSource::kMaxPdfBytes, pdf)) {
+        std::cerr << "Error: could not read PDF or input exceeds "
+            << RayoMd::PdfSource::kMaxPdfBytes << " bytes.\n";
+        return 3;
+    }
+    RayoMd::PdfSource::Result result = RayoMd::PdfSource::Inspect(pdf, false);
+    if (!result.Ok()) {
+        std::cerr << "Error: " << RayoMd::PdfSource::StatusMessage(result.status) << ".\n";
+        return RecoveryExitCode(result.status);
+    }
+    std::cout << "status=intact\nprofile=" << result.info.profile
+        << "\nproducer_version=" << result.info.producerVersion
+        << "\nsource_bytes=" << result.info.sourceBytes
+        << "\nencoding=" << result.info.encoding
+        << "\ndigest=valid\nattachment=" << result.info.attachmentName << "\n";
+    return 0;
+}
+
+int RunRecoverSource(const fs::path& inputPath, const fs::path& outputPath) {
+    std::string pdf;
+    if (!ReadBinaryFileLimited(inputPath, RayoMd::PdfSource::kMaxPdfBytes, pdf)) {
+        std::cerr << "Error: could not read PDF or input exceeds "
+            << RayoMd::PdfSource::kMaxPdfBytes << " bytes.\n";
+        return 3;
+    }
+    RayoMd::PdfSource::Result result = RayoMd::PdfSource::Inspect(pdf, true);
+    if (!result.Ok()) {
+        std::cerr << "Error: " << RayoMd::PdfSource::StatusMessage(result.status) << ".\n";
+        return RecoveryExitCode(result.status);
+    }
+    bool existed = false;
+    if (!WriteNewFileAtomicPortable(outputPath, result.source, existed)) {
+        std::cerr << (existed ? "Error: destination already exists: " : "Error: could not write recovered source: ")
+            << PathToUtf8(outputPath) << "\n";
+        return existed ? 34 : 12;
+    }
+    std::cout << "Recovered " << result.info.sourceBytes << " bytes to " << PathToUtf8(outputPath) << "\n";
+    return 0;
+}
+
 
 std::string PathToUtf8(const fs::path& path) {
     return path.u8string();
@@ -149,6 +276,7 @@ struct CliExportOptions {
     TinyPdf::PdfMargin margin = TinyPdf::PdfMargin::Normal();
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
+    bool embedSource = false;
     unsigned workers = 0;
 };
 
@@ -160,6 +288,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "native") options.engine = 0;
         else if (value == "--allow-url-images") options.enableUrlImages = true;
         else if (value == "--allow-unsafe-local-images" || value == "--unsafe-local-images") options.allowUnsafeLocalImages = true;
+        else if (value == "--embed-source") options.embedSource = true;
         else if (value.rfind("--workers=", 0) == 0) {
             std::string count = value.substr(10);
             char* end = nullptr;
@@ -206,6 +335,7 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     pdfOptions.sourcePath = sourcePath;
     pdfOptions.enableUrlImages = options.enableUrlImages;
     pdfOptions.allowUnsafeLocalImages = options.allowUnsafeLocalImages;
+    pdfOptions.embedSource = options.embedSource;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, pdfOptions, pdfBuffer);
     if (!buildResult) {
         int code = 10 + static_cast<int>(buildResult.error);
@@ -448,6 +578,7 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     options.sourcePath = PathToUtf8(inputPath);
     options.enableUrlImages = cliOptions.enableUrlImages;
     options.allowUnsafeLocalImages = cliOptions.allowUnsafeLocalImages;
+    options.embedSource = cliOptions.embedSource;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (!buildResult) {
         int code = 10 + static_cast<int>(buildResult.error);
@@ -559,6 +690,8 @@ void PrintUsage() {
         << "Usage:\n"
         << "  rayomd --version\n"
         << "  rayomd --doctor\n"
+        << "  rayomd --inspect-source <input.pdf>\n"
+        << "  rayomd --recover-source <input.pdf> <output.md>\n"
         << "  rayomd --export <input.md> <output.pdf> [native] [style] [margin]\n"
         << "  rayomd --stdin <output.pdf> [native] [style] [margin]\n"
         << "  rayomd --batch <input-folder> <output-folder> [native] [style] [margin]\n"
@@ -568,7 +701,7 @@ void PrintUsage() {
         << "\n"
         << "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
         << "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
-        << "Resource flags: --allow-url-images, --allow-unsafe-local-images.\n"
+        << "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source.\n"
         << "Batch flag: --workers=N (1-64; automatic mode uses at most 6).\n";
 }
 
@@ -595,6 +728,15 @@ int main(int argc, char** argv) {
     }
 
     if (command == "--doctor") return RunDoctor();
+
+    if (command == "--inspect-source") {
+        if (argc != 3) return PrintArgumentError("--inspect-source requires <input.pdf>.");
+        return RunInspectSource(argv[2]);
+    }
+    if (command == "--recover-source") {
+        if (argc != 4) return PrintArgumentError("--recover-source requires <input.pdf> <output.md>.");
+        return RunRecoverSource(argv[2], argv[3]);
+    }
 
     if (command == "--stdin") {
         if (argc < 3) return PrintArgumentError("--stdin requires <output.pdf>.");

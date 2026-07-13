@@ -267,6 +267,9 @@ Windows:
 rayomd.exe --version
 rayomd.exe --doctor
 rayomd.exe --export input.md output.pdf native elegant normal
+rayomd.exe --export input.md reversible.pdf native elegant normal --embed-source
+rayomd.exe --inspect-source reversible.pdf
+rayomd.exe --recover-source reversible.pdf recovered.md
 type input.md | rayomd.exe --stdin output.pdf native elegant normal
 rayomd.exe --batch input-folder output-folder native modern normal --workers=4
 type files.txt | rayomd.exe --stdin-batch output-folder native modern normal
@@ -280,6 +283,9 @@ Linux / WSL:
 ./rayomd --version
 ./rayomd --doctor
 ./rayomd --export input.md output.pdf native elegant normal
+./rayomd --export input.md reversible.pdf native elegant normal --embed-source
+./rayomd --inspect-source reversible.pdf
+./rayomd --recover-source reversible.pdf recovered.md
 cat input.md | ./rayomd --stdin output.pdf native elegant normal
 ./rayomd --batch input-folder output-folder native modern normal --workers=4
 cat files.txt | ./rayomd --stdin-batch output-folder native modern normal
@@ -293,6 +299,8 @@ Modes:
 |---|---|
 | `--version` | Print the compiled project version |
 | `--doctor` | Diagnose capabilities, Unicode fonts, temporary output, and a smoke export |
+| `--inspect-source` | Validate and describe an embedded RayoMD source profile |
+| `--recover-source` | Recover byte-exact Markdown from a validated reversible PDF |
 | `--export` | Convert one Markdown file |
 | `--stdin` | Convert Markdown content read from stdin into one PDF |
 | `--batch` | Convert every `.md` file in a folder |
@@ -311,6 +319,7 @@ Resource flags:
 - `--allow-url-images` enables HTTP/HTTPS image fetching and still blocks loopback, private, link-local, multicast, and non-HTTP(S) redirect targets.
 - `--allow-unsafe-local-images` restores legacy local-image path behavior for trusted documents only.
 - `--workers=N` sets the native folder/stdin-batch worker limit from 1 to 64; omit it for the memory-capped automatic policy.
+- `--embed-source` opts a native export into exact Markdown recovery; anyone receiving the PDF can extract source content that is not visible on its pages.
 
 Margins:
 
@@ -329,7 +338,15 @@ Exit codes:
 | `3` | Input file or stdin Markdown could not be read |
 | `11` | Native exporter could not load a system font |
 | `12` | Native exporter could not write the PDF |
+| `14` | Source selected for embedding exceeds 32 MiB |
+| `15` | Source selected for embedding is not valid UTF-8 |
+| `16` | Reversible PDF would exceed the 256 MiB recovery limit |
 | `20` | Pandoc export failed or is unsupported in this build |
+| `30` | PDF has no reversible RayoMD profile |
+| `31` | Reversible profile version is unsupported |
+| `32` | PDF/profile is corrupt, invalid UTF-8, or fails integrity validation |
+| `33` | PDF or recovered source exceeds a configured limit |
+| `34` | Recovery destination already exists |
 
 ## C++ API
 
@@ -348,6 +365,7 @@ options.style = TinyPdf::PdfStyle::Modern;
 options.margin = TinyPdf::PdfMargin::Normal();
 options.sourcePath = "input.md";
 options.enableUrlImages = false;  // set true only for trusted URL image fetches
+options.embedSource = false;      // opt in only when exact source recovery is wanted
 
 TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdownText, options, pdfBytes);
 if (!result) {
@@ -360,6 +378,33 @@ images resolve next to the input Markdown file. By default, local image targets
 must remain inside that source directory after canonicalization. Set
 `allowUnsafeLocalImages` only for trusted documents that deliberately need
 absolute, UNC/device, or parent-escaping paths.
+
+## Reversible PDFs
+
+Normal exports remain compact PDF 1.7 files and do not contain the Markdown
+source. Pass `--embed-source` only when exact recovery is wanted. Reversible
+outputs use the `rayomd-source/1` PDF 2.0 profile: a standard Associated File
+and `EmbeddedFiles` name-tree entry contain the exact bytes, while bounded XMP
+metadata records the source length and SHA-256 digest.
+
+Embedding can disclose comments, front matter, internal notes, reference
+definitions, whitespace, and other source content not visible on the pages.
+It is disabled by default. A validated reversible `.pdf` can also be dropped
+onto the Windows app to recover its source into the editor.
+
+`--inspect-source` validates without writing. `--recover-source` performs full
+validation and atomically creates the caller-selected output; it refuses to
+overwrite an existing file and never trusts the attachment name as a path.
+
+Profile version 1 accepts PDFs up to 256 MiB and Markdown up to 32 MiB. It
+supports only the single classic-xref structure emitted by RayoMD. Encryption,
+incremental updates, object/xref streams, unexpected filters, duplicate source
+entries, malformed offsets, invalid UTF-8, and digest mismatches are rejected.
+Exact recovery never falls back to heuristic PDF-to-Markdown conversion.
+
+The source is uncompressed so default Windows and Linux packages remain
+mutually recoverable without a mandatory compression dependency. See
+[`docs/development/reversible_pdf_profile.md`](docs/development/reversible_pdf_profile.md).
 
 ## Benchmarking
 
