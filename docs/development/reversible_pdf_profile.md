@@ -66,10 +66,10 @@ Windows results on 2026-07-13 (5 samples through 1 MiB, 3 at 10 MiB):
 
 | Source | Plain / embedded PDF | Plain p50/p95 | Embed p50/p95 | Inspect p50/p95 | Recover p50/p95 | Peak RSS |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 B | 970 / 1,914 B | 45.71/189.26 ms | 45.35/47.93 ms | 47.12/49.72 ms | 60.12/75.95 ms | 11.0 MiB |
-| 10 KiB | 94,442 / 105,648 B | 46.07/80.77 ms | 50.93/59.21 ms | 51.55/58.62 ms | 54.04/62.86 ms | 11.1 MiB |
-| 1 MiB | 9,656,443 / 10,706,007 B | 242.40/253.39 ms | 281.99/318.13 ms | 58.17/72.61 ms | 82.78/91.09 ms | 58.8 MiB |
-| 10 MiB maximum | 96,795,566 / 107,282,325 B | 1,845.80/1,915.97 ms | 1,679.28/1,953.34 ms | 216.31/234.09 ms | 187.04/233.80 ms | 486.4 MiB |
+| 0 B | 970 / 1,914 B | 38.62/46.39 ms | 39.32/44.19 ms | 40.38/43.38 ms | 53.43/74.88 ms | 2.5 MiB |
+| 10 KiB | 94,442 / 105,648 B | 62.95/85.40 ms | 49.37/56.61 ms | 46.54/57.48 ms | 47.29/49.64 ms | 9.7 MiB |
+| 1 MiB | 9,656,443 / 10,706,007 B | 190.88/203.28 ms | 237.27/270.64 ms | 71.48/90.24 ms | 64.26/72.29 ms | 58.7 MiB |
+| 10 MiB maximum | 96,795,566 / 107,282,325 B | 1,417.96/1,518.04 ms | 1,821.15/1,983.92 ms | 174.84/204.52 ms | 231.45/266.24 ms | 487.1 MiB |
 
 The instrumented build showed an embedding delta of 13 allocations for 10 KiB,
 1 MiB, and 10 MiB (14 for empty input). Extra allocated bytes were 34,800,
@@ -78,9 +78,9 @@ copies across hashing, object assembly, and the final PDF buffer; it occurs only
 on the opt-in path.
 
 The corresponding Linux measurements were made from WSL mounted storage
-(`/mnt/e`, not native ext4). The 10 MiB p50/p95 values were 2,847.55/3,182.33 ms
-plain, 2,472.71/2,690.13 ms embedded, 727.21/731.95 ms inspect, and
-818.69/956.66 ms recover. RSS was unavailable because the optional measurement
+(`/mnt/e`, not native ext4). The 10 MiB p50/p95 values were 3,370.85/3,671.15 ms
+plain, 2,511.80/2,539.52 ms embedded, 822.56/941.22 ms inspect, and
+876.21/903.89 ms recover. RSS was unavailable because the optional measurement
 helper was not installed in WSL; these are storage-qualified regression data,
 not native Linux headline claims.
 
@@ -95,6 +95,10 @@ Final binary growth is 22,016 bytes on Windows (+0.80%, 2,760,704 to 2,782,720)
 and 24,632 bytes on Linux (+6.71%, 367,096 to 391,728). No runtime dependency was
 added. The cold recovery translation unit is optimized for size while the
 renderer keeps its normal release optimization flags.
+
+The complete feature, workflow, rejection, storage, and reproduction tables are
+in the dated
+[`reversible PDF feature benchmark`](../benchmarks/reversible_pdf_features_2026-07-13.md).
 
 ## Limits and hostile input policy
 

@@ -25,6 +25,8 @@ except ImportError:  # pragma: no cover - optional local measurement helper
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_LIMIT = 10 * 1024 * 1024
 PDF_LIMIT = 256 * 1024 * 1024
+COMMAND_TIMEOUT_SECONDS = 120.0
+BENCHMARK_VERSION = 2
 PAYLOAD = (
     b"# Heading\n\nParagraph with **bold**, [link](https://example.com), and text.\n\n"
     b"| Left | Right |\n|---|---:|\n| alpha | 42 |\n\n"
@@ -54,6 +56,7 @@ def measured(
     command: list[str],
     expected: tuple[int, ...] = (0,),
     env: dict[str, str] | None = None,
+    stdin: bytes | None = None,
 ) -> dict[str, object]:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     started = time.perf_counter()
@@ -62,12 +65,29 @@ def measured(
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        stdin=subprocess.PIPE if stdin is not None else None,
         creationflags=flags,
         env=env,
     )
+    if stdin is not None and process.stdin is not None:
+        process.stdin.write(stdin)
+        process.stdin.close()
+        process.stdin = None
     peak_rss = 0
     observed = psutil.Process(process.pid) if psutil is not None else None
     while process.poll() is None:
+        if time.perf_counter() - started > COMMAND_TIMEOUT_SECONDS:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            stdout, stderr = process.communicate()
+            raise TimeoutError(
+                f"command exceeded {COMMAND_TIMEOUT_SECONDS:.0f}s: {' '.join(command)}\n"
+                f"stdout: {stdout.decode(errors='replace')}\n"
+                f"stderr: {stderr.decode(errors='replace')}"
+            )
         if observed is not None:
             try:
                 current_rss = observed.memory_info().rss
@@ -184,7 +204,202 @@ def validator(command: list[str]) -> dict[str, object]:
     }
 
 
+def feature_documents(payload_dir: Path) -> list[tuple[str, bytes]]:
+    image_source = ROOT / "docs" / "assets" / "branding" / "rayomd.png"
+    shutil.copyfile(image_source, payload_dir / "rayomd.png")
+    return [
+        ("ascii", b"# ASCII\n\nA short **native** document with `code`.\n"),
+        ("unicode", "# Unicode 😀\n\nZażółć gęślą jaźń. 日本語 Ελληνικά.\n".encode()),
+        ("links", b"# Links\n\n[one](https://example.com/one) and [two](https://example.com/two).\n"),
+        ("local-image", b"# Image\n\n![RayoMD](rayomd.png)\n"),
+        ("failed-image", b"# Missing image\n\n![useful fallback](missing.png)\n"),
+        ("remote-fallback", b"# Remote fallback\n\n![remote](https://example.invalid/image.png)\n"),
+        ("table-list", b"# Mixed\n\n- one\n  - nested\n\n| Name | Value |\n|---|---:|\n| alpha | 42 |\n"),
+        ("multipage", (b"# Page\n\nParagraph.\n\n" * 220)),
+        ("source-only", b"---\nprivate: true\n---\n\n<!-- internal note -->\n\n# Visible\n\n:::unsupported value\n"),
+    ]
+
+
+def run_feature_cases(binary: Path, payload_dir: Path, output: Path, samples: int) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for name, source in feature_documents(payload_dir):
+        source_path = payload_dir / f"feature-{name}.md"
+        source_path.write_bytes(source)
+        plain_pdf = output / f"feature-{name}-plain.pdf"
+        embedded_pdf = output / f"feature-{name}-embedded.pdf"
+        plain = [measured([
+            str(binary), "--export", str(source_path), str(plain_pdf), "native", "modern", "normal",
+        ]) for _ in range(samples)]
+        embedded = [measured([
+            str(binary), "--export", str(source_path), str(embedded_pdf), "native", "modern", "normal",
+            "--embed-source",
+        ]) for _ in range(samples)]
+        inspect = [measured([str(binary), "--inspect-source", str(embedded_pdf)]) for _ in range(samples)]
+        recover_samples: list[dict[str, object]] = []
+        for index in range(samples):
+            recovered = output / f"feature-{name}-recovered-{index}.md"
+            recover_samples.append(measured([
+                str(binary), "--recover-source", str(embedded_pdf), str(recovered),
+            ]))
+            if recovered.read_bytes() != source:
+                raise AssertionError(f"feature {name}: recovered bytes differ")
+            recovered.unlink()
+        records.append({
+            "name": name,
+            "source_bytes": len(source),
+            "plain_pdf_bytes": plain_pdf.stat().st_size,
+            "embedded_pdf_bytes": embedded_pdf.stat().st_size,
+            "plain": summarize(plain),
+            "embedded": summarize(embedded),
+            "inspect": summarize(inspect),
+            "recover": summarize(recover_samples),
+        })
+    return records
+
+
+def run_workflows(binary: Path, payload_dir: Path, output: Path, samples: int) -> dict[str, object]:
+    corpus = payload_dir / "workflow-corpus"
+    corpus.mkdir()
+    documents = feature_documents(corpus)
+    paths: list[Path] = []
+    for index in range(18):
+        name, source = documents[index % len(documents)]
+        path = corpus / f"{index:03d}-{name}.md"
+        path.write_bytes(source)
+        paths.append(path.resolve())
+    path_input = ("\n".join(str(path) for path in paths) + "\n").encode()
+    serve_input = path_input + b"quit\n"
+    result: dict[str, object] = {"documents": len(paths), "workers": 1}
+    for embedded in (False, True):
+        label = "embedded" if embedded else "plain"
+        flag = ["--embed-source"] if embedded else []
+        folder_out = output / f"workflow-folder-{label}"
+        stdin_out = output / f"workflow-stdin-{label}"
+        serve_out = output / f"workflow-serve-{label}"
+        folder = [measured([
+            str(binary), "--batch", str(corpus), str(folder_out), "native", "modern", "normal",
+            "--workers=1", *flag,
+        ]) for _ in range(samples)]
+        stdin_batch = [measured([
+            str(binary), "--stdin-batch", str(stdin_out), "native", "modern", "normal", "--workers=1", *flag,
+        ], stdin=path_input) for _ in range(samples)]
+        serve = [measured([
+            str(binary), "--serve", str(serve_out), "native", "modern", "normal", *flag,
+        ], stdin=serve_input) for _ in range(samples)]
+        result[label] = {
+            "folder": summarize(folder),
+            "stdin_batch": summarize(stdin_batch),
+            "serve": summarize(serve),
+        }
+        outputs = sorted(folder_out.glob("*.pdf"))
+        if len(outputs) != len(paths):
+            raise AssertionError(f"workflow {label}: expected {len(paths)} PDFs, found {len(outputs)}")
+        if embedded:
+            for pdf in outputs:
+                measured([str(binary), "--inspect-source", str(pdf)])
+    return result
+
+
+def run_rejection_cases(binary: Path, payload_dir: Path, output: Path, samples: int) -> list[dict[str, object]]:
+    source = b"# Rejection fixture\n\nexact payload\n"
+    source_path = payload_dir / "rejection.md"
+    source_path.write_bytes(source)
+    ordinary = output / "rejection-ordinary.pdf"
+    reversible = output / "rejection-reversible.pdf"
+    measured([str(binary), "--export", str(source_path), str(ordinary), "native", "modern", "normal"])
+    measured([
+        str(binary), "--export", str(source_path), str(reversible), "native", "modern", "normal", "--embed-source",
+    ])
+    reversible_bytes = reversible.read_bytes()
+    unsupported = output / "rejection-unsupported.pdf"
+    unsupported.write_bytes(reversible_bytes.replace(b"rayomd-source/1", b"rayomd-source/2", 1))
+    tampered = output / "rejection-tampered.pdf"
+    changed = bytearray(reversible_bytes)
+    source_offset = changed.find(source)
+    if source_offset < 0:
+        raise AssertionError("rejection fixture source was not found")
+    changed[source_offset] ^= 1
+    tampered.write_bytes(changed)
+    truncated = output / "rejection-truncated.pdf"
+    truncated.write_bytes(reversible_bytes[:-8])
+    oversized_source = payload_dir / "rejection-over-limit.md"
+    oversized_source.write_bytes(exact_payload(SOURCE_LIMIT + 1))
+    oversized_pdf = output / "rejection-over-limit.pdf"
+    definitions = [
+        ("not-reversible", [str(binary), "--inspect-source", str(ordinary)], (30,)),
+        ("unsupported-profile", [str(binary), "--inspect-source", str(unsupported)], (31,)),
+        ("integrity-mismatch", [str(binary), "--inspect-source", str(tampered)], (32,)),
+        ("truncated", [str(binary), "--inspect-source", str(truncated)], (32,)),
+        ("source-over-limit", [
+            str(binary), "--export", str(oversized_source), str(oversized_pdf), "native", "modern", "normal",
+            "--embed-source",
+        ], (14,)),
+    ]
+    return [{
+        "name": name,
+        "expected_exit": expected[0],
+        "result": summarize([measured(command, expected=expected) for _ in range(samples)]),
+    } for name, command, expected in definitions]
+
+
+def read_bench_result(path: Path) -> dict[str, object]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key] = value
+    required = ("input_bytes", "iterations", "total_ms", "avg_ms", "avg_pdf_bytes", "path")
+    if any(key not in values for key in required):
+        raise RuntimeError(f"incomplete benchmark result: {path}")
+    return {
+        "input_bytes": int(values["input_bytes"]),
+        "iterations": int(values["iterations"]),
+        "total_ms": float(values["total_ms"]),
+        "avg_ms": float(values["avg_ms"]),
+        "avg_pdf_bytes": int(values["avg_pdf_bytes"]),
+        "renderer_path": values["path"],
+    }
+
+
+def run_warm_matrix(binary: Path, payload_dir: Path, output: Path, suite: str) -> list[dict[str, object]]:
+    source_path = payload_dir / "warm-matrix.md"
+    source_path.write_bytes(exact_payload(10 * 1024))
+    iterations = 80 if suite == "full" else 20
+    records: list[dict[str, object]] = []
+    for style in ("elegant", "modern", "tech"):
+        for margin in ("compact", "normal", "wide", "margin=54pt"):
+            item: dict[str, object] = {"style": style, "margin": margin}
+            for embedded in (False, True):
+                label = "embedded" if embedded else "plain"
+                result_dir = output / f"warm-{style}-{margin.replace('=', '-').replace('.', '-')}-{label}"
+                command = [
+                    str(binary), "--bench", str(source_path), str(result_dir), str(iterations), style, margin,
+                ]
+                if embedded:
+                    command.append("--embed-source")
+                measured(command)
+                item[label] = read_bench_result(result_dir / "bench-results.txt")
+            records.append(item)
+    unicode_path = payload_dir / "warm-unicode.md"
+    unicode_path.write_text(("# Unicode 😀\n\nZażółć gęślą jaźń. 日本語 Ελληνικά.\n\n" * 120), encoding="utf-8")
+    unicode_record: dict[str, object] = {"style": "modern", "margin": "normal", "case": "unicode"}
+    for embedded in (False, True):
+        label = "embedded" if embedded else "plain"
+        result_dir = output / f"warm-unicode-{label}"
+        command = [
+            str(binary), "--bench", str(unicode_path), str(result_dir), str(iterations), "modern", "normal",
+        ]
+        if embedded:
+            command.append("--embed-source")
+        measured(command)
+        unicode_record[label] = read_bench_result(result_dir / "bench-results.txt")
+    records.append(unicode_record)
+    return records
+
+
 def run(args: argparse.Namespace) -> Path:
+    global COMMAND_TIMEOUT_SECONDS
+    COMMAND_TIMEOUT_SECONDS = args.timeout_seconds
     binary = Path(args.binary).resolve()
     if not binary.is_file():
         raise FileNotFoundError(binary)
@@ -201,6 +416,7 @@ def run(args: argparse.Namespace) -> Path:
 
     record: dict[str, object] = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "benchmark_version": BENCHMARK_VERSION,
         "platform": args.platform,
         "suite": args.suite,
         "binary": str(binary),
@@ -270,6 +486,16 @@ def run(args: argparse.Namespace) -> Path:
         case_records.append(item)
     record["cases"] = case_records
 
+    feature_samples = min(args.samples, 5)
+    feature_records = run_feature_cases(binary, payload_dir, output, feature_samples)
+    workflow_record = run_workflows(binary, payload_dir, output, feature_samples)
+    rejection_records = run_rejection_cases(binary, payload_dir, output, feature_samples)
+    warm_records = run_warm_matrix(binary, payload_dir, output, args.suite)
+    record["feature_cases"] = feature_records
+    record["workflows"] = workflow_record
+    record["rejection_cases"] = rejection_records
+    record["warm_matrix"] = warm_records
+
     storage_source = exact_payload(1024 * 1024)
     raw_fixture = output / "storage-raw.pdf"
     compressed_fixture = output / "storage-flate.pdf"
@@ -333,6 +559,69 @@ def run(args: argparse.Namespace) -> Path:
         )
     lines.extend((
         "",
+        "## Feature-shaped exports",
+        "",
+        "| Feature | Source | Plain / embedded PDF | Plain p50/p95 | Embedded p50/p95 | Inspect p50/p95 | Recover p50/p95 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ))
+    for item in feature_records:
+        lines.append(
+            f"| {item['name']} | {int(item['source_bytes']):,} | "
+            f"{int(item['plain_pdf_bytes']):,} / {int(item['embedded_pdf_bytes']):,} | "
+            f"{float(item['plain']['wall_ms_p50']):.2f}/{float(item['plain']['wall_ms_p95']):.2f} ms | "
+            f"{float(item['embedded']['wall_ms_p50']):.2f}/{float(item['embedded']['wall_ms_p95']):.2f} ms | "
+            f"{float(item['inspect']['wall_ms_p50']):.2f}/{float(item['inspect']['wall_ms_p95']):.2f} ms | "
+            f"{float(item['recover']['wall_ms_p50']):.2f}/{float(item['recover']['wall_ms_p95']):.2f} ms |"
+        )
+    lines.extend((
+        "",
+        "## In-process warm matrix",
+        "",
+        "| Case | Style | Margin | Plain | Embedded | Delta | Plain / embedded PDF |",
+        "|---|---|---|---:|---:|---:|---:|",
+    ))
+    for item in warm_records:
+        plain = item["plain"]
+        embedded = item["embedded"]
+        delta = ((float(embedded["avg_ms"]) / float(plain["avg_ms"])) - 1.0) * 100.0
+        lines.append(
+            f"| {item.get('case', 'ascii-10k')} | {item['style']} | {item['margin']} | "
+            f"{float(plain['avg_ms']):.3f} ms | {float(embedded['avg_ms']):.3f} ms | {delta:+.1f}% | "
+            f"{int(plain['avg_pdf_bytes']):,} / {int(embedded['avg_pdf_bytes']):,} B |"
+        )
+    lines.extend((
+        "",
+        "## Batch and warm workflows",
+        "",
+        f"Single worker, {int(workflow_record['documents'])} feature-mix documents.",
+        "",
+        "| Workflow | Plain p50/p95 | Embedded p50/p95 |",
+        "|---|---:|---:|",
+    ))
+    for key, label in (("folder", "Folder batch"), ("stdin_batch", "stdin batch"), ("serve", "Warm serve")):
+        plain = workflow_record["plain"][key]
+        embedded = workflow_record["embedded"][key]
+        lines.append(
+            f"| {label} | {float(plain['wall_ms_p50']):.2f}/{float(plain['wall_ms_p95']):.2f} ms | "
+            f"{float(embedded['wall_ms_p50']):.2f}/{float(embedded['wall_ms_p95']):.2f} ms |"
+        )
+    lines.extend((
+        "",
+        "## Bounded rejection paths",
+        "",
+        "| Case | Exit | p50/p95 | Peak RSS |",
+        "|---|---:|---:|---:|",
+    ))
+    for item in rejection_records:
+        result = item["result"]
+        rss = int(result.get("peak_rss_bytes") or 0)
+        lines.append(
+            f"| {item['name']} | {int(item['expected_exit'])} | "
+            f"{float(result['wall_ms_p50']):.2f}/{float(result['wall_ms_p95']):.2f} ms | "
+            f"{f'{rss / (1024 * 1024):.1f} MiB' if rss else 'unavailable'} |"
+        )
+    lines.extend((
+        "",
         "## Storage experiment",
         "",
         f"- Raw fixture: {raw_fixture.stat().st_size:,} bytes",
@@ -371,6 +660,7 @@ def main() -> int:
     parser.add_argument("--platform", required=True)
     parser.add_argument("--suite", choices=("quick", "full"), default="quick")
     parser.add_argument("--samples", type=int, default=5)
+    parser.add_argument("--timeout-seconds", type=float, default=120.0)
     parser.add_argument(
         "--profile-binary",
         help="matching RAYOMD_ENABLE_PROFILING build used to record allocation deltas",
@@ -379,6 +669,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.samples < 1 or args.samples > 20:
         parser.error("--samples must be between 1 and 20")
+    if args.timeout_seconds < 5 or args.timeout_seconds > 3600:
+        parser.error("--timeout-seconds must be between 5 and 3600")
     output = run(args)
     print(output)
     return 0
