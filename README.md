@@ -40,8 +40,9 @@ CLI.
 ## Highlights
 
 - Native Markdown-to-PDF path with no browser engine.
-- In a dated Windows three-tool comparison, RayoMD finished in `15.45` to
-  `18.66 ms`; the next comparator took `111.2x` to `132.0x` as long.
+- Fastest in our July 2026 Windows three-tool comparison: RayoMD finished in
+  `15.45` to `18.66 ms`; the next-fastest comparator took `111.2x` to
+  `132.0x` as long.
 - Single Windows GUI executable for the default release.
 - Compact non-Windows CLI binary.
 - Fast warm conversion for small and medium documents.
@@ -82,10 +83,10 @@ export and batch rows include process startup and file I/O.
 
 ### Fresh-Process Three-Tool Comparison (2026-07-13)
 
-On one Windows 11 system, RayoMD 2.2.0 had the lowest median elapsed time among
-RayoMD, Pandoc/XeLaTeX, and Node `md-to-pdf` for three deterministic synthetic
-inputs supported by RayoMD's native subset. The next comparator took `111.2x`
-to `132.0x` as long in this run.
+On one Windows 11 system, RayoMD 2.2.0 was the fastest of the three tested
+converters in every case. The deterministic synthetic inputs were supported by
+RayoMD's native subset, and the next-fastest comparator took `111.2x` to
+`132.0x` as long in this run.
 
 | Case | Input | RayoMD 2.2.0 | `md-to-pdf` 5.2.5 | Pandoc 3.9.0.1 + XeLaTeX | Next comparator / RayoMD |
 |---|---:|---:|---:|---:|---:|
@@ -98,8 +99,8 @@ runs, the table reports medians, and every result was checked for a PDF header,
 EOF marker, and non-trivial size. The renderers do not provide equivalent
 features or visual output: Pandoc/XeLaTeX and browser-based `md-to-pdf` cover
 far more document and styling behavior than RayoMD's deliberately focused
-native subset. This scoped timing comparison should not be generalized beyond
-the recorded tools, machine, inputs, and settings.
+native subset. The results support the scoped claim that RayoMD was fastest in
+this benchmark, not an unqualified claim across every converter or workload.
 
 See the dated
 [`three-tool benchmark report`](docs/benchmarks/markdown_pdf_speed_comparison_2026-07-13.md)
