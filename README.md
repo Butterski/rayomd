@@ -338,7 +338,7 @@ Exit codes:
 | `3` | Input file or stdin Markdown could not be read |
 | `11` | Native exporter could not load a system font |
 | `12` | Native exporter could not write the PDF |
-| `14` | Source selected for embedding exceeds 32 MiB |
+| `14` | Source selected for embedding exceeds 10 MiB |
 | `15` | Source selected for embedding is not valid UTF-8 |
 | `16` | Reversible PDF would exceed the 256 MiB recovery limit |
 | `20` | Pandoc export failed or is unsupported in this build |
@@ -389,22 +389,29 @@ metadata records the source length and SHA-256 digest.
 
 Embedding can disclose comments, front matter, internal notes, reference
 definitions, whitespace, and other source content not visible on the pages.
-It is disabled by default. A validated reversible `.pdf` can also be dropped
-onto the Windows app to recover its source into the editor.
+It is disabled by default. On Windows, use **Open...** or Ctrl+O, or drop a
+validated reversible `.pdf`, to recover its source into the editor. The editor
+keeps the profile version, producer, source size, attachment name, digest
+status, and edited state visible. **Save source...** uses the same atomic,
+confirm-before-overwrite path as other document writes. A failed inspection or
+recovery leaves the current editor contents unchanged.
 
 `--inspect-source` validates without writing. `--recover-source` performs full
 validation and atomically creates the caller-selected output; it refuses to
 overwrite an existing file and never trusts the attachment name as a path.
 
-Profile version 1 accepts PDFs up to 256 MiB and Markdown up to 32 MiB. It
+Profile version 1 accepts PDFs up to 256 MiB and Markdown up to 10 MiB. It
 supports only the single classic-xref structure emitted by RayoMD. Encryption,
 incremental updates, object/xref streams, unexpected filters, duplicate source
 entries, malformed offsets, invalid UTF-8, and digest mismatches are rejected.
 Exact recovery never falls back to heuristic PDF-to-Markdown conversion.
+UTF-8 BOMs and embedded NUL bytes are valid source bytes and survive exactly.
 
 The source is uncompressed so default Windows and Linux packages remain
 mutually recoverable without a mandatory compression dependency. See
 [`docs/development/reversible_pdf_profile.md`](docs/development/reversible_pdf_profile.md).
+General PDF-to-Markdown conversion is intentionally not shipped after the
+[arbitrary-PDF dependency and quality review](docs/development/arbitrary_pdf_research_decision.md).
 
 ## Benchmarking
 
@@ -424,6 +431,7 @@ comparable. The dedicated scaling harness records p50/p95, failures, and peak
 RSS at explicit worker counts:
 
     python scripts/concurrency_benchmark.py --binary build/windows/rayomd.exe --corpus <folder> --output benchmark-output/concurrency
+    python tools/benchmark.py reversible -- --binary build/windows/rayomd.exe --platform windows --suite full
 
 Optimization experiments are opt-in and remain out of normal releases:
 

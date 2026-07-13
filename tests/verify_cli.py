@@ -80,6 +80,20 @@ def verify(binary: Path, keep: Path | None) -> None:
         tampered[payload] ^= 1
         tampered_pdf.write_bytes(tampered)
         run(binary, "--inspect-source", str(tampered_pdf), expect=32)
+        failed_recovery = root / "tampered-recovery.md"
+        run(binary, "--recover-source", str(tampered_pdf), str(failed_recovery), expect=32)
+        if failed_recovery.exists():
+            raise AssertionError("failed recovery left a partial output file")
+
+        unsupported_pdf = root / "unsupported-profile.pdf"
+        unsupported = reversible.replace(b"rayomd-source/1", b"rayomd-source/2", 1)
+        unsupported_pdf.write_bytes(unsupported)
+        run(binary, "--inspect-source", str(unsupported_pdf), expect=31)
+
+        unrelated_pdf = root / "unrelated-attachment.pdf"
+        unrelated = reversible.replace(b"/Metadata", b"/Metadatu", 1)
+        unrelated_pdf.write_bytes(unrelated)
+        run(binary, "--inspect-source", str(unrelated_pdf), expect=30)
 
         unicode_md.write_text("# Unicode\n\nZażółć gęślą jaźń: 日本語.\n", encoding="utf-8")
         unicode_pdf = root / "unicode.pdf"

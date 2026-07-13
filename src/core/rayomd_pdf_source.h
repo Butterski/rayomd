@@ -8,7 +8,7 @@
 namespace RayoMd::PdfSource {
 
 constexpr size_t kMaxPdfBytes = 256u * 1024u * 1024u;
-constexpr size_t kMaxSourceBytes = 32u * 1024u * 1024u;
+constexpr size_t kMaxSourceBytes = 10u * 1024u * 1024u;
 
 enum class Status : uint8_t {
     Ok,

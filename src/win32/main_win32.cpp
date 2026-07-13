@@ -109,6 +109,16 @@ std::atomic<int> g_forcedRenderFrames{0};
 thread_local int g_nativePdfLastError = 0;
 std::string g_statusText = "Ready";
 std::wstring g_currentMarkdownPath;
+struct RecoveredPdfSummary {
+    bool available = false;
+    bool edited = false;
+    std::string profile;
+    std::string producerVersion;
+    std::string encoding;
+    std::string attachmentName;
+    size_t sourceBytes = 0;
+};
+RecoveredPdfSummary g_recoveredPdfSummary;
 int g_lineCount = 1;
 int g_wordCount = 0;
 int g_charCount = 0;
@@ -296,6 +306,37 @@ std::wstring ShowSaveDialog(HWND hWnd) {
     ofn.lpstrInitialDir = initDir.c_str();
     ofn.lpstrDefExt = L"pdf";
     ofn.lpstrTitle = L"Export PDF";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    return GetSaveFileNameW(&ofn) ? fileName : L"";
+}
+
+std::wstring ShowOpenDocumentDialog(HWND hWnd) {
+    wchar_t fileName[MAX_PATH] = {};
+    std::wstring initDir = GetDocumentsPath();
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hWnd;
+    ofn.lpstrFilter = L"Markdown and RayoMD PDF (*.md;*.pdf)\0*.md;*.pdf\0Markdown (*.md)\0*.md\0RayoMD PDF (*.pdf)\0*.pdf\0";
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrInitialDir = initDir.c_str();
+    ofn.lpstrTitle = L"Open Markdown or reversible RayoMD PDF";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    return GetOpenFileNameW(&ofn) ? fileName : L"";
+}
+
+std::wstring ShowMarkdownSaveDialog(HWND hWnd) {
+    wchar_t fileName[MAX_PATH] = L"recovered.md";
+    std::wstring initDir = GetDocumentsPath();
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hWnd;
+    ofn.lpstrFilter = L"Markdown (*.md)\0*.md\0";
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrInitialDir = initDir.c_str();
+    ofn.lpstrDefExt = L"md";
+    ofn.lpstrTitle = L"Save recovered Markdown";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     return GetSaveFileNameW(&ofn) ? fileName : L"";
 }
@@ -1363,6 +1404,7 @@ struct FileLoadResult {
     std::string content;
     MarkdownStats stats;
     bool recoveredPdf = false;
+    RayoMd::PdfSource::Info recoveredInfo;
     std::string error;
     double elapsedMs = 0.0;
 };
@@ -1382,7 +1424,11 @@ DWORD WINAPI FileLoadThread(LPVOID lp) {
         if (ReadFileLimited(p->path, static_cast<long long>(RayoMd::PdfSource::kMaxPdfBytes), pdf)) {
             RayoMd::PdfSource::Result recovered = RayoMd::PdfSource::Inspect(pdf, true);
             result->ok = recovered.Ok();
-            if (result->ok) { result->content = std::move(recovered.source); result->recoveredPdf = true; }
+            if (result->ok) {
+                result->content = std::move(recovered.source);
+                result->recoveredInfo = std::move(recovered.info);
+                result->recoveredPdf = true;
+            }
             else result->error = RayoMd::PdfSource::StatusMessage(recovered.status);
         } else result->error = "PDF could not be read or exceeds the configured limit";
     } else {
@@ -1418,6 +1464,29 @@ void LoadMarkdownFileAsync(HWND hWnd, const std::wstring& path) {
         delete params;
         g_isFileLoading = false;
         g_statusText = "File load failed.";
+    }
+}
+
+void DoOpenDocument(HWND hWnd) {
+    if (g_isExporting.load() || g_isFileLoading.load()) {
+        g_statusText = "Wait for the current operation to finish.";
+        return;
+    }
+    std::wstring path = ShowOpenDocumentDialog(hWnd);
+    if (!path.empty()) LoadMarkdownFileAsync(hWnd, path);
+}
+
+void SaveRecoveredMarkdown(HWND hWnd) {
+    if (!g_recoveredPdfSummary.available || g_isExporting.load() || g_isFileLoading.load()) return;
+    std::wstring path = ShowMarkdownSaveDialog(hWnd);
+    if (path.empty()) return;
+    if (path.size() < 3 || _wcsicmp(path.c_str() + path.size() - 3, L".md") != 0) path += L".md";
+    if (WriteBinaryFile(path, g_markdownText)) {
+        g_currentMarkdownPath = path;
+        g_recoveredPdfSummary.edited = false;
+        g_statusText = "Recovered Markdown saved atomically.";
+    } else {
+        g_statusText = "Could not save recovered Markdown.";
     }
 }
 
@@ -1635,9 +1704,20 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_lineCount = result->stats.lines;
                 g_wordCount = result->stats.words;
                 g_charCount = result->stats.chars;
-                g_statusText = result->recoveredPdf
-                    ? "Recovered validated Markdown in " + FormatDurationMs(result->elapsedMs) + "."
-                    : "File loaded in " + FormatDurationMs(result->elapsedMs) + ".";
+                if (result->recoveredPdf) {
+                    g_recoveredPdfSummary.available = true;
+                    g_recoveredPdfSummary.edited = false;
+                    g_recoveredPdfSummary.profile = std::move(result->recoveredInfo.profile);
+                    g_recoveredPdfSummary.producerVersion = std::move(result->recoveredInfo.producerVersion);
+                    g_recoveredPdfSummary.encoding = std::move(result->recoveredInfo.encoding);
+                    g_recoveredPdfSummary.attachmentName = std::move(result->recoveredInfo.attachmentName);
+                    g_recoveredPdfSummary.sourceBytes = result->recoveredInfo.sourceBytes;
+                    g_statusText = "Recovered " + std::to_string(g_recoveredPdfSummary.sourceBytes) +
+                        " validated bytes (SHA-256 valid) in " + FormatDurationMs(result->elapsedMs) + ".";
+                } else {
+                    g_recoveredPdfSummary = {};
+                    g_statusText = "File loaded in " + FormatDurationMs(result->elapsedMs) + ".";
+                }
             } else {
                 g_statusText = "File load failed: " + result->error + ".";
             }
@@ -1763,6 +1843,9 @@ void RenderMainFrame(HWND hWnd, ImGuiIO& io) {
     if (ImGui::IsKeyPressed(ImGuiKey_E) && io.KeyCtrl && !g_isExporting.load() && !g_isFileLoading.load()) {
         DoExport(hWnd);
     }
+    if (ImGui::IsKeyPressed(ImGuiKey_O) && io.KeyCtrl && !g_isExporting.load() && !g_isFileLoading.load()) {
+        DoOpenDocument(hWnd);
+    }
 
     ImVec2 editorMin(win.x + pad, win.y + bodyTop);
     ImVec2 editorMax(editorMin.x + editorW, editorMin.y + editorH);
@@ -1773,6 +1856,37 @@ void RenderMainFrame(HWND hWnd, ImGuiIO& io) {
     draw->AddRectFilled(editorMin, ImVec2(editorMax.x, editorMin.y + editorHeaderH), Rgba32(13, 17, 24), 16.0f, ImDrawFlags_RoundCornersTop);
     draw->AddLine(ImVec2(editorMin.x, editorMin.y + editorHeaderH), ImVec2(editorMax.x, editorMin.y + editorHeaderH), Rgba32(37, 47, 64, 150));
     DrawSectionTitle(draw, "Markdown", ImVec2(editorMin.x + 16.0f, editorMin.y + 11.0f));
+    float openButtonW = 82.0f;
+    float saveButtonW = g_recoveredPdfSummary.available ? 104.0f : 0.0f;
+    float headerButtonX = editorMax.x - 10.0f - openButtonW - (saveButtonW > 0.0f ? saveButtonW + 6.0f : 0.0f);
+    ImGui::SetCursorScreenPos(ImVec2(headerButtonX, editorMin.y + 5.0f));
+    if (DrawQuietChip("open_document", "Open...", false, ImVec2(openButtonW, 32.0f))) DoOpenDocument(hWnd);
+    if (g_recoveredPdfSummary.available) {
+        ImGui::SameLine(0.0f, 6.0f);
+        if (DrawQuietChip("save_recovered", "Save source", false, ImVec2(saveButtonW, 32.0f))) {
+            SaveRecoveredMarkdown(hWnd);
+        }
+    }
+    if (g_recoveredPdfSummary.available) {
+        std::string summary = g_recoveredPdfSummary.profile + "  /  " +
+            std::to_string(g_recoveredPdfSummary.sourceBytes) + " B  /  SHA-256 valid";
+        if (g_recoveredPdfSummary.edited) summary += "  /  edited";
+        ImVec2 summaryPos(editorMin.x + 112.0f, editorMin.y + 13.0f);
+        ImVec2 summarySize = ImGui::CalcTextSize(summary.c_str());
+        float available = std::max(0.0f, headerButtonX - summaryPos.x - 8.0f);
+        if (summarySize.x <= available) {
+            draw->AddText(summaryPos, Rgba32(94, 205, 145), summary.c_str());
+            ImGui::SetCursorScreenPos(summaryPos);
+            ImGui::InvisibleButton("pdf_inspection_summary", summarySize);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Profile: %s\nProducer: RayoMD %s\nSource: %zu bytes, %s\nAttachment: %s\nIntegrity at recovery: SHA-256 valid\nEditor modified: %s\n\nThe embedded source may contain comments or other content not visible in the PDF.",
+                    g_recoveredPdfSummary.profile.c_str(), g_recoveredPdfSummary.producerVersion.c_str(),
+                    g_recoveredPdfSummary.sourceBytes, g_recoveredPdfSummary.encoding.c_str(),
+                    g_recoveredPdfSummary.attachmentName.c_str(), g_recoveredPdfSummary.edited ? "yes" : "no");
+            }
+        }
+    }
 
     // Draw placeholder if empty
     bool isEmpty = g_markdownText.empty() || g_markdownText[0] == '\0';
@@ -1789,6 +1903,7 @@ void RenderMainFrame(HWND hWnd, ImGuiIO& io) {
         ImVec2(std::max(80.0f, editorW - 20.0f), std::max(80.0f, editorH - editorHeaderH - 20.0f)),
         ImGuiInputTextFlags_AllowTabInput)) {
         UpdateMarkdownStats();
+        if (g_recoveredPdfSummary.available) g_recoveredPdfSummary.edited = true;
     }
     if (g_fontEditor) ImGui::PopFont();
     ImGui::PopStyleColor(4);
@@ -1798,7 +1913,7 @@ void RenderMainFrame(HWND hWnd, ImGuiIO& io) {
     if (isEmpty && !ImGui::IsItemActive()) {
         ImVec2 pos = ImGui::GetItemRectMin();
         ImFont* editorFont = g_fontEditor ? g_fontEditor : ImGui::GetFont();
-        draw->AddText(editorFont, editorFont->LegacySize, ImVec2(pos.x + 14.0f, pos.y + 12.0f), Rgba32(94, 105, 120), "Start typing Markdown, or drop a .md file here.");
+        draw->AddText(editorFont, editorFont->LegacySize, ImVec2(pos.x + 14.0f, pos.y + 12.0f), Rgba32(94, 105, 120), "Start typing Markdown, or open/drop a .md or reversible RayoMD PDF.");
     }
 
     ImVec2 inspectorMin(editorMax.x + gap, editorMin.y);

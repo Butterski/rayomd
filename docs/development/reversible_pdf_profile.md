@@ -33,46 +33,75 @@ RayoMD version, UTF-8 encoding, exact byte length, SHA-256 digest, and neutral
 attachment name. Original paths, credentials, environment values, and fetched
 resources are never embedded.
 
-## Storage and performance decision
+## Storage, interoperability, and performance decision
 
 Profile version 1 stores the source without a PDF stream filter. This keeps the
 default Windows and Linux packages mutually recoverable and avoids a mandatory
-compressor or decompressor. Compression would save space for repetitive source,
-but it requires a new compatible profile decision.
+compressor or decompressor. A standards-valid 1 MiB repetitive-source prototype
+was 1,050,026 bytes raw and 5,163 bytes with Flate (3,698-byte compressed
+payload). The saving is substantial for repetitive input, but default builds do
+not all provide zlib and a decoder would enlarge the strict parser. Compression
+is therefore reserved for a future profile, not silently varied within v1.
 
-PDF 1.7 versus 2.0 header choice had no meaningful size or speed effect. In the
-final Windows release build, a 1,638-byte source added 2,592 bytes total: the
-source plus 954 bytes of profile structure. Source hashing, metadata, and copies
-run only when embedding is enabled; the disabled path remains byte-for-byte
-identical to the baseline PDF 1.7 output.
+qpdf accepted the raw and Flate PDF 2.0 prototypes without syntax errors.
+Poppler rendered their pages identically and `pdfdetach` extracted both source
+attachments byte-for-byte. A qpdf rewrite remained a valid PDF 2.0 document but
+was rejected by RayoMD's narrow parser; v1 supports normal viewing and standard
+attachment extraction, but does not promise recovery after another application
+rewrites the object graph.
 
-Measured on 2026-07-13:
+PDF 1.7 versus 2.0 header choice had no meaningful size or speed effect. Source
+hashing, metadata, and copies run only when embedding is enabled; the disabled
+path remains byte-for-byte identical to the baseline PDF 1.7 output.
 
-| Windows warm case | Plain | Embedded | Opt-in cost |
-|---|---:|---:|---:|
-| 1.6 KiB Unicode smoke, 500 iterations | 1.25 ms | 1.29 ms | +3.2% |
-| 1 MiB ASCII, 10 iterations | 114.27 ms | 132.12 ms | +15.6% |
-| 10 MiB ASCII, 1 iteration | 864.44 ms | 1,180.64 ms | +36.6% |
+The maintained harness uses cold process invocations and records p50/p95 wall
+time, output size, peak RSS, exact recovery, validators, and allocation deltas:
 
-The 10 MiB point is a single large-sample run and should be treated as a scale
-check, not a stable headline benchmark. Its 82.6 MB reversible PDF inspected in
-about 1.1 seconds and recovered the exact 10,485,760 bytes with matching SHA-256.
+```sh
+python tools/benchmark.py reversible -- --binary build/windows/rayomd.exe \
+  --profile-binary build/profile/rayomd.exe --platform windows --suite full
+```
+
+Windows results on 2026-07-13 (5 samples through 1 MiB, 3 at 10 MiB):
+
+| Source | Plain / embedded PDF | Plain p50/p95 | Embed p50/p95 | Inspect p50/p95 | Recover p50/p95 | Peak RSS |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 B | 970 / 1,914 B | 45.71/189.26 ms | 45.35/47.93 ms | 47.12/49.72 ms | 60.12/75.95 ms | 11.0 MiB |
+| 10 KiB | 94,442 / 105,648 B | 46.07/80.77 ms | 50.93/59.21 ms | 51.55/58.62 ms | 54.04/62.86 ms | 11.1 MiB |
+| 1 MiB | 9,656,443 / 10,706,007 B | 242.40/253.39 ms | 281.99/318.13 ms | 58.17/72.61 ms | 82.78/91.09 ms | 58.8 MiB |
+| 10 MiB maximum | 96,795,566 / 107,282,325 B | 1,845.80/1,915.97 ms | 1,679.28/1,953.34 ms | 216.31/234.09 ms | 187.04/233.80 ms | 486.4 MiB |
+
+The instrumented build showed an embedding delta of 13 allocations for 10 KiB,
+1 MiB, and 10 MiB (14 for empty input). Extra allocated bytes were 34,800,
+3,149,846, and 31,461,417 respectively. This is approximately three source-size
+copies across hashing, object assembly, and the final PDF buffer; it occurs only
+on the opt-in path.
+
+The corresponding Linux measurements were made from WSL mounted storage
+(`/mnt/e`, not native ext4). The 10 MiB p50/p95 values were 2,847.55/3,182.33 ms
+plain, 2,472.71/2,690.13 ms embedded, 727.21/731.95 ms inspect, and
+818.69/956.66 ms recover. RSS was unavailable because the optional measurement
+helper was not installed in WSL; these are storage-qualified regression data,
+not native Linux headline claims.
 
 The normal Windows watch suite showed no regression versus its stored baseline
 (warm median -8.2%, cold -33.7%, batch/file -28.5%, stdin-batch/file -8.4%). On
 mounted WSL `/mnt/e`, the mixed I/O-sensitive result was warm +0.7%, cold +24.3%,
-batch/file -8.1%, stdin-batch/file +8.6%, and serve +13.9%; these mounted-storage
-numbers are regression context, not native Linux performance claims.
+batch/file -8.1%, stdin-batch/file +8.6%, and serve +13.9%. These suites cover
+feature-heavy ASCII, Unicode, tables, links/images, cold and warm export, folder
+and stdin batch, and warm serve.
 
-Optimizing the cold recovery translation unit for size limited final binary
-growth to 17,920 bytes on Windows (+0.65%, 2,760,704 to 2,778,624) and 20,480
-bytes on Linux (+5.58%, 367,096 to 387,576). The renderer keeps its normal
-release optimization flags.
+Final binary growth is 22,016 bytes on Windows (+0.80%, 2,760,704 to 2,782,720)
+and 24,632 bytes on Linux (+6.71%, 367,096 to 391,728). No runtime dependency was
+added. The cold recovery translation unit is optimized for size while the
+renderer keeps its normal release optimization flags.
 
 ## Limits and hostile input policy
 
 - Maximum PDF inspected or emitted for reversible recovery: 256 MiB.
-- Maximum embedded Markdown: 32 MiB.
+- Maximum embedded Markdown: 10 MiB. A 32 MiB profile experiment produced a
+  310 MB plain PDF, exceeded the reversible PDF ceiling, and peaked near
+  1.5 GiB RSS, so larger inputs are rejected before rendering.
 - Maximum classic xref entries: 1,000,001 including object zero.
 - Maximum XMP profile stream: 16 KiB.
 - Exactly one classic xref section and generation zero are accepted.

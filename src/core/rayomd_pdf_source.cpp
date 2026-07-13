@@ -38,6 +38,11 @@ public:
 
     size_t Offset() const { return offset_; }
 
+    bool AtEnd() {
+        SkipSpace();
+        return offset_ == input_.size();
+    }
+
     void SkipSpace() {
         for (;;) {
             while (offset_ < input_.size() && IsWhite(input_[offset_])) offset_++;
@@ -152,102 +157,165 @@ bool ReadReference(Scanner& scanner, size_t& objectId) {
         scanner.ReadUnsigned(generation) && generation == 0 && scanner.Consume("R");
 }
 
-bool FindReference(std::string_view input, std::string_view key, size_t& objectId) {
-    Scanner scanner(input);
-    for (size_t tokens = 0; tokens < 4096; tokens++) {
+struct DictionaryEntry {
+    std::string_view name;
+    std::string_view value;
+};
+
+struct DictionaryView {
+    std::vector<DictionaryEntry> entries;
+    size_t endOffset = 0;
+};
+
+bool SkipPdfValue(std::string_view input, Scanner& scanner, unsigned depth, size_t& tokens);
+
+bool SkipPdfDictionary(std::string_view input, Scanner& scanner, unsigned depth, size_t& tokens,
+    std::vector<DictionaryEntry>* entries) {
+    if (depth > 16 || !scanner.Consume("<<")) return false;
+    std::vector<std::string_view> names;
+    while (tokens++ < 4096) {
+        Scanner end = scanner;
+        if (end.Consume(">>")) {
+            scanner = end;
+            return true;
+        }
         std::string_view name;
-        size_t before = scanner.Offset();
-        if (scanner.ReadName(name)) {
-            if (name == key) {
-                size_t candidate = 0;
-                Scanner after(input, scanner.Offset());
-                if (ReadReference(after, candidate)) {
-                    objectId = candidate;
-                    return true;
-                }
+        if (!scanner.ReadName(name) || names.size() >= 128 ||
+            std::find(names.begin(), names.end(), name) != names.end()) return false;
+        names.push_back(name);
+        scanner.SkipSpace();
+        size_t valueStart = scanner.Offset();
+        if (!SkipPdfValue(input, scanner, depth + 1, tokens)) return false;
+        if (entries) entries->push_back({name, input.substr(valueStart, scanner.Offset() - valueStart)});
+    }
+    return false;
+}
+
+bool SkipPdfValue(std::string_view input, Scanner& scanner, unsigned depth, size_t& tokens) {
+    if (depth > 16 || tokens++ >= 4096) return false;
+    Scanner compound = scanner;
+    if (compound.Consume("<<")) {
+        return SkipPdfDictionary(input, scanner, depth, tokens, nullptr);
+    }
+    compound = scanner;
+    if (compound.Consume("[")) {
+        scanner = compound;
+        while (tokens++ < 4096) {
+            Scanner end = scanner;
+            if (end.Consume("]")) {
+                scanner = end;
+                return true;
             }
-        } else {
-            scanner = Scanner(input, before);
-            if (!scanner.SkipToken()) break;
+            if (!SkipPdfValue(input, scanner, depth + 1, tokens)) return false;
+        }
+        return false;
+    }
+    std::string literal;
+    compound = scanner;
+    if (compound.ReadLiteral(literal)) {
+        scanner = compound;
+        return true;
+    }
+    std::string_view name;
+    compound = scanner;
+    if (compound.ReadName(name)) {
+        scanner = compound;
+        return true;
+    }
+    size_t number = 0;
+    compound = scanner;
+    if (compound.ReadUnsigned(number)) {
+        Scanner reference = compound;
+        size_t generation = 0;
+        if (reference.ReadUnsigned(generation) && generation == 0 && reference.Consume("R")) compound = reference;
+        scanner = compound;
+        return true;
+    }
+    for (std::string_view keyword : {std::string_view("true"), std::string_view("false"), std::string_view("null")}) {
+        compound = scanner;
+        if (compound.Consume(keyword)) {
+            scanner = compound;
+            return true;
         }
     }
     return false;
 }
 
-bool HasName(std::string_view input, std::string_view key) {
+bool ParseDictionary(std::string_view input, DictionaryView& result) {
+    result = {};
     Scanner scanner(input);
-    for (size_t tokens = 0; tokens < 4096; tokens++) {
-        std::string_view name;
-        size_t before = scanner.Offset();
-
-        if (scanner.ReadName(name)) {
-            if (name == key) return true;
-        } else {
-            scanner = Scanner(input, before);
-            if (!scanner.SkipToken()) break;
-        }
-    }
-    return false;
+    size_t tokens = 0;
+    if (!SkipPdfDictionary(input, scanner, 0, tokens, &result.entries)) return false;
+    result.endOffset = scanner.Offset();
+    return true;
 }
 
-bool FindArrayReference(std::string_view input, std::string_view key, size_t& objectId) {
-    Scanner scanner(input);
-    for (size_t tokens = 0; tokens < 4096; tokens++) {
-        std::string_view name;
-        size_t before = scanner.Offset();
-        if (scanner.ReadName(name)) {
-            if (name == key) {
-                Scanner after(input, scanner.Offset());
-                return after.Consume("[") && ReadReference(after, objectId);
-            }
-        } else {
-            scanner = Scanner(input, before);
-            if (!scanner.SkipToken()) break;
-        }
-    }
-    return false;
+const std::string_view* DictionaryValue(const DictionaryView& dictionary, std::string_view key) {
+    for (const auto& entry : dictionary.entries) if (entry.name == key) return &entry.value;
+    return nullptr;
 }
 
-bool FindLiteralReference(std::string_view input, std::string_view literal, size_t& objectId) {
-    Scanner scanner(input);
-    bool found = false;
-    size_t foundId = 0;
-    for (size_t tokens = 0; tokens < 4096; tokens++) {
-        std::string value;
-        size_t before = scanner.Offset();
-        if (scanner.ReadLiteral(value)) {
-            if (value == literal) {
-                Scanner after(input, scanner.Offset());
-                size_t candidate = 0;
-                if (!ReadReference(after, candidate) || found) return false;
-                found = true;
-                foundId = candidate;
-            }
-        } else {
-            scanner = Scanner(input, before);
-            if (!scanner.SkipToken()) break;
-        }
-    }
-    objectId = foundId;
-    return found;
+bool ValueReference(std::string_view value, size_t& objectId) {
+    Scanner scanner(value);
+    return ReadReference(scanner, objectId) && scanner.AtEnd();
 }
 
-bool FindUnsignedValue(std::string_view input, std::string_view key, size_t& value) {
-    Scanner scanner(input);
-    for (size_t tokens = 0; tokens < 4096; tokens++) {
-        std::string_view name;
-        size_t before = scanner.Offset();
-        if (scanner.ReadName(name)) {
-            if (name == key) {
-                Scanner after(input, scanner.Offset());
-                if (after.ReadUnsigned(value)) return true;
-            }
-        } else {
-            scanner = Scanner(input, before);
-            if (!scanner.SkipToken()) break;
-        }
-    }
-    return false;
+bool ValueUnsigned(std::string_view value, size_t& number) {
+    Scanner scanner(value);
+    return scanner.ReadUnsigned(number) && scanner.AtEnd();
+}
+
+bool ValueName(std::string_view value, std::string_view expected) {
+    Scanner scanner(value);
+    std::string_view name;
+    return scanner.ReadName(name) && name == expected && scanner.AtEnd();
+}
+
+bool ValueLiteral(std::string_view value, std::string_view expected) {
+    Scanner scanner(value);
+    std::string literal;
+    return scanner.ReadLiteral(literal) && literal == expected && scanner.AtEnd();
+}
+
+bool ValueDictionary(std::string_view value, DictionaryView& dictionary) {
+    if (!ParseDictionary(value, dictionary)) return false;
+    Scanner trailing(value, dictionary.endOffset);
+    return trailing.AtEnd();
+}
+
+bool ValueSingleReferenceArray(std::string_view value, size_t& objectId) {
+    Scanner scanner(value);
+    return scanner.Consume("[") && ReadReference(scanner, objectId) && scanner.Consume("]") && scanner.AtEnd();
+}
+
+bool ValueSourceNameArray(std::string_view value, size_t& objectId) {
+    Scanner scanner(value);
+    std::string literal;
+    return scanner.Consume("[") && scanner.ReadLiteral(literal) && literal == "source.md" &&
+        ReadReference(scanner, objectId) && scanner.Consume("]") && scanner.AtEnd();
+}
+
+bool DictionaryObject(std::string_view object, DictionaryView& dictionary) {
+    if (!ParseDictionary(object, dictionary)) return false;
+    Scanner trailing(object, dictionary.endOffset);
+    return trailing.Consume("endobj") && trailing.AtEnd();
+}
+
+bool StreamObject(std::string_view object, size_t maximum, DictionaryView& dictionary, std::string_view& data) {
+    if (!ParseDictionary(object, dictionary)) return false;
+    const std::string_view* lengthValue = DictionaryValue(dictionary, "Length");
+    size_t length = 0;
+    if (!lengthValue || !ValueUnsigned(*lengthValue, length) || length > maximum) return false;
+    constexpr std::string_view prefix = "\nstream\n";
+    constexpr std::string_view suffix = "\nendstream\nendobj";
+    if (object.substr(dictionary.endOffset, prefix.size()) != prefix) return false;
+    size_t start = 0, end = 0;
+    if (!CheckedAdd(dictionary.endOffset, prefix.size(), start) || !CheckedAdd(start, length, end) ||
+        end > object.size() || object.substr(end, suffix.size()) != suffix) return false;
+    Scanner trailing(object, end + suffix.size());
+    if (!trailing.AtEnd()) return false;
+    data = object.substr(start, length);
+    return true;
 }
 
 struct XrefTable {
@@ -262,12 +330,19 @@ bool ParseXref(std::string_view pdf, XrefTable& result) {
     if (marker == std::string_view::npos || marker < tailStart) return false;
     Scanner startScanner(pdf, marker + 9);
     if (!startScanner.ReadUnsigned(result.xrefOffset) || result.xrefOffset >= pdf.size()) return false;
+    size_t eof = startScanner.Offset();
+    while (eof < pdf.size() && IsWhite(pdf[eof])) eof++;
+    if (pdf.substr(eof, 5) != "%%EOF") return false;
+    eof += 5;
+    while (eof < pdf.size() && IsWhite(pdf[eof])) eof++;
+    if (eof != pdf.size()) return false;
 
     Scanner scanner(pdf, result.xrefOffset);
     size_t first = 0, count = 0;
     if (!scanner.Consume("xref") || !scanner.ReadUnsigned(first) || first != 0 ||
         !scanner.ReadUnsigned(count) || count < 2 || count > kMaxObjects + 1) return false;
     result.offsets.assign(count, 0);
+    size_t previousOffset = 0;
     for (size_t id = 0; id < count; id++) {
         size_t offset = 0, generation = 0;
         if (!scanner.ReadUnsigned(offset) || !scanner.ReadUnsigned(generation)) return false;
@@ -279,14 +354,24 @@ bool ParseXref(std::string_view pdf, XrefTable& result) {
         if (id == 0) {
             if (state != "f" || offset != 0 || generation != 65535) return false;
         } else {
-            if (state != "n" || generation != 0 || offset == 0 || offset >= result.xrefOffset) return false;
+            if (state != "n" || generation != 0 || offset == 0 || offset <= previousOffset ||
+                offset >= result.xrefOffset) return false;
             result.offsets[id] = offset;
+            previousOffset = offset;
         }
     }
     if (!scanner.Consume("trailer")) return false;
     std::string_view trailer = pdf.substr(scanner.Offset(), marker - scanner.Offset());
-    if (HasName(trailer, "Prev") || HasName(trailer, "XRefStm") || HasName(trailer, "Encrypt")) return false;
-    return FindReference(trailer, "Root", result.rootId) && result.rootId < result.offsets.size();
+    DictionaryView dictionary;
+    if (!ParseDictionary(trailer, dictionary)) return false;
+    Scanner trailing(trailer, dictionary.endOffset);
+    const std::string_view* sizeValue = DictionaryValue(dictionary, "Size");
+    const std::string_view* rootValue = DictionaryValue(dictionary, "Root");
+    size_t declaredSize = 0;
+    if (!trailing.AtEnd() || !sizeValue || !ValueUnsigned(*sizeValue, declaredSize) || declaredSize != count ||
+        !rootValue || !ValueReference(*rootValue, result.rootId) || result.rootId >= result.offsets.size()) return false;
+    return !DictionaryValue(dictionary, "Prev") && !DictionaryValue(dictionary, "XRefStm") &&
+        !DictionaryValue(dictionary, "Encrypt");
 }
 
 bool ObjectBody(std::string_view pdf, const XrefTable& xref, size_t objectId, std::string_view& body) {
@@ -297,27 +382,9 @@ bool ObjectBody(std::string_view pdf, const XrefTable& xref, size_t objectId, st
     size_t parsedId = 0, generation = 0;
     if (!scanner.ReadUnsigned(parsedId) || parsedId != objectId || !scanner.ReadUnsigned(generation) ||
         generation != 0 || !scanner.Consume("obj")) return false;
-    size_t end = xref.xrefOffset;
-    for (size_t candidate : xref.offsets) {
-        if (candidate > offset && candidate < end) end = candidate;
-    }
+    size_t end = objectId + 1 < xref.offsets.size() ? xref.offsets[objectId + 1] : xref.xrefOffset;
     if (scanner.Offset() >= end) return false;
     body = pdf.substr(scanner.Offset(), end - scanner.Offset());
-    return true;
-}
-
-bool StreamData(std::string_view object, size_t maximum, std::string_view& data) {
-    size_t length = 0;
-    if (!FindUnsignedValue(object, "Length", length) || length > maximum) return false;
-    size_t marker = object.find("stream");
-    if (marker == std::string_view::npos) return false;
-    size_t start = marker + 6;
-    if (start < object.size() && object[start] == '\r') start++;
-    if (start < object.size() && object[start] == '\n') start++;
-    else return false;
-    size_t end = 0;
-    if (!CheckedAdd(start, length, end) || end > object.size()) return false;
-    data = object.substr(start, length);
     return true;
 }
 
@@ -435,29 +502,79 @@ std::string BuildXmpMetadata(std::string_view source, std::string_view producerV
     return output;
 }
 
+bool CatalogSourceReferences(const DictionaryView& catalog, size_t& fileSpecId) {
+    const std::string_view* namesValue = DictionaryValue(catalog, "Names");
+    const std::string_view* associatedValue = DictionaryValue(catalog, "AF");
+    if (!namesValue || !associatedValue) return false;
+    DictionaryView names, embeddedFiles;
+    if (!ValueDictionary(*namesValue, names)) return false;
+    const std::string_view* embeddedValue = DictionaryValue(names, "EmbeddedFiles");
+    if (!embeddedValue || !ValueDictionary(*embeddedValue, embeddedFiles)) return false;
+    const std::string_view* sourceNames = DictionaryValue(embeddedFiles, "Names");
+    size_t namedId = 0, associatedId = 0;
+    return sourceNames && ValueSourceNameArray(*sourceNames, namedId) &&
+        ValueSingleReferenceArray(*associatedValue, associatedId) && namedId == associatedId &&
+        (fileSpecId = namedId) != 0;
+}
+
+bool FileSpecSourceReference(const DictionaryView& fileSpec, size_t& sourceId) {
+    const std::string_view* type = DictionaryValue(fileSpec, "Type");
+    const std::string_view* fileName = DictionaryValue(fileSpec, "F");
+    const std::string_view* unicodeName = DictionaryValue(fileSpec, "UF");
+    const std::string_view* relationship = DictionaryValue(fileSpec, "AFRelationship");
+    const std::string_view* embeddedValue = DictionaryValue(fileSpec, "EF");
+    if (!type || !ValueName(*type, "Filespec") || !fileName || !ValueLiteral(*fileName, "source.md") ||
+        !unicodeName || !ValueLiteral(*unicodeName, "source.md") || !relationship ||
+        !ValueName(*relationship, "Source") || !embeddedValue) return false;
+    DictionaryView embedded;
+    if (!ValueDictionary(*embeddedValue, embedded)) return false;
+    const std::string_view* fileRef = DictionaryValue(embedded, "F");
+    const std::string_view* unicodeRef = DictionaryValue(embedded, "UF");
+    size_t fileId = 0, unicodeId = 0;
+    return fileRef && unicodeRef && ValueReference(*fileRef, fileId) &&
+        ValueReference(*unicodeRef, unicodeId) && fileId == unicodeId && (sourceId = fileId) != 0;
+}
+
 Result Inspect(std::string_view pdf, bool recoverSource) {
     Result result;
     if (pdf.size() > kMaxPdfBytes) { result.status = Status::LimitExceeded; return result; }
     if (pdf.size() < 16 || pdf.substr(0, 5) != "%PDF-") { result.status = Status::CorruptPdf; return result; }
     XrefTable xref;
     if (!ParseXref(pdf, xref)) { result.status = Status::CorruptPdf; return result; }
-    std::string_view catalog;
-    if (!ObjectBody(pdf, xref, xref.rootId, catalog)) { result.status = Status::CorruptPdf; return result; }
-    size_t metadataId = 0;
-    if (!FindReference(catalog, "Metadata", metadataId)) { result.status = Status::NotReversible; return result; }
-    size_t fileSpecId = 0, associatedId = 0;
-    if (!FindLiteralReference(catalog, "source.md", fileSpecId) || !FindArrayReference(catalog, "AF", associatedId) ||
-        fileSpecId != associatedId) { result.status = Status::CorruptPdf; return result; }
-    if (pdf.substr(0, 8) != "%PDF-2.0") { result.status = Status::UnsupportedProfile; return result; }
-
-    std::string_view metadataObject, xml;
-    if (!ObjectBody(pdf, xref, metadataId, metadataObject) || !HasName(metadataObject, "Metadata") ||
-        !HasName(metadataObject, "XML") || !StreamData(metadataObject, kMaxMetadataBytes, xml) ||
-        xml.find("<!DOCTYPE") != std::string_view::npos || xml.find("<!ENTITY") != std::string_view::npos) {
+    std::string_view catalogObject;
+    DictionaryView catalog;
+    if (!ObjectBody(pdf, xref, xref.rootId, catalogObject) || !DictionaryObject(catalogObject, catalog)) {
         result.status = Status::CorruptPdf; return result;
     }
+    const std::string_view* catalogType = DictionaryValue(catalog, "Type");
+    if (!catalogType || !ValueName(*catalogType, "Catalog")) { result.status = Status::CorruptPdf; return result; }
+    size_t metadataId = 0;
+    const std::string_view* metadataValue = DictionaryValue(catalog, "Metadata");
+    if (!metadataValue || !ValueReference(*metadataValue, metadataId)) {
+        result.status = Status::NotReversible; return result;
+    }
+
+    std::string_view metadataObject, xml;
+    DictionaryView metadata;
+    if (!ObjectBody(pdf, xref, metadataId, metadataObject) ||
+        !StreamObject(metadataObject, kMaxMetadataBytes, metadata, xml)) {
+        result.status = Status::NotReversible; return result;
+    }
+    const std::string_view* metadataType = DictionaryValue(metadata, "Type");
+    const std::string_view* metadataSubtype = DictionaryValue(metadata, "Subtype");
+    if (!metadataType || !ValueName(*metadataType, "Metadata") || !metadataSubtype ||
+        !ValueName(*metadataSubtype, "XML") || DictionaryValue(metadata, "Filter") ||
+        xml.find("<!DOCTYPE") != std::string_view::npos || xml.find("<!ENTITY") != std::string_view::npos) {
+        result.status = Status::NotReversible; return result;
+    }
     std::string lengthText, digest;
-    if (!ExtractAttribute(xml, "profile", result.info.profile) ||
+    if (!ExtractAttribute(xml, "profile", result.info.profile)) {
+        result.status = Status::NotReversible; return result;
+    }
+    if (result.info.profile != "rayomd-source/1") {
+        result.status = Status::UnsupportedProfile; return result;
+    }
+    if (pdf.substr(0, 8) != "%PDF-2.0" ||
         !ExtractAttribute(xml, "producer", result.info.producerVersion) ||
         !ExtractAttribute(xml, "encoding", result.info.encoding) ||
         !ExtractAttribute(xml, "length", lengthText) ||
@@ -465,23 +582,40 @@ Result Inspect(std::string_view pdf, bool recoverSource) {
         !ExtractAttribute(xml, "attachment", result.info.attachmentName)) {
         result.status = Status::CorruptPdf; return result;
     }
-    if (result.info.profile != "rayomd-source/1" || result.info.encoding != "UTF-8") {
+    if (result.info.encoding != "UTF-8") {
         result.status = Status::UnsupportedProfile; return result;
     }
     if (result.info.attachmentName != "source.md" || digest.size() != 64 ||
         !ParseSize(lengthText, result.info.sourceBytes)) { result.status = Status::CorruptPdf; return result; }
     if (result.info.sourceBytes > kMaxSourceBytes) { result.status = Status::LimitExceeded; return result; }
 
-    std::string_view fileSpec;
+    size_t fileSpecId = 0;
+    if (!CatalogSourceReferences(catalog, fileSpecId)) { result.status = Status::CorruptPdf; return result; }
+    std::string_view fileSpecObject;
+    DictionaryView fileSpec;
     size_t sourceId = 0;
-    if (!ObjectBody(pdf, xref, fileSpecId, fileSpec) || !HasName(fileSpec, "Filespec") ||
-        !HasName(fileSpec, "Source") || !FindReference(fileSpec, "F", sourceId)) {
+    if (!ObjectBody(pdf, xref, fileSpecId, fileSpecObject) || !DictionaryObject(fileSpecObject, fileSpec) ||
+        !FileSpecSourceReference(fileSpec, sourceId)) {
         result.status = Status::CorruptPdf; return result;
     }
     std::string_view sourceObject, source;
-    if (!ObjectBody(pdf, xref, sourceId, sourceObject) || !HasName(sourceObject, "EmbeddedFile") ||
-        !HasName(sourceObject, "text#2Fmarkdown") || HasName(sourceObject, "Filter") ||
-        !StreamData(sourceObject, kMaxSourceBytes, source) || source.size() != result.info.sourceBytes) {
+    DictionaryView sourceDictionary;
+    if (!ObjectBody(pdf, xref, sourceId, sourceObject) ||
+        !StreamObject(sourceObject, kMaxSourceBytes, sourceDictionary, source)) {
+        result.status = Status::CorruptPdf; return result;
+    }
+    const std::string_view* sourceType = DictionaryValue(sourceDictionary, "Type");
+    const std::string_view* sourceSubtype = DictionaryValue(sourceDictionary, "Subtype");
+    const std::string_view* paramsValue = DictionaryValue(sourceDictionary, "Params");
+    DictionaryView params;
+    const std::string_view* declaredSizeValue = nullptr;
+    size_t declaredSourceSize = 0;
+    if (!sourceType || !ValueName(*sourceType, "EmbeddedFile") || !sourceSubtype ||
+        !ValueName(*sourceSubtype, "text#2Fmarkdown") || DictionaryValue(sourceDictionary, "Filter") ||
+        !paramsValue || !ValueDictionary(*paramsValue, params) ||
+        !(declaredSizeValue = DictionaryValue(params, "Size")) ||
+        !ValueUnsigned(*declaredSizeValue, declaredSourceSize) || declaredSourceSize != result.info.sourceBytes ||
+        source.size() != result.info.sourceBytes) {
         result.status = source.size() > kMaxSourceBytes ? Status::LimitExceeded : Status::CorruptPdf; return result;
     }
     result.info.digestValid = Sha256Hex(source) == digest;

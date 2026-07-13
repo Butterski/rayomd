@@ -43,7 +43,9 @@ Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
 format-specific; it must never silently fall back to heuristic PDF conversion.
 Keep ordinary non-reversible exports on their unchanged PDF 1.7 fast path.
-The profile limits PDFs to 256 MiB and source to 32 MiB.
+The profile limits PDFs to 256 MiB and source to 10 MiB. The source cap is
+based on the measured maximum exact-recovery case; reject larger inputs before
+rendering to avoid excessive output and peak memory.
 
 Important image/link details:
 
