@@ -152,6 +152,11 @@ The feature added `22,016 B` to Windows (`+0.80%`) and `24,632 B` to Linux
 for p50/p95, output sizes, allocations, raw-versus-Flate results, Linux WSL
 `/mnt/e` caveats, and reproduction commands.
 
+Reversible encoding is opt-in: ordinary exports retain their previous
+performance, while its extra hashing and attachment work is effectively within
+benchmark noise for small documents and becomes measurable mainly for large
+sources.
+
 ## Native Markdown Support
 
 | Feature | Native support |
