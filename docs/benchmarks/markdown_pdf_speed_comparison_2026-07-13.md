@@ -6,9 +6,10 @@ Run date: 2026-07-13.
 
 This report compares fresh-process elapsed time for RayoMD, Pandoc/XeLaTeX,
 and Node `md-to-pdf` on three deterministic synthetic Markdown inputs. RayoMD
-had the lowest median in these cases. This is not a universal speed ranking:
-the tools have materially different feature and rendering scope, and
-the result applies only to the recorded machine, versions, inputs, and options.
+was the fastest of the three tested converters in every case. This supports a
+scoped fastest-in-this-benchmark claim, not a universal ranking: the tools have
+materially different feature and rendering scope, and the result applies only
+to the recorded machine, versions, inputs, and options.
 
 ## Results
 
