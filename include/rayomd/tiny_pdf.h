@@ -31,7 +31,10 @@ struct PdfMargin {
 
 enum class BuildError : uint8_t {
     None,
-    FontUnavailable,
+    FontUnavailable = 1,
+    SourceTooLarge = 4,
+    InvalidSourceUtf8 = 5,
+    ReversiblePdfTooLarge = 6,
 };
 
 struct BuildResult {
@@ -47,6 +50,7 @@ struct PdfOptions {
     std::string sourcePath;
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
+    bool embedSource = false;
 };
 
 // Legacy error reporting is retained for the bool-returning compatibility
@@ -61,6 +65,7 @@ struct BuildOptions {
     std::string sourcePath;
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
+    bool embedSource = false;
 };
 
 BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes);

@@ -22,6 +22,7 @@ def main() -> int:
         ("compare", "compare RayoMD with Pandoc"),
         ("release", "archive curated release benchmark records"),
         ("competitors", "compare supported Markdown-to-PDF tools"),
+        ("reversible", "benchmark and validate the reversible PDF profile"),
     ):
         command = sub.add_parser(name, help=help_text)
         command.add_argument("arguments", nargs=argparse.REMAINDER)
@@ -31,6 +32,7 @@ def main() -> int:
         "compare": "compare_pandoc.py",
         "release": "archive_release_benchmarks.py",
         "competitors": "compare_markdown_pdf_tools.py",
+        "reversible": "reversible_pdf_benchmark.py",
     }
     forwarded = args.arguments
     if forwarded[:1] == ["--"]:

@@ -52,6 +52,49 @@ def verify(binary: Path, keep: Path | None) -> None:
         require_pdf(ascii_pdf, b"/Subtype /Link", b"https://example.com/one")
 
         unicode_md = root / "unicode.md"
+        reversible_pdf = root / "reversible.pdf"
+        run(binary, "--export", str(ascii_md), str(reversible_pdf), "native", "tech", "normal", "--embed-source")
+        reversible = require_pdf(
+            reversible_pdf, b"/Type /EmbeddedFile", b"/AFRelationship /Source", b"rayomd-source/1"
+        )
+        if not reversible.startswith(b"%PDF-2.0"):
+            raise AssertionError("reversible output did not select PDF 2.0")
+        inspected = run(binary, "--inspect-source", str(reversible_pdf))
+        if b"status=intact" not in inspected.stdout or b"digest=valid" not in inspected.stdout:
+            raise AssertionError("source inspection did not report an intact profile")
+        recovered_md = root / "recovered.md"
+        run(binary, "--recover-source", str(reversible_pdf), str(recovered_md))
+        if recovered_md.read_bytes() != ascii_md.read_bytes():
+            raise AssertionError("recovered Markdown is not byte-exact")
+        existing = run(binary, "--recover-source", str(reversible_pdf), str(recovered_md), expect=34)
+        if b"already exists" not in existing.stdout:
+            raise AssertionError("existing recovery destination was not protected")
+        not_reversible = run(binary, "--inspect-source", str(ascii_pdf), expect=30)
+        if b"not a reversible" not in not_reversible.stdout:
+            raise AssertionError("ordinary PDF was not distinguished from a reversible PDF")
+        tampered_pdf = root / "tampered.pdf"
+        tampered = bytearray(reversible)
+        payload = tampered.find(ascii_md.read_bytes())
+        if payload < 0:
+            raise AssertionError("embedded source payload was not found")
+        tampered[payload] ^= 1
+        tampered_pdf.write_bytes(tampered)
+        run(binary, "--inspect-source", str(tampered_pdf), expect=32)
+        failed_recovery = root / "tampered-recovery.md"
+        run(binary, "--recover-source", str(tampered_pdf), str(failed_recovery), expect=32)
+        if failed_recovery.exists():
+            raise AssertionError("failed recovery left a partial output file")
+
+        unsupported_pdf = root / "unsupported-profile.pdf"
+        unsupported = reversible.replace(b"rayomd-source/1", b"rayomd-source/2", 1)
+        unsupported_pdf.write_bytes(unsupported)
+        run(binary, "--inspect-source", str(unsupported_pdf), expect=31)
+
+        unrelated_pdf = root / "unrelated-attachment.pdf"
+        unrelated = reversible.replace(b"/Metadata", b"/Metadatu", 1)
+        unrelated_pdf.write_bytes(unrelated)
+        run(binary, "--inspect-source", str(unrelated_pdf), expect=30)
+
         unicode_md.write_text("# Unicode\n\nZażółć gęślą jaźń: 日本語.\n", encoding="utf-8")
         unicode_pdf = root / "unicode.pdf"
         run(binary, "--export", str(unicode_md), str(unicode_pdf), "native", "modern", "normal")

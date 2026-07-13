@@ -42,13 +42,14 @@ jobs:
           test -f third_party/simdutf/LICENSE-MIT
       - name: Python helper syntax and entry points
         run: |
-          python3 -m py_compile tests/verify_cli.py tools/benchmark.py scripts/perf_watch.py scripts/compare_pandoc.py scripts/compare_markdown_pdf_tools.py scripts/archive_release_benchmarks.py scripts/concurrency_benchmark.py scripts/train_pgo.py
+          python3 -m py_compile tests/verify_cli.py tools/benchmark.py scripts/perf_watch.py scripts/compare_pandoc.py scripts/compare_markdown_pdf_tools.py scripts/archive_release_benchmarks.py scripts/concurrency_benchmark.py scripts/reversible_pdf_benchmark.py scripts/train_pgo.py
           python3 -B tests/verify_cli.py --help >/dev/null
           python3 -B tools/benchmark.py --help >/dev/null
           python3 -B tools/benchmark.py run -- --help >/dev/null
           python3 -B tools/benchmark.py compare -- --help >/dev/null
           python3 -B tools/benchmark.py release -- --help >/dev/null
           python3 -B tools/benchmark.py competitors -- --help >/dev/null
+          python3 -B tools/benchmark.py reversible -- --help >/dev/null
           python3 -B scripts/concurrency_benchmark.py --help >/dev/null
           python3 -B scripts/train_pgo.py --help >/dev/null
       - name: Keep generated outputs out of source
@@ -65,5 +66,6 @@ jobs:
           test -f docs/assets/demo/show.mp4
           test -f docs/benchmark_smoke.md
           test -f docs/benchmarks/commercial_benchmark_summary.md
+          test -f docs/benchmarks/reversible_pdf_features_2026-07-13.md
           test -f docs/benchmarks/releases/README.md
           test -f include/rayomd/tiny_pdf.h

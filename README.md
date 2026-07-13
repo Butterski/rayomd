@@ -6,7 +6,7 @@
   <a href="https://github.com/Butterski/rayomd/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/rayomd/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 2.2.0" src="https://img.shields.io/badge/version-2.2.0-informational">
+  <img alt="Version: 2.3.0" src="https://img.shields.io/badge/version-2.3.0-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
@@ -125,6 +125,38 @@ for p50/p95, peak RSS, correctness checks, and rejected LTO/PGO/streaming
 experiments. Use [`tools/benchmark.py`](tools/benchmark.py) for current runs;
 raw corpora and reports stay under ignored `benchmark-output/`.
 
+### Reversible PDF Feature Snapshot (2026-07-13)
+
+The expanded release suite measures ordinary export beside opt-in source
+embedding, inspection, exact recovery, feature-shaped documents, batch/serve
+workflows, bounded rejection paths, allocation counts, and storage overhead.
+Windows fresh-process p50 results were:
+
+| Source | Embed | Inspect | Exact recovery | Peak RSS |
+|---:|---:|---:|---:|---:|
+| 10 KiB | `49.37 ms` | `46.54 ms` | `47.29 ms` | `9.7 MiB` |
+| 1 MiB | `237.27 ms` | `71.48 ms` | `64.26 ms` | `58.7 MiB` |
+| 10 MiB maximum | `1,821.15 ms` | `174.84 ms` | `231.45 ms` | `487.1 MiB` |
+
+On an 18-document feature mix with one worker, Windows folder batch measured
+`8.85 ms/file` plain and `10.08 ms/file` embedded. The in-process warm matrix
+covers all 12 style/margin combinations plus the Unicode builder. Standard-font ASCII,
+Unicode, links, local/failing/remote images, tables/lists, multipage, and
+source-only privacy cases are reported separately. Corrupt/unsupported inputs
+and the source limit were also timed, with rejection peak RSS at or below
+`9.7 MiB`.
+
+The feature added `22,016 B` to Windows (`+0.80%`) and `24,632 B` to Linux
+(`+6.71%`) without a new runtime dependency. See the dated
+[reversible feature benchmark](docs/benchmarks/reversible_pdf_features_2026-07-13.md)
+for p50/p95, output sizes, allocations, raw-versus-Flate results, Linux WSL
+`/mnt/e` caveats, and reproduction commands.
+
+Reversible encoding is opt-in: ordinary exports retain their previous
+performance, while its extra hashing and attachment work is effectively within
+benchmark noise for small documents and becomes measurable mainly for large
+sources.
+
 ## Native Markdown Support
 
 | Feature | Native support |
@@ -223,6 +255,60 @@ Linux verification:
 python3 tests/verify_cli.py --binary build/linux/rayomd
 ```
 
+### Keep the native build fast and light
+
+Use a clean `Release` build and keep experimental or dependency-expanding
+options off unless a measured requirement justifies them:
+
+```sh
+cmake -S . -B build/light -DCMAKE_BUILD_TYPE=Release \
+  -DRAYOMD_USE_CURL=OFF \
+  -DRAYOMD_USE_SIMDUTF=OFF \
+  -DRAYOMD_ENABLE_LTO=OFF \
+  -DRAYOMD_ENABLE_PROFILING=OFF \
+  -DRAYOMD_ENABLE_TSAN=OFF \
+  -DRAYOMD_PGO=OFF
+cmake --build build/light --config Release
+```
+
+For the smallest, most portable Linux artifact, add
+`-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON` if PNG alpha decoding is not required.
+The default no-curl build avoids a libcurl runtime dependency. Windows uses
+platform WinHTTP/WIC APIs already present in the OS.
+
+Runtime choices matter too:
+
+- Leave source embedding off unless exact recovery is needed; it adds the
+  source bytes and profile objects to each PDF but no dependency.
+- ASCII documents automatically stay on the smaller standard-font path.
+  Unicode embeds a subset system font into the PDF.
+- Images can dominate conversion time, output size, and memory. Prefer
+  appropriately sized local assets and keep remote fetching opt-in.
+- Keep the 10 MiB reversible-source cap unless broad measurements prove that a
+  larger cap is safe; the renderer, not hashing, drives maximum-case memory.
+- Do not enable simdutf, LTO, or PGO by assumption. Previous measurements were
+  mixed; retain an experiment only when watch, large-document, batch, memory,
+  and binary-size results all support it.
+
+Before accepting a performance-sensitive change, compare identical release
+builds and gate the ordinary path against an explicit record:
+
+```sh
+python tools/benchmark.py run -- \
+  --binary build/before/rayomd.exe --platform windows --suite watch --label before
+python tools/benchmark.py run -- \
+  --binary build/after/rayomd.exe --platform windows --suite watch --label after \
+  --baseline-record benchmark-output/perf-watch/<before>/record.json \
+  --fail-on-slower-pct 5
+python tools/benchmark.py reversible -- \
+  --binary build/after/rayomd.exe --platform windows --suite full --samples 5
+```
+
+Also compare executable/package byte size and run `tests/verify_cli.py`.
+Benchmark Linux on native/ext4 storage for release claims; `/mnt/*` WSL results
+must be labeled because filesystem overhead can dominate batch and recovery
+timings.
+
 ## Continuous Verification
 
 GitHub Actions run the release-critical checks on every push and pull request:
@@ -267,8 +353,12 @@ Windows:
 rayomd.exe --version
 rayomd.exe --doctor
 rayomd.exe --export input.md output.pdf native elegant normal
+rayomd.exe --export input.md reversible.pdf native elegant normal --embed-source
+rayomd.exe --inspect-source reversible.pdf
+rayomd.exe --recover-source reversible.pdf recovered.md
 type input.md | rayomd.exe --stdin output.pdf native elegant normal
 rayomd.exe --batch input-folder output-folder native modern normal --workers=4
+rayomd.exe --batch input-folder reversible-folder native modern normal --workers=4 --embed-source
 type files.txt | rayomd.exe --stdin-batch output-folder native modern normal
 rayomd.exe --serve output-folder native modern normal
 rayomd.exe --bench input.md bench-output-folder 5000 modern normal
@@ -280,8 +370,12 @@ Linux / WSL:
 ./rayomd --version
 ./rayomd --doctor
 ./rayomd --export input.md output.pdf native elegant normal
+./rayomd --export input.md reversible.pdf native elegant normal --embed-source
+./rayomd --inspect-source reversible.pdf
+./rayomd --recover-source reversible.pdf recovered.md
 cat input.md | ./rayomd --stdin output.pdf native elegant normal
 ./rayomd --batch input-folder output-folder native modern normal --workers=4
+./rayomd --batch input-folder reversible-folder native modern normal --workers=4 --embed-source
 cat files.txt | ./rayomd --stdin-batch output-folder native modern normal
 ./rayomd --serve output-folder native modern normal
 ./rayomd --bench input.md bench-output-folder 5000 modern normal
@@ -293,6 +387,8 @@ Modes:
 |---|---|
 | `--version` | Print the compiled project version |
 | `--doctor` | Diagnose capabilities, Unicode fonts, temporary output, and a smoke export |
+| `--inspect-source` | Validate and describe an embedded RayoMD source profile |
+| `--recover-source` | Recover byte-exact Markdown from a validated reversible PDF |
 | `--export` | Convert one Markdown file |
 | `--stdin` | Convert Markdown content read from stdin into one PDF |
 | `--batch` | Convert every `.md` file in a folder |
@@ -311,6 +407,9 @@ Resource flags:
 - `--allow-url-images` enables HTTP/HTTPS image fetching and still blocks loopback, private, link-local, multicast, and non-HTTP(S) redirect targets.
 - `--allow-unsafe-local-images` restores legacy local-image path behavior for trusted documents only.
 - `--workers=N` sets the native folder/stdin-batch worker limit from 1 to 64; omit it for the memory-capped automatic policy.
+- `--embed-source` opts any native export, batch, stdin-batch, serve, or benchmark
+  operation into exact Markdown recovery; anyone receiving the PDF can extract
+  source content that is not visible on its pages.
 
 Margins:
 
@@ -329,7 +428,15 @@ Exit codes:
 | `3` | Input file or stdin Markdown could not be read |
 | `11` | Native exporter could not load a system font |
 | `12` | Native exporter could not write the PDF |
+| `14` | Source selected for embedding exceeds 10 MiB |
+| `15` | Source selected for embedding is not valid UTF-8 |
+| `16` | Reversible PDF would exceed the 256 MiB recovery limit |
 | `20` | Pandoc export failed or is unsupported in this build |
+| `30` | PDF has no reversible RayoMD profile |
+| `31` | Reversible profile version is unsupported |
+| `32` | PDF/profile is corrupt, invalid UTF-8, or fails integrity validation |
+| `33` | PDF or recovered source exceeds a configured limit |
+| `34` | Recovery destination already exists |
 
 ## C++ API
 
@@ -348,6 +455,7 @@ options.style = TinyPdf::PdfStyle::Modern;
 options.margin = TinyPdf::PdfMargin::Normal();
 options.sourcePath = "input.md";
 options.enableUrlImages = false;  // set true only for trusted URL image fetches
+options.embedSource = false;      // opt in only when exact source recovery is wanted
 
 TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdownText, options, pdfBytes);
 if (!result) {
@@ -360,6 +468,40 @@ images resolve next to the input Markdown file. By default, local image targets
 must remain inside that source directory after canonicalization. Set
 `allowUnsafeLocalImages` only for trusted documents that deliberately need
 absolute, UNC/device, or parent-escaping paths.
+
+## Reversible PDFs
+
+Normal exports remain compact PDF 1.7 files and do not contain the Markdown
+source. Pass `--embed-source` only when exact recovery is wanted. Reversible
+outputs use the `rayomd-source/1` PDF 2.0 profile: a standard Associated File
+and `EmbeddedFiles` name-tree entry contain the exact bytes, while bounded XMP
+metadata records the source length and SHA-256 digest.
+
+Embedding can disclose comments, front matter, internal notes, reference
+definitions, whitespace, and other source content not visible on the pages.
+It is disabled by default. On Windows, use **Open...** or Ctrl+O, or drop a
+validated reversible `.pdf`, to recover its source into the editor. The editor
+keeps the profile version, producer, source size, attachment name, digest
+status, and edited state visible. **Save source...** uses the same atomic,
+confirm-before-overwrite path as other document writes. A failed inspection or
+recovery leaves the current editor contents unchanged.
+
+`--inspect-source` validates without writing. `--recover-source` performs full
+validation and atomically creates the caller-selected output; it refuses to
+overwrite an existing file and never trusts the attachment name as a path.
+
+Profile version 1 accepts PDFs up to 256 MiB and Markdown up to 10 MiB. It
+supports only the single classic-xref structure emitted by RayoMD. Encryption,
+incremental updates, object/xref streams, unexpected filters, duplicate source
+entries, malformed offsets, invalid UTF-8, and digest mismatches are rejected.
+Exact recovery never falls back to heuristic PDF-to-Markdown conversion.
+UTF-8 BOMs and embedded NUL bytes are valid source bytes and survive exactly.
+
+The source is uncompressed so default Windows and Linux packages remain
+mutually recoverable without a mandatory compression dependency. See
+[`docs/development/reversible_pdf_profile.md`](docs/development/reversible_pdf_profile.md).
+General PDF-to-Markdown conversion is intentionally not shipped after the
+[arbitrary-PDF dependency and quality review](docs/development/arbitrary_pdf_research_decision.md).
 
 ## Benchmarking
 
@@ -379,6 +521,12 @@ comparable. The dedicated scaling harness records p50/p95, failures, and peak
 RSS at explicit worker counts:
 
     python scripts/concurrency_benchmark.py --binary build/windows/rayomd.exe --corpus <folder> --output benchmark-output/concurrency
+    python tools/benchmark.py reversible -- --binary build/windows/rayomd.exe --platform windows --suite full
+
+The reversible suite includes feature-shaped exports, embedding-off/on batch,
+stdin-batch and serve workflows, inspect/recover, hostile rejection paths,
+source-scale output/RSS, and raw-versus-Flate interoperability fixtures.
+`quick` skips only the 10 MiB scale case; child commands have a bounded timeout.
 
 Optimization experiments are opt-in and remain out of normal releases:
 
