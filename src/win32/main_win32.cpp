@@ -29,6 +29,7 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <chrono>
@@ -60,6 +61,7 @@
 #include "imgui/misc/cpp/imgui_stdlib.h"
 #include "rayomd/tiny_pdf.h"
 #include "../common/text_utils.h"
+#include "../common/profiling.h"
 #include "../core/export_options.h"
 
 // Forward declare message handler from imgui_impl_win32.cpp
@@ -139,6 +141,7 @@ struct WinExportOptions {
     TinyPdf::PdfMargin margin = TinyPdf::PdfMargin::Normal();
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
+    unsigned workers = 0;
 };
 
 #ifdef _WIN32
@@ -313,6 +316,7 @@ bool WriteUtf8File(const std::wstring& path, const std::string& content) {
 }
 
 bool ReadUtf8File(const std::wstring& path, std::string& content) {
+    RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Io);
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return false;
 
@@ -406,6 +410,7 @@ bool ReplaceWithTempFile(const std::wstring& tempPath, const std::wstring& final
 }
 
 bool WriteBinaryFile(const std::wstring& path, const std::string& content) {
+    RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Io);
     for (int attempt = 0; attempt < 16; attempt++) {
         std::wstring tempPath = MakeTempSiblingPath(path);
         if (WriteBinaryTempFile(tempPath, content)) {
@@ -432,15 +437,17 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
 
 bool ExportNativePdf(const std::string& markdown, const std::wstring& outputPath,
     const WinExportOptions& exportOptions, const std::wstring& sourcePath = L"") {
+    const auto profileBefore = RayoMd::Profiling::Capture();
     static thread_local std::string pdfBytes;
     pdfBytes.clear();
     pdfBytes.reserve(1024 * 1024);
-    if (!BuildNativePdfBytes(markdown, exportOptions, pdfBytes, sourcePath)) return false;
-    if (!WriteBinaryFile(outputPath, pdfBytes)) {
+    bool ok = BuildNativePdfBytes(markdown, exportOptions, pdfBytes, sourcePath);
+    if (ok && !WriteBinaryFile(outputPath, pdfBytes)) {
         g_nativePdfLastError = 2;
-        return false;
+        ok = false;
     }
-    return true;
+    RayoMd::Profiling::EmitDelta("export", profileBefore, RayoMd::Profiling::Capture());
+    return ok;
 }
 
 int GetNativePdfLastError() {
@@ -561,6 +568,14 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.enableUrlImages = true;
         } else if (lstrcmpiW(argv[i], L"--allow-unsafe-local-images") == 0 || lstrcmpiW(argv[i], L"--unsafe-local-images") == 0) {
             options.allowUnsafeLocalImages = true;
+        } else if (_wcsnicmp(argv[i], L"--workers=", 10) == 0) {
+            wchar_t* end = nullptr;
+            unsigned long parsed = std::wcstoul(argv[i] + 10, &end, 10);
+            if (!end || *end != wchar_t(0) || parsed < 1 || parsed > 64) {
+                error = L"--workers must be between 1 and 64";
+                return false;
+            }
+            options.workers = static_cast<unsigned>(parsed);
         } else {
             std::string token = WideToUtf8(argv[i]);
             TinyPdf::PdfMargin margin;
@@ -638,45 +653,126 @@ bool ExportOneFile(const std::wstring& inputPath, const std::wstring& outputPath
     return RunPandoc(inputPath, outputPath, options, warning);
 }
 
+int ExportNativeFileWithBufferResult(const std::wstring& inputPath, const std::wstring& outputPath,
+    const WinExportOptions& options, std::string& pdfBuffer) {
+    const auto profileBefore = RayoMd::Profiling::Capture();
+    auto finish = [&](int result) {
+        RayoMd::Profiling::EmitDelta("export", profileBefore, RayoMd::Profiling::Capture());
+        return result;
+    };
+    std::string markdown;
+    if (!ReadUtf8File(inputPath, markdown)) return finish(3);
+    pdfBuffer.clear();
+    if (!BuildNativePdfBytes(markdown, options, pdfBuffer, inputPath)) {
+        return finish(10 + GetNativePdfLastError());
+    }
+    return finish(WriteBinaryFile(outputPath, pdfBuffer) ? 0 : 12);
+}
+
 bool ExportNativeFileWithBuffer(const std::wstring& inputPath, const std::wstring& outputPath,
     const WinExportOptions& options, std::string& pdfBuffer) {
-    std::string markdown;
-    if (!ReadUtf8File(inputPath, markdown)) return false;
-    pdfBuffer.clear();
-    if (!BuildNativePdfBytes(markdown, options, pdfBuffer, inputPath)) return false;
-    return WriteBinaryFile(outputPath, pdfBuffer);
+    return ExportNativeFileWithBufferResult(inputPath, outputPath, options, pdfBuffer) == 0;
+}
+
+struct WinBatchJob {
+    std::wstring inputPath;
+    std::wstring outputPath;
+    int result = 0;
+    std::string error;
+};
+
+unsigned ResolveWinWorkerCount(const WinExportOptions& options, const std::vector<WinBatchJob>& jobs) {
+    if (jobs.empty() || options.engine != 0) return 1;
+    unsigned workers = options.workers;
+    if (workers == 0) {
+        workers = std::thread::hardware_concurrency();
+        if (workers == 0) workers = 2;
+        workers = std::min(workers, 6u);
+    }
+    uintmax_t largestInput = 0;
+    for (const WinBatchJob& job : jobs) {
+        std::error_code error;
+        uintmax_t size = std::filesystem::file_size(std::filesystem::path(job.inputPath), error);
+        if (!error) largestInput = std::max(largestInput, size);
+    }
+    if (largestInput > 64u * 1024u * 1024u) workers = 1;
+    else if (largestInput > 16u * 1024u * 1024u) workers = std::min(workers, 2u);
+    return std::max(1u, std::min(workers, static_cast<unsigned>(jobs.size())));
+}
+
+int ExecuteWinBatchJobs(std::vector<WinBatchJob>& jobs, const WinExportOptions& options, const char* label) {
+    if (options.engine != 0) {
+        std::string warning;
+        for (WinBatchJob& job : jobs) {
+            if (job.result != 0) continue;
+            if (!ExportOneFile(job.inputPath, job.outputPath, options, &warning)) job.result = 20;
+        }
+        if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
+    } else {
+        const unsigned workerCount = ResolveWinWorkerCount(options, jobs);
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> workers;
+        workers.reserve(workerCount);
+        for (unsigned worker = 0; worker < workerCount; worker++) {
+            workers.emplace_back([&] {
+                std::string pdfBuffer;
+                pdfBuffer.reserve(1024 * 1024);
+                for (;;) {
+                    size_t index = next.fetch_add(1, std::memory_order_relaxed);
+                    if (index >= jobs.size()) break;
+                    WinBatchJob& job = jobs[index];
+                    if (job.result != 0) continue;
+                    job.result = ExportNativeFileWithBufferResult(job.inputPath, job.outputPath, options, pdfBuffer);
+                }
+            });
+        }
+        for (std::thread& worker : workers) worker.join();
+    }
+
+    int failures = 0;
+    int lastResult = 0;
+    for (const WinBatchJob& job : jobs) {
+        if (job.result == 0) continue;
+        failures++;
+        lastResult = job.result;
+        if (!job.error.empty()) WriteStdoutLine(job.error);
+        else WriteStdoutLine("Error: " + std::string(label) + " failed for " +
+            WideToUtf8(job.inputPath) + " (code " + std::to_string(job.result) + ").");
+    }
+    if (failures != 0) {
+        WriteStdoutLine("Error: " + std::string(label) + " failed for " +
+            std::to_string(failures) + " file(s).");
+    }
+    return failures == 0 ? 0 : lastResult;
 }
 
 int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, const WinExportOptions& options) {
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
-
     WIN32_FIND_DATAW findData = {};
     HANDLE hFind = FindFirstFileW(JoinPath(inputDir, L"*.md").c_str(), &findData);
     if (hFind == INVALID_HANDLE_VALUE) return 3;
 
-    int failures = 0;
-    int lastResult = 0;
+    std::vector<WinBatchJob> jobs;
     std::set<std::wstring> seenOutputs;
-    std::string warning;
     do {
         if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         std::wstring name = findData.cFileName;
         std::wstring inputPath = JoinPath(inputDir, name);
         std::wstring outputPath = JoinPath(outputDir, PdfNameForMarkdown(name));
-        if (!RegisterBatchOutputPath(outputPath, seenOutputs, inputPath)) {
-            failures++;
-            lastResult = 12;
-            continue;
+        WinBatchJob job{inputPath, outputPath};
+        std::wstring key = OutputPathKey(outputPath);
+        if (!seenOutputs.insert(key).second) {
+            job.result = 12;
+            job.error = "Error: multiple inputs map to the same output PDF: " + WideToUtf8(outputPath);
         }
-        if (!ExportOneFile(inputPath, outputPath, options, &warning)) {
-            failures++;
-            lastResult = options.engine == 0 ? 10 + GetNativePdfLastError() : 20;
-        }
+        jobs.push_back(std::move(job));
     } while (FindNextFileW(hFind, &findData));
-
-    if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
     FindClose(hFind);
-    return failures == 0 ? 0 : (lastResult != 0 ? lastResult : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20));
+
+    std::sort(jobs.begin(), jobs.end(), [](const WinBatchJob& left, const WinBatchJob& right) {
+        return OutputPathKey(left.inputPath) < OutputPathKey(right.inputPath);
+    });
+    return ExecuteWinBatchJobs(jobs, options, "batch export");
 }
 
 bool IsCleanStdinEof(DWORD error) {
@@ -710,33 +806,24 @@ void WriteStdoutLine(const std::string& line) {
 
 int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& options) {
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
-
     std::string list;
     if (!ReadAllStdin(list, 0)) return 3;
 
-    int failures = 0;
-    int lastResult = 0;
+    std::vector<WinBatchJob> jobs;
     std::set<std::wstring> seenOutputs;
-    std::string warning;
-    std::vector<std::string> lines = RayoMd::Text::SplitLines(list);
-    for (std::string line : lines) {
+    for (std::string line : RayoMd::Text::SplitLines(list)) {
         line = RayoMd::Text::Trim(line);
         if (line.empty()) continue;
         std::wstring inputPath = Utf8ToWide(line);
         std::wstring outputPath = JoinPath(outputDir, PdfNameForMarkdown(inputPath));
-        if (!RegisterBatchOutputPath(outputPath, seenOutputs, inputPath)) {
-            failures++;
-            lastResult = 12;
-            continue;
+        WinBatchJob job{inputPath, outputPath};
+        if (!seenOutputs.insert(OutputPathKey(outputPath)).second) {
+            job.result = 12;
+            job.error = "Error: multiple inputs map to the same output PDF: " + WideToUtf8(outputPath);
         }
-        if (!ExportOneFile(inputPath, outputPath, options, &warning)) {
-            failures++;
-            lastResult = options.engine == 0 ? 10 + GetNativePdfLastError() : 20;
-        }
+        jobs.push_back(std::move(job));
     }
-
-    if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
-    return failures == 0 ? 0 : (lastResult != 0 ? lastResult : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20));
+    return ExecuteWinBatchJobs(jobs, options, "stdin batch export");
 }
 int RunStdinExport(const std::wstring& outputPath, const WinExportOptions& options) {
     if (options.engine != 0) {

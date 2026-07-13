@@ -44,7 +44,7 @@ CTest exposes the same verifier when Python was found during configuration:
 
 Correctness verification does not run performance loops. For performance-sensitive
 work, use tools/benchmark.py before and after the change and report platform,
-storage location, suite, binary-size delta, and headline timing deltas. See
+storage location, suite, worker count, binary-size delta, peak RSS, and headline timing deltas. Use `scripts/concurrency_benchmark.py` for 1/2/4/6-worker changes and keep LTO, profiling, TSAN, and PGO CMake options opt-in. See
 docs/development/performance.md.
 ## Versioning
 

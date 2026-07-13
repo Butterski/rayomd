@@ -1,8 +1,10 @@
 #include "rayomd/tiny_pdf.h"
 #include "../common/text_utils.h"
+#include "../common/profiling.h"
 #include "../core/export_options.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstring>
@@ -11,7 +13,10 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <set>
 #include <string>
+#include <thread>
+#include <vector>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -31,6 +36,7 @@ namespace fs = std::filesystem;
 constexpr long long kMaxMarkdownInputBytes = 128LL * 1024LL * 1024LL;
 
 bool ReadUtf8FilePortable(const fs::path& path, std::string& content) {
+    RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Io);
 #ifndef _WIN32
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd >= 0) {
@@ -82,6 +88,7 @@ bool ReadStdinPortable(std::string& content) {
 }
 
 bool WriteBinaryFilePortable(const fs::path& path, const std::string& content) {
+    RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Io);
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) return false;
     file.write(content.data(), (std::streamsize)content.size());
@@ -142,6 +149,7 @@ struct CliExportOptions {
     TinyPdf::PdfMargin margin = TinyPdf::PdfMargin::Normal();
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
+    unsigned workers = 0;
 };
 
 bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& options,
@@ -152,6 +160,16 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "native") options.engine = 0;
         else if (value == "--allow-url-images") options.enableUrlImages = true;
         else if (value == "--allow-unsafe-local-images" || value == "--unsafe-local-images") options.allowUnsafeLocalImages = true;
+        else if (value.rfind("--workers=", 0) == 0) {
+            std::string count = value.substr(10);
+            char* end = nullptr;
+            unsigned long parsed = std::strtoul(count.c_str(), &end, 10);
+            if (!end || *end != char(0) || parsed < 1 || parsed > 64) {
+                error = "--workers must be between 1 and 64";
+                return false;
+            }
+            options.workers = static_cast<unsigned>(parsed);
+        }
         else {
             TinyPdf::PdfMargin margin;
             TinyPdf::PdfStyle style;
@@ -165,6 +183,13 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
     }
     return true;
 }
+void ReportExportError(std::string* deferredError, const std::string& message) {
+    if (deferredError) {
+        *deferredError = message;
+    } else {
+        std::cerr << message << std::endl;
+    }
+}
 fs::path PdfNameForMarkdown(const fs::path& path) {
     fs::path out = path.filename();
     out.replace_extension(".pdf");
@@ -173,7 +198,7 @@ fs::path PdfNameForMarkdown(const fs::path& path) {
 
 int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourcePath,
     const fs::path& outputPath, const CliExportOptions& options, std::string& pdfBuffer,
-    const std::string& inputLabel) {
+    const std::string& inputLabel, std::string* deferredError = nullptr) {
     pdfBuffer.clear();
     TinyPdf::PdfOptions pdfOptions;
     pdfOptions.style = options.style;
@@ -184,27 +209,33 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, pdfOptions, pdfBuffer);
     if (!buildResult) {
         int code = 10 + static_cast<int>(buildResult.error);
-        std::cerr << "Error: native PDF export failed";
-        if (!inputLabel.empty()) std::cerr << " for " << inputLabel;
-        std::cerr << " (code " << code << ").\n";
+        std::ostringstream message;
+        message << "Error: native PDF export failed";
+        if (!inputLabel.empty()) message << " for " << inputLabel;
+        message << " (code " << code << ").";
+        ReportExportError(deferredError, message.str());
         return code;
     }
     if (!WriteBinaryFilePortable(outputPath, pdfBuffer)) {
-        std::cerr << "Error: could not write PDF file: " << PathToUtf8(outputPath) << "\n";
+        ReportExportError(deferredError, "Error: could not write PDF file: " + PathToUtf8(outputPath));
         return 12;
     }
     return 0;
 }
 
 int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath,
-    const CliExportOptions& options, std::string& pdfBuffer) {
+    const CliExportOptions& options, std::string& pdfBuffer, std::string* deferredError = nullptr) {
+    const auto profileBefore = RayoMd::Profiling::Capture();
     std::string markdown;
     if (!ReadUtf8FilePortable(inputPath, markdown)) {
-        std::cerr << "Error: could not read input Markdown file: " << PathToUtf8(inputPath) << "\n";
+        ReportExportError(deferredError, "Error: could not read input Markdown file: " + PathToUtf8(inputPath));
+        RayoMd::Profiling::EmitDelta("export", profileBefore, RayoMd::Profiling::Capture());
         return 3;
     }
-    return BuildNativePdfMarkdown(markdown, PathToUtf8(inputPath), outputPath, options,
-        pdfBuffer, PathToUtf8(inputPath));
+    int result = BuildNativePdfMarkdown(markdown, PathToUtf8(inputPath), outputPath, options,
+        pdfBuffer, PathToUtf8(inputPath), deferredError);
+    RayoMd::Profiling::EmitDelta("export", profileBefore, RayoMd::Profiling::Capture());
+    return result;
 }
 
 int RunStdinExport(const fs::path& outputPath, const CliExportOptions& options) {
@@ -225,9 +256,71 @@ int RunStdinExport(const fs::path& outputPath, const CliExportOptions& options) 
     return BuildNativePdfMarkdown(markdown, std::string(), outputPath, options, pdfBuffer, std::string());
 }
 
+struct BatchJob {
+    fs::path inputPath;
+    fs::path outputPath;
+    int result = 0;
+    std::string error;
+};
+
+unsigned ResolveWorkerCount(const CliExportOptions& options, const std::vector<BatchJob>& jobs) {
+    if (jobs.empty()) return 1;
+    unsigned workers = options.workers;
+    if (workers == 0) {
+        workers = std::thread::hardware_concurrency();
+        if (workers == 0) workers = 2;
+        workers = std::min(workers, 6u);
+    }
+
+    uintmax_t largestInput = 0;
+    for (const BatchJob& job : jobs) {
+        std::error_code error;
+        uintmax_t size = fs::file_size(job.inputPath, error);
+        if (!error) largestInput = std::max(largestInput, size);
+    }
+    if (largestInput > 64u * 1024u * 1024u) workers = 1;
+    else if (largestInput > 16u * 1024u * 1024u) workers = std::min(workers, 2u);
+    return std::max(1u, std::min(workers, static_cast<unsigned>(jobs.size())));
+}
+
+int ExecuteBatchJobs(std::vector<BatchJob>& jobs, const CliExportOptions& options, const char* label) {
+    const unsigned workerCount = ResolveWorkerCount(options, jobs);
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount);
+    for (unsigned worker = 0; worker < workerCount; worker++) {
+        workers.emplace_back([&] {
+            std::string pdfBuffer;
+            pdfBuffer.reserve(1024 * 1024);
+            for (;;) {
+                size_t index = next.fetch_add(1, std::memory_order_relaxed);
+                if (index >= jobs.size()) break;
+                BatchJob& job = jobs[index];
+                if (job.result != 0) continue;
+                job.result = BuildNativePdfFile(job.inputPath, job.outputPath, options, pdfBuffer, &job.error);
+            }
+        });
+    }
+    for (std::thread& worker : workers) worker.join();
+
+    int failures = 0;
+    int lastResult = 0;
+    for (const BatchJob& job : jobs) {
+        if (job.result == 0) continue;
+        failures++;
+        lastResult = job.result;
+        if (!job.error.empty()) std::cerr << job.error << std::endl;
+    }
+    if (failures != 0) {
+        std::cerr << "Error: " << label << " failed for " << failures << " file(s)." << std::endl;
+        return lastResult;
+    }
+    return 0;
+}
+
 int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const CliExportOptions& options) {
     if (options.engine != 0) {
-        std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
+        std::cerr << "Error: Pandoc mode is currently only wired into the Windows build." << std::endl;
         return 20;
     }
 
@@ -235,94 +328,63 @@ int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const Cl
     if (!IsDirectoryPortable(inputDir, fsError)) {
         std::cerr << "Error: input folder is not a readable directory: " << PathToUtf8(inputDir);
         if (!fsError.empty()) std::cerr << " (" << fsError << ")";
-        std::cerr << "\n";
+        std::cerr << std::endl;
         return 3;
     }
     if (!EnsureDirectoryPortable(outputDir, fsError)) {
         std::cerr << "Error: could not create output folder: " << PathToUtf8(outputDir);
         if (!fsError.empty()) std::cerr << " (" << fsError << ")";
-        std::cerr << "\n";
+        std::cerr << std::endl;
         return 12;
     }
 
+    std::vector<BatchJob> jobs;
     std::error_code iterError;
-    fs::directory_iterator it(inputDir, iterError);
+    for (fs::directory_iterator it(inputDir, iterError), end; !iterError && it != end; it.increment(iterError)) {
+        std::error_code entryError;
+        if (!it->is_regular_file(entryError) || entryError || it->path().extension() != ".md") continue;
+        jobs.push_back({it->path(), outputDir / PdfNameForMarkdown(it->path())});
+    }
     if (iterError) {
         std::cerr << "Error: could not read input folder: " << PathToUtf8(inputDir)
-            << " (" << iterError.message() << ")\n";
+            << " (" << iterError.message() << ")" << std::endl;
         return 3;
     }
-
-    std::string pdfBuffer;
-    pdfBuffer.reserve(1024 * 1024);
-    int failures = 0;
-    int lastResult = 0;
-    for (fs::directory_iterator end; it != end; it.increment(iterError)) {
-        if (iterError) {
-            std::cerr << "Error: could not continue reading input folder: " << PathToUtf8(inputDir)
-                << " (" << iterError.message() << ")\n";
-            return 3;
-        }
-        const fs::directory_entry& entry = *it;
-        std::error_code entryError;
-        if (!entry.is_regular_file(entryError)) {
-            if (entryError) {
-                failures++;
-                lastResult = 3;
-                std::cerr << "Error: could not inspect batch entry: " << PathToUtf8(entry.path())
-                    << " (" << entryError.message() << ")\n";
-            }
-            continue;
-        }
-        if (entry.path().extension() != ".md") continue;
-        fs::path outputPath = outputDir / PdfNameForMarkdown(entry.path());
-        int result = BuildNativePdfFile(entry.path(), outputPath, options, pdfBuffer);
-        if (result != 0) {
-            failures++;
-            lastResult = result;
-        }
-    }
-    if (failures != 0) {
-        std::cerr << "Error: batch export failed for " << failures << " file(s).\n";
-        return lastResult;
-    }
-    return 0;
+    std::sort(jobs.begin(), jobs.end(), [](const BatchJob& left, const BatchJob& right) {
+        return left.inputPath.u8string() < right.inputPath.u8string();
+    });
+    return ExecuteBatchJobs(jobs, options, "batch export");
 }
 
 int RunStdinBatchExport(const fs::path& outputDir, const CliExportOptions& options) {
     if (options.engine != 0) {
-        std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
+        std::cerr << "Error: Pandoc mode is currently only wired into the Windows build." << std::endl;
         return 20;
     }
     std::string fsError;
     if (!EnsureDirectoryPortable(outputDir, fsError)) {
         std::cerr << "Error: could not create output folder: " << PathToUtf8(outputDir);
         if (!fsError.empty()) std::cerr << " (" << fsError << ")";
-        std::cerr << "\n";
+        std::cerr << std::endl;
         return 12;
     }
 
-    std::string pdfBuffer;
-    pdfBuffer.reserve(1024 * 1024);
-    int failures = 0;
-    int lastResult = 0;
+    std::vector<BatchJob> jobs;
+    std::set<std::string> outputs;
     std::string line;
     while (std::getline(std::cin, line)) {
         line = RayoMd::Text::Trim(line);
         if (line.empty()) continue;
         fs::path inputPath(line);
         fs::path outputPath = outputDir / PdfNameForMarkdown(inputPath);
-        int result = BuildNativePdfFile(inputPath, outputPath, options, pdfBuffer);
-        if (result != 0) {
-            failures++;
-            lastResult = result;
+        BatchJob job{inputPath, outputPath};
+        if (!outputs.insert(outputPath.lexically_normal().u8string()).second) {
+            job.result = 12;
+            job.error = "Error: multiple inputs map to the same output PDF: " + PathToUtf8(outputPath);
         }
+        jobs.push_back(std::move(job));
     }
-    if (failures != 0) {
-        std::cerr << "Error: stdin batch export failed for " << failures << " file(s).\n";
-        return lastResult;
-    }
-    return 0;
+    return ExecuteBatchJobs(jobs, options, "stdin batch export");
 }
 
 int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
@@ -506,7 +568,8 @@ void PrintUsage() {
         << "\n"
         << "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
         << "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
-        << "Resource flags: --allow-url-images, --allow-unsafe-local-images.\n";
+        << "Resource flags: --allow-url-images, --allow-unsafe-local-images.\n"
+        << "Batch flag: --workers=N (1-64; automatic mode uses at most 6).\n";
 }
 
 int PrintArgumentError(const std::string& message) {

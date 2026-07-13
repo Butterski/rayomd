@@ -1,6 +1,8 @@
 #include "rayomd/tiny_pdf.h"
 #include "export_options.h"
 #include "inline_markdown.h"
+#include "../common/profiling.h"
+#include "../common/text_utils.h"
 #include "markdown_parser.h"
 
 #ifdef _WIN32
@@ -16,8 +18,10 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cctype>
 #include <codecvt>
 #include <cstdint>
@@ -109,7 +113,6 @@ static std::wstring Utf8ToWide(std::string_view str) {
 constexpr double PAGE_W = 595.0;  // A4, points
 constexpr double PAGE_H = 842.0;
 static thread_local int g_lastError = 0;
-static std::mutex g_buildMutex;
 
 int GetLastError() {
     return g_lastError;
@@ -201,7 +204,7 @@ struct TtfFont {
     std::unordered_map<uint16_t, uint16_t> glyphForBmp;
     std::vector<uint16_t> advances;
     std::vector<uint32_t> loca;
-    mutable std::array<uint16_t, 65536> widthCache{};
+    mutable std::array<std::atomic<uint16_t>, 65536> widthCache{};
     uint16_t unitsPerEm = 1000;
     uint16_t glyphCount = 0;
     uint16_t metricCount = 0;
@@ -242,7 +245,7 @@ struct TtfFont {
             glyphForBmp.clear();
             advances.clear();
             loca.clear();
-            widthCache.fill(0);
+            for (auto& width : widthCache) width.store(0, std::memory_order_relaxed);
             if (ReadWholeFile(path, bytes) && Parse()) {
                 loaded = true;
                 return true;
@@ -399,16 +402,14 @@ struct TtfFont {
     }
 
     uint16_t WidthForCid(uint16_t cid) const {
-        uint16_t cached = widthCache[cid];
+        uint16_t cached = widthCache[cid].load(std::memory_order_relaxed);
         if (cached != 0) return cached;
         uint16_t glyph = GlyphFor(cid);
-        if (glyph < advances.size()) {
-            uint16_t width = (uint16_t)((advances[glyph] * 1000u + unitsPerEm / 2u) / unitsPerEm);
-            widthCache[cid] = width;
-            return width;
-        }
-        widthCache[cid] = 500;
-        return 500;
+        uint16_t width = glyph < advances.size()
+            ? (uint16_t)((advances[glyph] * 1000u + unitsPerEm / 2u) / unitsPerEm)
+            : (uint16_t)500;
+        widthCache[cid].store(width, std::memory_order_relaxed);
+        return width;
     }
 
     int Metric(int value) const {
@@ -545,11 +546,7 @@ static std::vector<std::wstring> WrapCodeLine(const TtfFont& font, std::wstring_
 }
 
 static void AppendF(std::string& out, double v) {
-    char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%.2f", v);
-    while (n > 1 && buf[n - 1] == '0') n--;
-    if (n > 0 && buf[n - 1] == '.') n--;
-    out.append(buf, (size_t)n);
+    RayoMd::Text::AppendFixed2(out, v);
 }
 
 static std::string F(double v) {
@@ -572,21 +569,20 @@ static void AppendSize(std::string& out, size_t value) {
 }
 
 static void AppendHex4(std::string& out, uint16_t value) {
-    static char table[65536][4];
-    static bool init = false;
-    if (!init) {
-        static const char* h = "0123456789ABCDEF";
-        for (uint32_t i = 0; i < 65536; i++) {
-            table[i][0] = h[(i >> 12) & 0xf];
-            table[i][1] = h[(i >> 8) & 0xf];
-            table[i][2] = h[(i >> 4) & 0xf];
-            table[i][3] = h[i & 0xf];
+    struct HexTable {
+        std::array<std::array<char, 4>, 65536> values{};
+        HexTable() {
+            static constexpr char digits[] = "0123456789ABCDEF";
+            for (uint32_t i = 0; i < values.size(); i++) {
+                values[i][0] = digits[(i >> 12) & 0xf];
+                values[i][1] = digits[(i >> 8) & 0xf];
+                values[i][2] = digits[(i >> 4) & 0xf];
+                values[i][3] = digits[i & 0xf];
+            }
         }
-        init = true;
-    }
-    size_t old = out.size();
-    out.resize(old + 4);
-    memcpy(&out[old], table[value], 4);
+    };
+    static const HexTable table;
+    out.append(table.values[value].data(), 4);
 }
 
 class UsedCidSet {
@@ -1854,6 +1850,7 @@ public:
     explicit ImageRegistry(const PdfOptions& opts) : options(opts), localPolicy(opts) {}
 
     bool Resolve(const std::string& src, const std::string& alt, int& index) {
+        RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Image);
         std::string key;
         std::string localPathUtf8;
         bool isUrl = IsHttpUrl(src);
@@ -1909,6 +1906,11 @@ private:
         return cache;
     }
 
+    static std::mutex& CacheMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
     static size_t& CacheBytes() {
         static size_t bytes = 0;
         return bytes;
@@ -1925,6 +1927,7 @@ private:
     }
 
     static bool LoadDecodedImageFromCache(const std::string& key, PdfImage& image) {
+        std::lock_guard<std::mutex> lock(CacheMutex());
         auto& cache = Cache();
         auto it = cache.find(key);
         if (it == cache.end()) return false;
@@ -1936,26 +1939,31 @@ private:
     static void StoreDecodedImageInCache(const std::string& key, const PdfImage& image) {
         size_t cost = ImageCacheCost(image);
         if (cost > kMaxImageBytes) return;
+        PdfImage copy = image;
+        copy.name.clear();
+
+        std::lock_guard<std::mutex> lock(CacheMutex());
         auto& cache = Cache();
+        if (cache.find(key) != cache.end()) return;
         size_t& cacheBytes = CacheBytes();
         if (cacheBytes + cost > 64u * 1024u * 1024u) {
             cache.clear();
             cacheBytes = 0;
         }
-        PdfImage copy = image;
-        copy.name.clear();
         cacheBytes += cost;
-        cache[key] = std::move(copy);
+        cache.emplace(key, std::move(copy));
     }
 
     static bool IsKnownFailure(const std::string& key) {
+        std::lock_guard<std::mutex> lock(CacheMutex());
         auto& failures = FailureCache();
         return failures.find(key) != failures.end();
     }
 
     static void StoreFailure(const std::string& key) {
+        std::lock_guard<std::mutex> lock(CacheMutex());
         auto& failures = FailureCache();
-        if (failures.size() > 256) failures.clear();
+        if (failures.size() >= 256) failures.clear();
         failures[key] = true;
     }
 };
@@ -2756,89 +2764,124 @@ static std::string BuildFontFileObject(const std::string& fontBytes) {
     return body;
 }
 
-static const std::string& CachedFontFileObject(const TtfFont& font, const CidList& used, const std::string& key) {
-    static std::unordered_map<std::string, std::string> cache;
-    auto it = cache.find(key);
-    if (it != cache.end()) return it->second;
+class BoundedStringCache {
+public:
+    BoundedStringCache(size_t maxEntriesValue, size_t maxBytesValue)
+        : maxEntries(maxEntriesValue), maxBytes(maxBytesValue) {}
+
+    std::shared_ptr<const std::string> Get(const std::string& key) {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = values.find(key);
+        return it == values.end() ? nullptr : it->second;
+    }
+
+    std::shared_ptr<const std::string> Insert(const std::string& key, std::string value) {
+        auto candidate = std::make_shared<const std::string>(std::move(value));
+        if (candidate->size() > maxBytes) return candidate;
+        std::lock_guard<std::mutex> lock(mutex);
+        auto existing = values.find(key);
+        if (existing != values.end()) return existing->second;
+        if (values.size() >= maxEntries || bytes + candidate->size() > maxBytes) {
+            values.clear();
+            bytes = 0;
+        }
+        bytes += candidate->size();
+        values.emplace(key, candidate);
+        return candidate;
+    }
+
+private:
+    const size_t maxEntries;
+    const size_t maxBytes;
+    size_t bytes = 0;
+    std::mutex mutex;
+    std::unordered_map<std::string, std::shared_ptr<const std::string>> values;
+};
+
+static std::shared_ptr<const std::string> CachedFontFileObject(
+    const TtfFont& font, const CidList& used, const std::string& key) {
+    static BoundedStringCache cache(8, 32u * 1024u * 1024u);
+    if (auto cached = cache.Get(key)) return cached;
 
     std::string subset;
     const std::string* fontBytes = nullptr;
-    if (BuildSubsetFontBytes(font, used, subset) && subset.size() < font.bytes.size()) {
-        fontBytes = &subset;
-    }
+    if (BuildSubsetFontBytes(font, used, subset) && subset.size() < font.bytes.size()) fontBytes = &subset;
 
     std::string full;
     if (!fontBytes) {
         full.assign((const char*)font.bytes.data(), font.bytes.size());
         fontBytes = &full;
     }
-
-    auto inserted = cache.emplace(key, BuildFontFileObject(*fontBytes));
-    return inserted.first->second;
+    return cache.Insert(key, BuildFontFileObject(*fontBytes));
 }
 
-static const std::string& MakeCidToGidMap(const TtfFont& font, const CidList& used, const std::string& key) {
-    static std::unordered_map<std::string, std::string> cache;
-    auto cached = cache.find(key);
-    if (cached != cache.end()) return cached->second;
-
+static std::shared_ptr<const std::string> MakeCidToGidMap(
+    const TtfFont& font, const CidList& used, const std::string& key) {
+    static BoundedStringCache cache(64, 8u * 1024u * 1024u);
+    if (auto cached = cache.Get(key)) return cached;
     uint16_t maxCid = 255;
     for (uint16_t cid : used) maxCid = std::max(maxCid, cid);
-
-    std::string map((size_t)(maxCid + 1) * 2, '\0');
+    std::string map((size_t)(maxCid + 1) * 2, char(0));
     for (uint32_t cid = 0; cid <= maxCid; cid++) {
         uint16_t glyph = font.GlyphFor(cid);
         map[(size_t)cid * 2] = (char)((glyph >> 8) & 0xff);
         map[(size_t)cid * 2 + 1] = (char)(glyph & 0xff);
     }
-    auto inserted = cache.emplace(key, std::move(map));
-    return inserted.first->second;
+    return cache.Insert(key, std::move(map));
 }
 
-static const std::string& MakeToUnicodeCMap(const CidList& used, const std::string& key) {
-    static std::unordered_map<std::string, std::string> cache;
-    auto cached = cache.find(key);
-    if (cached != cache.end()) return cached->second;
-
+static std::shared_ptr<const std::string> MakeToUnicodeCMap(
+    const CidList& used, const std::string& key) {
+    static BoundedStringCache cache(64, 8u * 1024u * 1024u);
+    if (auto cached = cache.Get(key)) return cached;
     std::string out;
     out.reserve(512 + used.size() * 20);
-    out += "/CIDInit /ProcSet findresource begin\n"
-           "12 dict begin\nbegincmap\n"
-           "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
-           "/CMapName /RayoMDUnicode def\n"
-           "/CMapType 2 def\n"
-           "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n";
-
+    out += R"PDF(/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /RayoMDUnicode def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+)PDF";
     int count = 0;
     for (auto it = used.begin(); it != used.end();) {
         int chunk = std::min<int>(100, (int)used.size() - count);
         AppendInt(out, chunk);
-        out += " beginbfchar\n";
+        out += " beginbfchar";
+        out.push_back(char(10));
         for (int i = 0; i < chunk; i++, ++it) {
             out.push_back('<');
             AppendHex4(out, *it);
             out += "> <";
             AppendHex4(out, *it);
-            out += ">\n";
+            out += ">";
+            out.push_back(char(10));
             count++;
         }
-        out += "endbfchar\n";
+        out += "endbfchar";
+        out.push_back(char(10));
     }
-
     if (count == 0) {
-        out += "1 beginbfchar\n<0020> <0020>\nendbfchar\n";
+        out += R"PDF(1 beginbfchar
+<0020> <0020>
+endbfchar
+)PDF";
     }
-
-    out += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
-    auto inserted = cache.emplace(key, std::move(out));
-    return inserted.first->second;
+    out += R"PDF(endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+)PDF";
+    return cache.Insert(key, std::move(out));
 }
 
-static const std::string& MakeWidths(const TtfFont& font, const CidList& used, const std::string& key) {
-    static std::unordered_map<std::string, std::string> cache;
-    auto cached = cache.find(key);
-    if (cached != cache.end()) return cached->second;
-
+static std::shared_ptr<const std::string> MakeWidths(
+    const TtfFont& font, const CidList& used, const std::string& key) {
+    static BoundedStringCache cache(64, 8u * 1024u * 1024u);
+    if (auto cached = cache.Get(key)) return cached;
     std::string out;
     out.reserve(16 + used.size() * 14);
     out += "[ ";
@@ -2855,8 +2898,7 @@ static const std::string& MakeWidths(const TtfFont& font, const CidList& used, c
         }
     }
     out += "]";
-    auto inserted = cache.emplace(key, std::move(out));
-    return inserted.first->second;
+    return cache.Insert(key, std::move(out));
 }
 
 static std::string EscapeLiteral(const std::string& s) {
@@ -2915,29 +2957,44 @@ static bool IsAsciiDocument(const std::string& s) {
 #endif
 }
 
+static constexpr std::array<unsigned char, 128> MakeAsciiWidthTable() {
+    std::array<unsigned char, 128> widths{};
+    for (auto& width : widths) width = 52;
+    widths[' '] = 28;
+    for (char c : { 'i', 'l', 'I', '!', '.', ',', ':', ';' }) widths[static_cast<unsigned char>(c)] = 25;
+    for (char c : { 'm', 'w', 'M', 'W' }) widths[static_cast<unsigned char>(c)] = 78;
+    for (char c = '0'; c <= '9'; c++) widths[static_cast<unsigned char>(c)] = 56;
+    for (char c = 'A'; c <= 'Z'; c++) widths[static_cast<unsigned char>(c)] = 62;
+    return widths;
+}
+
+static constexpr auto kAsciiWidthHundredths = MakeAsciiWidthTable();
+
 static double AsciiCharWidth(char c, double size, bool mono = false) {
     if (mono) return size * 0.60;
-    if (c == ' ') return size * 0.28;
-    if (c == 'i' || c == 'l' || c == 'I' || c == '!' || c == '.' || c == ',' || c == ':' || c == ';') return size * 0.25;
-    if (c == 'm' || c == 'w' || c == 'M' || c == 'W') return size * 0.78;
-    if (c >= '0' && c <= '9') return size * 0.56;
-    if (c >= 'A' && c <= 'Z') return size * 0.62;
-    return size * 0.52;
+    return size * kAsciiWidthHundredths[static_cast<unsigned char>(c)] * 0.01;
 }
 
 static double AsciiTextWidth(std::string_view text, double size, bool mono = false) {
-    double width = 0.0;
-    for (char c : text) width += AsciiCharWidth(c, size, mono);
-    return width;
+    if (mono) return static_cast<double>(text.size()) * size * 0.60;
+    unsigned widthHundredths = 0;
+    for (unsigned char c : text) widthHundredths += kAsciiWidthHundredths[c];
+    return static_cast<double>(widthHundredths) * size * 0.01;
 }
 
-static std::vector<std::string> WrapAsciiText(const std::string& raw, double maxWidth, double size, bool mono = false) {
+struct WrappedAsciiLine {
+    std::string text;
+    double width = 0.0;
+};
+
+static void WrapAsciiText(const std::string& raw, double maxWidth, double size,
+    bool mono, std::vector<WrappedAsciiLine>& lines) {
     std::string text = StripInlineMarkdown(raw);
-    std::vector<std::string> lines;
+    lines.clear();
     std::string line;
     line.reserve(std::min<size_t>(text.size(), 256));
     double lineWidth = 0.0;
-    double spaceWidth = AsciiTextWidth(" ", size, mono);
+    const double spaceWidth = mono ? size * 0.60 : size * 0.28;
     size_t i = 0;
 
     while (i < text.size()) {
@@ -2954,19 +3011,16 @@ static std::vector<std::string> WrapAsciiText(const std::string& raw, double max
             lineWidth += spaceWidth + wordWidth;
             continue;
         }
-
         if (line.empty() && wordWidth <= maxWidth) {
             line.assign(word.data(), word.size());
             lineWidth = wordWidth;
             continue;
         }
-
         if (!line.empty()) {
-            lines.push_back(line);
+            lines.push_back({std::move(line), lineWidth});
             line.clear();
             lineWidth = 0.0;
         }
-
         if (wordWidth <= maxWidth) {
             line.assign(word.data(), word.size());
             lineWidth = wordWidth;
@@ -2977,21 +3031,26 @@ static std::vector<std::string> WrapAsciiText(const std::string& raw, double max
         part.reserve(word.size());
         double partWidth = 0.0;
         for (char c : word) {
-            double cw = AsciiCharWidth(c, size, mono);
-            if (!part.empty() && partWidth + cw > maxWidth) {
-                lines.push_back(part);
+            double charWidth = AsciiCharWidth(c, size, mono);
+            if (!part.empty() && partWidth + charWidth > maxWidth) {
+                lines.push_back({std::move(part), partWidth});
                 part.clear();
                 partWidth = 0.0;
             }
             part.push_back(c);
-            partWidth += cw;
+            partWidth += charWidth;
         }
         line = std::move(part);
         lineWidth = partWidth;
     }
+    if (!line.empty()) lines.push_back({std::move(line), lineWidth});
+    if (lines.empty()) lines.push_back({"", 0.0});
+}
 
-    if (!line.empty()) lines.push_back(line);
-    if (lines.empty()) lines.push_back("");
+static std::vector<WrappedAsciiLine> WrapAsciiText(
+    const std::string& raw, double maxWidth, double size, bool mono = false) {
+    std::vector<WrappedAsciiLine> lines;
+    WrapAsciiText(raw, maxWidth, size, mono, lines);
     return lines;
 }
 
@@ -3278,7 +3337,7 @@ private:
         double size = sizes[level];
         if (y < PAGE_H - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
         for (const auto& line : WrapAsciiText(block.text, PAGE_W - margin * 2.0, size)) {
-            DrawTextLine(margin, size, line, "F2", "0.02 0.02 0.02");
+            DrawTextLine(margin, size, line.text, "F2", "0.02 0.02 0.02");
         }
         y -= level <= 2 ? 8.0 : 5.0;
     }
@@ -3308,7 +3367,7 @@ private:
         }
 
         for (const auto& line : WrapAsciiText(text, width, bodySize)) {
-            DrawTextLine(x, bodySize, line);
+            DrawTextLine(x, bodySize, line.text);
         }
         y -= 5.0;
     }
@@ -3320,7 +3379,7 @@ private:
             Ensure(lineHeight + 2.0);
             Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
             Rect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
-            DrawTextLine(x, bodySize, line, "F1", "0.18 0.22 0.25");
+            DrawTextLine(x, bodySize, line.text, "F1", "0.18 0.22 0.25");
         }
         y -= 7.0;
     }
@@ -3368,12 +3427,13 @@ private:
         double pad = 5.0;
         y -= 3.0;
 
+        std::vector<std::vector<WrappedAsciiLine>> wrapped(columns);
+        static const std::string emptyCell;
         for (size_t r = 0; r < rows.size(); r++) {
-            std::vector<std::vector<std::string>> wrapped(columns);
             size_t maxLines = 1;
             for (size_t c = 0; c < columns; c++) {
-                std::string cell = c < rows[r].size() ? rows[r][c] : "";
-                wrapped[c] = WrapAsciiText(cell, std::max(16.0, colWidth - pad * 2.0), size);
+                const std::string& cell = c < rows[r].size() ? rows[r][c] : emptyCell;
+                WrapAsciiText(cell, std::max(16.0, colWidth - pad * 2.0), size, false, wrapped[c]);
                 maxLines = std::max(maxLines, wrapped[c].size());
             }
 
@@ -3386,12 +3446,12 @@ private:
                 Rect(cellX, top, colWidth, rowHeight, "0.72 0.72 0.72", true);
                 int align = c < aligns.size() ? aligns[c] : -1;
                 for (size_t li = 0; li < wrapped[c].size(); li++) {
-                    const std::string& line = wrapped[c][li];
+                    const WrappedAsciiLine& line = wrapped[c][li];
                     double tx = cellX + pad;
-                    double lw = AsciiTextWidth(line, size);
+                    double lw = line.width;
                     if (align == 0) tx = cellX + (colWidth - lw) * 0.5;
                     else if (align == 1) tx = cellX + colWidth - pad - lw;
-                    Text(tx, top - pad - size - li * lh, size, line, r == 0 ? "F2" : "F1", "0.08 0.08 0.08");
+                    Text(tx, top - pad - size - li * lh, size, line.text, r == 0 ? "F2" : "F1", "0.08 0.08 0.08");
                 }
             }
             y -= rowHeight;
@@ -3417,7 +3477,11 @@ private:
 };
 
 static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes) {
-    std::vector<Block> blocks = ParseMarkdown(markdown);
+    std::vector<Block> blocks;
+    {
+        RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
+        blocks = ParseMarkdown(markdown);
+    }
     PdfObjects pdf;
     int pagesId = pdf.Reserve();
     int fontRegularId = pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
@@ -3426,7 +3490,11 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
 
     ImageRegistry imageRegistry(options);
     StandardRenderer renderer(options.style, options.margin, &imageRegistry);
-    renderer.Render(blocks);
+    {
+        RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
+        renderer.Render(blocks);
+    }
+    RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
     std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks());
 
@@ -3485,26 +3553,32 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
 }
 
 static const TtfFont* GetCachedFont() {
-    static TtfFont font;
-    static bool tried = false;
-    static bool loaded = false;
-
-    if (!tried) {
-        loaded = font.Load();
-        tried = true;
-    }
-    return loaded ? &font : nullptr;
+    struct CachedFont {
+        TtfFont font;
+        bool loaded = font.Load();
+    };
+    static const CachedFont cached;
+    return cached.loaded ? &cached.font : nullptr;
 }
 
 static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes) {
-    const TtfFont* fontPtr = GetCachedFont();
+    const TtfFont* fontPtr = nullptr;
+    {
+        RayoMd::Profiling::ScopedPhase fontProfile(RayoMd::Profiling::Phase::Font);
+        fontPtr = GetCachedFont();
+    }
     if (!fontPtr) {
         g_lastError = 1;
         return false;
     }
     const TtfFont& font = *fontPtr;
 
-    std::vector<Block> blocks = ParseMarkdown(markdown);
+    std::vector<Block> blocks;
+    {
+        RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
+        blocks = ParseMarkdown(markdown);
+    }
+
     PdfObjects pdf;
 
     int fontFileId = pdf.Reserve();
@@ -3517,31 +3591,35 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
 
     ImageRegistry imageRegistry(options);
     Renderer renderer(font, type0FontId, options.style, options.margin, &imageRegistry);
-    renderer.Render(blocks);
+    {
+        RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
+        renderer.Render(blocks);
+    }
+    RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
     std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks());
 
     const CidList& used = renderer.UsedCids();
     std::string cidKey = MakeCidKey(used);
-    const std::string& cidMapBytes = MakeCidToGidMap(font, used, cidKey);
-    const std::string& toUnicodeBytes = MakeToUnicodeCMap(used, cidKey);
+    auto cidMapBytes = MakeCidToGidMap(font, used, cidKey);
+    auto toUnicodeBytes = MakeToUnicodeCMap(used, cidKey);
 
-    pdf.Set(fontFileId, CachedFontFileObject(font, used, cidKey));
+    pdf.Set(fontFileId, *CachedFontFileObject(font, used, cidKey));
     std::string cidMapObject;
-    cidMapObject.reserve(cidMapBytes.size() + 48);
+    cidMapObject.reserve(cidMapBytes->size() + 48);
     cidMapObject += "<< /Length ";
-    AppendSize(cidMapObject, cidMapBytes.size());
+    AppendSize(cidMapObject, cidMapBytes->size());
     cidMapObject += " >>\nstream\n";
-    cidMapObject += cidMapBytes;
+    cidMapObject += *cidMapBytes;
     cidMapObject += "\nendstream";
     pdf.Set(cidMapId, cidMapObject);
 
     std::string toUnicodeObject;
-    toUnicodeObject.reserve(toUnicodeBytes.size() + 48);
+    toUnicodeObject.reserve(toUnicodeBytes->size() + 48);
     toUnicodeObject += "<< /Length ";
-    AppendSize(toUnicodeObject, toUnicodeBytes.size());
+    AppendSize(toUnicodeObject, toUnicodeBytes->size());
     toUnicodeObject += " >>\nstream\n";
-    toUnicodeObject += toUnicodeBytes;
+    toUnicodeObject += *toUnicodeBytes;
     toUnicodeObject += "\nendstream";
     pdf.Set(toUnicodeId, toUnicodeObject);
 
@@ -3575,7 +3653,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     cidFont += " 0 R /CIDToGIDMap ";
     AppendInt(cidFont, cidMapId);
     cidFont += " 0 R /DW 500 /W ";
-    cidFont += MakeWidths(font, used, cidKey);
+    cidFont += *MakeWidths(font, used, cidKey);
     cidFont += " >>";
     pdf.Set(cidFontId, cidFont);
 
@@ -3640,11 +3718,12 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
 }
 
 BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes) {
-    std::lock_guard<std::mutex> buildLock(g_buildMutex);
+    const auto profileBefore = RayoMd::Profiling::Capture();
     g_lastError = 0;
     bool built = IsAsciiDocument(markdown)
         ? BuildStandardPdfBytes(markdown, options, pdfBytes)
         : BuildUnicodePdfBytes(markdown, options, pdfBytes);
+    RayoMd::Profiling::EmitDelta("build", profileBefore, RayoMd::Profiling::Capture());
     return built ? BuildResult{} : BuildResult{ static_cast<BuildError>(g_lastError) };
 }
 
