@@ -1,10 +1,10 @@
 # RayoMD
 
 <p align="center">
-  <a href="https://github.com/Butterski/md2pdf/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Butterski/md2pdf/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/Butterski/md2pdf/actions/workflows/hygiene.yml"><img alt="Repository Hygiene" src="https://github.com/Butterski/md2pdf/actions/workflows/hygiene.yml/badge.svg"></a>
-  <a href="https://github.com/Butterski/md2pdf/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/md2pdf/actions/workflows/release.yml/badge.svg"></a>
-  <a href="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/md2pdf/actions/workflows/codeql.yml/badge.svg"></a>
+  <a href="https://github.com/Butterski/rayomd/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Butterski/rayomd/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/Butterski/rayomd/actions/workflows/hygiene.yml"><img alt="Repository Hygiene" src="https://github.com/Butterski/rayomd/actions/workflows/hygiene.yml/badge.svg"></a>
+  <a href="https://github.com/Butterski/rayomd/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/rayomd/actions/workflows/release.yml/badge.svg"></a>
+  <a href="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
   <img alt="Version: 2.2.0" src="https://img.shields.io/badge/version-2.2.0-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
@@ -40,9 +40,8 @@ CLI.
 ## Highlights
 
 - Native Markdown-to-PDF path with no browser engine.
-- Fastest in our July 2026 Windows tests: `74x` to `113x` faster than
-  Pandoc/XeLaTeX and the popular Node `md-to-pdf` converter on three synthetic
-  small-to-medium workloads.
+- In a dated Windows three-tool comparison, RayoMD finished in `15.45` to
+  `18.66 ms`; the next comparator took `111.2x` to `132.0x` as long.
 - Single Windows GUI executable for the default release.
 - Compact non-Windows CLI binary.
 - Fast warm conversion for small and medium documents.
@@ -74,110 +73,56 @@ need a complete document ecosystem.
 The native renderer is intentionally a fast Markdown subset, not a Pandoc clone.
 That boundary keeps the binary small and the default path dependency-light.
 
-## Benchmark Snapshot
+## Performance Snapshot
 
-These are local CMake Release results kept as reproducible baselines for this
-repository. Treat them as engineering numbers, not universal performance claims:
-hardware, storage, fonts, compiler, and document shape all matter. The small
-document smoke rows were refreshed on 2026-06-18 after making the remote image
-in `tester.md` deterministic. The Linux `tester.md` row was refreshed on
-2026-06-21 for the default no-curl Linux build.
+These are dated local CMake Release measurements, not a universal ranking.
+Hardware, storage, fonts, compiler, document shape, and supported feature scope
+all affect the result. Warm `--bench` rows measure in-process PDF generation;
+export and batch rows include process startup and file I/O.
 
-Warm `--bench` rows measure in-process PDF byte generation after startup. Export
-and batch rows include process and file I/O. Linux small-document rows below
-were run from a Windows-mounted WSL path (`/mnt/e`); Linux batch numbers in the
-larger synthetic table came from native WSL ext4 storage. `/mnt/*`
-Windows-mounted paths are much slower for many small files.
+### Fresh-Process Three-Tool Comparison (2026-07-13)
 
-### Small Document Smoke
+On one Windows 11 system, RayoMD 2.2.0 had the lowest median elapsed time among
+RayoMD, Pandoc/XeLaTeX, and Node `md-to-pdf` for three deterministic synthetic
+inputs supported by RayoMD's native subset. The next comparator took `111.2x`
+to `132.0x` as long in this run.
 
-The `tester.md` rows use `modern normal`; the ASCII smoke row uses the verifier
-default shown in `tests/verify_cli.py`. PDF byte counts can differ by
-platform because native builds use platform font and optional image pipelines.
-
-| Build | Input | Iterations | Avg conversion | Output PDF |
-|---|---:|---:|---:|---:|
-| Windows GUI/CLI | `tester.md`, Unicode | 100 | `1.26 ms` | `730,223 bytes` |
-| Linux CLI | `tester.md`, Unicode | 100 | `5.03 ms` | `878,079 bytes` |
-| Linux CLI | ASCII smoke doc | 1,000 | `0.02 ms` | `1,885 bytes` |
-
-Release binary sizes from local release builds:
-
-| Target | Size |
-|---|---:|
-| `rayomd.exe` Windows app | `2,364,928 bytes` |
-| `rayomd` Linux CLI | `276,912 bytes` |
-
-### Fastest In Our July 2026 Tests
-
-RayoMD was the fastest converter in every case in a fresh-process Windows
-comparison with Pandoc/XeLaTeX and the Node `md-to-pdf` tool. It finished at
-least `74.2x` faster than the next-fastest comparator across a tiny README, a
-medium feature mix, and a pagination-heavy 500-row table.
-
-| Case | Input | RayoMD | `md-to-pdf` | Pandoc + XeLaTeX | RayoMD vs next fastest |
+| Case | Input | RayoMD 2.2.0 | `md-to-pdf` 5.2.5 | Pandoc 3.9.0.1 + XeLaTeX | Next comparator / RayoMD |
 |---|---:|---:|---:|---:|---:|
-| Tiny README | `205 B` | **`17.93 ms`** | `1655.77 ms` | `3022.02 ms` | **`92.3x`** |
-| Medium feature mix | `15,102 B` | **`19.74 ms`** | `2238.22 ms` | `3324.44 ms` | **`113.4x`** |
-| 500-row table | `33,353 B` | **`30.64 ms`** | `2272.99 ms` | `3302.67 ms` | **`74.2x`** |
+| Tiny README | `205 B` | **`15.45 ms`** | `1,717.89 ms` | `3,210.69 ms` | **`111.2x`** |
+| Medium feature mix | `15,102 B` | **`17.29 ms`** | `2,281.90 ms` | `3,377.94 ms` | **`132.0x`** |
+| 500-row table | `33,353 B` | **`18.66 ms`** | `2,340.90 ms` | `3,427.50 ms` | **`125.5x`** |
 
-The test machine used an AMD Ryzen 5 5600X (6 cores, 12 threads), 128 GiB RAM,
-and Windows 11 Pro build 26200. The compared software was RayoMD 2.0.0,
-Pandoc 3.9.0.1 with MiKTeX-XeTeX 4.16, and `md-to-pdf` 5.2.5 running on
-Node.js 25.8.1.
-
-Each tool ran as a new process, so timings include program startup, Markdown
-parsing, PDF generation, and output-file writing. Each case had one uncounted
-warm-up followed by seven measured runs; the table reports the median. Inputs
-were deterministic local files with no remote resources, and every output was
-checked for a valid PDF header, EOF marker, and non-trivial size.
+Each tool ran in a fresh process. One uncounted warm-up preceded seven measured
+runs, the table reports medians, and every result was checked for a PDF header,
+EOF marker, and non-trivial size. The renderers do not provide equivalent
+features or visual output: Pandoc/XeLaTeX and browser-based `md-to-pdf` cover
+far more document and styling behavior than RayoMD's deliberately focused
+native subset. This scoped timing comparison should not be generalized beyond
+the recorded tools, machine, inputs, and settings.
 
 See the dated
-[`full benchmark report`](docs/benchmarks/markdown_pdf_speed_comparison_2026-07-11.md)
-for timing ranges, tool-selection rationale, reproduction commands, and feature
-scope caveats. The reusable harness is
-[`tools/benchmark.py`](tools/benchmark.py).
+[`three-tool benchmark report`](docs/benchmarks/markdown_pdf_speed_comparison_2026-07-13.md)
+for timing ranges, environment, versions, caveats, and reproduction commands.
 
-This supports the scoped claim that RayoMD was the fastest Markdown-to-PDF
-converter **in these tests**. It is not an unqualified universal claim: Pandoc
-and browser renderers implement broader document and styling features than
-RayoMD's deliberately focused native subset.
+### Native 2.2.0 Release Snapshot
 
-### Local Pandoc Comparison
+The broader 2026-07-13 suite measured the default one-worker path separately:
 
-On 2026-06-18, a local Windows end-to-end export comparison against
-Pandoc 3.9.0.1 + XeLaTeX showed the native RayoMD path about `182x` to `322x`
-faster on simple synthetic Markdown cases covering a 500-row table, nested lists
-with code, and a mixed 100 KiB report.
+| Platform/storage | Binary | Warm aggregate | Cold export | Folder batch | stdin batch | Serve reported |
+|---|---:|---:|---:|---:|---:|---:|
+| Windows workspace | `2,759,168 B` | `8.110 ms` | `29.752 ms` | `16.053 ms/file` | `7.730 ms/file` | `7.295 ms` |
+| Linux WSL ext4 | `367,096 B` | `6.115 ms` | `15.965 ms` | `5.785 ms/file` | `5.608 ms/file` | `5.255 ms` |
 
-| Case | RayoMD median | Pandoc median |
-|---|---:|---:|
-| 500-row pipe table | `38.98 ms` | `7113.89 ms` |
-| Nested lists and code | `20.21 ms` | `6504.84 ms` |
-| Mixed 100 KiB report | `52.45 ms` | `10614.53 ms` |
+A separate five-round, 160-document scaling matrix improved folder throughput
+by `2.7x` on Windows and `4.5x` on Linux at six workers, with the expected RSS
+increase. Automatic worker caps limit memory multiplication for large inputs.
 
-This compares a narrow native Markdown subset with a much more complete Pandoc
-document pipeline, so it is a scope comparison as much as a speed comparison.
-See [`docs/benchmarks/pandoc_comparison_2026-06-18.md`](docs/benchmarks/pandoc_comparison_2026-06-18.md)
-for methodology and caveats.
-
-### Larger Synthetic Runs
-
-Run date: 2026-06-06. Full caveats and source report pointers are in
-[`docs/benchmarks/commercial_benchmark_summary.md`](docs/benchmarks/commercial_benchmark_summary.md).
-
-| Case | Result | Caveat |
-|---|---:|---|
-| Linux 100 MB native export | `7.03 s` | WSL ext4, synthetic ASCII-heavy document |
-| Windows 100 MB native export | `13.48 s` | Synthetic ASCII-heavy document |
-| Linux 100 MB warm native benchmark | `6.48 s avg` | Warm `--bench`, no end-to-end I/O |
-| Linux 100-file stdin batch | `0.144 s` | 100 synthetic files around 20 KB each |
-| Windows 20-file batch | `0.610 s` | 20 synthetic files around 100 KB each |
-| Windows Pandoc compatibility smoke | `8.11 s` | External Pandoc/LaTeX path, 100 KB ASCII input |
-
-Use `tools/benchmark.py` for current before/after work. It records machine
-and git metadata, keeps JSONL history for report-only local comparisons, and
-can compare against explicit baseline records for deterministic gates.
+See the full
+[`2.2.0 optimization audit`](docs/benchmarks/optimization_2.2.0_2026-07-13.md)
+for p50/p95, peak RSS, correctness checks, and rejected LTO/PGO/streaming
+experiments. Use [`tools/benchmark.py`](tools/benchmark.py) for current runs;
+raw corpora and reports stay under ignored `benchmark-output/`.
 
 ## Native Markdown Support
 
@@ -452,6 +397,7 @@ Release records belong under docs/benchmarks/releases/. Remote-image timing is
 excluded because network latency is not a stable performance signal. The full
 2.2.0 decisions and measurements are in
 [docs/benchmarks/optimization_2.2.0_2026-07-13.md](docs/benchmarks/optimization_2.2.0_2026-07-13.md).
+
 ## Project Layout
 
     include/rayomd/             Public native exporter API
@@ -469,6 +415,7 @@ excluded because network latency is not a stable performance signal. The full
 
 Generated build trees, benchmark corpora, local binaries, generated PDFs, and
 raw timing reports are ignored and must not be committed.
+
 ## Packaging
 
 Default native releases are intentionally small:
