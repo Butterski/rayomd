@@ -650,6 +650,20 @@ def command_failure(name: str, rc: int, stdout: str, stderr: str) -> RuntimeErro
     )
 
 
+def supports_worker_option(binary: Path) -> bool:
+    try:
+        proc = subprocess.run(
+            [str(binary), "--help"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        return "--workers=" in (proc.stdout + proc.stderr)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def run_bench_case(
     binary: Path,
     input_path: Path,
@@ -696,6 +710,12 @@ def run_watch(
     workers: int,
 ) -> dict[str, Any]:
     cfg = SUITES[suite]
+    worker_option_supported = supports_worker_option(binary)
+    if workers != 1 and not worker_option_supported:
+        raise RuntimeError(
+            f"binary does not support --workers={workers}; only the historical sequential default is comparable"
+        )
+    worker_args = [f"--workers={workers}"] if worker_option_supported else []
     corpus = generate_corpus(run_root, suite, seed, image_mode)
     single_paths = corpus["single_paths"]
     batch_paths = corpus["batch_paths"]
@@ -822,7 +842,7 @@ def run_watch(
         "native",
         style,
         margin,
-        f"--workers={workers}",
+        *worker_args,
     ]
     rc, batch_ms, stdout, stderr, batch_peak_rss = run_command(batch_cmd)
     (results_root / "batch_stdout.txt").write_text(stdout, encoding="utf-8", newline="\n")
@@ -841,7 +861,7 @@ def run_watch(
         "native",
         style,
         margin,
-        f"--workers={workers}",
+        *worker_args,
     ]
     rc, stdin_ms, stdout, stderr, stdin_peak_rss = run_command(stdin_cmd, stdin_payload)
     (results_root / "stdin_batch_stdout.txt").write_text(stdout, encoding="utf-8", newline="\n")
