@@ -115,6 +115,19 @@ static std::wstring Utf8ToWide(std::string_view str) {
 #endif
 }
 
+#ifdef _WIN32
+static std::string WideToUtf8(std::wstring_view str) {
+    if (str.empty()) return {};
+    int length = WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, str.data(), (int)str.size(), nullptr, 0, nullptr, nullptr);
+    if (length <= 0) return {};
+    std::string utf8((size_t)length, '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, str.data(), (int)str.size(),
+            &utf8[0], length, nullptr, nullptr) != length) return {};
+    return utf8;
+}
+#endif
+
 constexpr double PAGE_W = 595.0;  // A4, points
 constexpr double PAGE_H = 842.0;
 static thread_local int g_lastError = 0;
@@ -693,8 +706,17 @@ public:
         return (int)objects.size();
     }
 
+    int Add(std::string&& body) {
+        objects.push_back(std::move(body));
+        return (int)objects.size();
+    }
+
     void Set(int id, const std::string& body) {
         if (id > 0 && id <= (int)objects.size()) objects[id - 1] = body;
+    }
+
+    void Set(int id, std::string&& body) {
+        if (id > 0 && id <= (int)objects.size()) objects[id - 1] = std::move(body);
     }
 
     int AddStream(const std::string& dict, const std::string& data) {
@@ -707,14 +729,21 @@ public:
         body += " >>\nstream\n";
         body += data;
         body += "\nendstream";
-        return Add(body);
+        return Add(std::move(body));
     }
 
-    std::string Build(int rootId, int infoId, bool pdf20 = false) const {
-        std::string pdf;
+    void BuildInto(int rootId, int infoId, std::string& pdf, bool pdf20 = false) const {
         size_t reserveBytes = 64 * 1024;
         for (const auto& object : objects) reserveBytes += object.size() + 64;
-        pdf.reserve(reserveBytes);
+        constexpr size_t kRetentionFloor = 4u * 1024u * 1024u;
+        if (pdf.capacity() > kRetentionFloor && reserveBytes < pdf.capacity() / 4) {
+            std::string replacement;
+            replacement.reserve(reserveBytes);
+            pdf.swap(replacement);
+        } else {
+            pdf.clear();
+            if (pdf.capacity() < reserveBytes) pdf.reserve(reserveBytes);
+        }
         pdf += pdf20 ? "%PDF-2.0\n%" : "%PDF-1.7\n%";
         pdf.push_back((char)0xE2);
         pdf.push_back((char)0xE3);
@@ -751,7 +780,6 @@ public:
         pdf += " 0 R >>\nstartxref\n";
         AppendSize(pdf, xref);
         pdf += "\n%%EOF\n";
-        return pdf;
     }
 
 private:
@@ -773,7 +801,7 @@ static void AddReversibleSource(PdfObjects& pdf, std::string& catalog, const std
     fileSpec += " 0 R /UF ";
     AppendInt(fileSpec, sourceId);
     fileSpec += " 0 R >> /AFRelationship /Source >>";
-    int fileSpecId = pdf.Add(fileSpec);
+    int fileSpecId = pdf.Add(std::move(fileSpec));
 
     std::string metadata = RayoMd::PdfSource::BuildXmpMetadata(markdown, RAYOMD_VERSION);
     int metadataId = pdf.AddStream("/Type /Metadata /Subtype /XML", metadata);
@@ -789,7 +817,6 @@ static void AddReversibleSource(PdfObjects& pdf, std::string& catalog, const std
 
 
 struct PdfImage {
-    std::string name;
     std::string stream;
     std::string maskStream;
     std::string colorSpace = "/DeviceRGB";
@@ -801,6 +828,8 @@ struct PdfImage {
     int height = 0;
     int bitsPerComponent = 8;
 };
+
+using SharedPdfImage = std::shared_ptr<const PdfImage>;
 
 struct LinkRect {
     double x1 = 0.0;
@@ -823,6 +852,181 @@ static std::filesystem::path PathFromUtf8(std::string_view s) {
 static std::string PathToUtf8(const std::filesystem::path& path) {
     return path.u8string();
 }
+
+#ifdef _WIN32
+struct WinLocalImageFile {
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    size_t size = 0;
+
+    WinLocalImageFile() = default;
+    WinLocalImageFile(const WinLocalImageFile&) = delete;
+    WinLocalImageFile& operator=(const WinLocalImageFile&) = delete;
+
+    WinLocalImageFile(WinLocalImageFile&& other) noexcept
+        : handle(other.handle), size(other.size) {
+        other.handle = INVALID_HANDLE_VALUE;
+        other.size = 0;
+    }
+
+    WinLocalImageFile& operator=(WinLocalImageFile&& other) noexcept {
+        if (this == &other) return *this;
+        Reset();
+        handle = other.handle;
+        size = other.size;
+        other.handle = INVALID_HANDLE_VALUE;
+        other.size = 0;
+        return *this;
+    }
+
+    ~WinLocalImageFile() { Reset(); }
+
+    void Reset() {
+        if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+        handle = INVALID_HANDLE_VALUE;
+        size = 0;
+    }
+};
+
+enum class DirectLocalImageResult {
+    NotApplicable,
+    Rejected,
+    Opened,
+};
+
+static bool GetFinalNtPath(HANDLE handle, std::wstring& path) {
+    constexpr DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_NT;
+    std::array<wchar_t, 512> stack{};
+    DWORD length = GetFinalPathNameByHandleW(handle, stack.data(), (DWORD)stack.size(), flags);
+    if (length == 0) return false;
+    if (length < stack.size()) {
+        path.assign(stack.data(), length);
+        return true;
+    }
+
+    if (length > 32767) return false;
+    std::vector<wchar_t> buffer((size_t)length + 1, L'\0');
+    length = GetFinalPathNameByHandleW(handle, buffer.data(), (DWORD)buffer.size(), flags);
+    if (length == 0 || length >= buffer.size()) return false;
+    path.assign(buffer.data(), length);
+    return true;
+}
+
+static bool ExpectedNtPathForDirectDosPath(
+    const std::filesystem::path& absolute, std::wstring& expected) {
+    std::wstring drive = absolute.root_name().native();
+    if (drive.size() != 2 || drive[1] != L':' ||
+        !((drive[0] >= L'A' && drive[0] <= L'Z') ||
+          (drive[0] >= L'a' && drive[0] <= L'z'))) return false;
+
+    std::vector<wchar_t> targets(4096, L'\0');
+    DWORD length = QueryDosDeviceW(drive.c_str(), targets.data(), (DWORD)targets.size());
+    if (length == 0 && ::GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+        targets.assign(32768, L'\0');
+        length = QueryDosDeviceW(drive.c_str(), targets.data(), (DWORD)targets.size());
+    }
+    if (length == 0) return false;
+
+    std::wstring device(targets.data());
+    if (device.compare(0, 8, L"\\Device\\") != 0) return false;
+    std::wstring relative = absolute.relative_path().native();
+    std::replace(relative.begin(), relative.end(), L'/', L'\\');
+    while (!relative.empty() && relative.front() == L'\\') relative.erase(relative.begin());
+
+    expected = std::move(device);
+    if (!relative.empty()) {
+        expected.push_back(L'\\');
+        expected += relative;
+    }
+    while (!expected.empty() && expected.back() == L'\\') expected.pop_back();
+    return !expected.empty();
+}
+
+static bool TryApprovedNtRootForPolicy(
+    const std::filesystem::path& absolute, std::wstring& approved) {
+    std::wstring expected;
+    if (!ExpectedNtPathForDirectDosPath(absolute, expected)) return false;
+
+    HANDLE handle = CreateFileW(absolute.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+
+    BY_HANDLE_FILE_INFORMATION info{};
+    std::wstring finalPath;
+    bool valid = GetFileType(handle) == FILE_TYPE_DISK &&
+        GetFileInformationByHandle(handle, &info) &&
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        GetFinalNtPath(handle, finalPath) && finalPath == expected;
+    CloseHandle(handle);
+    if (!valid) return false;
+    approved = std::move(expected);
+    return true;
+}
+
+static DirectLocalImageResult TryOpenDirectLocalImage(
+    const std::filesystem::path& path, const std::wstring& approvedRoot,
+    std::string& key, WinLocalImageFile& file) {
+    HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        DWORD error = ::GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
+            ? DirectLocalImageResult::Rejected
+            : DirectLocalImageResult::NotApplicable;
+    }
+
+    if (GetFileType(handle) != FILE_TYPE_DISK) {
+        CloseHandle(handle);
+        return DirectLocalImageResult::Rejected;
+    }
+
+    std::wstring finalPath;
+    if (!GetFinalNtPath(handle, finalPath)) {
+        CloseHandle(handle);
+        return DirectLocalImageResult::Rejected;
+    }
+    if (finalPath.size() <= approvedRoot.size() ||
+        finalPath.compare(0, approvedRoot.size(), approvedRoot) != 0 ||
+        finalPath[approvedRoot.size()] != L'\\') {
+        CloseHandle(handle);
+        return DirectLocalImageResult::Rejected;
+    }
+
+    BY_HANDLE_FILE_INFORMATION info{};
+    LARGE_INTEGER size{};
+    if (!GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+        !GetFileSizeEx(handle, &size) || size.QuadPart <= 0 ||
+        size.QuadPart > (LONGLONG)kMaxImageBytes) {
+        CloseHandle(handle);
+        return DirectLocalImageResult::Rejected;
+    }
+
+    std::string finalUtf8 = WideToUtf8(finalPath);
+    if (finalUtf8.empty()) {
+        CloseHandle(handle);
+        return DirectLocalImageResult::Rejected;
+    }
+    key = "file-nt:" + finalUtf8;
+    file.Reset();
+    file.handle = handle;
+    file.size = (size_t)size.QuadPart;
+    return DirectLocalImageResult::Opened;
+}
+
+static bool ReadLocalImageHandle(WinLocalImageFile& file, std::vector<uint8_t>& bytes) {
+    if (file.handle == INVALID_HANDLE_VALUE || file.size == 0 || file.size > kMaxImageBytes) return false;
+    bytes.resize(file.size);
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+        DWORD chunk = (DWORD)std::min<size_t>(bytes.size() - offset, 1024 * 1024);
+        DWORD read = 0;
+        if (!ReadFile(file.handle, bytes.data() + offset, chunk, &read, nullptr) || read == 0) return false;
+        offset += read;
+    }
+    return true;
+}
+#endif
 
 static bool HasUriScheme(std::string_view src) {
     if (src.empty() || !std::isalpha((unsigned char)src[0])) return false;
@@ -848,32 +1052,104 @@ static bool IsUnsafeLocalImageSource(std::string_view src) {
     return path.is_absolute();
 }
 
-static std::filesystem::path CanonicalForPolicy(const std::filesystem::path& path) {
+static bool TryCanonicalForPolicy(
+    const std::filesystem::path& path, std::filesystem::path& normalized) {
     std::error_code ec;
     std::filesystem::path absolute = path.is_absolute() ? path : std::filesystem::absolute(path, ec);
-    if (ec) absolute = path;
+    if (ec) return false;
 
-    std::filesystem::path normalized = std::filesystem::weakly_canonical(absolute, ec);
-    if (ec) normalized = absolute.lexically_normal();
-    return normalized.lexically_normal();
+    normalized = std::filesystem::canonical(absolute, ec);
+    if (ec) return false;
+    normalized = normalized.lexically_normal();
+    return true;
 }
 
-static bool PathPartEqualForPolicy(const std::filesystem::path& a, const std::filesystem::path& b) {
+static bool PathPartEqualForPolicy(
+    const std::filesystem::path& a, const std::filesystem::path& b, bool exact) {
     std::string left = a.u8string();
     std::string right = b.u8string();
 #ifdef _WIN32
-    std::transform(left.begin(), left.end(), left.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-    std::transform(right.begin(), right.end(), right.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    if (!exact) {
+        std::transform(left.begin(), left.end(), left.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+        std::transform(right.begin(), right.end(), right.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    }
 #endif
     return left == right;
 }
 
-static bool IsPathContainedInRoot(const std::filesystem::path& child, const std::filesystem::path& root) {
+struct DirectRootCacheEntry {
+    std::filesystem::path root;
+    std::wstring approvedNtRoot;
+};
+
+struct DirectRootCache {
+    std::mutex mutex;
+    std::array<DirectRootCacheEntry, 4> entries;
+    size_t next = 0;
+};
+
+static DirectRootCache& RootCache() {
+    static DirectRootCache cache;
+    return cache;
+}
+
+static bool TryCanonicalRootForPolicy(
+    const std::filesystem::path& path, std::filesystem::path& normalized,
+    bool& direct, std::wstring& approvedNtRoot) {
+    direct = false;
+    approvedNtRoot.clear();
+    std::error_code ec;
+    std::filesystem::path absolute =
+        path.is_absolute() ? path : std::filesystem::absolute(path, ec);
+    if (ec) return false;
+    absolute = absolute.lexically_normal();
+
+    DirectRootCache& cache = RootCache();
+    {
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        for (const DirectRootCacheEntry& entry : cache.entries) {
+            if (!entry.root.empty() && entry.root == absolute) {
+                normalized = absolute;
+                direct = true;
+                approvedNtRoot = entry.approvedNtRoot;
+                return true;
+            }
+        }
+    }
+
+    std::filesystem::path canonical;
+    if (!TryCanonicalForPolicy(absolute, canonical)) return false;
+    std::wstring approved;
+    if (canonical == absolute) {
+#ifdef _WIN32
+        TryApprovedNtRootForPolicy(absolute, approved);
+#endif
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        for (const DirectRootCacheEntry& entry : cache.entries) {
+            if (!entry.root.empty() && entry.root == absolute) {
+                normalized = absolute;
+                direct = true;
+                approvedNtRoot = entry.approvedNtRoot;
+                return true;
+            }
+        }
+        DirectRootCacheEntry& entry = cache.entries[cache.next++ % cache.entries.size()];
+        entry.root = absolute;
+        entry.approvedNtRoot = approved;
+    }
+    normalized = std::move(canonical);
+    direct = normalized == absolute;
+    if (direct) approvedNtRoot = std::move(approved);
+    return true;
+}
+
+static bool IsPathContainedInRoot(
+    const std::filesystem::path& child, const std::filesystem::path& root, bool exact) {
     std::filesystem::path childNorm = child.lexically_normal();
     std::filesystem::path rootNorm = root.lexically_normal();
     auto childIt = childNorm.begin();
     for (auto rootIt = rootNorm.begin(); rootIt != rootNorm.end(); ++rootIt, ++childIt) {
-        if (childIt == childNorm.end() || !PathPartEqualForPolicy(*childIt, *rootIt)) return false;
+        if (childIt == childNorm.end() || !PathPartEqualForPolicy(*childIt, *rootIt, exact)) return false;
     }
     return true;
 }
@@ -892,14 +1168,32 @@ public:
         if (safeBase.empty()) safeBase = ".";
     }
 
+#ifdef _WIN32
+    DirectLocalImageResult TryOpenDirect(
+        const std::string& src, std::string& key, WinLocalImageFile& file) {
+        if (src.empty() || IsHttpUrl(src)) return DirectLocalImageResult::Rejected;
+        if (allowUnsafe) return DirectLocalImageResult::NotApplicable;
+        if (!hasSourcePath || IsUnsafeLocalImageSource(src)) return DirectLocalImageResult::Rejected;
+
+        const std::filesystem::path& root = SafeRoot();
+        if (!safeRootValid) return DirectLocalImageResult::Rejected;
+        if (!safeRootDirect || safeRootNt.empty()) return DirectLocalImageResult::NotApplicable;
+
+        std::filesystem::path path = (root / PathFromUtf8(src)).lexically_normal();
+        return TryOpenDirectLocalImage(path, safeRootNt, key, file);
+    }
+#endif
+
     bool Resolve(const std::string& src, std::string& key, std::string& pathUtf8) {
         if (src.empty() || IsHttpUrl(src)) return false;
         if (allowUnsafe) return ResolveUnsafe(src, key, pathUtf8);
         if (!hasSourcePath || IsUnsafeLocalImageSource(src)) return false;
 
         const std::filesystem::path& root = SafeRoot();
-        std::filesystem::path normalized = CanonicalForPolicy(root / PathFromUtf8(src));
-        if (!IsPathContainedInRoot(normalized, root)) return false;
+        if (!safeRootValid) return false;
+        std::filesystem::path normalized;
+        if (!TryCanonicalForPolicy(root / PathFromUtf8(src), normalized) ||
+            !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
 
         pathUtf8 = PathToUtf8(normalized);
         key = "file:" + pathUtf8;
@@ -909,7 +1203,8 @@ public:
 private:
     const std::filesystem::path& SafeRoot() {
         if (!safeRootReady) {
-            safeRoot = CanonicalForPolicy(safeBase);
+            safeRootValid = TryCanonicalRootForPolicy(
+                safeBase, safeRoot, safeRootDirect, safeRootNt);
             safeRootReady = true;
         }
         return safeRoot;
@@ -919,7 +1214,8 @@ private:
         std::filesystem::path path = PathFromUtf8(src);
         if (path.is_relative() && hasSourcePath) path = sourceBase / path;
 
-        std::filesystem::path normalized = CanonicalForPolicy(path);
+        std::filesystem::path normalized;
+        if (!TryCanonicalForPolicy(path, normalized)) return false;
         pathUtf8 = PathToUtf8(normalized);
         key = "file:" + pathUtf8;
         return true;
@@ -928,9 +1224,12 @@ private:
     bool allowUnsafe = false;
     bool hasSourcePath = false;
     bool safeRootReady = false;
+    bool safeRootValid = false;
+    bool safeRootDirect = false;
     std::filesystem::path sourceBase;
     std::filesystem::path safeBase;
     std::filesystem::path safeRoot;
+    std::wstring safeRootNt;
 };
 
 static bool ReadLocalImageFile(const std::string& pathUtf8, std::vector<uint8_t>& bytes) {
@@ -1883,8 +2182,8 @@ public:
 
     bool Resolve(const std::string& src, const std::string& alt, int& index) {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Image);
-        // Reference and inline syntax can resolve to the same source. Reuse only
-        // an image that this registry has already accepted through the policy.
+        // Reuse raw sources only after this registry has accepted them through
+        // its immutable policy; cross-build caches stay canonical-keyed.
         std::string sourceKey = "source:";
         sourceKey += src;
         auto source = indexByKey.find(sourceKey);
@@ -1895,57 +2194,77 @@ public:
 
         std::string key;
         std::string localPathUtf8;
+#ifdef _WIN32
+        WinLocalImageFile localFile;
+        bool directLocal = false;
+#endif
         bool isUrl = IsHttpUrl(src);
         if (isUrl) {
+            if (!options.enableUrlImages) return false;
             key = "url:" + src;
-        } else if (!localPolicy.Resolve(src, key, localPathUtf8)) {
-            return false;
+        } else {
+#ifdef _WIN32
+            DirectLocalImageResult direct = localPolicy.TryOpenDirect(src, key, localFile);
+            if (direct == DirectLocalImageResult::Rejected) return false;
+            directLocal = direct == DirectLocalImageResult::Opened;
+            if (!directLocal && !localPolicy.Resolve(src, key, localPathUtf8)) return false;
+#else
+            if (!localPolicy.Resolve(src, key, localPathUtf8)) return false;
+#endif
         }
 
         auto local = indexByKey.find(key);
         if (local != indexByKey.end()) {
             index = local->second;
+            indexByKey.emplace(std::move(sourceKey), index);
             return true;
         }
-        if (IsKnownFailure(key)) return false;
 
-        PdfImage image;
-        if (!LoadDecodedImageFromCache(key, image)) {
+        SharedPdfImage sharedImage = LoadDecodedImageFromCache(key);
+        if (!sharedImage && IsKnownFailure(key)) return false;
+        if (!sharedImage) {
+            PdfImage image;
             std::vector<uint8_t> bytes;
-            bool loaded = isUrl
-                ? FetchUrlBytes(src, options, bytes)
-                : (ReadLocalImageFile(localPathUtf8, bytes) && bytes.size() <= kMaxImageBytes);
+            bool loaded = false;
+            if (isUrl) {
+                loaded = FetchUrlBytes(src, options, bytes);
+            }
+#ifdef _WIN32
+            else if (directLocal) {
+                loaded = ReadLocalImageHandle(localFile, bytes);
+            }
+#endif
+            else {
+                loaded = ReadLocalImageFile(localPathUtf8, bytes) && bytes.size() <= kMaxImageBytes;
+            }
             if (!loaded || !DecodeImageBytes(bytes, image)) {
                 StoreFailure(key);
                 return false;
             }
-            StoreDecodedImageInCache(key, image);
+            sharedImage = StoreDecodedImageInCache(key, std::move(image));
         }
 
-        image.name = "Im";
-        AppendSize(image.name, images.size() + 1);
         index = (int)images.size();
         indexByKey[key] = index;
         indexByKey.emplace(std::move(sourceKey), index);
-        images.push_back(std::move(image));
+        images.push_back(std::move(sharedImage));
         (void)alt;
         return true;
     }
 
     const PdfImage& Get(int index) const {
-        return images[(size_t)index];
+        return *images[(size_t)index];
     }
 
-    const std::vector<PdfImage>& Images() const { return images; }
+    const std::vector<SharedPdfImage>& Images() const { return images; }
 
 private:
     const PdfOptions& options;
     LocalImagePolicy localPolicy;
-    std::vector<PdfImage> images;
+    std::vector<SharedPdfImage> images;
     std::unordered_map<std::string, int> indexByKey;
-
-    static std::unordered_map<std::string, PdfImage>& Cache() {
-        static std::unordered_map<std::string, PdfImage> cache;
+    static std::unordered_map<std::string, SharedPdfImage>& Cache() {
+        static std::unordered_map<std::string, SharedPdfImage> cache;
         return cache;
     }
 
@@ -1969,41 +2288,40 @@ private:
             image.filter.size() + image.decodeParms.size() + 128;
     }
 
-    static bool LoadDecodedImageFromCache(const std::string& key, PdfImage& image) {
+    static SharedPdfImage LoadDecodedImageFromCache(const std::string& key) {
         std::lock_guard<std::mutex> lock(CacheMutex());
         auto& cache = Cache();
         auto it = cache.find(key);
-        if (it == cache.end()) return false;
-        image = it->second;
-        image.name.clear();
-        return true;
+        return it == cache.end() ? SharedPdfImage{} : it->second;
     }
 
-    static void StoreDecodedImageInCache(const std::string& key, const PdfImage& image) {
+    static SharedPdfImage StoreDecodedImageInCache(const std::string& key, PdfImage image) {
         size_t cost = ImageCacheCost(image);
-        if (cost > kMaxImageBytes) return;
-        PdfImage copy = image;
-        copy.name.clear();
+        SharedPdfImage candidate = std::make_shared<PdfImage>(std::move(image));
+        if (cost > kMaxImageBytes) return candidate;
 
         std::lock_guard<std::mutex> lock(CacheMutex());
         auto& cache = Cache();
-        if (cache.find(key) != cache.end()) return;
+        if (cache.find(key) != cache.end()) return candidate;
         size_t& cacheBytes = CacheBytes();
         if (cacheBytes + cost > 64u * 1024u * 1024u) {
             cache.clear();
             cacheBytes = 0;
         }
         cacheBytes += cost;
-        cache.emplace(key, std::move(copy));
+        cache.emplace(key, candidate);
+        return candidate;
     }
 
     static bool IsKnownFailure(const std::string& key) {
+        if (key.empty()) return false;
         std::lock_guard<std::mutex> lock(CacheMutex());
         auto& failures = FailureCache();
         return failures.find(key) != failures.end();
     }
 
     static void StoreFailure(const std::string& key) {
+        if (key.empty() || key.size() > 4096) return;
         std::lock_guard<std::mutex> lock(CacheMutex());
         auto& failures = FailureCache();
         if (failures.size() >= 256) failures.clear();
@@ -2057,10 +2375,11 @@ static std::string BuildMaskStreamDict(const PdfImage& image) {
     return dict;
 }
 
-static std::vector<int> AddImageObjects(PdfObjects& pdf, const std::vector<PdfImage>& images) {
+static std::vector<int> AddImageObjects(PdfObjects& pdf, const std::vector<SharedPdfImage>& images) {
     std::vector<int> ids;
     ids.reserve(images.size());
-    for (const PdfImage& image : images) {
+    for (const SharedPdfImage& shared : images) {
+        const PdfImage& image = *shared;
         int smaskId = 0;
         if (!image.maskStream.empty()) {
             smaskId = pdf.AddStream(BuildMaskStreamDict(image), image.maskStream);
@@ -2070,13 +2389,12 @@ static std::vector<int> AddImageObjects(PdfObjects& pdf, const std::vector<PdfIm
     return ids;
 }
 
-static void AppendXObjectResources(std::string& page, const std::vector<PdfImage>& images,
-    const std::vector<int>& imageObjectIds) {
-    if (images.empty()) return;
+static void AppendXObjectResources(std::string& page, const std::vector<int>& imageObjectIds) {
+    if (imageObjectIds.empty()) return;
     page += " /XObject << ";
-    for (size_t i = 0; i < images.size() && i < imageObjectIds.size(); i++) {
-        page += "/";
-        page += images[i].name;
+    for (size_t i = 0; i < imageObjectIds.size(); i++) {
+        page += "/Im";
+        AppendSize(page, i + 1);
         page += " ";
         AppendInt(page, imageObjectIds[i]);
         page += " 0 R ";
@@ -2106,7 +2424,7 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
             annot += "] /Border [0 0 0] /A << /S /URI /URI (";
             annot += EscapeLiteral(link.url);
             annot += ") >> >>";
-            ids.push_back(pdf.Add(annot));
+            ids.push_back(pdf.Add(std::move(annot)));
         }
         idsByPage.push_back(std::move(ids));
     }
@@ -2452,7 +2770,7 @@ private:
         pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, url });
     }
 
-    void DrawImage(const PdfImage& image, double x, double top, double w, double h) {
+    void DrawImage(int imageIndex, double x, double top, double w, double h) {
         std::string& c = pages.back();
         c += "q ";
         AppendF(c, w);
@@ -2463,7 +2781,8 @@ private:
         c += " ";
         AppendF(c, top - h);
         c += " cm /";
-        c += image.name;
+        c += "Im";
+        AppendSize(c, (size_t)imageIndex + 1);
         c += " Do Q\n";
     }
 
@@ -2501,7 +2820,7 @@ private:
 
         Ensure(h + 10.0);
         double x = margin + (maxW - w) * 0.5;
-        DrawImage(image, x, y, w, h);
+        DrawImage(index, x, y, w, h);
         y -= h + 10.0;
     }
 
@@ -3439,7 +3758,7 @@ private:
         return lines;
     }
 
-    void DrawImage(const PdfImage& image, double x, double top, double w, double h) {
+    void DrawImage(int imageIndex, double x, double top, double w, double h) {
         std::string& c = pages.back();
         c += "q ";
         AppendF(c, w);
@@ -3450,7 +3769,8 @@ private:
         c += " ";
         AppendF(c, top - h);
         c += " cm /";
-        c += image.name;
+        c += "Im";
+        AppendSize(c, (size_t)imageIndex + 1);
         c += " Do Q\n";
     }
 
@@ -3488,7 +3808,7 @@ private:
 
         Ensure(h + 10.0);
         double x = margin + (maxW - w) * 0.5;
-        DrawImage(image, x, y, w, h);
+        DrawImage(index, x, y, w, h);
         y -= h + 10.0;
     }
 
@@ -3793,13 +4113,13 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
         page += " 0 R /F3 ";
         AppendInt(page, fontMonoId);
         page += " 0 R >>";
-        AppendXObjectResources(page, imageRegistry.Images(), imageObjectIds);
+        AppendXObjectResources(page, imageObjectIds);
         page += " >> /Contents ";
         AppendInt(page, contentId);
         page += " 0 R";
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
         page += " >>";
-        pageIds.push_back(pdf.Add(page));
+        pageIds.push_back(pdf.Add(std::move(page)));
     }
 
     std::string pages;
@@ -3812,7 +4132,7 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
     pages += "] /Count ";
     AppendSize(pages, pageIds.size());
     pages += " >>";
-    pdf.Set(pagesId, pages);
+    pdf.Set(pagesId, std::move(pages));
 
     std::string catalog;
     catalog.reserve(options.embedSource ? 256 : 48);
@@ -3821,11 +4141,11 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
     catalog += " 0 R";
     if (options.embedSource) AddReversibleSource(pdf, catalog, markdown);
     catalog += " >>";
-    int catalogId = pdf.Add(catalog);
+    int catalogId = pdf.Add(std::move(catalog));
     int infoId = pdf.Add("<< /Producer (RayoMD Native Standard PDF) /Creator (RayoMD) /Title (" +
         EscapeLiteral("Markdown Export") + ") >>");
 
-    pdfBytes = pdf.Build(catalogId, infoId, options.embedSource);
+    pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
     return true;
 }
 
@@ -3889,7 +4209,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     cidMapObject += " >>\nstream\n";
     cidMapObject += *cidMapBytes;
     cidMapObject += "\nendstream";
-    pdf.Set(cidMapId, cidMapObject);
+    pdf.Set(cidMapId, std::move(cidMapObject));
 
     std::string toUnicodeObject;
     toUnicodeObject.reserve(toUnicodeBytes->size() + 48);
@@ -3898,7 +4218,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     toUnicodeObject += " >>\nstream\n";
     toUnicodeObject += *toUnicodeBytes;
     toUnicodeObject += "\nendstream";
-    pdf.Set(toUnicodeId, toUnicodeObject);
+    pdf.Set(toUnicodeId, std::move(toUnicodeObject));
 
     std::string desc;
     desc.reserve(224);
@@ -3919,7 +4239,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     desc += " /StemV 80 /FontFile2 ";
     AppendInt(desc, fontFileId);
     desc += " 0 R >>";
-    pdf.Set(descriptorId, desc);
+    pdf.Set(descriptorId, std::move(desc));
 
     std::string cidFont;
     cidFont.reserve(256);
@@ -3932,7 +4252,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     cidFont += " 0 R /DW 500 /W ";
     cidFont += *MakeWidths(font, used, cidKey);
     cidFont += " >>";
-    pdf.Set(cidFontId, cidFont);
+    pdf.Set(cidFontId, std::move(cidFont));
 
     std::string type0;
     type0.reserve(160);
@@ -3942,7 +4262,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     type0 += " 0 R] /ToUnicode ";
     AppendInt(type0, toUnicodeId);
     type0 += " 0 R >>";
-    pdf.Set(type0FontId, type0);
+    pdf.Set(type0FontId, std::move(type0));
 
     std::vector<int> pageIds;
     const std::vector<std::string>& renderedPages = renderer.Pages();
@@ -3960,13 +4280,13 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
         page += "] /Resources << /Font << /F1 ";
         AppendInt(page, type0FontId);
         page += " 0 R >>";
-        AppendXObjectResources(page, imageRegistry.Images(), imageObjectIds);
+        AppendXObjectResources(page, imageObjectIds);
         page += " >> /Contents ";
         AppendInt(page, contentId);
         page += " 0 R";
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
         page += " >>";
-        pageIds.push_back(pdf.Add(page));
+        pageIds.push_back(pdf.Add(std::move(page)));
     }
 
     std::string pages;
@@ -3979,7 +4299,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     pages += "] /Count ";
     AppendSize(pages, pageIds.size());
     pages += " >>";
-    pdf.Set(pagesId, pages);
+    pdf.Set(pagesId, std::move(pages));
 
     std::string catalog;
     catalog.reserve(options.embedSource ? 256 : 48);
@@ -3988,11 +4308,11 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     catalog += " 0 R";
     if (options.embedSource) AddReversibleSource(pdf, catalog, markdown);
     catalog += " >>";
-    int catalogId = pdf.Add(catalog);
+    int catalogId = pdf.Add(std::move(catalog));
     int infoId = pdf.Add("<< /Producer (RayoMD Native Tiny PDF) /Creator (RayoMD) /Title (" +
         EscapeLiteral("Markdown Export") + ") >>");
 
-    pdfBytes = pdf.Build(catalogId, infoId, options.embedSource);
+    pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
     return true;
 }
 

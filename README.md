@@ -6,7 +6,7 @@
   <a href="https://github.com/Butterski/rayomd/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/rayomd/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 2.4.1" src="https://img.shields.io/badge/version-2.4.1-informational">
+  <img alt="Version: 2.5.0" src="https://img.shields.io/badge/version-2.5.0-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
@@ -64,10 +64,23 @@ comparator took `111.2x` to `132.0x` as long.
 | Medium feature mix | **`17.29 ms`** | `2,281.90 ms` | `3,377.94 ms` |
 | 500-row table | **`18.66 ms`** | `2,340.90 ms` | `3,427.50 ms` |
 
+A focused warm-path check on 2026-07-18 used the repository's 3,896-byte
+`tester.md` fixture and an order-balanced frozen-baseline comparison:
+
+| Platform/storage | RayoMD 2.4.1 baseline | RayoMD 2.5.0 | Change |
+|---|---:|---:|---:|
+| Windows 11 workspace | `1.833 ms` | **`0.865 ms`** | **`-51.0%` paired median** |
+| Linux WSL `/mnt/e` | `12.029 ms` | **`7.320 ms`** | **`-31.4%` paired median** |
+
+These are warm `--bench` generation medians; they exclude process startup,
+input reading, and timed output writing. Each row uses 10 order-balanced pairs;
+the 10 baseline and 10 candidate PDFs on each platform were byte-identical.
+
 This is a scoped benchmark, not a universal ranking or a claim of feature or
 visual equivalence. See the
 [full report](https://github.com/Butterski/rayomd/wiki/Markdown-to-PDF-Speed-Comparison-2026-07-13),
 [optimization audit](https://github.com/Butterski/rayomd/wiki/RayoMD-2.2.0-Optimization-Audit-2026-07-13),
+[warm `tester.md` record](https://github.com/Butterski/rayomd/wiki/RayoMD-tester.md-Warm-Benchmark-2026-07-18),
 and [benchmark archive](https://github.com/Butterski/rayomd/wiki/Benchmarks)
 for methodology, environment, memory, binary-size, and reproduction details.
 

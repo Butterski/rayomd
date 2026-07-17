@@ -636,6 +636,52 @@ bool ExpectStatus(const std::string& pdf, RayoMd::PdfSource::Status status, cons
         << static_cast<int>(status) << std::endl;
     return false;
 }
+
+bool ExpectImagePolicyResult(const std::string& markdown, const TinyPdf::PdfOptions& options,
+    bool expectImage, const char* label) {
+    std::string pdf;
+    bool built = TinyPdf::BuildPdf(markdown, options, pdf).Ok() && ValidPdf(pdf);
+    bool hasImage = built && pdf.find("/Subtype /Image") != std::string::npos;
+    if (built && hasImage == expectImage) return true;
+    std::cerr << label << " image policy mismatch" << std::endl;
+    return false;
+}
+
+bool CheckImagePolicyCacheIsolation() {
+    std::string sourceRoot = RAYOMD_TEST_SOURCE_DIR;
+    for (char& ch : sourceRoot) if (ch == '\\') ch = '/';
+
+    const std::string relativeSource = "docs/assets/branding/rayomd.png";
+    const std::string relativeMarkdown = "![relative](" + relativeSource + ")\n";
+    TinyPdf::PdfOptions safe;
+    safe.sourcePath = sourceRoot + "/tester.md";
+    if (!ExpectImagePolicyResult(relativeMarkdown, safe, true, "contained image")) return false;
+
+    TinyPdf::PdfOptions noRoot = safe;
+    noRoot.sourcePath.clear();
+    if (!ExpectImagePolicyResult(relativeMarkdown, noRoot, false, "source-less image")) return false;
+
+    TinyPdf::PdfOptions wrongRoot = safe;
+    wrongRoot.sourcePath = sourceRoot + "/docs/tester.md";
+    if (!ExpectImagePolicyResult(relativeMarkdown, wrongRoot, false, "different source root")) return false;
+
+    // Reach the already cached mascot through an escaping parent path. The
+    // decoded-image cache must never substitute for authorization.
+    TinyPdf::PdfOptions escapingRoot = safe;
+    escapingRoot.sourcePath = sourceRoot + "/docs/development/tester.md";
+    const std::string escapingMarkdown =
+        "![escape](../assets/branding/rayomd.png)\n";
+    if (!ExpectImagePolicyResult(escapingMarkdown, escapingRoot, false, "parent escape")) return false;
+
+    const std::string absoluteMarkdown =
+        "![absolute](<" + sourceRoot + "/" + relativeSource + ">)\n";
+    TinyPdf::PdfOptions unsafe = safe;
+    unsafe.allowUnsafeLocalImages = true;
+    if (!ExpectImagePolicyResult(absoluteMarkdown, unsafe, true, "unsafe absolute image")) return false;
+    if (!ExpectImagePolicyResult(absoluteMarkdown, safe, false, "safe absolute image")) return false;
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -646,6 +692,7 @@ int main() {
     if (!CheckClassicBlockAmbiguities()) return 51;
     if (!CheckClassicInlineExactness()) return 52;
     if (!CheckContainerPdfLayout()) return 53;
+    if (!CheckImagePolicyCacheIsolation()) return 54;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
