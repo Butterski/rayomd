@@ -54,15 +54,15 @@ templates, citations, syntax highlighting, or HTML/CSS fidelity.
 
 ## Performance snapshot
 
-In a dated Windows 11 fresh-process comparison, RayoMD 2.2.0 was fastest on all
-three deterministic workloads supported by its native subset. The next-fastest
-comparator took `111.2x` to `132.0x` as long.
+In a 2026-07-18 Windows 11 fresh-process comparison, RayoMD 2.5.0 was fastest
+on all three deterministic workloads supported by its native subset. The
+next-fastest comparator took `57.3x` to `89.1x` as long.
 
 | Case | RayoMD | `md-to-pdf` | Pandoc + XeLaTeX |
 |---|---:|---:|---:|
-| Tiny README | **`15.45 ms`** | `1,717.89 ms` | `3,210.69 ms` |
-| Medium feature mix | **`17.29 ms`** | `2,281.90 ms` | `3,377.94 ms` |
-| 500-row table | **`18.66 ms`** | `2,340.90 ms` | `3,427.50 ms` |
+| Tiny README | **`35.29 ms`** | `3,142.94 ms` | `6,643.43 ms` |
+| Medium feature mix | **`52.00 ms`** | `2,982.20 ms` | `4,783.51 ms` |
+| 500-row table | **`36.12 ms`** | `2,656.61 ms` | `6,761.36 ms` |
 
 A focused warm-path check on 2026-07-18 used the repository's 3,896-byte
 `tester.md` fixture and an order-balanced frozen-baseline comparison:
@@ -78,7 +78,7 @@ the 10 baseline and 10 candidate PDFs on each platform were byte-identical.
 
 This is a scoped benchmark, not a universal ranking or a claim of feature or
 visual equivalence. See the
-[full report](https://github.com/Butterski/rayomd/wiki/Markdown-to-PDF-Speed-Comparison-2026-07-13),
+[full report](https://github.com/Butterski/rayomd/wiki/Markdown-to-PDF-Speed-Comparison-2026-07-18),
 [optimization audit](https://github.com/Butterski/rayomd/wiki/RayoMD-2.2.0-Optimization-Audit-2026-07-13),
 [warm `tester.md` record](https://github.com/Butterski/rayomd/wiki/RayoMD-tester.md-Warm-Benchmark-2026-07-18),
 and [benchmark archive](https://github.com/Butterski/rayomd/wiki/Benchmarks)
