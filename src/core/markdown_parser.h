@@ -27,6 +27,7 @@ struct Block {
     std::string text;
     std::string imageSrc;
     std::vector<std::vector<std::string>> rows;
+    std::vector<Block> children;
     std::vector<int> aligns;
 };
 

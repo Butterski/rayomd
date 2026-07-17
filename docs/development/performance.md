@@ -12,13 +12,30 @@ python tools/benchmark.py run -- --binary build/windows/rayomd.exe --platform wi
 python3 tools/benchmark.py run -- --binary build/linux/rayomd --platform linux-native-ext4 --suite watch --label local
 python tools/benchmark.py reversible -- --binary build/windows/rayomd.exe --platform windows --suite full --samples 5
 python tools/benchmark.py compare -- --rayomd build/windows/rayomd.exe --root benchmark-output/pandoc --runs 5
-python tools/benchmark.py competitors -- --rayomd build/windows/rayomd.exe --root benchmark-output/competitors
+python tools/benchmark.py competitors -- --rayomd build/windows/rayomd.exe --node-modules path/to/node_modules --root benchmark-output/competitors
 python3 tools/benchmark.py release -- --from-version 1.1.0 --suite quick
 ```
 
 The standard `run` workflow covers cold export, warm `--bench`, folder batch,
 stdin batch, warm serve, ASCII, Unicode, tables, explicit rules/page breaks,
 comments, and optional local images. Use it to protect the default fast path.
+
+The `competitors` workflow includes the three deterministic synthetic cases plus
+John Gruber's authentic `Markdown: Syntax` source and deterministic 1 MiB and
+5 MiB whole-document repetitions. It caches the download under ignored
+`benchmark-output/`, records the source URL and SHA-256, and reports per-case,
+overall, and large-document speedups against the fastest competitor. Use
+`--offline` to reuse the cache. The source contains inline/block HTML and
+Markdown features outside RayoMD's focused native subset, so timings must be
+published with the compatibility caveat and not as rendering-equivalence claims.
+
+Each tool first gets a 15-second tiny-document preflight; a failure disables it
+for the rest of the run. Measured invocations have a 60-second default timeout,
+and scaled cases use one run without a warm-up. A timeout is recorded as a DNF
+and disables that tool for the remaining cases instead of aborting the report.
+The fastest competitor that actually completed remains the score baseline.
+Override these controls with `--preflight-timeout`, `--large-runs`, and
+`--large-timeout` for deliberate longer campaigns.
 
 The `reversible` workflow covers all source-recovery work in one reproducible
 run:

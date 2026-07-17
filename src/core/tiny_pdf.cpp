@@ -2127,7 +2127,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         case BlockType::Paragraph: renderer.RenderParagraph(block.text); break;
         case BlockType::Bullet: renderer.RenderBullet(block); break;
         case BlockType::Numbered: renderer.RenderNumbered(block); break;
-        case BlockType::Quote: renderer.RenderQuote(block.text); break;
+        case BlockType::Quote: renderer.RenderQuote(block); break;
         case BlockType::Code: renderer.RenderCode(block.text); break;
         case BlockType::MathBlock: renderer.RenderMath(block.text); break;
         case BlockType::Table: renderer.RenderTable(block.rows, block.aligns); break;
@@ -2173,6 +2173,7 @@ private:
     void RenderBullet(const Block& block) {
         RenderListItem("- ", block);
         y -= 2.0;
+        if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
 
     void RenderNumbered(const Block& block) {
@@ -2182,6 +2183,14 @@ private:
         marker += ". ";
         RenderListItem(marker, block);
         y -= 2.0;
+        if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
+    }
+
+    void RenderIndentedBlocks(const std::vector<Block>& blocks, double inset) {
+        double savedMargin = margin;
+        margin += inset;
+        RenderBlocks(*this, blocks);
+        margin = savedMargin;
     }
 
     struct StyledSpan {
@@ -2190,6 +2199,7 @@ private:
         bool bold = false;
         bool italic = false;
         bool strike = false;
+        bool code = false;
     };
 
     struct StyledWord {
@@ -2198,17 +2208,18 @@ private:
         bool bold = false;
         bool italic = false;
         bool strike = false;
+        bool code = false;
     };
 
     void PushSpan(std::vector<StyledSpan>& spans, std::string_view text, bool bold, bool italic, bool strike,
-        std::string_view url = {}) {
+        std::string_view url = {}, bool code = false) {
         if (text.empty()) return;
         std::wstring wide = Utf8ToWide(text);
         if (!spans.empty() && spans.back().bold == bold && spans.back().italic == italic &&
-            spans.back().strike == strike && spans.back().url == url) {
+            spans.back().strike == strike && spans.back().url == url && spans.back().code == code) {
             spans.back().text += wide;
         } else {
-            spans.push_back({ wide, ToString(url), bold, italic, strike });
+            spans.push_back({ wide, ToString(url), bold, italic, strike, code });
         }
     }
 
@@ -2217,7 +2228,7 @@ private:
         std::vector<Internal::InlineSpan> inlineSpans = Internal::ParseInlineSpans(input);
         spans.reserve(inlineSpans.size());
         for (const Internal::InlineSpan& span : inlineSpans) {
-            PushSpan(spans, span.text, span.bold, span.italic, span.strike, span.url);
+            PushSpan(spans, span.text, span.bold, span.italic, span.strike, span.url, span.code);
         }
         return spans;
     }
@@ -2230,27 +2241,29 @@ private:
             for (wchar_t ch : span.text) {
                 if (ch == L' ' || ch == L'\t' || ch == L'\n' || ch == L'\r') {
                     if (!current.empty()) {
-                        words.push_back({ current, span.url, span.bold, span.italic, span.strike });
+                        words.push_back({ current, span.url, span.bold, span.italic, span.strike, span.code });
                         current.clear();
                     }
                 } else {
                     current.push_back(ch);
                 }
             }
-            if (!current.empty()) words.push_back({ current, span.url, span.bold, span.italic, span.strike });
+            if (!current.empty()) {
+                words.push_back({ current, span.url, span.bold, span.italic, span.strike, span.code });
+            }
         }
         return words;
     }
 
     void AppendStyledSpan(std::vector<StyledSpan>& line, std::wstring text, bool bold, bool italic, bool strike,
-        const std::string& url = std::string()) {
+        const std::string& url = std::string(), bool code = false) {
         if (text.empty()) return;
         if (!line.empty() && line.back().bold == bold && line.back().italic == italic &&
-            line.back().strike == strike && line.back().url == url) {
+            line.back().strike == strike && line.back().url == url && line.back().code == code) {
             line.back().text += text;
             return;
         }
-        line.push_back({ std::move(text), url, bold, italic, strike });
+        line.push_back({ std::move(text), url, bold, italic, strike, code });
     }
 
     bool IsClosingPunctuation(const std::wstring& text) {
@@ -2259,7 +2272,21 @@ private:
     }
 
     std::vector<std::vector<StyledSpan>> WrapStyled(const std::string& text, double width, double size) {
-        if (text.find_first_of("!*_~`$[\\") == std::string::npos) {
+        if (text.find('\n') != std::string::npos) {
+            std::vector<std::vector<StyledSpan>> explicitLines;
+            size_t start = 0;
+            while (start <= text.size()) {
+                size_t end = text.find('\n', start);
+                std::string segment = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                std::vector<std::vector<StyledSpan>> wrapped = WrapStyled(segment, width, size);
+                explicitLines.insert(explicitLines.end(), std::make_move_iterator(wrapped.begin()),
+                    std::make_move_iterator(wrapped.end()));
+                if (end == std::string::npos) break;
+                start = end + 1;
+            }
+            return explicitLines;
+        }
+        if (text.find_first_of("!*_~`$[<\\") == std::string::npos) {
             std::vector<std::vector<StyledSpan>> lines;
             std::wstring wide = Utf8ToWide(NormalizeSymbols(text));
             for (const auto& line : WrapText(font, std::wstring_view(wide), width, size)) {
@@ -2300,7 +2327,7 @@ private:
                     wordWidth += spaceWidth;
                 }
             }
-            AppendStyledSpan(line, std::move(textRun), word.bold, word.italic, word.strike, word.url);
+            AppendStyledSpan(line, std::move(textRun), word.bold, word.italic, word.strike, word.url, word.code);
             lineWidth += wordWidth;
         }
 
@@ -2492,7 +2519,8 @@ private:
             double baseline = y - bodySize;
             for (const auto& span : line) {
                 double spanWidth = TextWidth(font, span.text, bodySize);
-                const char* color = span.url.empty() ? "0.08 0.08 0.08" : "0.05 0.30 0.68";
+                if (span.code) DrawRect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.94 0.94 0.92");
+                const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
                 PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
@@ -2508,15 +2536,103 @@ private:
         RenderParagraph(marker + block.text, x, width);
     }
 
-    void RenderQuote(const std::string& text) {
-        std::wstring wide = Utf8ToWide(text);
+    void RenderQuote(const Block& block) {
+        if (block.children.empty()) {
+            RenderQuote(block.text);
+            return;
+        }
+        RenderQuoteChildren(block.children);
+    }
+
+    void RenderQuoteChildren(const std::vector<Block>& children) {
+        for (const Block& child : children) {
+            switch (child.type) {
+            case BlockType::Paragraph: RenderQuote(child.text); break;
+            case BlockType::Heading: RenderQuoteHeading(child); break;
+            case BlockType::Bullet:
+                RenderQuote("- " + child.text);
+                if (!child.children.empty()) {
+                    double savedMargin = margin;
+                    margin += 14.0;
+                    RenderQuoteChildren(child.children);
+                    margin = savedMargin;
+                }
+                break;
+            case BlockType::Numbered: {
+                std::string item;
+                AppendInt(item, child.number);
+                item += ". " + child.text;
+                RenderQuote(item);
+                if (!child.children.empty()) {
+                    double savedMargin = margin;
+                    margin += 14.0;
+                    RenderQuoteChildren(child.children);
+                    margin = savedMargin;
+                }
+                break;
+            }
+            case BlockType::Quote: {
+                double savedMargin = margin;
+                margin += 10.0;
+                RenderQuote(child);
+                margin = savedMargin;
+                break;
+            }
+            case BlockType::Code:
+            case BlockType::MathBlock:
+            case BlockType::Table:
+            case BlockType::Rule:
+            case BlockType::Image: {
+                double savedMargin = margin;
+                margin += 14.0;
+                if (child.type == BlockType::Code) RenderCode(child.text);
+                else if (child.type == BlockType::MathBlock) RenderMath(child.text);
+                else if (child.type == BlockType::Table) RenderTable(child.rows, child.aligns);
+                else if (child.type == BlockType::Rule) RenderRule();
+                else RenderImage(child);
+                margin = savedMargin;
+                break;
+            }
+            case BlockType::PageBreak: RenderPageBreak(); break;
+            }
+        }
+    }
+
+    void RenderQuoteHeading(const Block& block) {
+        static const double sizes[] = { 0, 18, 16, 14, 13, 12, 11.5 };
+        int level = std::max(1, std::min(6, block.level));
+        double size = sizes[level];
+        double height = size * 1.35;
         double x = margin + 14.0;
         double width = PAGE_W - margin * 2.0 - 22.0;
-        for (const auto& line : WrapText(font, wide, width, bodySize)) {
+        std::wstring text = Utf8ToWide(block.text);
+        for (const std::wstring& line : WrapText(font, text, width, size)) {
+            Ensure(height + 2.0);
+            DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, height + 3.0, "0.94 0.95 0.96");
+            DrawRect(margin, y + 2.0, 3.0, height + 3.0, "0.45 0.62 0.72");
+            PaintText(x, y - size, size, line, "0.10 0.15 0.18", true);
+            y -= height;
+        }
+        y -= 7.0;
+    }
+    void RenderQuote(const std::string& text) {
+        double x = margin + 14.0;
+        double width = PAGE_W - margin * 2.0 - 22.0;
+        for (const auto& line : WrapStyled(text, width, bodySize)) {
             Ensure(lineHeight + 2.0);
             DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
             DrawRect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
-            DrawTextLine(x, bodySize, line, "0.18 0.22 0.25");
+            double cursor = x;
+            double baseline = y - bodySize;
+            for (const StyledSpan& span : line) {
+                double spanWidth = TextWidth(font, span.text, bodySize);
+                if (span.code) DrawRect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
+                const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
+                PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
+                AddLink(cursor, baseline, spanWidth, bodySize, span.url);
+                cursor += spanWidth;
+            }
+            y -= lineHeight;
         }
         y -= 7.0;
     }
@@ -3140,6 +3256,7 @@ private:
         RenderParagraph("- " + block.text, margin + 16.0 + block.level * 18.0,
             PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0);
         y -= 2.0;
+        if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
 
     void RenderNumbered(const Block& block) {
@@ -3151,6 +3268,14 @@ private:
         RenderParagraph(item, margin + 16.0 + block.level * 18.0,
             PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0);
         y -= 2.0;
+        if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
+    }
+
+    void RenderIndentedBlocks(const std::vector<Block>& blocks, double inset) {
+        double savedMargin = margin;
+        margin += inset;
+        RenderBlocks(*this, blocks);
+        margin = savedMargin;
     }
 
     void NewPage() {
@@ -3187,11 +3312,13 @@ private:
     struct AsciiSpan {
         std::string text;
         std::string url;
+        bool code = false;
     };
 
     struct AsciiWord {
         std::string text;
         std::string url;
+        bool code = false;
     };
 
     void AddLink(double x, double baseline, double width, double size, const std::string& url) {
@@ -3199,14 +3326,15 @@ private:
         pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, url });
     }
 
-    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string_view text, std::string_view url = {}) {
+    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string_view text, std::string_view url = {},
+        bool code = false) {
         if (text.empty()) return;
-        std::string stripped = StripInlineMarkdown(text);
+        std::string stripped = ToString(text);
         if (stripped.empty()) return;
-        if (!spans.empty() && spans.back().url == url) {
+        if (!spans.empty() && spans.back().url == url && spans.back().code == code) {
             spans.back().text += stripped;
         } else {
-            spans.push_back({ std::move(stripped), ToString(url) });
+            spans.push_back({ std::move(stripped), ToString(url), code });
         }
     }
 
@@ -3215,7 +3343,7 @@ private:
         std::vector<Internal::InlineSpan> inlineSpans = Internal::ParseInlineSpans(text);
         spans.reserve(inlineSpans.size());
         for (const Internal::InlineSpan& span : inlineSpans) {
-            PushAsciiSpan(spans, span.text, span.url);
+            PushAsciiSpan(spans, span.text, span.url, span.code);
         }
         return spans;
     }
@@ -3228,28 +3356,43 @@ private:
             for (char ch : span.text) {
                 if (IsSpace(ch)) {
                     if (!current.empty()) {
-                        words.push_back({ current, span.url });
+                        words.push_back({ current, span.url, span.code });
                         current.clear();
                     }
                 } else {
                     current.push_back(ch);
                 }
             }
-            if (!current.empty()) words.push_back({ current, span.url });
+            if (!current.empty()) words.push_back({ current, span.url, span.code });
         }
         return words;
     }
 
-    void AppendAsciiLineSpan(std::vector<AsciiSpan>& line, std::string text, const std::string& url) {
+    void AppendAsciiLineSpan(std::vector<AsciiSpan>& line, std::string text, const std::string& url,
+        bool code = false) {
         if (text.empty()) return;
-        if (!line.empty() && line.back().url == url) {
+        if (!line.empty() && line.back().url == url && line.back().code == code) {
             line.back().text += text;
             return;
         }
-        line.push_back({ std::move(text), url });
+        line.push_back({ std::move(text), url, code });
     }
 
     std::vector<std::vector<AsciiSpan>> WrapAsciiLinks(const std::string& text, double width, double size) {
+        if (text.find('\n') != std::string::npos) {
+            std::vector<std::vector<AsciiSpan>> explicitLines;
+            size_t start = 0;
+            while (start <= text.size()) {
+                size_t end = text.find('\n', start);
+                std::string segment = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                std::vector<std::vector<AsciiSpan>> wrapped = WrapAsciiLinks(segment, width, size);
+                explicitLines.insert(explicitLines.end(), std::make_move_iterator(wrapped.begin()),
+                    std::make_move_iterator(wrapped.end()));
+                if (end == std::string::npos) break;
+                start = end + 1;
+            }
+            return explicitLines;
+        }
         std::vector<AsciiWord> words = SplitAsciiWords(ParseAsciiLinkSpans(text));
         std::vector<std::vector<AsciiSpan>> lines;
         lines.reserve(std::max<size_t>(1, text.size() / 72));
@@ -3258,7 +3401,7 @@ private:
         double spaceWidth = AsciiTextWidth(" ", size);
 
         for (const AsciiWord& word : words) {
-            double wordWidth = AsciiTextWidth(word.text, size);
+            double wordWidth = AsciiTextWidth(word.text, size, word.code);
             bool needsSpace = !line.empty();
             double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
 
@@ -3276,7 +3419,7 @@ private:
                 wordWidth += spaceWidth;
             }
 
-            AppendAsciiLineSpan(line, std::move(textRun), word.url);
+            AppendAsciiLineSpan(line, std::move(textRun), word.url, word.code);
             lineWidth += wordWidth;
         }
 
@@ -3379,16 +3522,17 @@ private:
     }
 
     void RenderParagraph(const std::string& text, double x, double width) {
-        if (text.find('[') != std::string::npos) {
+        if (text.find_first_of("!*_~`$[<\\\n") != std::string::npos) {
             for (const auto& line : WrapAsciiLinks(text, width, bodySize)) {
                 double lh = bodySize * 1.35;
                 Ensure(lh);
                 double cursor = x;
                 double baseline = y - bodySize;
                 for (const AsciiSpan& span : line) {
-                    double spanWidth = AsciiTextWidth(span.text, bodySize);
-                    const char* color = span.url.empty() ? "0.08 0.08 0.08" : "0.05 0.30 0.68";
-                    Text(cursor, baseline, bodySize, span.text, "F1", color);
+                    double spanWidth = AsciiTextWidth(span.text, bodySize, span.code);
+                    if (span.code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lh, "0.94 0.94 0.92");
+                    const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
+                    Text(cursor, baseline, bodySize, span.text, span.code ? "F3" : "F1", color);
                     AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                     cursor += spanWidth;
                 }
@@ -3404,14 +3548,102 @@ private:
         y -= 5.0;
     }
 
+    void RenderQuote(const Block& block) {
+        if (block.children.empty()) {
+            RenderQuote(block.text);
+            return;
+        }
+        RenderQuoteChildren(block.children);
+    }
+
+    void RenderQuoteChildren(const std::vector<Block>& children) {
+        for (const Block& child : children) {
+            switch (child.type) {
+            case BlockType::Paragraph: RenderQuote(child.text); break;
+            case BlockType::Heading: RenderQuoteHeading(child); break;
+            case BlockType::Bullet:
+                RenderQuote("- " + child.text);
+                if (!child.children.empty()) {
+                    double savedMargin = margin;
+                    margin += 14.0;
+                    RenderQuoteChildren(child.children);
+                    margin = savedMargin;
+                }
+                break;
+            case BlockType::Numbered: {
+                std::string item;
+                AppendInt(item, child.number);
+                item += ". " + child.text;
+                RenderQuote(item);
+                if (!child.children.empty()) {
+                    double savedMargin = margin;
+                    margin += 14.0;
+                    RenderQuoteChildren(child.children);
+                    margin = savedMargin;
+                }
+                break;
+            }
+            case BlockType::Quote: {
+                double savedMargin = margin;
+                margin += 10.0;
+                RenderQuote(child);
+                margin = savedMargin;
+                break;
+            }
+            case BlockType::Code:
+            case BlockType::MathBlock:
+            case BlockType::Table:
+            case BlockType::Rule:
+            case BlockType::Image: {
+                double savedMargin = margin;
+                margin += 14.0;
+                if (child.type == BlockType::Code) RenderCode(child.text);
+                else if (child.type == BlockType::MathBlock) RenderMath(child.text);
+                else if (child.type == BlockType::Table) RenderTable(child.rows, child.aligns);
+                else if (child.type == BlockType::Rule) RenderRule();
+                else RenderImage(child);
+                margin = savedMargin;
+                break;
+            }
+            case BlockType::PageBreak: RenderPageBreak(); break;
+            }
+        }
+    }
+
+    void RenderQuoteHeading(const Block& block) {
+        static const double sizes[] = { 0, 18, 16, 14, 13, 12, 11.5 };
+        int level = std::max(1, std::min(6, block.level));
+        double size = sizes[level];
+        double height = size * 1.35;
+        double x = margin + 14.0;
+        double width = PAGE_W - margin * 2.0 - 22.0;
+        for (const WrappedAsciiLine& line : WrapAsciiText(block.text, width, size)) {
+            Ensure(height + 2.0);
+            Rect(margin, y + 2.0, PAGE_W - margin * 2.0, height + 3.0, "0.94 0.95 0.96");
+            Rect(margin, y + 2.0, 3.0, height + 3.0, "0.45 0.62 0.72");
+            Text(x, y - size, size, line.text, "F2", "0.10 0.15 0.18");
+            y -= height;
+        }
+        y -= 7.0;
+    }
     void RenderQuote(const std::string& text) {
         double x = margin + 14.0;
         double width = PAGE_W - margin * 2.0 - 22.0;
-        for (const auto& line : WrapAsciiText(text, width, bodySize)) {
+        for (const auto& line : WrapAsciiLinks(text, width, bodySize)) {
             Ensure(lineHeight + 2.0);
             Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
             Rect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
-            DrawTextLine(x, bodySize, line.text, "F1", "0.18 0.22 0.25");
+            double cursor = x;
+            double baseline = y - bodySize;
+            for (const AsciiSpan& span : line) {
+                double spanWidth = AsciiTextWidth(span.text, bodySize, span.code);
+                if (span.code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
+                const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
+                Text(cursor, baseline, bodySize, span.text, span.code ? "F3" : "F1", color);
+                AddLink(cursor, baseline, spanWidth, bodySize, span.url);
+                cursor += spanWidth;
+            }
+            y -= lineHeight;
         }
         y -= 7.0;
     }

@@ -1,4 +1,5 @@
 #include "markdown_parser.h"
+#include "inline_markdown.h"
 
 #include <algorithm>
 #include <cctype>
@@ -420,88 +421,15 @@ static bool ParseInlineLinkSyntaxAt(std::string_view source, size_t start, size_
 static bool ExtractMarkdownDestination(std::string_view target, std::string& dest);
 
 std::string StripInlineMarkdown(std::string_view input) {
-    if (input.find_first_of("!*_~`$[\\") == std::string_view::npos &&
+    if (input.find_first_of("!*_~`$[<\\") == std::string_view::npos &&
         input.find('\xE2') == std::string_view::npos) {
         return ToString(TrimView(input));
     }
-
-    std::string source = NormalizeSymbols(ToString(input));
-    std::string out;
-    out.reserve(source.size());
-
-    for (size_t i = 0; i < source.size();) {
-        if (source[i] == '!' && i + 1 < source.size() && source[i + 1] == '[') {
-            MarkdownInlineLink link;
-            if (ParseInlineLinkSyntaxAt(source, i, 2, link)) {
-                out += "image: ";
-                out.append(link.label.data(), link.label.size());
-                i = link.end;
-                continue;
-            }
-        }
-
-        if (source[i] == '[') {
-            MarkdownInlineLink link;
-            if (ParseInlineLinkSyntaxAt(source, i, 1, link)) {
-                out.append(link.label.data(), link.label.size());
-                std::string url;
-                if (ExtractMarkdownDestination(link.target, url)) {
-                    out += " <";
-                    out.append(url.data(), url.size());
-                    out += ">";
-                }
-                i = link.end;
-                continue;
-            }
-        }
-
-        if (source[i] == '`') {
-            size_t end = source.find('`', i + 1);
-            if (end != std::string::npos) {
-                out += source.substr(i + 1, end - i - 1);
-                i = end + 1;
-                continue;
-            }
-        }
-
-        if (source[i] == '$' && !(i + 1 < source.size() && source[i + 1] == '$')) {
-            size_t end = source.find('$', i + 1);
-            if (end != std::string::npos) {
-                out += source.substr(i + 1, end - i - 1);
-                i = end + 1;
-                continue;
-            }
-        }
-
-        if (source[i] == '\\' && i + 1 < source.size()) {
-            out.push_back(source[i + 1]);
-            i += 2;
-            continue;
-        }
-
-        if (source[i] == '*') {
-            i++;
-            continue;
-        }
-
-        if (source[i] == '_') {
-            bool leftWord = i > 0 && std::isalnum((unsigned char)source[i - 1]);
-            bool rightWord = i + 1 < source.size() && std::isalnum((unsigned char)source[i + 1]);
-            if (!leftWord || !rightWord) {
-                i++;
-                continue;
-            }
-        }
-
-        if (source[i] == '~' && i + 1 < source.size() && source[i + 1] == '~') {
-            i += 2;
-            continue;
-        }
-
-        out.push_back(source[i++]);
-    }
-
-    return Trim(out);
+    std::vector<InlineSpan> spans = ParseInlineSpans(input);
+    std::string visible;
+    visible.reserve(input.size());
+    for (const InlineSpan& span : spans) visible += span.text;
+    return Trim(std::move(visible));
 }
 
 struct ImageSyntax {
@@ -557,6 +485,139 @@ static bool ParseStandaloneImage(std::string_view line, ImageSyntax* image) {
     if (image) {
         image->alt = StripInlineMarkdown(link.label);
         image->src = std::move(src);
+    }
+    return true;
+}
+
+static int LeadingColumns(std::string_view line, size_t* bytes = nullptr) {
+    int columns = 0;
+    size_t i = 0;
+    while (i < line.size()) {
+        if (line[i] == ' ') {
+            columns++;
+            i++;
+        } else if (line[i] == '\t') {
+            columns += 4 - (columns % 4);
+            i++;
+        } else {
+            break;
+        }
+    }
+    if (bytes) *bytes = i;
+    return columns;
+}
+
+static bool RemoveIndentLevel(std::string_view line, std::string_view& content) {
+    int columns = 0;
+    size_t i = 0;
+    while (i < line.size() && columns < 4) {
+        if (line[i] == ' ') {
+            columns++;
+            i++;
+        } else if (line[i] == '\t') {
+            columns = 4;
+            i++;
+        } else {
+            break;
+        }
+    }
+    if (columns < 4) return false;
+    content = line.substr(i);
+    return true;
+}
+
+static bool ParseSetextUnderline(std::string_view line, int& level) {
+    size_t indentBytes = 0;
+    if (LeadingColumns(line, &indentBytes) > 3) return false;
+    std::string_view marker = TrimView(line.substr(indentBytes));
+    if (marker.empty()) return false;
+    char ch = marker.front();
+    if (ch != '=' && ch != '-') return false;
+    for (char value : marker) if (value != ch) return false;
+    level = ch == '=' ? 1 : 2;
+    return true;
+}
+
+static bool HasHardLineBreak(std::string_view line) {
+    return line.size() >= 2 && line[line.size() - 1] == ' ' && line[line.size() - 2] == ' ';
+}
+
+static std::string_view StripQuoteMarker(std::string_view line) {
+    std::string_view value = LTrimView(line);
+    if (value.empty() || value.front() != '>') return line;
+    value.remove_prefix(1);
+    if (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+    return value;
+}
+
+static std::string_view StripLeadingColumns(std::string_view line, int columnsToRemove) {
+    int columns = 0;
+    size_t index = 0;
+    while (index < line.size() && columns < columnsToRemove) {
+        if (line[index] == ' ') {
+            columns++;
+            index++;
+        } else if (line[index] == '\t') {
+            columns += 4 - (columns % 4);
+            index++;
+        } else {
+            break;
+        }
+    }
+    return line.substr(index);
+}
+
+static bool ParseReferenceTitle(std::string_view value, std::string& title) {
+    value = TrimView(value);
+    if (value.size() < 2) return false;
+    char open = value.front();
+    char close = open == '(' ? ')' : open;
+    if (open != '\'' && open != '"' && open != '(') return false;
+    if (value.back() != close) return false;
+    title = ToString(value.substr(1, value.size() - 2));
+    return true;
+}
+
+static bool ParseReferenceDefinition(const std::vector<std::string_view>& lines, size_t index,
+    std::string& label, ReferenceDefinition& definition, size_t& consumed) {
+    consumed = 0;
+    std::string_view line = lines[index];
+    size_t indentBytes = 0;
+    if (LeadingColumns(line, &indentBytes) > 3) return false;
+    std::string_view value = line.substr(indentBytes);
+    if (value.empty() || value.front() != '[') return false;
+    size_t close = value.find(']');
+    if (close == std::string_view::npos || close == 1 || close + 1 >= value.size() || value[close + 1] != ':') {
+        return false;
+    }
+    label = NormalizeReferenceLabel(value.substr(1, close - 1));
+    if (label.empty()) return false;
+    std::string_view rest = LTrimView(value.substr(close + 2));
+    if (rest.empty()) return false;
+
+    std::string_view destination;
+    size_t cursor = 0;
+    if (rest.front() == '<') {
+        size_t end = rest.find('>');
+        if (end == std::string_view::npos || end == 1) return false;
+        destination = rest.substr(1, end - 1);
+        cursor = end + 1;
+    } else {
+        while (cursor < rest.size() && !IsSpace(rest[cursor])) cursor++;
+        destination = rest.substr(0, cursor);
+    }
+    if (destination.empty()) return false;
+    definition.destination = UnescapeMarkdownDestination(destination);
+    definition.title.clear();
+    std::string_view trailing = TrimView(rest.substr(cursor));
+    if (!trailing.empty() && !ParseReferenceTitle(trailing, definition.title)) return false;
+    consumed = 1;
+    if (trailing.empty() && index + 1 < lines.size()) {
+        std::string nextTitle;
+        if (LeadingColumns(lines[index + 1]) >= 1 && ParseReferenceTitle(lines[index + 1], nextTitle)) {
+            definition.title = std::move(nextTitle);
+            consumed = 2;
+        }
     }
     return true;
 }
@@ -658,11 +719,48 @@ static bool IsBlockStart(const LineInfo& info) {
     return info.kind != LineKind::Plain;
 }
 
-std::vector<Block> ParseMarkdown(const std::string& markdown) {
+static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth) {
     std::vector<std::string_view> lines = SplitLineViews(markdown);
     std::vector<LineInfo> infos;
     infos.reserve(lines.size());
     for (std::string_view line : lines) infos.push_back(ClassifyLine(line));
+
+    ReferenceDefinitions definitions;
+    std::vector<unsigned char> suppressed;
+    if (markdown.find("]:") != std::string::npos) {
+        suppressed.assign(lines.size(), 0);
+        std::string_view activeFence;
+        for (size_t index = 0; index < lines.size();) {
+            if (infos[index].kind == LineKind::Fence) {
+                if (activeFence.empty()) activeFence = infos[index].text;
+                else if (IsMatchingClosingFence(infos[index], activeFence)) activeFence = {};
+                index++;
+                continue;
+            }
+            if (!activeFence.empty()) {
+                index++;
+                continue;
+            }
+            std::string_view ignoredIndented;
+            if (RemoveIndentLevel(lines[index], ignoredIndented)) {
+                index++;
+                continue;
+            }
+            std::string label;
+            ReferenceDefinition definition;
+            size_t consumed = 0;
+            if (ParseReferenceDefinition(lines, index, label, definition, consumed)) {
+                definitions.emplace(std::move(label), std::move(definition));
+                for (size_t offset = 0; offset < consumed; offset++) suppressed[index + offset] = 1;
+                index += consumed;
+                continue;
+            }
+            index++;
+        }
+    }
+    auto isSuppressed = [&](size_t index) {
+        return !suppressed.empty() && suppressed[index] != 0;
+    };
 
     std::vector<Block> blocks;
     blocks.reserve(std::max<size_t>(8, lines.size() / 2));
@@ -679,12 +777,68 @@ std::vector<Block> ParseMarkdown(const std::string& markdown) {
     }
 
     while (i < lines.size()) {
+        if (isSuppressed(i)) {
+            i++;
+            continue;
+        }
         const LineInfo& info = infos[i];
         std::string_view line = info.raw;
         std::string_view trimmed = info.trimmed;
         if (info.kind == LineKind::Empty) {
             i++;
             continue;
+        }
+
+        int setextLevel = 0;
+        if (info.kind == LineKind::Plain && i + 1 < lines.size() && !isSuppressed(i + 1) &&
+            ParseSetextUnderline(lines[i + 1], setextLevel)) {
+            std::string heading = definitions.empty() || trimmed.find('[') == std::string_view::npos ?
+                StripInlineMarkdown(trimmed) :
+                StripInlineMarkdown(ResolveReferenceLinks(trimmed, definitions));
+            blocks.push_back({ BlockType::Heading, setextLevel, 0, std::move(heading) });
+            i += 2;
+            continue;
+        }
+
+        std::string_view indentedContent;
+        if (RemoveIndentLevel(line, indentedContent)) {
+            std::vector<std::string_view> codeLines;
+            while (i < lines.size()) {
+                std::string_view content;
+                if (RemoveIndentLevel(lines[i], content)) {
+                    codeLines.push_back(content);
+                    i++;
+                    continue;
+                }
+                if (infos[i].kind == LineKind::Empty) {
+                    codeLines.push_back({});
+                    i++;
+                    continue;
+                }
+                break;
+            }
+            while (!codeLines.empty() && codeLines.back().empty()) codeLines.pop_back();
+            std::string text;
+            for (size_t codeIndex = 0; codeIndex < codeLines.size(); codeIndex++) {
+                if (codeIndex) text.push_back('\n');
+                text.append(codeLines[codeIndex]);
+            }
+            blocks.push_back({ BlockType::Code, 0, 0, std::move(text) });
+            continue;
+        }
+
+        if (!definitions.empty() && line.find("![") != std::string_view::npos) {
+            std::string resolvedLine = ResolveReferenceLinks(line, definitions);
+            ImageSyntax resolvedImage;
+            if (ParseStandaloneImage(resolvedLine, &resolvedImage)) {
+                Block block;
+                block.type = BlockType::Image;
+                block.text = std::move(resolvedImage.alt);
+                block.imageSrc = std::move(resolvedImage.src);
+                blocks.push_back(std::move(block));
+                i++;
+                continue;
+            }
         }
 
         if (info.kind == LineKind::Fence) {
@@ -751,7 +905,10 @@ std::vector<Block> ParseMarkdown(const std::string& markdown) {
         }
 
         if (info.kind == LineKind::Heading) {
-            blocks.push_back({ BlockType::Heading, info.level, 0, StripInlineMarkdown(info.text) });
+            std::string heading = definitions.empty() || info.text.find('[') == std::string_view::npos ?
+                StripInlineMarkdown(info.text) :
+                StripInlineMarkdown(ResolveReferenceLinks(info.text, definitions));
+            blocks.push_back({ BlockType::Heading, info.level, 0, std::move(heading) });
             i++;
             continue;
         }
@@ -780,45 +937,108 @@ std::vector<Block> ParseMarkdown(const std::string& markdown) {
             continue;
         }
 
-        if (info.kind == LineKind::Bullet) {
-            blocks.push_back({ BlockType::Bullet, info.level, 0, ToString(info.text) });
+        if (info.kind == LineKind::Bullet || info.kind == LineKind::Numbered) {
+            Block item;
+            item.type = info.kind == LineKind::Bullet ? BlockType::Bullet : BlockType::Numbered;
+            item.level = info.level;
+            item.number = info.number;
+            int baseIndent = LeadingColumns(line);
+            std::string itemMarkdown(info.text);
+            bool sawBlank = false;
             i++;
-            continue;
-        }
-
-        if (info.kind == LineKind::Numbered) {
-            blocks.push_back({ BlockType::Numbered, info.level, info.number, ToString(info.text) });
-            i++;
+            while (i < lines.size()) {
+                if (isSuppressed(i)) {
+                    i++;
+                    continue;
+                }
+                if (infos[i].kind == LineKind::Empty) {
+                    itemMarkdown += "\n\n";
+                    sawBlank = true;
+                    i++;
+                    continue;
+                }
+                if ((infos[i].kind == LineKind::Bullet || infos[i].kind == LineKind::Numbered) &&
+                    infos[i].level <= info.level) break;
+                int continuationIndent = LeadingColumns(lines[i]);
+                bool indented = continuationIndent > baseIndent;
+                if (!indented && (sawBlank || IsBlockStart(infos[i]))) break;
+                std::string_view continuation = indented ?
+                    StripLeadingColumns(lines[i], baseIndent + 2) : infos[i].trimmed;
+                if (!itemMarkdown.empty() && itemMarkdown.back() != '\n') itemMarkdown.push_back('\n');
+                itemMarkdown.append(continuation);
+                sawBlank = false;
+                i++;
+            }
+            if (!definitions.empty() && itemMarkdown.find('[') != std::string::npos) itemMarkdown = ResolveReferenceLinks(itemMarkdown, definitions);
+            if (depth < 8) {
+                item.children = ParseMarkdownImpl(itemMarkdown, depth + 1);
+            } else {
+                item.text = StripInlineMarkdown(itemMarkdown);
+            }
+            if (!item.children.empty() && item.children.front().type == BlockType::Paragraph) {
+                item.text = std::move(item.children.front().text);
+                item.children.erase(item.children.begin());
+            }
+            blocks.push_back(std::move(item));
             continue;
         }
 
         if (info.kind == LineKind::Quote) {
-            std::string quote;
-            while (i < lines.size() && infos[i].kind == LineKind::Quote) {
-                if (!quote.empty()) quote += " ";
-                quote.append(infos[i].text.data(), infos[i].text.size());
-                i++;
+            std::string quoteMarkdown;
+            bool allowLazyContinuation = true;
+            while (i < lines.size()) {
+                if (infos[i].kind == LineKind::Quote) {
+                    if (!quoteMarkdown.empty()) quoteMarkdown.push_back('\n');
+                    std::string_view quoted = StripQuoteMarker(lines[i]);
+                    quoteMarkdown.append(quoted);
+                    allowLazyContinuation = !TrimView(quoted).empty();
+                    i++;
+                    continue;
+                }
+                if (allowLazyContinuation && infos[i].kind == LineKind::Plain) {
+                    quoteMarkdown.push_back('\n');
+                    quoteMarkdown.append(lines[i]);
+                    i++;
+                    continue;
+                }
+                break;
             }
-            blocks.push_back({ BlockType::Quote, 0, 0, StripInlineMarkdown(quote) });
+            if (!definitions.empty() && quoteMarkdown.find('[') != std::string::npos) quoteMarkdown = ResolveReferenceLinks(quoteMarkdown, definitions);
+            Block quote;
+            quote.type = BlockType::Quote;
+            if (depth < 8) {
+                quote.children = ParseMarkdownImpl(quoteMarkdown, depth + 1);
+            } else {
+                quote.text = StripInlineMarkdown(quoteMarkdown);
+            }
+            if (quote.children.empty()) quote.text = StripInlineMarkdown(quoteMarkdown);
+            blocks.push_back(std::move(quote));
             continue;
         }
 
         std::string paragraph;
-        while (i < lines.size() && !IsBlockStart(infos[i]) && !IsTableStart(lines, i)) {
-            if (!paragraph.empty()) paragraph += " ";
-            std::string_view v = infos[i].trimmed;
+        bool previousHardBreak = false;
+        while (i < lines.size() && !isSuppressed(i) && !IsBlockStart(infos[i]) && !IsTableStart(lines, i)) {
+            if (!paragraph.empty()) paragraph += previousHardBreak ? "\n" : " ";
+            std::string_view v = HasHardLineBreak(lines[i]) ? RTrimView(lines[i]) : infos[i].trimmed;
             paragraph.append(v.data(), v.size());
+            previousHardBreak = HasHardLineBreak(lines[i]);
             i++;
         }
         if (paragraph.empty()) {
             paragraph = ToString(trimmed);
             i++;
         }
-        blocks.push_back({ BlockType::Paragraph, 0, 0, paragraph });
+        if (!definitions.empty() && paragraph.find('[') != std::string::npos) paragraph = ResolveReferenceLinks(paragraph, definitions);
+        blocks.push_back({ BlockType::Paragraph, 0, 0, std::move(paragraph) });
     }
 
     return blocks;
 }
+std::vector<Block> ParseMarkdown(const std::string& markdown) {
+    return ParseMarkdownImpl(markdown, 0);
+}
+
 
 
 } // namespace TinyPdf::Internal

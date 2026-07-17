@@ -1,8 +1,12 @@
 #include "rayomd/tiny_pdf.h"
 #include "../src/common/text_utils.h"
+#include "../src/core/inline_markdown.h"
+#include "../src/core/markdown_parser.h"
 #include "../src/core/rayomd_pdf_source.h"
 
+#include <array>
 #include <atomic>
+#include <sstream>
 #include <cstdio>
 #include <iostream>
 #include <string>
@@ -50,6 +54,523 @@ bool BuildReversible(const std::string& markdown, std::string& output) {
     return TinyPdf::BuildPdf(markdown, options, output).Ok() && ValidPdf(output);
 }
 
+size_t CountOccurrences(const std::string& value, std::string_view needle) {
+    size_t count = 0;
+    size_t position = 0;
+    while ((position = value.find(needle, position)) != std::string::npos) {
+        count++;
+        position += needle.size();
+    }
+    return count;
+}
+
+std::string InlineVisible(std::string_view input) {
+    std::string visible;
+    for (const TinyPdf::Internal::InlineSpan& span : TinyPdf::Internal::ParseInlineSpans(input)) {
+        visible += span.text;
+    }
+    return visible;
+}
+
+bool FindLinkRectangle(const std::string& pdf, std::string_view url, std::array<double, 4>& rectangle) {
+    std::string uri = "/URI (";
+    uri.append(url);
+    uri.push_back(')');
+    size_t uriPosition = pdf.find(uri);
+    if (uriPosition == std::string::npos) return false;
+    size_t rectanglePosition = pdf.rfind("/Rect [", uriPosition);
+    if (rectanglePosition == std::string::npos) return false;
+    size_t valuesStart = rectanglePosition + 7;
+    size_t valuesEnd = pdf.find(']', valuesStart);
+    if (valuesEnd == std::string::npos || valuesEnd > uriPosition) return false;
+    std::istringstream values(pdf.substr(valuesStart, valuesEnd - valuesStart));
+    for (double& coordinate : rectangle) {
+        if (!(values >> coordinate)) return false;
+    }
+    return rectangle[0] >= 0.0 && rectangle[1] >= 0.0 &&
+        rectangle[2] > rectangle[0] && rectangle[3] > rectangle[1] &&
+        rectangle[2] <= 595.0 && rectangle[3] <= 842.0;
+}
+
+bool CheckClassicMarkdownPhaseOne() {
+    using TinyPdf::Internal::Block;
+    using TinyPdf::Internal::BlockType;
+    using TinyPdf::Internal::InlineSpan;
+    const std::string source =
+        "Primary title\n=====\n\nSecondary title\n-----\n\n"
+        "[zero][target], [one] [target], [Target][], <https://example.net>, and <person@example.net>.\n\n"
+        "    alpha\n      beta\n\n"
+        "first line  \nsecond line\n\n"
+        "![Rayo][logo]\n\n"
+        "[target]: <https://example.com/path>  \"Optional title\"\n"
+        "[logo]: docs/assets/branding/rayomd.png\n";
+    std::vector<Block> blocks = TinyPdf::Internal::ParseMarkdown(source);
+    if (blocks.size() != 6 || blocks[0].type != BlockType::Heading || blocks[0].level != 1 ||
+        blocks[1].type != BlockType::Heading || blocks[1].level != 2 ||
+        blocks[2].type != BlockType::Paragraph || blocks[3].type != BlockType::Code ||
+        blocks[3].text != "alpha\n  beta" || blocks[4].type != BlockType::Paragraph ||
+        blocks[4].text != "first line\nsecond line" || blocks[5].type != BlockType::Image ||
+        blocks[5].imageSrc != "docs/assets/branding/rayomd.png") {
+        std::cerr << "classic block parsing mismatch" << std::endl;
+        return false;
+    }
+
+    std::vector<InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(blocks[2].text);
+    std::vector<std::string> urls;
+    for (const InlineSpan& span : spans) if (!span.url.empty()) urls.push_back(span.url);
+    const std::vector<std::string> expectedUrls = {
+        "https://example.com/path", "https://example.com/path", "https://example.com/path",
+        "https://example.net", "mailto:person@example.net"
+    };
+    if (urls != expectedUrls) {
+        std::cerr << "classic link resolution mismatch" << std::endl;
+        return false;
+    }
+
+    spans = TinyPdf::Internal::ParseInlineSpans("``literal ` tick`` and \\*literal\\* \\a");
+    bool foundCode = false;
+    std::string visible;
+    for (const InlineSpan& span : spans) {
+        foundCode = foundCode || (span.code && span.text == "literal ` tick");
+        visible += span.text;
+    }
+    if (!foundCode || visible != "literal ` tick and *literal* \\a") {
+        std::cerr << "code-span or escape semantics mismatch: " << visible << std::endl;
+        return false;
+    }
+
+    std::string pdf;
+    if (!Build(source, pdf) || CountOccurrences(pdf, "/Subtype /Link") != expectedUrls.size() ||
+        pdf.find("/Subtype /Image") == std::string::npos) {
+        std::cerr << "classic PDF annotation/image smoke mismatch" << std::endl;
+        return false;
+    }
+    std::array<double, 4> referenceRectangle{};
+    std::array<double, 4> urlRectangle{};
+    std::array<double, 4> emailRectangle{};
+    if (!FindLinkRectangle(pdf, "https://example.com/path", referenceRectangle) ||
+        !FindLinkRectangle(pdf, "https://example.net", urlRectangle) ||
+        !FindLinkRectangle(pdf, "mailto:person@example.net", emailRectangle)) {
+        std::cerr << "classic PDF link rectangle mismatch" << std::endl;
+        return false;
+    }
+    const std::string unicodeReference =
+        u8"Zażółć [odnośnik][unicode].\n\n[unicode]: https://example.com/unicode\n";
+    std::string unicodePdf;
+    if (!Build(unicodeReference, unicodePdf) || CountOccurrences(unicodePdf, "/Subtype /Link") != 1) {
+        std::cerr << "Unicode reference-link smoke mismatch" << std::endl;
+        return false;
+    }
+    const std::string missingReferenceImage =
+        "![missing][asset]\n\n[asset]: docs/assets/branding/does-not-exist.png\n";
+    std::string missingPdf;
+    if (!Build(missingReferenceImage, missingPdf) || missingPdf.find("/Subtype /Image") != std::string::npos) {
+        std::cerr << "reference-image fallback smoke mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool CheckStructuredContainers() {
+    using TinyPdf::Internal::Block;
+    using TinyPdf::Internal::BlockType;
+    const std::string quoteSource =
+        "> first paragraph\n"
+        ">\n"
+        "> second [paragraph][ref]\n"
+        "> > nested quote\n"
+        "> - nested item\n"
+        ">   continuation\n"
+        ">\n"
+        "> ## child heading\n"
+        ">\n"
+        ">     quoted code\n\n"
+        "[ref]: https://example.com/nested\n";
+    std::vector<Block> quoteBlocks = TinyPdf::Internal::ParseMarkdown(quoteSource);
+    if (quoteBlocks.size() != 1 || quoteBlocks[0].type != BlockType::Quote ||
+        quoteBlocks[0].children.size() != 6 ||
+        quoteBlocks[0].children[0].type != BlockType::Paragraph ||
+        quoteBlocks[0].children[1].type != BlockType::Paragraph ||
+        quoteBlocks[0].children[2].type != BlockType::Quote ||
+        quoteBlocks[0].children[2].children.empty() ||
+        quoteBlocks[0].children[3].type != BlockType::Bullet ||
+        quoteBlocks[0].children[3].text != "nested item continuation" ||
+        quoteBlocks[0].children[4].type != BlockType::Heading ||
+        quoteBlocks[0].children[5].type != BlockType::Code) {
+        std::cerr << "structured blockquote mismatch" << std::endl;
+        return false;
+    }
+
+    const std::string listSource =
+        "- first line\n"
+        "  wrapped continuation\n"
+        "\n"
+        "    second paragraph\n"
+        "\n"
+        "    > child quote\n"
+        "\n"
+        "        code line\n"
+        "\n"
+        "    - nested item\n"
+        "- sibling\n";
+    std::vector<Block> listBlocks = TinyPdf::Internal::ParseMarkdown(listSource);
+    if (listBlocks.size() != 2 || listBlocks[0].type != BlockType::Bullet ||
+        listBlocks[0].text != "first line wrapped continuation" || listBlocks[0].children.size() < 4 ||
+        listBlocks[0].children[0].type != BlockType::Paragraph ||
+        listBlocks[0].children[1].type != BlockType::Quote ||
+        listBlocks[0].children[2].type != BlockType::Code ||
+        listBlocks[0].children[3].type != BlockType::Bullet ||
+        listBlocks[1].type != BlockType::Bullet || listBlocks[1].text != "sibling") {
+        std::cerr << "structured list mismatch" << std::endl;
+        return false;
+    }
+
+    std::string deeplyNested(24, '>');
+    deeplyNested += " bounded\n";
+    std::vector<Block> deepBlocks = TinyPdf::Internal::ParseMarkdown(deeplyNested);
+    size_t observedDepth = 0;
+    const Block* nested = deepBlocks.empty() ? nullptr : &deepBlocks.front();
+    while (nested && nested->type == BlockType::Quote) {
+        observedDepth++;
+        nested = nested->children.empty() ? nullptr : &nested->children.front();
+    }
+    if (observedDepth < 8 || observedDepth > 9) {
+        std::cerr << "container nesting bound mismatch: " << observedDepth << std::endl;
+        return false;
+    }
+
+    std::string pdf;
+    if (!Build(quoteSource + "\n" + listSource, pdf) ||
+        CountOccurrences(pdf, "/Subtype /Link") != 1) {
+        std::cerr << "structured container PDF smoke mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool CheckClassicInlineCases() {
+    using TinyPdf::Internal::InlineSpan;
+    struct VisibleCase { const char* input; const char* visible; };
+    const VisibleCase visibleCases[] = {
+        {"__strong__", "strong"},
+        {"_emphasis_", "emphasis"},
+        {"***combined***", "combined"},
+        {"**outer _inner_**", "outer inner"},
+        {"word_with_internal_underscores", "word_with_internal_underscores"},
+        {"unmatched * marker", "unmatched * marker"},
+        {"\\q preserves slash", "\\q preserves slash"},
+        {"\\> also preserves slash", "\\> also preserves slash"},
+        {"[missing][] and [good](https://example.com)", "[missing][] and good"},
+        {"before ![alt](missing.png) after", "before image: alt after"},
+    };
+    for (const VisibleCase& item : visibleCases) {
+        std::vector<InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(item.input);
+        std::string visible;
+        for (const InlineSpan& span : spans) visible += span.text;
+        if (visible != item.visible) {
+            std::cerr << "inline visible mismatch: " << visible << " != " << item.visible << std::endl;
+            return false;
+        }
+    }
+
+    std::vector<InlineSpan> strong = TinyPdf::Internal::ParseInlineSpans("__strong__");
+    std::vector<InlineSpan> emphasis = TinyPdf::Internal::ParseInlineSpans("_emphasis_");
+    std::vector<InlineSpan> combined = TinyPdf::Internal::ParseInlineSpans("***combined***");
+    std::vector<InlineSpan> nested = TinyPdf::Internal::ParseInlineSpans("**outer _inner_**");
+    if (strong.size() != 1 || !strong[0].bold || emphasis.size() != 1 || !emphasis[0].italic ||
+        combined.size() != 1 || !combined[0].bold || !combined[0].italic) {
+        std::cerr << "inline emphasis flags mismatch" << std::endl;
+        return false;
+    }
+    bool nestedCombined = false;
+    for (const InlineSpan& span : nested) {
+        nestedCombined = nestedCombined || (span.text == "inner" && span.bold && span.italic);
+    }
+    if (!nestedCombined) {
+        std::cerr << "nested emphasis flags mismatch" << std::endl;
+        return false;
+    }
+
+    const std::string definitions =
+        "[first]: <https://example.com/first>\n"
+        "    \"title on next line\"\n\n"
+        "[first][] and `[first][]`\n";
+    std::vector<TinyPdf::Internal::Block> blocks = TinyPdf::Internal::ParseMarkdown(definitions);
+    if (blocks.size() != 1 || blocks[0].text.find("https://example.com/first") == std::string::npos ||
+        blocks[0].text.find("`[first][]`") == std::string::npos) {
+        std::cerr << "reference definition continuation/code exclusion mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool CheckClassicBlockAmbiguities() {
+    using TinyPdf::Internal::Block;
+    using TinyPdf::Internal::BlockType;
+    const std::string blockSource =
+        "Heading one\n===\n\n"
+        "Heading two\n---\n\n"
+        "---\n\n"
+        "\talpha\n\t\tbeta\n\n"
+        "soft\nline\n\n"
+        "hard  \nbreak\n";
+    std::vector<Block> blocks = TinyPdf::Internal::ParseMarkdown(blockSource);
+    if (blocks.size() != 6 || blocks[0].type != BlockType::Heading || blocks[0].level != 1 ||
+        blocks[1].type != BlockType::Heading || blocks[1].level != 2 ||
+        blocks[2].type != BlockType::Rule || blocks[3].type != BlockType::Code ||
+        blocks[3].text != "alpha\n\tbeta" || blocks[4].type != BlockType::Paragraph ||
+        blocks[4].text != "soft line" || blocks[5].type != BlockType::Paragraph ||
+        blocks[5].text != "hard\nbreak") {
+        std::cerr << "classic block ambiguity mismatch" << std::endl;
+        return false;
+    }
+
+    blocks = TinyPdf::Internal::ParseMarkdown("    not heading\n    ---\n");
+    if (blocks.size() != 1 || blocks[0].type != BlockType::Code ||
+        blocks[0].text != "not heading\n---") {
+        std::cerr << "indented Setext ambiguity mismatch" << std::endl;
+        return false;
+    }
+
+    const std::string references =
+        "[plain][ID], [spaced] [id], [implicit][], [collapsed][many spaces], and [missing][nope].\n\n"
+        "[id]: https://example.com/id\n"
+        "[implicit]: https://example.com/implicit\n"
+        "[many   spaces]: https://example.com/collapsed\n";
+    blocks = TinyPdf::Internal::ParseMarkdown(references);
+    if (blocks.size() != 1 || blocks[0].type != BlockType::Paragraph) {
+        std::cerr << "reference definition suppression mismatch" << std::endl;
+        return false;
+    }
+    std::vector<std::string> urls;
+    std::string visible;
+    for (const TinyPdf::Internal::InlineSpan& span :
+        TinyPdf::Internal::ParseInlineSpans(blocks[0].text)) {
+        visible += span.text;
+        if (!span.url.empty()) urls.push_back(span.url);
+    }
+    const std::vector<std::string> expectedUrls = {
+        "https://example.com/id", "https://example.com/id",
+        "https://example.com/implicit", "https://example.com/collapsed"
+    };
+    if (urls != expectedUrls || visible != "plain, spaced, implicit, collapsed, and [missing][nope].") {
+        std::cerr << "reference normalization/negative mismatch" << std::endl;
+        return false;
+    }
+
+    const std::string codeDefinitions =
+        "`[fake][]`\n\n"
+        "    [fake]: https://example.com/fake\n\n"
+        "```\n[other]: https://example.com/other\n```\n";
+    blocks = TinyPdf::Internal::ParseMarkdown(codeDefinitions);
+    if (blocks.size() != 3 || blocks[0].type != BlockType::Paragraph ||
+        blocks[0].text != "`[fake][]`" || blocks[1].type != BlockType::Code ||
+        blocks[2].type != BlockType::Code) {
+        std::cerr << "reference definition code exclusion mismatch: blocks=" << blocks.size();
+        for (const Block& block : blocks) std::cerr << " [" << (int)block.type << ":" << block.text << "]";
+        std::cerr << std::endl;
+        return false;
+    }
+
+    const std::string inlineReferenceImage =
+        "before ![alt][asset] after\n\n"
+        "[asset]: docs/assets/branding/rayomd.png\n";
+    blocks = TinyPdf::Internal::ParseMarkdown(inlineReferenceImage);
+    if (blocks.size() != 1 || blocks[0].type != BlockType::Paragraph ||
+        InlineVisible(blocks[0].text) != "before image: alt after") {
+        std::cerr << "inline reference image fallback mismatch" << std::endl;
+        return false;
+    }
+
+    const std::string containerTables =
+        "> A | B\n"
+        "> --- | ---\n"
+        "> 1 | 2\n\n"
+        "- table item\n\n"
+        "    C | D\n"
+        "    --- | ---\n"
+        "    3 | 4\n";
+    blocks = TinyPdf::Internal::ParseMarkdown(containerTables);
+    if (blocks.size() != 2 || blocks[0].type != BlockType::Quote ||
+        blocks[0].children.size() != 1 || blocks[0].children[0].type != BlockType::Table ||
+        blocks[1].type != BlockType::Bullet || blocks[1].children.size() != 1 ||
+        blocks[1].children[0].type != BlockType::Table) {
+        std::cerr << "container table parsing mismatch" << std::endl;
+        return false;
+    }
+
+    blocks = TinyPdf::Internal::ParseMarkdown(
+        "2) ordered item\n   wrapped continuation\n\n    second paragraph\n");
+    if (blocks.size() != 1 || blocks[0].type != BlockType::Numbered || blocks[0].number != 2 ||
+        blocks[0].text != "ordered item wrapped continuation" || blocks[0].children.size() != 1 ||
+        blocks[0].children[0].type != BlockType::Paragraph ||
+        blocks[0].children[0].text != "second paragraph") {
+        std::cerr << "structured ordered-list mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool CheckClassicInlineExactness() {
+    using TinyPdf::Internal::InlineSpan;
+    struct CodeCase { const char* input; const char* visible; const char* codeText; };
+    const CodeCase codeCases[] = {
+        {"`code`", "code", "code"},
+        {"``literal ` tick``", "literal ` tick", "literal ` tick"},
+        {"` foo `", "foo", "foo"},
+        {"`  `", "  ", "  "},
+        {"`line\nbreak`", "line break", "line break"},
+        {"```two `` ticks```", "two `` ticks", "two `` ticks"},
+        {"unmatched ` tick", "unmatched ` tick", nullptr},
+    };
+    for (const CodeCase& item : codeCases) {
+        std::vector<InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(item.input);
+        std::string visible;
+        bool matchedCode = false;
+        bool anyCode = false;
+        for (const InlineSpan& span : spans) {
+            visible += span.text;
+            anyCode = anyCode || span.code;
+            matchedCode = matchedCode || (item.codeText && span.code && span.text == item.codeText);
+        }
+        if (visible != item.visible || (item.codeText ? !matchedCode : anyCode)) {
+            std::cerr << "matching-run code span mismatch: " << item.input << std::endl;
+            return false;
+        }
+    }
+
+    struct EmphasisCase { const char* input; const char* text; bool bold; bool italic; };
+    const EmphasisCase emphasisCases[] = {
+        {"*asterisk*", "asterisk", false, true},
+        {"**asterisk**", "asterisk", true, false},
+        {"***asterisk***", "asterisk", true, true},
+        {"_underscore_", "underscore", false, true},
+        {"__underscore__", "underscore", true, false},
+        {"___underscore___", "underscore", true, true},
+        {"**outer _inner_**", "inner", true, true},
+    };
+    for (const EmphasisCase& item : emphasisCases) {
+        bool found = false;
+        for (const InlineSpan& span : TinyPdf::Internal::ParseInlineSpans(item.input)) {
+            found = found || (span.text == item.text && span.bold == item.bold && span.italic == item.italic);
+        }
+        if (!found) {
+            std::cerr << "classic emphasis mismatch: " << item.input << std::endl;
+            return false;
+        }
+    }
+    if (InlineVisible("word_with_internal_underscores") != "word_with_internal_underscores" ||
+        InlineVisible("unmatched * marker") != "unmatched * marker") {
+        std::cerr << "emphasis negative-case mismatch" << std::endl;
+        return false;
+    }
+
+    const std::string escapable = "\\`*{}[]()#+-.!_";
+    for (char punctuation : escapable) {
+        std::string input;
+        input.push_back('\\');
+        input.push_back(punctuation);
+        std::string expected(1, punctuation);
+        if (InlineVisible(input) != expected) {
+            std::cerr << "classic escape mismatch for byte " << (int)(unsigned char)punctuation << std::endl;
+            return false;
+        }
+    }
+    for (char punctuation : std::string(">q/@:=")) {
+        std::string input;
+        input.push_back('\\');
+        input.push_back(punctuation);
+        if (InlineVisible(input) != input) {
+            std::cerr << "non-escapable slash mismatch for byte " << (int)(unsigned char)punctuation << std::endl;
+            return false;
+        }
+    }
+
+    std::vector<InlineSpan> code = TinyPdf::Internal::ParseInlineSpans("`\\* _`");
+    if (code.size() != 1 || !code[0].code || code[0].text != "\\* _") {
+        std::cerr << "code-span escape isolation mismatch" << std::endl;
+        return false;
+    }
+    std::vector<TinyPdf::Internal::Block> blocks =
+        TinyPdf::Internal::ParseMarkdown("    \\* _\n");
+    if (blocks.size() != 1 || blocks[0].type != TinyPdf::Internal::BlockType::Code ||
+        blocks[0].text != "\\* _") {
+        std::cerr << "code-block escape isolation mismatch" << std::endl;
+        return false;
+    }
+
+    const std::string invalidAutolinks = "<not-an-email> and <user@localhost>";
+    std::vector<InlineSpan> invalid = TinyPdf::Internal::ParseInlineSpans(invalidAutolinks);
+    bool hasUrl = false;
+    std::string invalidVisible;
+    for (const InlineSpan& span : invalid) {
+        hasUrl = hasUrl || !span.url.empty();
+        invalidVisible += span.text;
+    }
+    if (hasUrl || invalidVisible != invalidAutolinks) {
+        std::cerr << "autolink negative-case mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool CheckContainerPdfLayout() {
+    const std::string layout =
+        "[root](https://example.com/root)\n\n"
+        "> [quote](https://example.com/quote)\n"
+        "> > [nested](https://example.com/nested)\n"
+        ">\n"
+        "> ## Quote heading\n"
+        ">\n"
+        ">     quote_code()\n\n"
+        "- list item\n\n"
+        "    [child](https://example.com/child)\n\n"
+        "        list_code()\n";
+    std::string standardPdf;
+    if (!Build(layout, standardPdf) ||
+        standardPdf.find("RayoMD Native Standard PDF") == std::string::npos ||
+        CountOccurrences(standardPdf, "/Subtype /Link") != 4) {
+        std::cerr << "standard container PDF build mismatch" << std::endl;
+        return false;
+    }
+    std::array<double, 4> root{};
+    std::array<double, 4> quote{};
+    std::array<double, 4> nested{};
+    std::array<double, 4> child{};
+    if (!FindLinkRectangle(standardPdf, "https://example.com/root", root) ||
+        !FindLinkRectangle(standardPdf, "https://example.com/quote", quote) ||
+        !FindLinkRectangle(standardPdf, "https://example.com/nested", nested) ||
+        !FindLinkRectangle(standardPdf, "https://example.com/child", child) ||
+        quote[0] <= root[0] + 5.0 || nested[0] <= quote[0] + 5.0 || child[0] <= root[0] + 5.0) {
+        std::cerr << "standard container indentation/link alignment mismatch" << std::endl;
+        return false;
+    }
+    size_t heading = standardPdf.find("(Quote heading) Tj");
+    size_t headingFont = heading == std::string::npos ? std::string::npos :
+        standardPdf.rfind("/F2 ", heading);
+    if (heading == std::string::npos || headingFont == std::string::npos || heading - headingFont > 160) {
+        std::cerr << "quote heading style mismatch" << std::endl;
+        return false;
+    }
+
+    std::string unicodePdf;
+    const std::string unicodeLayout = u8"Za\u017C\u00F3\u0142\u0107\n\n" + layout;
+    if (!Build(unicodeLayout, unicodePdf) ||
+        unicodePdf.find("RayoMD Native Tiny PDF") == std::string::npos ||
+        CountOccurrences(unicodePdf, "/Subtype /Link") != 4) {
+        std::cerr << "Unicode container PDF build mismatch" << std::endl;
+        return false;
+    }
+    if (!FindLinkRectangle(unicodePdf, "https://example.com/root", root) ||
+        !FindLinkRectangle(unicodePdf, "https://example.com/quote", quote) ||
+        !FindLinkRectangle(unicodePdf, "https://example.com/nested", nested) ||
+        !FindLinkRectangle(unicodePdf, "https://example.com/child", child) ||
+        quote[0] <= root[0] + 5.0 || nested[0] <= quote[0] + 5.0 || child[0] <= root[0] + 5.0) {
+        std::cerr << "Unicode container indentation/link alignment mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
 struct FixtureOptions {
     std::string attachmentName = "source.md";
     std::string profile = "rayomd-source/1";
@@ -119,6 +640,12 @@ bool ExpectStatus(const std::string& pdf, RayoMd::PdfSource::Status status, cons
 
 int main() {
     if (!CheckFormatter()) return 1;
+    if (!CheckClassicMarkdownPhaseOne()) return 48;
+    if (!CheckStructuredContainers()) return 49;
+    if (!CheckClassicInlineCases()) return 50;
+    if (!CheckClassicBlockAmbiguities()) return 51;
+    if (!CheckClassicInlineExactness()) return 52;
+    if (!CheckContainerPdfLayout()) return 53;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

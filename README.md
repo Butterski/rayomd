@@ -130,10 +130,13 @@ Version-specific engineering contracts remain beside the code:
 
 ## Native renderer scope
 
-Native mode supports headings, paragraphs, nested lists, block quotes, fenced
-code, pipe tables, rules, page breaks, inline emphasis, clickable links,
-standalone images with fallback text, basic math cleanup/boxes, Unicode fonts,
-and common status-symbol normalization.
+Native mode supports ATX and Setext headings, paragraphs, structured nested
+lists and block quotes, fenced and indented code, pipe tables, rules, page
+breaks, matching-run code spans, classic emphasis and escapes, inline and
+reference-style links, URL/email autolinks, standalone inline/reference images,
+basic math cleanup/boxes, Unicode fonts, and common status-symbol normalization.
+Images embedded in paragraph text use a consistent `image: alt` fallback;
+standalone images retain native image layout and missing-image fallback text.
 
 It deliberately does not promise full CommonMark/Pandoc compatibility, TeX math,
 syntax highlighting, footnotes, citations, filters, templates, or HTML/CSS
