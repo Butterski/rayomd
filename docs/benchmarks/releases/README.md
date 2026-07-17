@@ -24,8 +24,8 @@ run the helper with `--skip-download --binary-root <extracted-root>`.
 
 | Version | Platform | Suite | Storage | Warm ms | Cold ms | Batch ms/file | Stdin ms/file | Serve ms |
 |---|---|---|---|---:|---:|---:|---:|---:|
-| [`v2.5.0`](v2.5.0/linux-wsl-release-local-quick-modern-normal-local.json) | linux-wsl-release-local | quick | WSL /mnt/e Windows-mounted storage; local 2.5.0 Release source build; quick suite | `59.91` | `115.8679` | `109.948` | `85.5993` | `79.295` |
-| [`v2.5.0`](v2.5.0/windows-release-local-quick-modern-normal-local.json) | windows-release-local | quick | Windows 11 workspace; local 2.5.0 Release source build; quick suite | `2.43` | `31.3418` | `8.7576` | `6.5414` | `3.48` |
+| [`v2.5.0`](v2.5.0/linux-wsl-release-local-quick-modern-normal-local.json) | linux-wsl-release-local | quick | WSL /mnt/e Windows-mounted storage; local 2.5.0 Release source build; quick suite | `103.485` | `100.7261` | `81.505` | `93.5928` | `70.195` |
+| [`v2.5.0`](v2.5.0/windows-release-local-quick-modern-normal-local.json) | windows-release-local | quick | Windows 11 workspace; local 2.5.0 Release source build; quick suite | `4.19` | `41.6209` | `15.7321` | `9.9723` | `4.985` |
 | [`v2.3.0`](v2.3.0/linux-wsl-release-quick-modern-normal-local.json) | linux-wsl-release | quick | WSL /mnt/e Windows-mounted storage; release linux-x64 tarball; quick suite | `59.615` | `81.6626` | `75.2461` | `75.4007` | `66.4` |
 | [`v2.2.0`](v2.2.0/linux-wsl-release-quick-modern-normal-local.json) | linux-wsl-release | quick | WSL /mnt/e Windows-mounted storage; release linux-x64 tarball; quick suite | `55.555` | `83.6285` | `72.7392` | `72.6992` | `59.71` |
 | [`v2.1.0`](v2.1.0/linux-wsl-release-quick-modern-normal-local.json) | linux-wsl-release | quick | WSL /mnt/e Windows-mounted storage; release linux-x64 tarball; quick suite | `58.515` | `89.6396` | `18.9413` | `73.1409` | `70.035` |
