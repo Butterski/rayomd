@@ -1883,6 +1883,16 @@ public:
 
     bool Resolve(const std::string& src, const std::string& alt, int& index) {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Image);
+        // Reference and inline syntax can resolve to the same source. Reuse only
+        // an image that this registry has already accepted through the policy.
+        std::string sourceKey = "source:";
+        sourceKey += src;
+        auto source = indexByKey.find(sourceKey);
+        if (source != indexByKey.end()) {
+            index = source->second;
+            return true;
+        }
+
         std::string key;
         std::string localPathUtf8;
         bool isUrl = IsHttpUrl(src);
@@ -1916,6 +1926,7 @@ public:
         AppendSize(image.name, images.size() + 1);
         index = (int)images.size();
         indexByKey[key] = index;
+        indexByKey.emplace(std::move(sourceKey), index);
         images.push_back(std::move(image));
         (void)alt;
         return true;
