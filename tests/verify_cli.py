@@ -51,6 +51,14 @@ def verify(binary: Path, keep: Path | None) -> None:
         run(binary, "--export", str(ascii_md), str(ascii_pdf), "native", "tech", "margin=54pt")
         require_pdf(ascii_pdf, b"/Subtype /Link", b"https://example.com/one")
 
+        spaced_dir = root / "path with spaces"
+        spaced_dir.mkdir()
+        spaced_md = spaced_dir / "quoted input.md"
+        spaced_pdf = spaced_dir / "quoted output.pdf"
+        spaced_md.write_bytes(ascii_md.read_bytes())
+        run(binary, "--export", str(spaced_md), str(spaced_pdf), "native", "tech", "margin=54pt")
+        require_pdf(spaced_pdf, b"/Subtype /Link", b"https://example.com/one")
+
         unicode_md = root / "unicode.md"
         reversible_pdf = root / "reversible.pdf"
         run(binary, "--export", str(ascii_md), str(reversible_pdf), "native", "tech", "normal", "--embed-source")

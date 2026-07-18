@@ -123,11 +123,37 @@ if(WIN32)
         third_party/imgui/backends/imgui_impl_win32.cpp
         third_party/imgui/backends/imgui_impl_dx11.cpp
     )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_sources(rayomd PRIVATE
+            src/win32/delay_load.cpp
+            src/win32/delay_import_pointers.cpp
+            src/win32/delay_image_load.cpp
+            src/win32/delay_image_import_pointers.cpp)
+        target_link_options(rayomd PRIVATE
+            -Wl,--wrap=GetOpenFileNameW
+            -Wl,--wrap=GetSaveFileNameW
+            -Wl,--wrap=D3D11CreateDeviceAndSwapChain
+            -Wl,--wrap=D3DCompile
+            -Wl,--wrap=DwmEnableBlurBehindWindow
+            -Wl,--wrap=DwmGetColorizationColor
+            -Wl,--wrap=DwmIsCompositionEnabled
+            -Wl,--wrap=DwmSetWindowAttribute
+            -Wl,--wrap=DragAcceptFiles
+            -Wl,--wrap=DragFinish
+            -Wl,--wrap=DragQueryFileW
+            -Wl,--wrap=SHGetFolderPathW
+            -Wl,--wrap=ShellExecuteW)
+    endif()
     target_compile_definitions(rayomd PRIVATE UNICODE _UNICODE)
     target_include_directories(rayomd PRIVATE include . third_party third_party/imgui)
-    target_link_libraries(rayomd PRIVATE
-        d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi winhttp windowscodecs ws2_32 Threads::Threads
-    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_link_libraries(rayomd PRIVATE
+            dxgi windowscodecs Threads::Threads)
+    else()
+        target_link_libraries(rayomd PRIVATE
+            d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi
+            winhttp windowscodecs ws2_32 Threads::Threads)
+    endif()
     rayomd_simdutf(rayomd)
     rayomd_common_definitions(rayomd)
     rayomd_release_flags(rayomd)

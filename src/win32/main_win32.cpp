@@ -680,6 +680,68 @@ bool EnsureDirectoryRecursive(const std::wstring& path) {
 
 void WriteStdoutLine(const std::string& line);
 
+LPWSTR* ParseCommandLineLocally(LPCWSTR commandLine, int* argumentCount) {
+    if (!argumentCount) return nullptr;
+    *argumentCount = 0;
+
+    std::vector<std::wstring> arguments;
+    const wchar_t* cursor = commandLine ? commandLine : L"";
+    while (*cursor) {
+        while (*cursor == L' ' || *cursor == L'\t') cursor++;
+        if (!*cursor) break;
+
+        std::wstring argument;
+        bool quoted = false;
+        while (*cursor) {
+            if (!quoted && (*cursor == L' ' || *cursor == L'\t')) break;
+
+            size_t slashCount = 0;
+            while (*cursor == L'\\') {
+                slashCount++;
+                cursor++;
+            }
+            if (*cursor == L'"') {
+                argument.append(slashCount / 2, L'\\');
+                if ((slashCount & 1u) != 0) {
+                    argument.push_back(L'"');
+                    cursor++;
+                } else {
+                    quoted = !quoted;
+                    cursor++;
+                }
+                continue;
+            }
+
+            argument.append(slashCount, L'\\');
+            if (!*cursor || (!quoted && (*cursor == L' ' || *cursor == L'\t'))) break;
+            argument.push_back(*cursor++);
+        }
+        arguments.push_back(std::move(argument));
+        while (*cursor == L' ' || *cursor == L'\t') cursor++;
+    }
+
+    size_t pointerBytes = (arguments.size() + 1) * sizeof(LPWSTR);
+    size_t characterCount = 0;
+    for (const std::wstring& argument : arguments) characterCount += argument.size() + 1;
+    if (characterCount > (SIZE_MAX - pointerBytes) / sizeof(wchar_t)) return nullptr;
+
+    size_t allocationBytes = pointerBytes + characterCount * sizeof(wchar_t);
+    LPWSTR* result = static_cast<LPWSTR*>(LocalAlloc(LMEM_FIXED, allocationBytes));
+    if (!result) return nullptr;
+    wchar_t* destination = reinterpret_cast<wchar_t*>(
+        reinterpret_cast<unsigned char*>(result) + pointerBytes);
+    for (size_t index = 0; index < arguments.size(); index++) {
+        result[index] = destination;
+        const std::wstring& argument = arguments[index];
+        std::copy(argument.begin(), argument.end(), destination);
+        destination += argument.size();
+        *destination++ = L'\0';
+    }
+    result[arguments.size()] = nullptr;
+    *argumentCount = static_cast<int>(arguments.size());
+    return result;
+}
+
 std::wstring PdfNameForMarkdown(const std::wstring& name) {
     size_t slash = name.find_last_of(L"\\/");
     std::wstring base = slash == std::wstring::npos ? name : name.substr(slash + 1);
@@ -1134,7 +1196,7 @@ int RunRecoverSource(const std::wstring& inputPath, const std::wstring& outputPa
 
 int TryCommandLineExport() {
     int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    LPWSTR* argv = ParseCommandLineLocally(GetCommandLineW(), &argc);
     if (!argv) return -1;
 
     if (argc >= 2 && (lstrcmpiW(argv[1], L"--version") == 0 || lstrcmpiW(argv[1], L"-v") == 0)) {
