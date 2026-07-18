@@ -112,3 +112,8 @@ extern "C" HINSTANCE WINAPI __wrap_ShellExecuteW(
     return procedure ? procedure(owner, operation, file, parameters, directory, showCommand)
                      : reinterpret_cast<HINSTANCE>(static_cast<INT_PTR>(SE_ERR_DLLNOTFOUND));
 }
+
+extern "C" LPWSTR* WINAPI __wrap_CommandLineToArgvW(LPCWSTR commandLine, int* argumentCount) {
+    RAYOMD_DELAY_PROC(L"shell32.dll", CommandLineToArgvW);
+    return procedure ? procedure(commandLine, argumentCount) : nullptr;
+}

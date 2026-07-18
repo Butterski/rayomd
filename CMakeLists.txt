@@ -142,7 +142,8 @@ if(WIN32)
             -Wl,--wrap=DragFinish
             -Wl,--wrap=DragQueryFileW
             -Wl,--wrap=SHGetFolderPathW
-            -Wl,--wrap=ShellExecuteW)
+            -Wl,--wrap=ShellExecuteW
+            -Wl,--wrap=CommandLineToArgvW)
     endif()
     target_compile_definitions(rayomd PRIVATE UNICODE _UNICODE)
     target_include_directories(rayomd PRIVATE include . third_party third_party/imgui)

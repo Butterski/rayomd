@@ -25,6 +25,21 @@ def run(binary: Path, *args: str, stdin: str | None = None, expect: int = 0) -> 
     return proc
 
 
+def run_raw_windows(binary: Path, command_line: str, expect: int = 0) -> subprocess.CompletedProcess[bytes]:
+    proc = subprocess.run(
+        command_line,
+        executable=str(binary),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+        timeout=10,
+    )
+    if proc.returncode != expect:
+        output = proc.stdout.decode("utf-8", errors="replace")
+        raise AssertionError(f"expected exit {expect}, got {proc.returncode}: {command_line}\n{output}")
+    return proc
+
+
 def require_pdf(path: Path, *needles: bytes) -> bytes:
     data = path.read_bytes()
     if not data.startswith(b"%PDF-") or len(data) < 100:
@@ -44,6 +59,9 @@ def verify(binary: Path, keep: Path | None) -> None:
     try:
         run(binary, "--version")
         run(binary, "--doctor")
+        if os.name == "nt":
+            # Exercise CommandLineToArgvW behavior outside the common fast path.
+            run_raw_windows(binary, "   --doctor")
 
         ascii_md = root / "ascii.md"
         ascii_md.write_text("# ASCII\n\n[one](https://example.com/one)\n", encoding="utf-8")
@@ -58,6 +76,16 @@ def verify(binary: Path, keep: Path | None) -> None:
         spaced_md.write_bytes(ascii_md.read_bytes())
         run(binary, "--export", str(spaced_md), str(spaced_pdf), "native", "tech", "margin=54pt")
         require_pdf(spaced_pdf, b"/Subtype /Link", b"https://example.com/one")
+
+        if os.name == "nt":
+            adjacent_quote_pdf = root / "adjacent-quote.pdf"
+            adjacent_quote_pdf.unlink(missing_ok=True)
+            prefix = subprocess.list2cmdline(
+                [str(binary), "--export", str(ascii_md), str(adjacent_quote_pdf)]
+            )
+            adjacent = run_raw_windows(binary, prefix + ' "nat""ive"', expect=2)
+            if b"unrecognized export option" not in adjacent.stdout or adjacent_quote_pdf.exists():
+                raise AssertionError("adjacent quotes did not retain CommandLineToArgvW semantics")
 
         unicode_md = root / "unicode.md"
         reversible_pdf = root / "reversible.pdf"

@@ -680,6 +680,34 @@ bool EnsureDirectoryRecursive(const std::wstring& path) {
 
 void WriteStdoutLine(const std::string& line);
 
+bool CanParseCommandLineLocally(LPCWSTR commandLine) {
+    if (!commandLine || !*commandLine || *commandLine == L' ' || *commandLine == L'\t') {
+        return false;
+    }
+
+    const wchar_t* cursor = commandLine;
+    while (*cursor) {
+        if (*cursor == L'"') {
+            cursor++;
+            if (*cursor == L'"') return false;
+            while (*cursor && *cursor != L'"') {
+                if (*cursor == L'\\' && cursor[1] == L'"') return false;
+                cursor++;
+            }
+            if (*cursor != L'"') return false;
+            cursor++;
+            if (*cursor && *cursor != L' ' && *cursor != L'\t') return false;
+        } else {
+            while (*cursor && *cursor != L' ' && *cursor != L'\t') {
+                if (*cursor == L'"') return false;
+                cursor++;
+            }
+        }
+        while (*cursor == L' ' || *cursor == L'\t') cursor++;
+    }
+    return true;
+}
+
 LPWSTR* ParseCommandLineLocally(LPCWSTR commandLine, int* argumentCount) {
     if (!argumentCount) return nullptr;
     *argumentCount = 0;
@@ -1196,7 +1224,10 @@ int RunRecoverSource(const std::wstring& inputPath, const std::wstring& outputPa
 
 int TryCommandLineExport() {
     int argc = 0;
-    LPWSTR* argv = ParseCommandLineLocally(GetCommandLineW(), &argc);
+    LPCWSTR commandLine = GetCommandLineW();
+    LPWSTR* argv = CanParseCommandLineLocally(commandLine)
+        ? ParseCommandLineLocally(commandLine, &argc)
+        : CommandLineToArgvW(commandLine, &argc);
     if (!argv) return -1;
 
     if (argc >= 2 && (lstrcmpiW(argv[1], L"--version") == 0 || lstrcmpiW(argv[1], L"-v") == 0)) {
