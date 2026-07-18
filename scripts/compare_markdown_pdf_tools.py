@@ -62,7 +62,7 @@ def scaled_document(source: bytes, target_bytes: int) -> tuple[bytes, int]:
 
 
 
-def corpus(root: Path, source_url: str, offline: bool) -> tuple[dict[str, Path], dict[str, object]]:
+def corpus(root: Path, source_url: str, offline: bool, pinned_only: bool = False) -> tuple[dict[str, Path], dict[str, object]]:
     tiny = """# Release notes
 
 RayoMD converts Markdown to PDF with a small native renderer.
@@ -100,6 +100,9 @@ See [the project](https://github.com/Butterski/rayomd) for details.
         paths[name] = root / "corpus" / f"{name}.md"
         write(paths[name], value)
         cases[name] = {"kind": "synthetic", "copies": 1}
+
+    if pinned_only:
+        return paths, {"source": None, "cases": cases}
 
     cache_name = f"{sha256(source_url.encode('utf-8'))[:16]}.text"
     source_bytes, source_origin = fetch_source(source_url, root / "downloads" / cache_name, offline)
@@ -212,12 +215,13 @@ def main() -> int:
     parser.add_argument("--preflight-timeout", default=15, type=int)
     parser.add_argument("--source-url", default=DEFAULT_SOURCE_URL)
     parser.add_argument("--offline", action="store_true", help="reuse the cached real-world source")
+    parser.add_argument("--pinned-only", action="store_true", help="measure only the image-free synthetic README cases")
     args = parser.parse_args()
     args.root.mkdir(parents=True, exist_ok=True)
     if min(args.runs, args.large_runs, args.timeout, args.large_timeout, args.preflight_timeout) < 1:
         raise RuntimeError("run counts and timeouts must be at least 1")
 
-    inputs, corpus_metadata = corpus(args.root, args.source_url, args.offline)
+    inputs, corpus_metadata = corpus(args.root, args.source_url, args.offline, args.pinned_only)
     runner = Path(__file__).with_name("md_to_pdf_runner.cjs").resolve()
     node_modules = args.node_modules.resolve()
     tools = {
@@ -286,12 +290,14 @@ def main() -> int:
             large_cases.append(case)
     scored_speedups = [value for value in speedups.values() if value is not None]
     large_speedups = [speedups[case] for case in large_cases if speedups[case] is not None]
+    overall_geomean = round(statistics.geometric_mean(scored_speedups), 2) if scored_speedups else None
+    large_geomean = round(statistics.geometric_mean(large_speedups), 2) if large_speedups else None
     scores = {
         "wins": wins,
         "scored_cases": scored_cases,
         "total_cases": len(results),
-        "overall_geomean_vs_fastest_competitor": round(statistics.geometric_mean(scored_speedups), 2),
-        "large_geomean_vs_fastest_competitor": round(statistics.geometric_mean(large_speedups), 2),
+        "overall_geomean_vs_fastest_competitor": overall_geomean,
+        "large_geomean_vs_fastest_competitor": large_geomean,
     }
 
     metadata = {
@@ -308,6 +314,7 @@ def main() -> int:
             "large_timeout_seconds": args.large_timeout,
             "preflight_timeout_seconds": args.preflight_timeout,
             "disable_tool_after_timeout": True,
+            "scope": "pinned-image-free" if args.pinned_only else "full",
         },
         "versions": {
             "rayomd": version([str(args.rayomd.resolve()), "--version"]),
@@ -327,13 +334,19 @@ def main() -> int:
     write(args.root / "record.json", json.dumps(metadata, indent=2, ensure_ascii=False) + "\n")
     lines = [
         "# Markdown-to-PDF comparison", "",
-        f"- Real-world source: {args.source_url}",
-        f"- Source SHA-256: `{corpus_metadata['source']['sha256']}`",
-        "- The source contains HTML and features outside RayoMD's native subset; timings do not imply rendering equivalence.",
-        "- Scaled cases repeat the complete source and measure size scaling, not additional syntax diversity.", "",
-        "| Case | Kind | Input | RayoMD | Pandoc + XeLaTeX | md-to-pdf | vs fastest competitor |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "- Scope: pinned image-free synthetic README cases." if args.pinned_only else f"- Real-world source: {args.source_url}",
     ]
+    if args.pinned_only:
+        lines.append("- The measured inputs contain no Markdown or HTML image syntax; RayoMD URL-image fetching is disabled.")
+    else:
+        lines.extend([
+            f"- Source SHA-256: `{corpus_metadata['source']['sha256']}`",
+            "- The source contains HTML and features outside RayoMD's native subset; timings do not imply rendering equivalence.",
+            "- Scaled cases repeat the complete source and measure size scaling, not additional syntax diversity.",
+        ])
+    lines.extend(["", "| Case | Kind | Input | RayoMD | Pandoc + XeLaTeX | md-to-pdf | vs fastest competitor |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ])
     for case, src in inputs.items():
         row = results[case]
         kind = case_metadata[case]["kind"]
@@ -344,11 +357,13 @@ def main() -> int:
             f"{format_measurement(row['rayomd'])} | {format_measurement(row['pandoc_xelatex'])} | "
             f"{format_measurement(row['md_to_pdf'])} | {speedup_text} |"
         )
-    lines.extend([
-        "",
-        f"Overall score: RayoMD won **{scores['wins']}/{scores['scored_cases']}** scored cases and was **{scores['overall_geomean_vs_fastest_competitor']:.1f}x** faster than the fastest completed competitor by geometric mean.",
-        f"Large-document score: RayoMD was **{scores['large_geomean_vs_fastest_competitor']:.1f}x** faster across the authentic, 1 MiB, and 5 MiB cases.",
-    ])
+    lines.append("")
+    if overall_geomean is None:
+        lines.append(f"Overall score: no cases were scored ({scores['wins']}/{scores['scored_cases']} wins).")
+    else:
+        lines.append(f"Overall score: RayoMD won **{scores['wins']}/{scores['scored_cases']}** scored cases and was **{overall_geomean:.1f}x** faster than the fastest completed competitor by geometric mean.")
+    if large_geomean is not None:
+        lines.append(f"Large-document score: RayoMD was **{large_geomean:.1f}x** faster across the authentic, 1 MiB, and 5 MiB cases.")
     write(args.root / "summary.md", "\n".join(lines) + "\n")
     partial_path.unlink(missing_ok=True)
     print("\n" + "\n".join(lines))

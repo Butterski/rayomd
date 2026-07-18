@@ -54,15 +54,15 @@ templates, citations, syntax highlighting, or HTML/CSS fidelity.
 
 ## Performance snapshot
 
-In a 2026-07-18 Windows 11 fresh-process comparison, RayoMD 2.5.0 was fastest
-on all three deterministic workloads supported by its native subset. The
-next-fastest comparator took `57.3x` to `89.1x` as long.
+In a 2026-07-18 Windows 11 image-free fresh-process comparison, RayoMD 2.5.0
+was fastest on all three deterministic workloads supported by its native
+subset. The next-fastest comparator took `92.8x` to `123.2x` as long.
 
 | Case | RayoMD | `md-to-pdf` | Pandoc + XeLaTeX |
 |---|---:|---:|---:|
-| Tiny README | **`35.29 ms`** | `3,142.94 ms` | `6,643.43 ms` |
-| Medium feature mix | **`52.00 ms`** | `2,982.20 ms` | `4,783.51 ms` |
-| 500-row table | **`36.12 ms`** | `2,656.61 ms` | `6,761.36 ms` |
+| Tiny README | **`17.76 ms`** | `1,647.49 ms` | `3,121.12 ms` |
+| Medium feature mix | **`18.51 ms`** | `2,279.92 ms` | `3,406.69 ms` |
+| 500-row table | **`19.41 ms`** | `2,307.51 ms` | `3,465.09 ms` |
 
 A focused warm-path check on 2026-07-18 used the repository's 3,896-byte
 `tester.md` fixture and an order-balanced frozen-baseline comparison:
