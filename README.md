@@ -54,35 +54,33 @@ templates, citations, syntax highlighting, or HTML/CSS fidelity.
 
 ## Performance snapshot
 
-In a 2026-07-18 Windows 11 image-free fresh-process comparison, RayoMD 2.5.0
-was fastest on all three deterministic workloads supported by its native
-subset. The next-fastest comparator took `92.8x` to `123.2x` as long.
+On 2026-07-18, order-balanced tests measured RayoMD 2.6 against the repository's
+`tester.md` with and without image syntax:
 
-| Case | RayoMD | `md-to-pdf` | Pandoc + XeLaTeX |
-|---|---:|---:|---:|
-| Tiny README | **`17.76 ms`** | `1,647.49 ms` | `3,121.12 ms` |
-| Medium feature mix | **`18.51 ms`** | `2,279.92 ms` | `3,406.69 ms` |
-| 500-row table | **`19.41 ms`** | `2,307.51 ms` | `3,465.09 ms` |
+| Platform/storage | Warm: imageless | Warm: image-bearing | Fresh process: imageless | Fresh process: image-bearing |
+|---|---:|---:|---:|---:|
+| Windows 11 workspace | **`0.447 ms`** | `0.714 ms` | **`21.10 ms`** | `98.39 ms` |
+| Linux WSL `/mnt/e` | **`0.225 ms`** | `5.120 ms` | **`25.45 ms`** | `153.63 ms` |
 
-A focused warm-path check on 2026-07-18 used the repository's 3,896-byte
-`tester.md` fixture and an order-balanced frozen-baseline comparison:
+A fresh process includes startup, source reading, PDF generation, output
+writing, and exit. The existing Python runner measured 32 A/B pairs after six
+preflights per case; filesystem and OS caches may remain warm. Even with the
+image-bearing fixture, the median stayed below `100 ms` on Windows and below
+`160 ms` on WSL's Windows-mounted workspace.
 
-| Platform/storage | RayoMD 2.4.1 baseline | RayoMD 2.5.0 | Change |
-|---|---:|---:|---:|
-| Windows 11 workspace | `1.833 ms` | **`0.865 ms`** | **`-51.0%` paired median** |
-| Linux WSL `/mnt/e` | `12.029 ms` | **`7.320 ms`** | **`-31.4%` paired median** |
+Warm `--bench` medians exclude startup, input reading, and timed output writing.
+They use 10 A/B pairs (`1,000` builds per Windows round and `200` per WSL
+round). The image-bearing fixture reuses the local mascot; URL fetching stayed
+off, so remote and missing sources used deterministic fallbacks. Every repeated
+PDF was byte-identical within its platform and case.
 
-These are warm `--bench` generation medians; they exclude process startup,
-input reading, and timed output writing. Each row uses 10 order-balanced pairs;
-the 10 baseline and 10 candidate PDFs on each platform were byte-identical.
+The WSL result includes `/mnt/e` path and file-access costs and is not a
+Linux-native/ext4 claim.
 
-This is a scoped benchmark, not a universal ranking or a claim of feature or
-visual equivalence. See the
-[full report](https://github.com/Butterski/rayomd/wiki/Markdown-to-PDF-Speed-Comparison-2026-07-18),
-[optimization audit](https://github.com/Butterski/rayomd/wiki/RayoMD-2.2.0-Optimization-Audit-2026-07-13),
-[warm `tester.md` record](https://github.com/Butterski/rayomd/wiki/RayoMD-tester.md-Warm-Benchmark-2026-07-18),
-and [benchmark archive](https://github.com/Butterski/rayomd/wiki/Benchmarks)
-for methodology, environment, memory, binary-size, and reproduction details.
+See the [2.6 performance snapshot](https://github.com/Butterski/rayomd/wiki/RayoMD-2.6.0-Performance-Snapshot)
+for p95 values, ranges, hashes, fixture details, and reproduction commands. The
+[benchmark index](https://github.com/Butterski/rayomd/wiki/Benchmarks) keeps
+cross-tool, warm-path, reversible-PDF, and older release reports organized.
 
 ## Quick start
 
