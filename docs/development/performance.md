@@ -10,6 +10,7 @@ timing or release evidence is needed. Raw reports belong under ignored
 ```sh
 python tools/benchmark.py run -- --binary build/windows/rayomd.exe --platform windows --suite watch --label local
 python3 tools/benchmark.py run -- --binary build/linux/rayomd --platform linux-native-ext4 --suite watch --label local
+python3 tools/benchmark.py ab -- --baseline build/before/rayomd --candidate build/linux/rayomd --cpu 3 --instructions
 python tools/benchmark.py reversible -- --binary build/windows/rayomd.exe --platform windows --suite full --samples 5
 python tools/benchmark.py compare -- --rayomd build/windows/rayomd.exe --root benchmark-output/pandoc --runs 5
 python tools/benchmark.py competitors -- --rayomd build/windows/rayomd.exe --node-modules path/to/node_modules --root benchmark-output/competitors
@@ -19,6 +20,16 @@ python3 tools/benchmark.py release -- --from-version 1.1.0 --suite quick
 The standard `run` workflow covers cold export, warm `--bench`, folder batch,
 stdin batch, warm serve, ASCII, Unicode, tables, explicit rules/page breaks,
 comments, and optional local images. Use it to protect the default fast path.
+
+The `ab` workflow measures what one engine change costs. It runs `--bench` for
+the baseline, an identical copy of the baseline, and the candidate in rotated
+order on the same fixtures (by default the watch suite's documents and
+`tester.md`). It reports the median of the paired per-round changes, so drift
+of the machine cancels, and the copy's change is the noise floor. It also says
+whether the two binaries write the same PDF bytes. `--instructions` adds the
+callgrind instruction count of one warm build (Linux, valgrind). That count
+does not move with code placement, which release-build timings do by about a
+percent; see "Layout fixes" below.
 
 The `competitors` workflow includes the three deterministic synthetic cases plus
 John Gruber's authentic `Markdown: Syntax` source and deterministic 1 MiB and
@@ -83,6 +94,15 @@ python tools/benchmark.py run -- \
   --baseline-record benchmark-output/perf-watch/windows/<before-run>/record.json \
   --fail-on-slower-pct 5
 ```
+
+The gate judges medians and totals. p95 values from two to a few dozen samples
+are close to their maximum: on identical binaries `serve_reported_ms_p95` moved
+by +5.6 % and `cold_export_ms_p95` (over eight runs) by +5.5 %. They are reported, not gated. Warm
+averages come from `total_ms / iterations`, so a 0.22 ms feature case is no
+longer read in 0.01 ms (4.5 %) steps, and the watch suite takes 24 cold
+exports. With these rules, eight A/A runs of the 2026-10-08 binary against its
+own record all passed; the largest gated change was +2.4 %
+(`sized_unicode_warm_ms_median`).
 
 Also compare executable/package byte size. A change that improves a tiny case
 but regresses larger documents, batch/serve throughput, memory, or package size

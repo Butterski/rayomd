@@ -91,7 +91,7 @@ SUITES = {
         "paragraphs_max": 3,
         "bench_iterations": 80,
         "bench_rounds": 1,
-        "cold_runs": 3,
+        "cold_runs": 6,
         "feature_sections": 12,
         "feature_iterations": 60,
         "sized_doc_bytes": 24 * KIB,
@@ -106,7 +106,7 @@ SUITES = {
         "paragraphs_max": 5,
         "bench_iterations": 250,
         "bench_rounds": 2,
-        "cold_runs": 8,
+        "cold_runs": 24,
         "feature_sections": 72,
         "feature_iterations": 150,
         "sized_doc_bytes": 96 * KIB,
@@ -121,7 +121,7 @@ SUITES = {
         "paragraphs_max": 6,
         "bench_iterations": 500,
         "bench_rounds": 3,
-        "cold_runs": 16,
+        "cold_runs": 48,
         "feature_sections": 180,
         "feature_iterations": 300,
         "sized_doc_bytes": 512 * KIB,
@@ -690,12 +690,18 @@ def run_bench_case(
         raise command_failure(name, rc, stdout, stderr)
     bench = parse_bench(out_dir / "bench-results.txt")
     sample_size = check_pdf(out_dir / "sample.pdf")
+    # avg_ms is printed with two decimals, which is 4.5 % of a 0.22 ms feature case;
+    # total_ms over all iterations keeps the precision.
+    if "total_ms" in bench and "iterations" in bench:
+        avg_ms = float(bench["total_ms"]) / int(bench["iterations"])
+    else:
+        avg_ms = float(bench["avg_ms"])
     return {
         "bench": bench,
         "wall_ms": wall_ms,
         "sample_pdf_bytes": sample_size,
         "peak_rss_bytes": peak_rss,
-        "avg_ms": float(bench["avg_ms"]),
+        "avg_ms": avg_ms,
     }
 
 
@@ -986,6 +992,13 @@ def delta_pct(value: float, base: float) -> float:
 
 def is_time_metric(metric: str) -> bool:
     return "_ms" in metric
+
+
+def is_gate_metric(metric: str) -> bool:
+    """Time metrics the regression gate judges. A p95 over two to a few dozen samples is
+    close to their maximum and moves by more than the gate on identical binaries, so it is
+    reported but not gated; medians and totals are."""
+    return is_time_metric(metric) and not metric.endswith("_p95")
 
 
 def comparable_metric_keys(current: dict[str, Any], previous: dict[str, Any]) -> list[str]:
@@ -1354,7 +1367,7 @@ def main() -> int:
     parser.add_argument("--root", default=Path("benchmark-output/perf-watch"), type=Path)
     parser.add_argument("--history", default=None, type=Path, help="JSONL history path for report-only local comparisons")
     parser.add_argument("--baseline-record", default=None, type=Path, help="explicit record.json or version benchmark JSON for pass/fail comparisons")
-    parser.add_argument("--fail-on-slower-pct", default=None, type=float, help="exit nonzero if explicit-baseline time metrics regress by this percent")
+    parser.add_argument("--fail-on-slower-pct", default=None, type=float, help="exit nonzero if an explicit-baseline median or total time metric regresses by this percent (p95 metrics are reported, not gated)")
     parser.add_argument("--version-log-dir", default=None, type=Path, help="write a compact version benchmark record and refresh README.md in this directory")
     parser.add_argument("--benchmark-version", default="", help="version label to use for archived benchmark records, for example 1.1.0")
     parser.add_argument("--storage-note", default="", help="short storage/environment note for version benchmark records, for example WSL ext4")
@@ -1482,7 +1495,7 @@ def main() -> int:
             print("Explicit baseline record has no comparable metrics.", file=sys.stderr)
             return 2
         threshold = args.fail_on_slower_pct
-        slower = [row for row in baseline_comparison if is_time_metric(row["metric"]) and row["delta_pct"] >= threshold]
+        slower = [row for row in baseline_comparison if is_gate_metric(row["metric"]) and row["delta_pct"] >= threshold]
         if slower:
             print(f"Performance regression threshold hit against explicit baseline: {threshold}%", file=sys.stderr)
             for row in slower:

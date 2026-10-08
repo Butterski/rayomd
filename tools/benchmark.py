@@ -19,6 +19,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (
         ("run", "run the standard performance watcher"),
+        ("ab", "compare two RayoMD binaries on the warm engine, with an A/A noise control"),
         ("compare", "compare RayoMD with Pandoc"),
         ("release", "archive curated release benchmark records"),
         ("competitors", "compare supported Markdown-to-PDF tools"),
@@ -29,6 +30,7 @@ def main() -> int:
     args = parser.parse_args()
     routes = {
         "run": "perf_watch.py",
+        "ab": "engine_ab.py",
         "compare": "compare_pandoc.py",
         "release": "archive_release_benchmarks.py",
         "competitors": "compare_markdown_pdf_tools.py",
