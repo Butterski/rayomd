@@ -258,10 +258,11 @@ bool CheckMathBlockSyntax() {
         {"Mass $m$\n===", "H*:Mass {m}"},
         {"## Costs $5 and $10", "H:Costs $5 and $10"},
         {"# Both $$a$$ and \\( b \\)", "H*:Both {a} and {b}"},
-        // tables: cells split at every unescaped pipe, exactly as without math; a table without
-        // formulas keeps the inline Markdown of its cells for the renderers
+        // tables: cells split at every unescaped pipe, exactly as without math, and a row keeps
+        // the header's number of cells (GFM); a table without formulas keeps the inline
+        // Markdown of its cells for the renderers
         {"| f | v |\n|---|---|\n| $\\alpha$ | $\\frac{a}{b}$ |", "T*[f,v][{\\alpha},{\\frac{a}{b}}]"},
-        {"| a | b |\n|---|---|\n| $|x|$ | abs |", "T[a,b][$,x,$,abs]"},
+        {"| a | b |\n|---|---|\n| $|x|$ | abs |", "T[a,b][$,x]"},
         {"| a | b |\n|---|---|\n| $\\|x\\|$ | \\( y \\) |", "T*[a,b][{|x|},{y}]"},
         {"| a | b |\n|---|---|\n| $\\|x\\|$ | $a \\mid b$ |", "T*[a,b][{|x|},{a \\mid b}]"},
         {"| a | b |\n|---|---|\n| $5 | 10$ |", "T[a,b][$5,10$]"},

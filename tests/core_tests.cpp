@@ -1309,6 +1309,24 @@ bool CheckLinkText() {
     return true;
 }
 
+// GFM table rows: a table goes on up to a blank line or the start of another block, a line
+// without pipes is a row too, and every row has the header's number of cells.
+bool CheckTableRows() {
+    using TinyPdf::Internal::BlockType;
+    const auto blocks = TinyPdf::Internal::ParseMarkdown(
+        "| a | b |\n|---|---|\n| one |\nbare text\n| 1 | 2 | 3 |\n- item\n\n"
+        "| c | d |\n|---|---|\n| x | y |\n\nafter\n");
+    const std::vector<std::vector<std::string>> first = {{"a", "b"}, {"one", ""}, {"bare text", ""}, {"1", "2"}};
+    const std::vector<std::vector<std::string>> second = {{"c", "d"}, {"x", "y"}};
+    if (blocks.size() != 4 || blocks[0].type != BlockType::Table || blocks[0].rows != first ||
+        blocks[1].type != BlockType::Bullet || blocks[1].text != "item" || blocks[2].type != BlockType::Table ||
+        blocks[2].rows != second || blocks[3].type != BlockType::Paragraph || blocks[3].text != "after") {
+        std::cerr << "GFM table rows mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // Table cells show their inline Markdown in both renderers: emphasis in its face, code in
 // Courier on a background, links that can be clicked where the cell shows them; escaped
 // markers and other backslashes stay as written.
@@ -1463,6 +1481,7 @@ int main() {
     if (!CheckStandardFontEmphasis()) return 71;
     if (!CheckTableCellMarkdown()) return 72;
     if (!CheckLinkText()) return 73;
+    if (!CheckTableRows()) return 74;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

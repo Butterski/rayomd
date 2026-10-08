@@ -1296,11 +1296,14 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 rows.push_back(std::move(row));
             };
             addRow(lines[i], SplitTableCells(lines[i]));
+            const size_t columns = rows[0].size();
             i += 2;
 
-            while (i < lines.size() && infos[i].kind != LineKind::Empty) {
+            // As in GFM, the rows go on up to a blank line or the start of another block, and
+            // every row has the cells of the header: missing ones are empty, extra ones dropped.
+            while (i < lines.size() && infos[i].kind == LineKind::Plain && !isSuppressed(i)) {
                 std::vector<std::string> row = SplitTableCells(lines[i]);
-                if (row.size() < 2) break;
+                row.resize(columns);
                 addRow(lines[i], std::move(row));
                 i++;
             }
