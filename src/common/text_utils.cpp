@@ -66,9 +66,16 @@ size_t AsciiRunLength(std::string_view text, size_t at) {
     return at - start;
 }
 
-} // namespace
+// Base letters of Latin Extended-A (U+0100..U+017F), for text no font on the system can
+// show: "Zażółć" reads as "Zazolc" rather than "Za??o??". '?' where there is none.
+constexpr char kLatinExtendedABase[] =
+    "AaAaAaCcCcCcCcDdDdEeEeEeEeEeGgGgGgGgHhHhIiIiIiIiIi??JjKkkLlLlLlL"
+    "lLlNnNnNnnNnOoOoOo??RrRrRrSsSsSsSsTtTtTtUuUuUuUuUuUuWwYyYZzZzZzs";
 
-bool TranscodeToWinAnsi(std::string_view utf8, std::string* out) {
+// The WinAnsi bytes of `utf8` into `out` (nullptr only checks). Without `replaced`, false at
+// the first character WinAnsiEncoding has no code for; with it, such a character becomes its
+// base letter or '?', counted in *replaced.
+bool ToWinAnsi(std::string_view utf8, std::string* out, size_t* replaced) {
     if (out) {
         out->clear();
         out->reserve(utf8.size());
@@ -86,24 +93,47 @@ bool TranscodeToWinAnsi(std::string_view utf8, std::string* out) {
         }
         uint32_t codePoint = 0;
         size_t length = 0;
-        if (!DecodeUtf8(utf8, at, codePoint, length)) return false;
-        at += length;
-        const char* symbol = codePoint == 0x2705 ? "[OK]" : codePoint == 0x26A0 ? "[!]" :
-            codePoint == 0x274C ? "[X]" : nullptr;
-        if (symbol) {
-            if (out) out->append(symbol);
-            last = ']';
-            continue;
+        int code = -1;
+        if (DecodeUtf8(utf8, at, codePoint, length)) {
+            at += length;
+            const char* symbol = codePoint == 0x2705 ? "[OK]" : codePoint == 0x26A0 ? "[!]" :
+                codePoint == 0x274C ? "[X]" : nullptr;
+            if (symbol) {
+                if (out) out->append(symbol);
+                last = ']';
+                continue;
+            }
+            // Variation selector, byte-order mark and soft hyphen: nothing to show.
+            if (codePoint == 0xFE0F || codePoint == 0xFEFF || codePoint == 0x00AD) continue;
+            code = WinAnsiCode(codePoint);
+        } else {
+            at++;      // not UTF-8: one byte at a time
         }
-        // Variation selector, byte-order mark and soft hyphen: nothing to show.
-        if (codePoint == 0xFE0F || codePoint == 0xFEFF || codePoint == 0x00AD) continue;
-        const int code = WinAnsiCode(codePoint);
-        if (code < 0) return false;
+        if (code >= 0) {
+            const uint32_t next = ((last << 8) | static_cast<uint32_t>(code)) & 0xFFFFFFu;
+            if (next == 0xE29C85u || next == 0xE29AA0u || next == 0xE29D8Cu) code = -1;
+        }
+        if (code < 0) {
+            if (!replaced) return false;
+            ++*replaced;
+            code = codePoint >= 0x100 && codePoint < 0x180 ? kLatinExtendedABase[codePoint - 0x100] : '?';
+        }
         last = ((last << 8) | static_cast<uint32_t>(code)) & 0xFFFFFFu;
-        if (last == 0xE29C85u || last == 0xE29AA0u || last == 0xE29D8Cu) return false;
         if (out) out->push_back(static_cast<char>(code));
     }
     return true;
+}
+
+} // namespace
+
+bool TranscodeToWinAnsi(std::string_view utf8, std::string* out) {
+    return ToWinAnsi(utf8, out, nullptr);
+}
+
+size_t TranscodeToWinAnsiLossy(std::string_view utf8, std::string& out) {
+    size_t replaced = 0;
+    ToWinAnsi(utf8, &out, &replaced);
+    return replaced;
 }
 
 const char* RendererPathName(std::string_view text) {
@@ -131,30 +161,6 @@ std::string WinAnsiToUtf8(std::string_view winAnsi) {
         utf8.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
     }
     return utf8;
-}
-
-std::string Utf8ToWinAnsiLossy(std::string_view utf8) {
-    std::string winAnsi;
-    winAnsi.reserve(utf8.size());
-    for (size_t at = 0; at < utf8.size();) {
-        const unsigned char lead = static_cast<unsigned char>(utf8[at]);
-        if (lead < 0x80) {
-            winAnsi.push_back(static_cast<char>(lead));
-            at++;
-            continue;
-        }
-        uint32_t codePoint = 0;
-        size_t length = 0;
-        if (!DecodeUtf8(utf8, at, codePoint, length)) {
-            winAnsi.push_back('?');
-            at++;
-            continue;
-        }
-        at += length;
-        const int code = WinAnsiCode(codePoint);
-        winAnsi.push_back(code < 0 ? '?' : static_cast<char>(code));
-    }
-    return winAnsi;
 }
 
 std::string Trim(std::string value) {

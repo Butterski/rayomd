@@ -109,12 +109,13 @@ std::string FormatDouble(double value);
 // [OK], [!] and [X]; U+FE0F, U+FEFF and the soft hyphen are dropped. False for text that is
 // not UTF-8 or holds a character WinAnsiEncoding has no code for.
 bool TranscodeToWinAnsi(std::string_view utf8, std::string* out);
+// The same for text that no font on the system can show: a character without a WinAnsi
+// code becomes its base letter (Latin Extended-A) or '?'. Returns how many did.
+size_t TranscodeToWinAnsiLossy(std::string_view utf8, std::string& out);
 // The renderer and fonts a document gets, as --bench reports it: "standard-font-ascii",
 // "standard-font-winansi" (Latin text in the standard fonts), or "unicode-embedded-font".
 const char* RendererPathName(std::string_view text);
 // Transcoded text back to UTF-8, for link targets, image paths and formulas.
 std::string WinAnsiToUtf8(std::string_view winAnsi);
-// UTF-8 to WinAnsiEncoding; '?' for each character without a code.
-std::string Utf8ToWinAnsiLossy(std::string_view utf8);
 
 } // namespace RayoMd::Text

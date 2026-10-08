@@ -319,6 +319,16 @@ void ReportExportError(std::string* deferredError, const std::string& message) {
         std::cerr << message << std::endl;
     }
 }
+// A warning, not an error: the PDF is written. One write, so batch workers do not mix lines.
+void WarnMissingCharacters(const std::string& inputLabel, uint32_t count) {
+    std::string message = "Warning: ";
+    message += inputLabel.empty() ? std::string("the document") : inputLabel;
+    message += ": no TrueType font was found, so ";
+    message += std::to_string(count);
+    message += " character(s) are shown as a base letter or '?'. Install a Unicode font such as DejaVu Sans"
+        " or Noto Sans, or set RAYOMD_FONT to a .ttf file.\n";
+    std::cerr << message << std::flush;
+}
 fs::path PdfNameForMarkdown(const fs::path& path) {
     fs::path out = path.filename();
     out.replace_extension(".pdf");
@@ -346,6 +356,7 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
         ReportExportError(deferredError, message.str());
         return code;
     }
+    if (buildResult.missingCharacters != 0) WarnMissingCharacters(inputLabel, buildResult.missingCharacters);
     if (!WriteBinaryFilePortable(outputPath, pdfBuffer)) {
         ReportExportError(deferredError, "Error: could not write PDF file: " + PathToUtf8(outputPath));
         return 12;
@@ -656,15 +667,18 @@ int RunDoctor() {
 
     TinyPdf::PdfOptions options;
     std::string pdfBytes;
-    TinyPdf::BuildResult result = TinyPdf::BuildPdf("# RayoMD Doctor\n\nUnicode: \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E.\n", options, pdfBytes);
-    bool fontOk = result.Ok();
+    // Polish letters are in every Unicode text font but not in WinAnsiEncoding, so they take
+    // the TrueType path; without a font they are counted as missing.
+    TinyPdf::BuildResult result = TinyPdf::BuildPdf(
+        "# RayoMD Doctor\n\nUnicode: Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87.\n", options, pdfBytes);
+    bool fontOk = result.Ok() && result.missingCharacters == 0;
     std::cout << "unicode_font=" << (fontOk ? "ok" : "unavailable") << "\n";
 
     std::error_code ec;
     fs::path tempDir = fs::temp_directory_path(ec);
     bool tempOk = !ec && fs::is_directory(tempDir, ec) && !ec;
     fs::path smokePath;
-    if (tempOk && fontOk) {
+    if (tempOk && result.Ok()) {
         const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
         smokePath = tempDir / ("rayomd-doctor-" + std::to_string(stamp) + ".pdf");
         tempOk = WriteBinaryFilePortable(smokePath, pdfBytes);
@@ -676,7 +690,7 @@ int RunDoctor() {
         fs::remove(smokePath, removeError);
     }
     std::cout << "temp_output=" << (tempOk ? "ok" : "failed") << "\n";
-    std::cout << "smoke_export=" << (fontOk && tempOk ? "ok" : "failed") << "\n";
+    std::cout << "smoke_export=" << (result.Ok() && tempOk ? "ok" : "failed") << "\n";
     if (fontOk && tempOk) {
         std::cout << "status=ok\n";
         return 0;

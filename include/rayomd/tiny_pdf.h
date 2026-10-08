@@ -31,6 +31,9 @@ struct PdfMargin {
 
 enum class BuildError : uint8_t {
     None,
+    // No longer returned: a document whose characters need a TrueType font that cannot be
+    // found is drawn in the standard fonts, and BuildResult::missingCharacters counts what
+    // they could not show.
     FontUnavailable = 1,
     SourceTooLarge = 4,
     InvalidSourceUtf8 = 5,
@@ -39,6 +42,8 @@ enum class BuildError : uint8_t {
 
 struct BuildResult {
     BuildError error = BuildError::None;
+    // Characters no available font could show, drawn as their base letter or as '?'.
+    uint32_t missingCharacters = 0;
 
     constexpr bool Ok() const { return error == BuildError::None; }
     constexpr explicit operator bool() const { return Ok(); }

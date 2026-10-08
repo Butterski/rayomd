@@ -74,12 +74,16 @@ namespace TinyPdf {
 // hex strings). Keep it inlined into its callers whatever else comes to call them.
 // This file reaches GCC's inline-unit-growth limit at -O3, so which calls get inlined
 // shifts with any change to it; hot helpers and lambdas say so explicitly.
+// Rare paths (words wider than a line, table rows taller than a page, font discovery) are
+// out of line and optimised for size, so they stay away from the hot text path.
 #if defined(__GNUC__) || defined(__clang__)
 #define RAYOMD_HOT_INLINE inline __attribute__((always_inline))
 #define RAYOMD_HOT_LAMBDA __attribute__((always_inline))
+#define RAYOMD_COLD __attribute__((cold, noinline))
 #else
 #define RAYOMD_HOT_INLINE inline
 #define RAYOMD_HOT_LAMBDA
+#define RAYOMD_COLD
 #endif
 
 using CidList = std::vector<uint16_t>;
@@ -279,42 +283,115 @@ struct TtfFont {
     int16_t yMax = 900;
     bool loaded = false;
 
+    // RAYOMD_FONT first, then the sans fonts where the common systems install them, then,
+    // on systems other than Windows, any regular sans TrueType font under the usual font
+    // directories.
     bool Load() {
 #ifdef _WIN32
+        if (const wchar_t* explicitFont = _wgetenv(L"RAYOMD_FONT")) {
+            if (*explicitFont && TryLoad(std::wstring(explicitFont))) return true;
+        }
         wchar_t winDir[MAX_PATH] = {};
         if (!GetWindowsDirectoryW(winDir, MAX_PATH)) return false;
-
-        std::vector<std::wstring> candidates;
-        std::wstring fontsDir = std::wstring(winDir) + L"\\Fonts\\";
-        candidates.push_back(fontsDir + L"segoeui.ttf");
-        candidates.push_back(fontsDir + L"arial.ttf");
-        candidates.push_back(fontsDir + L"tahoma.ttf");
-#else
-        std::vector<std::string> candidates;
-        if (const char* explicitFont = std::getenv("RAYOMD_FONT")) {
-            candidates.push_back(explicitFont);
+        const std::wstring fontsDir = std::wstring(winDir) + L"\\Fonts\\";
+        for (const wchar_t* name : { L"segoeui.ttf", L"arial.ttf", L"tahoma.ttf", L"verdana.ttf" }) {
+            if (TryLoad(fontsDir + name)) return true;
         }
-        candidates.push_back("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
-        candidates.push_back("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf");
-        candidates.push_back("/usr/share/fonts/truetype/freefont/FreeSans.ttf");
-        candidates.push_back("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
-        candidates.push_back("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf");
+        return false;
+#else
+        if (const char* explicitFont = std::getenv("RAYOMD_FONT")) {
+            if (*explicitFont && TryLoad(std::string(explicitFont))) return true;
+        }
+        static const char* const kKnownFonts[] = {
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",              // Debian, Ubuntu
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",            // Fedora, RHEL
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",                          // Arch
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",                       // Alpine, older Fedora
+            "/usr/share/fonts/truetype/DejaVuSans.ttf",                     // openSUSE
+            "/usr/local/share/fonts/dejavu/DejaVuSans.ttf",                 // FreeBSD
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            "/usr/share/fonts/gnu-free/FreeSans.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",         // macOS
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "/system/fonts/Roboto-Regular.ttf",                             // Android, Termux
+        };
+        for (const char* path : kKnownFonts) {
+            if (TryLoad(std::string(path))) return true;
+        }
+        return LoadFromFontDirectories();
 #endif
+    }
 
-        for (const auto& path : candidates) {
-            bytes.clear();
-            tables.clear();
-            glyphForBmp.clear();
-            advances.clear();
-            loca.clear();
-            for (auto& width : widthCache) width.store(0, std::memory_order_relaxed);
-            if (ReadWholeFile(path, bytes) && Parse()) {
-                loaded = true;
-                return true;
+    template <typename Path>
+    bool TryLoad(const Path& path) {
+        bytes.clear();
+        tables.clear();
+        glyphForBmp.clear();
+        advances.clear();
+        loca.clear();
+        for (auto& width : widthCache) width.store(0, std::memory_order_relaxed);
+        loaded = ReadWholeFile(path, bytes) && Parse();
+        return loaded;
+    }
+
+#ifndef _WIN32
+    // The last resort: a walk of the usual font directories (at most 20,000 entries) for
+    // TrueType files, trying the most promising names first: sans before serif, regular
+    // before bold, italic, light, condensed, monospaced, emoji or symbol faces.
+    RAYOMD_COLD bool LoadFromFontDirectories() {
+        std::vector<std::string> roots = { "/usr/share/fonts", "/usr/local/share/fonts", "/System/Library/Fonts",
+            "/Library/Fonts" };
+        if (const char* home = std::getenv("HOME")) {
+            for (const char* sub : { "/.local/share/fonts", "/.fonts", "/Library/Fonts" }) roots.push_back(std::string(home) + sub);
+        }
+        std::vector<std::string> paths;
+        std::vector<int> scores;
+        size_t visited = 0;
+        for (const std::string& root : roots) {
+            std::error_code error;
+            std::filesystem::recursive_directory_iterator entries(root,
+                std::filesystem::directory_options::skip_permission_denied, error);
+            for (const std::filesystem::recursive_directory_iterator end; !error && entries != end && visited < 20000;
+                entries.increment(error), visited++) {
+                std::string name = entries->path().filename().string();
+                for (char& ch : name) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                if (name.size() < 5 || name.compare(name.size() - 4, 4, ".ttf") != 0) continue;
+                int score = 0;
+                if (name.find("sans") != std::string::npos) score += 4;
+                if (name.find("regular") != std::string::npos) score += 2;
+                for (const char* face : { "bold", "italic", "oblique", "light", "thin", "black", "heavy", "medium",
+                         "condensed", "narrow", "mono", "emoji", "symbol", "math" }) {
+                    if (name.find(face) != std::string::npos) score -= 10;
+                }
+                paths.push_back(entries->path().string());
+                scores.push_back(score);
             }
+        }
+        // The best remaining candidate, the first found among equals, up to 32 attempts. Scores
+        // lie between -140 and 6, so kTried marks a file that failed to load.
+        const int kTried = -1000000;
+        for (int attempt = 0; attempt < 32; attempt++) {
+            size_t best = paths.size();
+            for (size_t index = 0; index < paths.size(); index++) {
+                if (scores[index] != kTried && (best == paths.size() || scores[index] > scores[best])) best = index;
+            }
+            if (best == paths.size()) break;
+            if (TryLoad(paths[best])) return true;
+            scores[best] = kTried;
         }
         return false;
     }
+#endif
 
     bool Parse() {
         if (bytes.size() < 12) return false;
@@ -2736,14 +2813,6 @@ static void AppendPageAnnotations(std::string& page, const std::vector<int>& ann
     page += "]";
 }
 
-// Rare paths of the renderers (words wider than a line, table rows taller than a page): out
-// of line and optimised for size, so they stay away from the hot text path.
-#if defined(__GNUC__) || defined(__clang__)
-#define RAYOMD_COLD __attribute__((cold, noinline))
-#else
-#define RAYOMD_COLD
-#endif
-
 // ---- Native math integration (shared by both renderers) ----------------------
 
 // Code that runs only for documents with formulas: optimise it for size and keep it
@@ -5030,13 +5099,15 @@ private:
     // Helvetica at the text size the formula stands in, as the Unicode renderer does with its
     // font. ASCII documents keep no fallback, so their formulas lay out as they always did.
     static double MeasureLatinMathFallback(void*, std::string_view utf8, double size) {
-        return AsciiTextWidth(RayoMd::Text::Utf8ToWinAnsiLossy(utf8), size / kMathSizeFactor,
-            StandardTextFont::Regular);
+        std::string text;
+        RayoMd::Text::TranscodeToWinAnsiLossy(utf8, text);
+        return AsciiTextWidth(text, size / kMathSizeFactor, StandardTextFont::Regular);
     }
 
     static void EmitLatinMathFallback(void*, std::string& content, std::string_view utf8, double x,
         double baseline, double size, const char* rgb) {
-        const std::string text = RayoMd::Text::Utf8ToWinAnsiLossy(utf8);
+        std::string text;
+        RayoMd::Text::TranscodeToWinAnsiLossy(utf8, text);
         TailWriter out(content, 48 + strlen(rgb) + kOperandBytes * 3 + text.size() * 2);
         out.Lit("q ");
         out.Bytes(rgb, strlen(rgb));
@@ -6360,18 +6431,8 @@ static const TtfFont* GetCachedFont() {
     return cached.loaded ? &cached.font : nullptr;
 }
 
-static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes) {
-    const TtfFont* fontPtr = nullptr;
-    {
-        RayoMd::Profiling::ScopedPhase fontProfile(RayoMd::Profiling::Phase::Font);
-        fontPtr = GetCachedFont();
-    }
-    if (!fontPtr) {
-        g_lastError = 1;
-        return false;
-    }
-    const TtfFont& font = *fontPtr;
-
+static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& font, const PdfOptions& options,
+    std::string& pdfBytes) {
     std::vector<Block> blocks;
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
@@ -6538,14 +6599,30 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
     }
     g_lastError = 0;
     bool built = false;
+    uint32_t missingCharacters = 0;
     if (IsPlainAsciiDocument(markdown)) {
         built = BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes);
     } else {
         // Latin text needs no font file: the standard fonts show it in WinAnsiEncoding.
         std::string winAnsi;
-        built = RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi)
-            ? BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes)
-            : BuildUnicodePdfBytes(markdown, options, pdfBytes);
+        if (RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi)) {
+            built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes);
+        } else {
+            const TtfFont* font = nullptr;
+            {
+                RayoMd::Profiling::ScopedPhase fontProfile(RayoMd::Profiling::Phase::Font);
+                font = GetCachedFont();
+            }
+            if (font) {
+                built = BuildUnicodePdfBytes(markdown, *font, options, pdfBytes);
+            } else {
+                // No TrueType font on this system: the standard fonts show what they can, and
+                // the caller learns how many characters they could not.
+                const size_t missing = RayoMd::Text::TranscodeToWinAnsiLossy(markdown, winAnsi);
+                missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
+                built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes);
+            }
+        }
     }
     if (built && options.embedSource && pdfBytes.size() > RayoMd::PdfSource::kMaxPdfBytes) {
         pdfBytes.clear();
@@ -6553,7 +6630,10 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
         built = false;
     }
     RayoMd::Profiling::EmitDelta("build", profileBefore, RayoMd::Profiling::Capture());
-    return built ? BuildResult{} : BuildResult{ static_cast<BuildError>(g_lastError) };
+    if (!built) return BuildResult{ static_cast<BuildError>(g_lastError) };
+    BuildResult result;
+    result.missingCharacters = missingCharacters;
+    return result;
 }
 
 bool BuildPdfBytes(const std::string& markdown, const BuildOptions& options, std::string& pdfBytes) {

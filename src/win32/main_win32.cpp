@@ -1142,9 +1142,11 @@ int RunDoctor() {
 
     TinyPdf::PdfOptions options;
     std::string pdfBytes;
+    // Polish letters are in every Unicode text font but not in WinAnsiEncoding, so they take
+    // the TrueType path; without a font they are counted as missing.
     TinyPdf::BuildResult result = TinyPdf::BuildPdf(
-        "# RayoMD Doctor\n\nUnicode: \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E.\n", options, pdfBytes);
-    const bool fontOk = result.Ok();
+        "# RayoMD Doctor\n\nUnicode: Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87.\n", options, pdfBytes);
+    const bool fontOk = result.Ok() && result.missingCharacters == 0;
     WriteStdoutLine(std::string("unicode_font=") + (fontOk ? "ok" : "unavailable"));
 
     wchar_t tempDir[MAX_PATH] = {};
@@ -1152,7 +1154,7 @@ int RunDoctor() {
     DWORD tempLength = GetTempPathW(MAX_PATH, tempDir);
     bool tempOk = tempLength > 0 && tempLength < MAX_PATH &&
         GetTempFileNameW(tempDir, L"rmd", 0, smokePath) != 0;
-    if (tempOk && fontOk) {
+    if (tempOk && result.Ok()) {
         tempOk = WriteUtf8File(smokePath, pdfBytes);
         WIN32_FILE_ATTRIBUTE_DATA attributes = {};
         tempOk = tempOk && GetFileAttributesExW(
@@ -1161,7 +1163,7 @@ int RunDoctor() {
     }
     if (smokePath[0] != L'\0') DeleteFileW(smokePath);
     WriteStdoutLine(std::string("temp_output=") + (tempOk ? "ok" : "failed"));
-    WriteStdoutLine(std::string("smoke_export=") + (fontOk && tempOk ? "ok" : "failed"));
+    WriteStdoutLine(std::string("smoke_export=") + (result.Ok() && tempOk ? "ok" : "failed"));
     WriteStdoutLine(std::string("status=") + (fontOk && tempOk ? "ok" : "failed"));
     return fontOk && tempOk ? 0 : 1;
 }

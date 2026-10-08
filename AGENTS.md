@@ -304,7 +304,11 @@ GitHub CI entry points:
   characters all have a WinAnsiEncoding code is transcoded once in `BuildPdf`
   (`TranscodeToWinAnsi`); link targets, image paths and formula sources go back to UTF-8
   where they leave the renderer (`WinAnsiToUtf8`).
-- Preserve Unicode output by loading/subsetting a system font when needed.
+- Preserve Unicode output by loading/subsetting a system font when needed
+  (`RAYOMD_FONT`, then known per-OS paths, then a bounded scan of the font
+  directories). Without any font, the document degrades to the standard fonts
+  and `BuildResult::missingCharacters` counts what they could not show; never
+  fail the export for a missing font.
 - Keep PDF syntax valid: object ids, xrefs, page resources, image XObjects, and
   link annotations must remain consistent.
 - `BuildOptions::sourcePath` matters for relative images; pass it from every

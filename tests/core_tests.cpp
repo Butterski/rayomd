@@ -1244,6 +1244,13 @@ bool CheckLatinText() {
         std::cerr << "WinAnsi transcoding of symbols and invisible marks mismatch" << std::endl;
         return false;
     }
+    // Without any TrueType font, Latin Extended-A letters fall back to their base letter and
+    // other characters, and bytes that are not UTF-8, to '?'; each is counted.
+    if (RayoMd::Text::TranscodeToWinAnsiLossy(u8"Za\u017C\u00F3\u0142\u0107 \u65E5\u672C \u2705 x\xFF", out) != 6 ||
+        out != "Zaz\xF3lc ?? [OK] x?") {
+        std::cerr << "lossy WinAnsi transcoding mismatch: " << out << std::endl;
+        return false;
+    }
     for (int code = 0x20; code < 0x100; code++) {
         const std::string single(1, static_cast<char>(code));
         const std::string utf8 = WinAnsiToUtf8(single);
