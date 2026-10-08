@@ -293,6 +293,25 @@ Countermeasures that held up:
 Forcing more calls inline was not kept: under the limit it only moves the
 loss to other calls.
 
+## Latin text on the standard fonts, October 2026
+
+A document whose characters all have a WinAnsiEncoding code (Western European
+text, curly quotes, dashes, the Euro sign) is transcoded once in `BuildPdf` and
+takes the standard-font renderer instead of embedding a TrueType subset. Pure
+ASCII documents keep their path and their bytes; other documents first try the
+transcoder, which stops at the first character outside WinAnsi (within the
+first 175 characters in every watch fixture).
+
+Measured on 2026-10-08 with `tools/benchmark.py ab` (g++ 13.3 `-O3`, nine
+rounds, against `6bd2585`): Latin documents build 39 % to 48 % faster
+(`README.md` -48 %), and their PDFs shrink from 140 to 225 KB to 5 to 30 KB.
+Watch fixtures run 0.24 % fewer instructions (geometric mean); their time
+moved +0.5 % in the release build and +0.2 % with alignment pinned, both
+within the A/A spread of code placement.
+
+Link targets of both renderers are now percent-encoded UTF-8: `/URI` strings
+used to lose their non-ASCII bytes (`Größe` became `Gre`).
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

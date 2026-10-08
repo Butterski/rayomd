@@ -15,8 +15,8 @@ the layout or the Markdown rules change.
   SHA-256 digests of an ASCII fixture; the standard-font path is platform independent, so
   the digests hold on Windows and Linux. They move only with a deliberate change of the
   plain-text output, which re-pins them and says why.
-- An ASCII document with math stays on the standard-font path. Math never loads, embeds or
-  subsets a font.
+- An ASCII document with math stays on the standard-font path, and so does a Latin one
+  (every character in WinAnsiEncoding). Math never loads, embeds or subsets a font.
 - Malformed, unsupported or hostile input never crashes, hangs or fails the export. Every
   limit has one defined outcome (see [Limits](#limits)).
 - The module has no mutable global state; `Layout` and `Emit` are safe from several threads.
@@ -81,7 +81,8 @@ Deliberate deviations and degradations:
   strokes (for example `\mp \ll \gg \mapsto \hbar \circ \oint`); a few rare ones fall back
   to a similar glyph.
 - `\text{…}` words with non-ASCII characters are painted with the document's embedded
-  font (Unicode documents); the ASCII renderer cannot meet such text.
+  font (Unicode documents), or in Helvetica (Latin documents, whose characters all have a
+  WinAnsiEncoding code); an ASCII document has no such text.
 - Over-wide display formulas are not broken into lines automatically.
 
 ## Fonts and PDF output

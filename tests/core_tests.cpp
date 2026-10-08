@@ -1219,6 +1219,80 @@ bool CheckWordsAcrossInlineBoundaries() {
     return true;
 }
 
+// Latin text needs no font file: documents whose characters all have a code in
+// WinAnsiEncoding are transcoded and shown in the standard fonts.
+bool CheckLatinText() {
+    using RayoMd::Text::TranscodeToWinAnsi;
+    using RayoMd::Text::WinAnsiToUtf8;
+    std::string out;
+    if (!TranscodeToWinAnsi(u8"caf\u00E9 \u20AC \u201Cq\u201D \u2013 x\u2026", &out) ||
+        out != "caf\xE9 \x80 \x93q\x94 \x96 x\x85") {
+        std::cerr << "WinAnsi transcoding mismatch" << std::endl;
+        return false;
+    }
+    // Not UTF-8 (overlong, surrogate, cut short), or a character WinAnsi has no code for.
+    for (const char* rejected : {"\xC0\xAF", "\xED\xA0\x80", "caf\xC3", u8"Za\u017C\u00F3\u0142\u0107", u8"\u2192"}) {
+        if (TranscodeToWinAnsi(rejected, nullptr)) {
+            std::cerr << "WinAnsi transcoding accepted text it cannot show" << std::endl;
+            return false;
+        }
+    }
+    // The status symbols become their ASCII forms; invisible marks go. Text whose WinAnsi
+    // bytes would read as a symbol again ("a circumflex, oe, ellipsis") stays Unicode.
+    if (!TranscodeToWinAnsi(u8"\uFEFFok \u2705 \u26A0\uFE0F \u274C so\u00ADft", &out) ||
+        out != "ok [OK] [!] [X] soft" || TranscodeToWinAnsi(u8"\u00E2\u0153\u2026", nullptr)) {
+        std::cerr << "WinAnsi transcoding of symbols and invisible marks mismatch" << std::endl;
+        return false;
+    }
+    for (int code = 0x20; code < 0x100; code++) {
+        const std::string single(1, static_cast<char>(code));
+        const std::string utf8 = WinAnsiToUtf8(single);
+        if (utf8.empty() || code == 0x7F || code == 0xAD) continue;    // no glyph; the soft hyphen is dropped
+        if (!TranscodeToWinAnsi(utf8, &out) || out != single) {
+            std::cerr << "WinAnsi code " << code << " does not survive a round trip" << std::endl;
+            return false;
+        }
+    }
+
+    const std::string latin =
+        u8"# Gr\u00F6\u00DFe\n\n"
+        u8"Caf\u00E9 \u201Ccr\u00E8me\u201D \u2013 5\u00A0\u20AC, [Gr\u00F6\u00DFe](https://de.wikipedia.org/wiki/Gr\u00F6\u00DFe) "
+        u8"and $\\text{caf\u00E9}^2$ \u2705.\n\n```\nprint('\u2705 ok')\n```\n";
+    std::string pdf;
+    if (!Build(latin, pdf) || pdf.find("RayoMD Native Standard PDF") == std::string::npos ||
+        pdf.find("/FontFile2") != std::string::npos) {
+        std::cerr << "Latin text does not take the standard fonts" << std::endl;
+        return false;
+    }
+    std::string shown;
+    for (const StandardTextOp& op : StandardTextOps(pdf)) shown += op.text + "\n";
+    // The no-break space joins "5" and the Euro sign into one word; the formula's Latin text
+    // is drawn in Helvetica by the math fallback.
+    if (shown.find("Gr\xF6\xDF" "e") == std::string::npos || shown.find("Caf\xE9 \x93" "cr\xE8me\x94 \x96 5\xA0\x80") ==
+        std::string::npos || shown.find("caf\xE9") == std::string::npos ||
+        shown.find("[OK]") == std::string::npos || shown.find("print('[OK] ok')") == std::string::npos) {
+        std::cerr << "Latin text shown as:\n" << shown << std::endl;
+        return false;
+    }
+    if (pdf.find("/URI (https://de.wikipedia.org/wiki/Gr%C3%B6%C3%9Fe)") == std::string::npos) {
+        std::cerr << "Latin link target is not percent-encoded UTF-8" << std::endl;
+        return false;
+    }
+    std::string unicodePdf;
+    if (!Build(u8"Za\u017C\u00F3\u0142\u0107 [Gr\u00F6\u00DFe](https://de.wikipedia.org/wiki/Gr\u00F6\u00DFe)\n", unicodePdf) ||
+        unicodePdf.find("RayoMD Native Tiny PDF") == std::string::npos ||
+        unicodePdf.find("/URI (https://de.wikipedia.org/wiki/Gr%C3%B6%C3%9Fe)") == std::string::npos) {
+        std::cerr << "Unicode link target is not percent-encoded UTF-8" << std::endl;
+        return false;
+    }
+    std::string reversible;
+    if (!BuildReversible(latin, reversible) || RayoMd::PdfSource::Inspect(reversible, true).source != latin) {
+        std::cerr << "reversible Latin PDF does not embed the UTF-8 source" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -1245,6 +1319,7 @@ int main() {
     if (!CheckStandardFontEncoding()) return 67;
     if (!CheckStandardLinesFitMargin()) return 68;
     if (!CheckWordsAcrossInlineBoundaries()) return 69;
+    if (!CheckLatinText()) return 70;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

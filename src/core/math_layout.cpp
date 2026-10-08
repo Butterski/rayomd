@@ -1512,12 +1512,14 @@ std::string MathFontObject(int index, int symbolDescriptorId) {
     return out;
 }
 
-double StandardTextWidth(std::string_view ascii, double size, StandardTextFont font) {
+double StandardTextWidth(std::string_view text, double size, StandardTextFont font) {
     unsigned long long units = 0;
-    for (const char ch : ascii) {
+    for (const char ch : text) {
         const unsigned index = static_cast<unsigned char>(ch) - 32u;
-        if (index >= 95u) continue;
-        units += font == StandardTextFont::Mono ? 600u : kStandardTextWidths[font == StandardTextFont::Bold][index];
+        if (index >= 224u) continue;
+        const unsigned width = kStandardTextWidths[font == StandardTextFont::Bold][index];
+        // A code without a glyph in WinAnsiEncoding has width 0 in every font.
+        units += font == StandardTextFont::Mono && width != 0 ? 600u : width;
     }
     return static_cast<double>(units) * size / 1000.0;
 }
@@ -1528,10 +1530,14 @@ static constexpr std::array<StandardWordAdvances, 3> MakeStandardWordAdvances() 
         StandardWordAdvances& table = tables[font];
         for (unsigned code = 0; code < 256; ++code) {
             uint16_t advance = 1;
-            if (code >= 32 && code <= 126) advance = font == 2 ? 600 : kStandardTextWidths[font][code - 32];
+            if (code >= 32) {
+                const uint16_t width = kStandardTextWidths[font == 1][code - 32];
+                if (width != 0) advance = font == 2 ? 600 : width;
+            }
             table.byte[code] = advance;
         }
         table.space = table.byte[static_cast<unsigned char>(' ')];
+        // The no-break space (0xA0) keeps its width: it joins the words beside it.
         for (const char white : {' ', '\t', '\r', '\n'}) table.byte[static_cast<unsigned char>(white)] = 0;
     }
     return tables;

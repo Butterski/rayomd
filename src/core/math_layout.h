@@ -36,10 +36,11 @@ std::string MathSymbolDescriptorObject();
 std::string MathFontObject(int index, int symbolDescriptorId);
 
 // ---- exact widths of the standard renderer's text fonts -----------------------------------
-// /F1 Helvetica, /F2 Helvetica-Bold, /F3 Courier, all in WinAnsiEncoding. Bytes outside
-// 32..126 count as zero width.
+// /F1 Helvetica, /F2 Helvetica-Bold, /F3 Courier, all in WinAnsiEncoding: the text is ASCII,
+// or Latin text transcoded to WinAnsi codes 0x80..0xFF. Bytes below 32 and codes without a
+// WinAnsi glyph count as zero width.
 enum class StandardTextFont { Regular, Bold, Mono };
-double StandardTextWidth(std::string_view ascii, double size, StandardTextFont font);
+double StandardTextWidth(std::string_view text, double size, StandardTextFont font);
 
 // The same advances by byte, for wrapping text a word at a time: index the array with
 // static_cast<size_t>(font). byte[] is 0 for the four ASCII white-space bytes, so a single
@@ -52,8 +53,9 @@ struct StandardWordAdvances {
 extern const std::array<StandardWordAdvances, 3> kStandardWordAdvances;
 
 // ---- fallback for characters the standard fonts cannot show --------------------------------
-// Only the Unicode renderer provides one. The struct and its context must outlive every
-// MathFormula laid out with it. `measure` is called during Layout, `emit` only during Emit.
+// The Unicode renderer provides one, and the standard renderer for Latin text. The struct and
+// its context must outlive every MathFormula laid out with it. `measure` is called during
+// Layout, `emit` only during Emit.
 struct MathFallbackFont {
     void* context;
     double (*measure)(void* context, std::string_view utf8, double size);

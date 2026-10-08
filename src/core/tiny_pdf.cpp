@@ -2673,8 +2673,32 @@ static void AppendXObjectResources(std::string& page, const std::vector<int>& im
     page += ">>";
 }
 
+// A link target as the body of a PDF literal string. /URI takes 7-bit ASCII, so the target's
+// UTF-8 bytes from 0x80 are percent-encoded (an IRI as a URI, RFC 3987); `winAnsi` targets
+// come from transcoded text and turn back into UTF-8 first.
+static void AppendUriLiteral(std::string& out, std::string_view url, bool winAnsi) {
+    std::string utf8;
+    if (winAnsi && !IsAllAscii(url)) {
+        utf8 = RayoMd::Text::WinAnsiToUtf8(url);
+        url = utf8;
+    }
+    static const char kHex[] = "0123456789ABCDEF";
+    for (const char ch : url) {
+        const unsigned char byte = static_cast<unsigned char>(ch);
+        if (byte >= 0x80) {
+            out += '%';
+            out += kHex[byte >> 4];
+            out += kHex[byte & 0x0F];
+            continue;
+        }
+        if (byte < 32 || byte == 127) continue;
+        if (ch == '(' || ch == ')' || ch == '\\') out += '\\';
+        out += ch;
+    }
+}
+
 static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
-    const std::vector<std::vector<LinkRect>>& linksByPage) {
+    const std::vector<std::vector<LinkRect>>& linksByPage, bool winAnsiTargets) {
     std::vector<std::vector<int>> idsByPage;
     idsByPage.reserve(linksByPage.size());
     for (const auto& pageLinks : linksByPage) {
@@ -2693,7 +2717,7 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
             annot += " ";
             AppendF(annot, link.y2);
             annot += "] /Border [0 0 0] /A << /S /URI /URI (";
-            annot += EscapeLiteral(link.url);
+            AppendUriLiteral(annot, link.url, winAnsiTargets);
             annot += ") >> >>";
             ids.push_back(pdf.Add(std::move(annot)));
         }
@@ -4728,62 +4752,37 @@ static std::string EscapeLiteral(const std::string& s) {
 // Returns the end of what was written.
 static char* WriteEscapedLiteral(char* out, std::string_view text) {
     // Most lines hold no parenthesis, backslash or control byte and are copied in one piece.
+    // Bytes from 0x80 are WinAnsi codes: the standard renderer gets ASCII or transcoded text.
     if (!RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteLiteralSpecial)) {
         if (!text.empty()) memcpy(out, text.data(), text.size());
         return out + text.size();
     }
     for (char c : text) {
-        if ((unsigned char)c < 32 || (unsigned char)c >= 127) continue;
+        if ((unsigned char)c < 32 || (unsigned char)c == 127) continue;
         if (c == '(' || c == ')' || c == '\\') *out++ = '\\';
         *out++ = c;
     }
     return out;
 }
 
-static bool IsAsciiDocument(const std::string& s) {
-    auto isAsciiAfterSymbolNormalization = [](std::string_view text) {
-        for (size_t i = 0; i < text.size();) {
-            unsigned char c = (unsigned char)text[i];
-            if (c < 128) {
-                i++;
-                continue;
-            }
-            if (i + 3 <= text.size() && text.compare(i, 3, "\xE2\x9C\x85") == 0) {
-                i += 3;
-                continue;
-            }
-            if (i + 6 <= text.size() && text.compare(i, 6, "\xE2\x9A\xA0\xEF\xB8\x8F") == 0) {
-                i += 6;
-                continue;
-            }
-            if (i + 3 <= text.size() && text.compare(i, 3, "\xE2\x9A\xA0") == 0) {
-                i += 3;
-                continue;
-            }
-            if (i + 3 <= text.size() && text.compare(i, 3, "\xE2\x9D\x8C") == 0) {
-                i += 3;
-                continue;
-            }
-            return false;
-        }
-        return true;
-    };
-
+// True for text without a byte >= 0x80, which the standard renderer takes as it is. Other
+// text reaches it transcoded to WinAnsiEncoding, or takes the Unicode renderer.
+static bool IsPlainAsciiDocument(const std::string& s) {
 #ifdef FAST_MD_SSE2
     const char* ptr = s.data();
     const char* end = ptr + s.size();
     while (ptr + 16 <= end) {
         __m128i chunk = _mm_loadu_si128((const __m128i*)ptr);
-        if (_mm_movemask_epi8(chunk) != 0) return isAsciiAfterSymbolNormalization(s);
+        if (_mm_movemask_epi8(chunk) != 0) return false;
         ptr += 16;
     }
     while (ptr < end) {
-        if ((unsigned char)*ptr >= 128) return isAsciiAfterSymbolNormalization(s);
+        if ((unsigned char)*ptr >= 128) return false;
         ptr++;
     }
     return true;
 #else
-    return isAsciiAfterSymbolNormalization(s);
+    return IsAllAscii(s);
 #endif
 }
 
@@ -4983,12 +4982,16 @@ static std::vector<std::string> WrapAsciiLiteral(std::string_view raw, double ma
 
 class StandardRenderer {
 public:
-    // The content streams of all pages are appended to `output`, one after another.
-    StandardRenderer(std::string& output, PdfStyle styleValue, const PdfMargin& marginValue, ImageRegistry* imageRegistry)
-        : images(imageRegistry), style(styleValue), content(output) {
+    // The content streams of all pages are appended to `output`, one after another. With
+    // `winAnsi`, the text is a document transcoded to WinAnsiEncoding (Latin text).
+    StandardRenderer(std::string& output, PdfStyle styleValue, const PdfMargin& marginValue, ImageRegistry* imageRegistry,
+        bool winAnsi)
+        : images(imageRegistry), style(styleValue), winAnsiText(winAnsi), content(output) {
         margin = ResolveMarginPoints(marginValue);
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
+        latinMathFallback = { this, &StandardRenderer::MeasureLatinMathFallback,
+            &StandardRenderer::EmitLatinMathFallback, 0.718, 0.207 };
         NewPage();
     }
 
@@ -5007,6 +5010,7 @@ private:
 
     ImageRegistry* images = nullptr;
     PdfStyle style = PdfStyle::Elegant;
+    bool winAnsiText = false;
     double margin = 54.0;
     double bodySize = 11.5;
     double lineHeight = 15.5;
@@ -5016,10 +5020,45 @@ private:
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     MathPool math;
+    MathFallbackFont latinMathFallback{};
 
     double MaxMathHeight() const {
         return (PAGE_H - margin * 2.0) * 0.5;
     }
+
+    // Latin text in a formula (\text{café}, a degree sign) is measured and painted in
+    // Helvetica at the text size the formula stands in, as the Unicode renderer does with its
+    // font. ASCII documents keep no fallback, so their formulas lay out as they always did.
+    static double MeasureLatinMathFallback(void*, std::string_view utf8, double size) {
+        return AsciiTextWidth(RayoMd::Text::Utf8ToWinAnsiLossy(utf8), size / kMathSizeFactor,
+            StandardTextFont::Regular);
+    }
+
+    static void EmitLatinMathFallback(void*, std::string& content, std::string_view utf8, double x,
+        double baseline, double size, const char* rgb) {
+        const std::string text = RayoMd::Text::Utf8ToWinAnsiLossy(utf8);
+        TailWriter out(content, 48 + strlen(rgb) + kOperandBytes * 3 + text.size() * 2);
+        out.Lit("q ");
+        out.Bytes(rgb, strlen(rgb));
+        out.Lit(" rg BT /F1 ");
+        out.Fixed(size / kMathSizeFactor);
+        out.Lit(" Tf 1 0 0 1 ");
+        out.Fixed(x);
+        out.Lit(" ");
+        out.Fixed(baseline);
+        out.Lit(" Tm (");
+        out.cursor = WriteEscapedLiteral(out.cursor, text);
+        out.Lit(") Tj ET Q\n");
+    }
+
+    // Formula source as the math module reads it: UTF-8, so transcoded Latin text goes back
+    // into `storage`. MathFallback() shows the characters the math fonts do not have.
+    std::string_view MathSource(std::string_view tex, std::string& storage) const {
+        if (!winAnsiText || IsAllAscii(tex)) return tex;
+        storage = RayoMd::Text::WinAnsiToUtf8(tex);
+        return storage;
+    }
+    const MathFallbackFont* MathFallback() const { return winAnsiText ? &latinMathFallback : nullptr; }
 
     void RenderBullet(const Block& block) {
         RenderParagraph("- " + block.text, margin + 16.0 + block.level * 18.0,
@@ -5116,8 +5155,9 @@ private:
     // or cannot fit the line is shown as its TeX source in code style instead.
     RAYOMD_MATH_COLD void PushAsciiMathSpan(std::vector<AsciiSpan>& spans, const Internal::InlineSpan& span, double size,
         double width, bool bold) {
-        int index = math.Add(span.text, size, span.math == Internal::InlineMath::Display, bold, width,
-            MaxMathHeight(), nullptr);
+        std::string utf8;
+        int index = math.Add(MathSource(span.text, utf8), size, span.math == Internal::InlineMath::Display, bold,
+            width, MaxMathHeight(), MathFallback());
         AsciiSpan& added = MathAppend(spans);
         if (index < 0) {
             added.text = MathSourceText(span);
@@ -5722,7 +5762,10 @@ private:
         }
 
         int index = -1;
-        if (!images->Resolve(block.imageSrc, block.text, index)) {
+        // Paths and URLs are UTF-8; transcoded Latin text goes back first.
+        std::string utf8Source;
+        if (winAnsiText && !IsAllAscii(block.imageSrc)) utf8Source = RayoMd::Text::WinAnsiToUtf8(block.imageSrc);
+        if (!images->Resolve(utf8Source.empty() ? block.imageSrc : utf8Source, block.text, index)) {
             RenderImageFallback(block);
             return;
         }
@@ -6074,7 +6117,9 @@ private:
         double padBottom = quoted ? kQuoteMathPad : 0.0;
         double maxHeight = PAGE_H - margin * 2.0 - padTop - padBottom - 3.0;
         MathFormula formula;
-        if (!LayoutMathToFit(tex, bodySize, true, false, available, maxHeight, nullptr, formula)) {
+        std::string utf8;
+        if (!LayoutMathToFit(MathSource(tex, utf8), bodySize, true, false, available, maxHeight, MathFallback(),
+            formula)) {
             double savedMargin = margin;
             if (quoted) margin += 14.0;
             RenderMathSource(tex);
@@ -6217,30 +6262,34 @@ static void PrepareOutput(std::string& pdfBytes, size_t expectedBytes) {
     if (pdfBytes.capacity() < expectedBytes) pdfBytes.reserve(expectedBytes);
 }
 
-static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes) {
+// `text` is ASCII, or with `winAnsi` the document transcoded to WinAnsiEncoding; `source` is
+// the document as given, which a reversible PDF embeds.
+static bool BuildStandardPdfBytes(const std::string& text, const std::string& source, bool winAnsi,
+    const PdfOptions& options, std::string& pdfBytes) {
     std::vector<Block> blocks;
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
-        blocks = ParseMarkdown(markdown);
+        blocks = ParseMarkdown(text);
     }
     PdfObjects pdf;
     int pagesId = pdf.Reserve();
     // WinAnsiEncoding: without it the fonts' built-in StandardEncoding shows the straight
-    // quote and the backtick as curly quotes. The text widths in math_font_metrics.inc follow it.
+    // quote and the backtick as curly quotes, and transcoded Latin text has no codes above
+    // 0x7F. The text widths in math_font_metrics.inc follow it.
     int fontRegularId = pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
     int fontBoldId = pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
     int fontMonoId = pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>");
 
     ImageRegistry imageRegistry(options);
-    PrepareOutput(pdfBytes, markdown.size() * 4 + 32 * 1024);
-    StandardRenderer renderer(pdfBytes, options.style, options.margin, &imageRegistry);
+    PrepareOutput(pdfBytes, text.size() * 4 + 32 * 1024);
+    StandardRenderer renderer(pdfBytes, options.style, options.margin, &imageRegistry, winAnsi);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         renderer.Render(blocks);
     }
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
-    std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks());
+    std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
@@ -6292,7 +6341,7 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
     catalog += " 0 R";
-    if (options.embedSource) AddReversibleSource(pdf, catalog, markdown);
+    if (options.embedSource) AddReversibleSource(pdf, catalog, source);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));
     int infoId = pdf.Add("<< /Producer (RayoMD Native Standard PDF) /Creator (RayoMD) /Title (" +
@@ -6348,7 +6397,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     }
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
-    std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks());
+    std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
@@ -6488,9 +6537,16 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
         }
     }
     g_lastError = 0;
-    bool built = IsAsciiDocument(markdown)
-        ? BuildStandardPdfBytes(markdown, options, pdfBytes)
-        : BuildUnicodePdfBytes(markdown, options, pdfBytes);
+    bool built = false;
+    if (IsPlainAsciiDocument(markdown)) {
+        built = BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes);
+    } else {
+        // Latin text needs no font file: the standard fonts show it in WinAnsiEncoding.
+        std::string winAnsi;
+        built = RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi)
+            ? BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes)
+            : BuildUnicodePdfBytes(markdown, options, pdfBytes);
+    }
     if (built && options.embedSource && pdfBytes.size() > RayoMd::PdfSource::kMaxPdfBytes) {
         pdfBytes.clear();
         g_lastError = static_cast<int>(BuildError::ReversiblePdfTooLarge);

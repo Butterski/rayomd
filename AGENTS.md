@@ -300,7 +300,10 @@ GitHub CI entry points:
 
 - Native mode should fail gracefully. Missing images, unsupported image formats,
   and unavailable URLs should produce fallback text, not crash.
-- Keep ASCII documents on the standard-font path when possible.
+- Keep ASCII and Latin documents on the standard-font path when possible. A document whose
+  characters all have a WinAnsiEncoding code is transcoded once in `BuildPdf`
+  (`TranscodeToWinAnsi`); link targets, image paths and formula sources go back to UTF-8
+  where they leave the renderer (`WinAnsiToUtf8`).
 - Preserve Unicode output by loading/subsetting a system font when needed.
 - Keep PDF syntax valid: object ids, xrefs, page resources, image XObjects, and
   link annotations must remain consistent.

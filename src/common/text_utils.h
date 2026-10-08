@@ -64,14 +64,14 @@ enum ByteClass : unsigned char {
     kByteInlineSyntax = 1,   // ! * _ ~ ` $ [ < and the backslash: may start inline Markdown
     kByteLineFeed = 2,       // '\n'
     kByteSymbolLead = 4,     // 0xE2, the first byte of the status symbols NormalizeSymbols rewrites
-    kByteLiteralSpecial = 8, // ( ) \ and every byte outside 32..126: not copied as is into a PDF literal string
+    kByteLiteralSpecial = 8, // ( ) \ and the control bytes 0..31 and 127: not copied as is into a PDF literal string
 };
 
 namespace Detail {
 constexpr std::array<unsigned char, 256> MakeByteClasses() {
     std::array<unsigned char, 256> classes{};
     for (size_t value = 0; value < classes.size(); value++) {
-        if (value < 32 || value >= 127) classes[value] = kByteLiteralSpecial;
+        if (value < 32 || value == 127) classes[value] = kByteLiteralSpecial;
     }
     for (char ch : { '(', ')', '\\' }) classes[static_cast<unsigned char>(ch)] = kByteLiteralSpecial;
     for (char ch : { '!', '*', '_', '~', '`', '$', '[', '<', '\\' }) {
@@ -103,6 +103,18 @@ inline bool ContainsByteClass(std::string_view text, unsigned char mask) {
 std::string Trim(std::string value);
 std::vector<std::string> SplitLines(const std::string& text);
 std::string FormatDouble(double value);
-bool IsAsciiDocument(const std::string& text);
+
+// Transcodes UTF-8 text to WinAnsiEncoding (Windows-1252), the encoding of the PDF standard
+// fonts, into `out` (nullptr only checks). The status symbols the renderers rewrite become
+// [OK], [!] and [X]; U+FE0F, U+FEFF and the soft hyphen are dropped. False for text that is
+// not UTF-8 or holds a character WinAnsiEncoding has no code for.
+bool TranscodeToWinAnsi(std::string_view utf8, std::string* out);
+// The renderer and fonts a document gets, as --bench reports it: "standard-font-ascii",
+// "standard-font-winansi" (Latin text in the standard fonts), or "unicode-embedded-font".
+const char* RendererPathName(std::string_view text);
+// Transcoded text back to UTF-8, for link targets, image paths and formulas.
+std::string WinAnsiToUtf8(std::string_view winAnsi);
+// UTF-8 to WinAnsiEncoding; '?' for each character without a code.
+std::string Utf8ToWinAnsiLossy(std::string_view utf8);
 
 } // namespace RayoMd::Text

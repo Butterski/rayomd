@@ -170,7 +170,7 @@ EXPECTED_SYMBOLS = (
 EXPECTED_METRICS = (
     ("glyph metric rows", 1120), ("composites", 57), ("composite pieces", 116),
     ("transform operator bytes", 288), ("accent codes", 10), ("delimiter bases", 23),
-    ("text width entries", 190), ("read-only bytes", 14255),
+    ("text width entries", 448), ("read-only bytes", 14771),
 )
 KNOWN_ACCENT_CODES = (0xC3, 0xCF, 0xC4, 0xC2, 0xC1, 0xC7, 0xC8, 0xC6, 0xC5, 0xCA)
 KNOWN_SYMBOL_GLYPHS = 189
@@ -180,9 +180,50 @@ KNOWN_SYMBOL_WIDTH_TEXT_BYTES = 827
 KNOWN_SYMBOL_FONT_BBOX = "-180 -293 1090 1010"
 KNOWN_SYMBOL_STD_VW = "85"
 # /F1 /F2 /F3 declare /WinAnsiEncoding: there, unlike in the fonts' built-in StandardEncoding,
-# code 0x27 is the straight quote and code 0x60 the grave accent.
-WIN_ANSI_TEXT_GLYPHS = {0x27: "quotesingle", 0x60: "grave"}
-KNOWN_TEXT_WIDTH_SUMS = {"H": 50058, "HB": 52367}
+# code 0x27 is the straight quote and code 0x60 the grave accent, and codes 0x80..0xFF hold
+# the Windows-1252 letters and signs (PDF 1.7, Annex D). The standard renderer shows Latin
+# text in these fonts after transcoding it to these codes.
+WIN_ANSI_TEXT_GLYPHS = {
+    0x27: "quotesingle", 0x60: "grave",
+    0x80: "Euro", 0x82: "quotesinglbase", 0x83: "florin", 0x84: "quotedblbase", 0x85: "ellipsis",
+    0x86: "dagger", 0x87: "daggerdbl", 0x88: "circumflex", 0x89: "perthousand", 0x8A: "Scaron",
+    0x8B: "guilsinglleft", 0x8C: "OE", 0x8E: "Zcaron", 0x91: "quoteleft", 0x92: "quoteright",
+    0x93: "quotedblleft", 0x94: "quotedblright", 0x95: "bullet", 0x96: "endash", 0x97: "emdash",
+    0x98: "tilde", 0x99: "trademark", 0x9A: "scaron", 0x9B: "guilsinglright", 0x9C: "oe",
+    0x9E: "zcaron", 0x9F: "Ydieresis", 0xA0: "space", 0xA1: "exclamdown", 0xA2: "cent",
+    0xA3: "sterling", 0xA4: "currency", 0xA5: "yen", 0xA6: "brokenbar", 0xA7: "section",
+    0xA8: "dieresis", 0xA9: "copyright", 0xAA: "ordfeminine", 0xAB: "guillemotleft",
+    0xAC: "logicalnot", 0xAD: "hyphen", 0xAE: "registered", 0xAF: "macron", 0xB0: "degree",
+    0xB1: "plusminus", 0xB2: "twosuperior", 0xB3: "threesuperior", 0xB4: "acute", 0xB5: "mu",
+    0xB6: "paragraph", 0xB7: "periodcentered", 0xB8: "cedilla", 0xB9: "onesuperior",
+    0xBA: "ordmasculine", 0xBB: "guillemotright", 0xBC: "onequarter", 0xBD: "onehalf",
+    0xBE: "threequarters", 0xBF: "questiondown", 0xC0: "Agrave", 0xC1: "Aacute",
+    0xC2: "Acircumflex", 0xC3: "Atilde", 0xC4: "Adieresis", 0xC5: "Aring", 0xC6: "AE",
+    0xC7: "Ccedilla", 0xC8: "Egrave", 0xC9: "Eacute", 0xCA: "Ecircumflex", 0xCB: "Edieresis",
+    0xCC: "Igrave", 0xCD: "Iacute", 0xCE: "Icircumflex", 0xCF: "Idieresis", 0xD0: "Eth",
+    0xD1: "Ntilde", 0xD2: "Ograve", 0xD3: "Oacute", 0xD4: "Ocircumflex", 0xD5: "Otilde",
+    0xD6: "Odieresis", 0xD7: "multiply", 0xD8: "Oslash", 0xD9: "Ugrave", 0xDA: "Uacute",
+    0xDB: "Ucircumflex", 0xDC: "Udieresis", 0xDD: "Yacute", 0xDE: "Thorn", 0xDF: "germandbls",
+    0xE0: "agrave", 0xE1: "aacute", 0xE2: "acircumflex", 0xE3: "atilde", 0xE4: "adieresis",
+    0xE5: "aring", 0xE6: "ae", 0xE7: "ccedilla", 0xE8: "egrave", 0xE9: "eacute",
+    0xEA: "ecircumflex", 0xEB: "edieresis", 0xEC: "igrave", 0xED: "iacute", 0xEE: "icircumflex",
+    0xEF: "idieresis", 0xF0: "eth", 0xF1: "ntilde", 0xF2: "ograve", 0xF3: "oacute",
+    0xF4: "ocircumflex", 0xF5: "otilde", 0xF6: "odieresis", 0xF7: "divide", 0xF8: "oslash",
+    0xF9: "ugrave", 0xFA: "uacute", 0xFB: "ucircumflex", 0xFC: "udieresis", 0xFD: "yacute",
+    0xFE: "thorn", 0xFF: "ydieresis",
+}
+# Codes 32..255 that WinAnsiEncoding leaves without a glyph; their width is 0.
+WIN_ANSI_UNDEFINED = (0x7F, 0x81, 0x8D, 0x8F, 0x90, 0x9D)
+KNOWN_TEXT_WIDTH_SUMS = {"H": 118723, "HB": 123009}
+
+
+def win_ansi_glyph(font, code: int):
+    """Glyph name at `code` of /WinAnsiEncoding, or None."""
+    if code in WIN_ANSI_TEXT_GLYPHS:
+        return WIN_ANSI_TEXT_GLYPHS[code]
+    return font.by_code.get(code) if code < 0x80 else None
+
+
 KNOWN_COURIER_ADVANCE = 600
 KNOWN_SPACE_ADVANCE = 250
 KNOWN_METRICS = (       # (math font, code, row)
@@ -1381,15 +1422,18 @@ class Tables:
             self.err("Symbol: FontBBox is %r, expected %r" % (symbol.header.get("FontBBox"), KNOWN_SYMBOL_FONT_BBOX))
         if symbol.header.get("StdVW") != KNOWN_SYMBOL_STD_VW:
             self.err("Symbol: StdVW is %r, expected %r" % (symbol.header.get("StdVW"), KNOWN_SYMBOL_STD_VW))
-        # Exact widths of the standard renderer's text fonts. Their font dictionaries declare
-        # /WinAnsiEncoding, which names other glyphs than the fonts' built-in StandardEncoding
-        # at two of the codes 32..126 (WIN_ANSI_TEXT_GLYPHS).
+        # Exact widths of the standard renderer's text fonts in /WinAnsiEncoding, codes 32..255:
+        # codes 32..126 are the fonts' built-in StandardEncoding but for the two of
+        # WIN_ANSI_TEXT_GLYPHS, and codes from 0x80 come from WIN_ANSI_TEXT_GLYPHS alone.
         self.text_widths = {}
         for short in ("H", "HB"):
             font = fonts[short]
             widths = []
-            for code in range(32, 127):
-                name = WIN_ANSI_TEXT_GLYPHS.get(code, font.by_code.get(code))
+            for code in range(32, 256):
+                if code in WIN_ANSI_UNDEFINED:
+                    widths.append(0)
+                    continue
+                name = win_ansi_glyph(font, code)
                 if name is None or name not in font.by_name:
                     self.err("%s: code %d has no glyph" % (font.file_name, code))
                     widths.append(0)
@@ -1397,11 +1441,13 @@ class Tables:
                     widths.append(self.fit(font.by_name[name][1], 0, 65535, "%s code %d" % (font.file_name, code)))
             self.text_widths[short] = widths
             if sum(widths) != KNOWN_TEXT_WIDTH_SUMS[short]:
-                self.err("known value: the widths of %s codes 32..126 sum to %d, expected %d"
+                self.err("known value: the widths of %s codes 32..255 sum to %d, expected %d"
                          % (font.base_name, sum(widths), KNOWN_TEXT_WIDTH_SUMS[short]))
         courier = fonts["C"]
-        for code in range(32, 127):
-            name = WIN_ANSI_TEXT_GLYPHS.get(code, courier.by_code.get(code))
+        for code in range(32, 256):
+            if code in WIN_ANSI_UNDEFINED:
+                continue
+            name = win_ansi_glyph(courier, code)
             if name is None or name not in courier.by_name or courier.by_name[name][1] != KNOWN_COURIER_ADVANCE:
                 self.err("Courier: code %d does not have advance %d" % (code, KNOWN_COURIER_ADVANCE))
 
@@ -2341,9 +2387,10 @@ def render_metrics(tables: Tables, header: list[str]) -> str:
     out += delim_base_rows(tables)
     out += [
         "",
-        "// Advance widths of codes 32..126 in WinAnsiEncoding, the encoding of /F1 /F2 /F3: [0] Helvetica,",
-        "// [1] Helvetica-Bold. Courier is %d for every code." % KNOWN_COURIER_ADVANCE,
-        "static constexpr uint16_t kStandardTextWidths[2][95] = {",
+        "// Advance widths of codes 32..255 in WinAnsiEncoding, the encoding of /F1 /F2 /F3: [0] Helvetica,",
+        "// [1] Helvetica-Bold; 0 where WinAnsiEncoding has no glyph. Courier is %d for every code."
+        % KNOWN_COURIER_ADVANCE,
+        "static constexpr uint16_t kStandardTextWidths[2][224] = {",
     ]
     for short in ("H", "HB"):
         out.append("    {   // %s" % fonts[short].base_name)

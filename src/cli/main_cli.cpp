@@ -614,7 +614,7 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     report << "total_ms=" << RayoMd::Text::FormatDouble(totalMs) << "\n";
     report << "avg_ms=" << RayoMd::Text::FormatDouble(avgMs) << "\n";
     report << "avg_pdf_bytes=" << (totalBytes / (size_t)iterations) << "\n";
-    report << "path=" << (RayoMd::Text::IsAsciiDocument(markdown) ? "standard-font-ascii" : "unicode-embedded-font") << "\n";
+    report << "path=" << RayoMd::Text::RendererPathName(markdown) << "\n";
 
     if (!WriteUtf8FilePortable(outputDir / "bench-results.txt", report.str())) {
         std::cerr << "Error: could not write benchmark results in " << PathToUtf8(outputDir) << "\n";

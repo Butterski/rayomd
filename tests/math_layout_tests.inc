@@ -210,7 +210,14 @@ bool Run() {
         Expect(Near(StandardTextWidth(sample, 11.5, StandardTextFont::Regular), 148.2925, 1e-9), "Helvetica width");
         Expect(Near(StandardTextWidth(sample, 11.5, StandardTextFont::Bold), 159.137, 1e-9), "Helvetica-Bold width");
         Expect(Near(StandardTextWidth(sample, 11.5, StandardTextFont::Mono), 31 * 6.9, 1e-9), "Courier width");
-        Expect(StandardTextWidth("\x01\x7F\xC5\x82", 10.0, StandardTextFont::Regular) == 0.0, "bytes outside 32..126 have no width");
+        Expect(StandardTextWidth("\x01\x1F\x7F\x81\x8D\x8F\x90\x9D", 10.0, StandardTextFont::Regular) == 0.0 &&
+            StandardTextWidth("\x01\x7F\x81", 10.0, StandardTextFont::Mono) == 0.0,
+            "control bytes and the codes WinAnsiEncoding leaves empty have no width");
+        // WinAnsi codes from 0x80: e acute 556, Euro 556, left double quote 333 (Helvetica AFM).
+        Expect(Near(StandardTextWidth("\xE9\x80\x93", 10.0, StandardTextFont::Regular), 14.45, 1e-9) &&
+            Near(StandardTextWidth("\xE9\x80\x93", 10.0, StandardTextFont::Bold), 5.56 + 5.56 + 5.0, 1e-9) &&
+            Near(StandardTextWidth("\xE9\x80", 10.0, StandardTextFont::Mono), 12.0, 1e-9),
+            "WinAnsi codes from 0x80 have the width of their glyph");
     }
 
     // The six font objects.
