@@ -420,6 +420,24 @@ Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
 fixtures, which hold CJK text DejaVu Sans lacks, run 0.2 % to 0.4 % more
 instructions for the check and the count, in the same time.
 
+## Smaller font subsets, October 2026
+
+The embedded TrueType subset kept every glyph id of the font: `loca` and `hmtx`
+held all 6,253 glyphs of DejaVu Sans, empty or not, and `post` all their names.
+Of a typical 151 KB subset only 14 KB were outlines; with a CJK font a few
+characters made a 959 KB subset. The subset now holds only the glyphs the
+document shows, numbered from 0 (`SubsetGlyphs`, composites pointing at the new
+ids of their components), `post` is format 3 without names, and the `cmap` maps
+nothing, since the PDF's `CIDToGIDMap` does. A font whose tables cannot be read
+for that (`CanSubset`) is still embedded whole with its own ids.
+
+Measured on 2026-10-09: 66 Unicode documents render pixel for pixel the same in
+MuPDF and Poppler (also at 300 dpi) with the same extracted text, in 34 % fewer
+bytes (22.6 MB to 14.9 MB); a short Unicode document shrinks from 176 KB to
+58 KB, the DejaVu subset in it from 151 KB to 33 KB. Single exports run 2.7 %
+to 12.7 % faster; warm `--bench` builds, which reuse the cached font object,
+run 1.4 % fewer instructions in the same time.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -478,6 +496,19 @@ modes meet this for every document that fits its reservation. Fixing
 `M_MMAP_THRESHOLD` and `M_TRIM_THRESHOLD` with `mallopt` in the CLI, or keeping
 the large temporaries alive from one build to the next, would remove the faults;
 measure batch mode before choosing.
+
+**CIDs in order of first use.** CIDs are Unicode code points, so the
+`CIDToGIDMap` stream runs up to the largest one a document shows, uncompressed:
+one arrow (U+2192) makes it 16 KB, CJK text up to 80 KB, now often more than the
+font subset itself. Numbering CIDs in the order characters first appear (a
+code-point table per renderer) would shrink the map to two bytes per character
+used, or remove it with `/CIDToGIDMap /Identity` when CIDs equal the subset's
+glyph ids, and keep `/W` short. The ToUnicode CMap already maps CIDs back.
+
+**The `name` table of the font subset.** At 15.6 KB it is now the largest part of
+a DejaVu Sans subset (33 KB). It carries the font's copyright and license
+notice, which the license asks to keep with copies, so it stays; a subset of its
+records that keeps those notices would save about 10 KB per Unicode PDF.
 
 ## Keeping the release light
 

@@ -4648,37 +4648,78 @@ static bool OriginalTableBytes(const TtfFont& font, const std::string& tag, std:
     return true;
 }
 
-static bool BuildSubsetFontBytes(const TtfFont& font, const CidList& used, std::string& out) {
-    if (font.glyphCount == 0 || font.loca.size() < (size_t)font.glyphCount + 1) return false;
+// Whether the glyph data and the tables a subset rewrites can be read: then a subset of the
+// font is built, else the whole font is embedded with its own glyph ids.
+static bool CanSubset(const TtfFont& font) {
+    auto sized = [&](const char* tag, uint32_t size) {
+        auto it = font.tables.find(tag);
+        return it != font.tables.end() && it->second.length >= size;
+    };
+    return font.glyphCount != 0 && font.loca.size() >= (size_t)font.glyphCount + 1 && font.advances.size() >= font.glyphCount &&
+        sized("glyf", 0) && sized("hmtx", 0) && sized("head", 54) && sized("hhea", 36) && sized("maxp", 6);
+}
 
+// The glyphs of the subset for `used`, by their ids in the font, which is also the order of
+// their ids in the subset: .notdef, '?', the space, the glyph of every used CID and the
+// components of composite glyphs.
+static std::vector<uint16_t> SubsetGlyphs(const TtfFont& font, const CidList& used) {
     std::vector<uint8_t> include((size_t)font.glyphCount, 0);
     AddGlyphClosure(font, 0, include);
     AddGlyphClosure(font, font.GlyphFor('?'), include);
     AddGlyphClosure(font, font.GlyphFor(' '), include);
-    for (uint16_t cid : used) {
-        AddGlyphClosure(font, font.GlyphFor(cid), include);
+    for (uint16_t cid : used) AddGlyphClosure(font, font.GlyphFor(cid), include);
+    std::vector<uint16_t> glyphs;
+    for (uint32_t glyph = 0; glyph < font.glyphCount; glyph++) {
+        if (include[glyph]) glyphs.push_back((uint16_t)glyph);
     }
+    return glyphs;
+}
 
-    auto glyfIt = font.tables.find("glyf");
-    if (glyfIt == font.tables.end()) return false;
-    const TtfFont::Table& oldGlyf = glyfIt->second;
+// The id in the subset of `glyphs` of the font's glyph `glyph`; .notdef when it is not in it.
+static uint16_t SubsetGlyphId(const std::vector<uint16_t>& glyphs, uint16_t glyph) {
+    auto it = std::lower_bound(glyphs.begin(), glyphs.end(), glyph);
+    return it != glyphs.end() && *it == glyph ? (uint16_t)(it - glyphs.begin()) : 0;
+}
 
+// A TrueType font of `glyphs` (SubsetGlyphs) only, numbered from 0 in that order: loca and
+// hmtx hold those glyphs, a composite glyph points at the new ids of its components, post
+// keeps no glyph names, and the cmap maps nothing, since the PDF's CIDToGIDMap does. The
+// font must pass CanSubset.
+static bool BuildSubsetFontBytes(const TtfFont& font, const std::vector<uint16_t>& glyphs, std::string& out) {
+    const TtfFont::Table& oldGlyf = font.tables.at("glyf");
+    const TtfFont::Table& oldHmtx = font.tables.at("hmtx");
     std::string glyfData;
-    glyfData.reserve(std::min<size_t>(font.bytes.size(), std::max<size_t>(32 * 1024, used.size() * 256)));
     std::string locaData;
-    locaData.reserve(((size_t)font.glyphCount + 1) * 4);
-
-    for (uint32_t gid = 0; gid < font.glyphCount; gid++) {
+    std::string hmtxData;
+    locaData.reserve((glyphs.size() + 1) * 4);
+    hmtxData.reserve(glyphs.size() * 4);
+    for (uint16_t glyph : glyphs) {
         AppendU32(locaData, (uint32_t)glyfData.size());
-        uint32_t start = font.loca[gid];
-        uint32_t end = font.loca[gid + 1];
-        if (include[gid] && end > start) {
-            size_t oldStart = (size_t)oldGlyf.offset + start;
-            size_t oldEnd = (size_t)oldGlyf.offset + end;
-            if (oldEnd > font.bytes.size() || oldEnd < oldStart) return false;
-            glyfData.append((const char*)font.bytes.data() + oldStart, oldEnd - oldStart);
-            while (glyfData.size() & 3) glyfData.push_back('\0');
+        // Every glyph gets a full metric; past numberOfHMetrics the font lists only bearings.
+        const size_t bearing = glyph < font.metricCount ? (size_t)glyph * 4 + 2
+            : (size_t)font.metricCount * 4 + (size_t)(glyph - font.metricCount) * 2;
+        AppendU16(hmtxData, font.advances[glyph]);
+        AppendU16(hmtxData, bearing + 2 <= oldHmtx.length ? ReadU16(font.bytes, oldHmtx.offset + bearing) : 0);
+
+        const uint32_t start = font.loca[glyph];
+        const uint32_t end = font.loca[(size_t)glyph + 1];
+        if (end <= start) continue;
+        const size_t at = glyfData.size();
+        glyfData.append((const char*)font.bytes.data() + oldGlyf.offset + start, end - start);
+        if (end - start >= 10 && ReadS16(font.bytes, (size_t)oldGlyf.offset + start) < 0) {
+            // Composite: each component names a glyph, rewritten to its id in the subset.
+            for (size_t component = at + 10; component + 4 <= glyfData.size();) {
+                const uint16_t flags = (uint16_t)(((uint8_t)glyfData[component] << 8) | (uint8_t)glyfData[component + 1]);
+                const uint16_t old = (uint16_t)(((uint8_t)glyfData[component + 2] << 8) | (uint8_t)glyfData[component + 3]);
+                SetU16(glyfData, component + 2, SubsetGlyphId(glyphs, old));
+                component += 4 + ((flags & 0x0001) ? 4 : 2);
+                if (flags & 0x0008) component += 2;
+                else if (flags & 0x0040) component += 4;
+                else if (flags & 0x0080) component += 8;
+                if (!(flags & 0x0020)) break;
+            }
         }
+        while (glyfData.size() & 3) glyfData.push_back('\0');
     }
     AppendU32(locaData, (uint32_t)glyfData.size());
 
@@ -4699,15 +4740,27 @@ static bool BuildSubsetFontBytes(const TtfFont& font, const CidList& used, std::
         std::string table;
         std::string tagString(tag, 4);
         if (tagString == "glyf") {
-            table = glyfData;
+            table = std::move(glyfData);
         } else if (tagString == "loca") {
-            table = locaData;
+            table = std::move(locaData);
+        } else if (tagString == "hmtx") {
+            table = std::move(hmtxData);
+        } else if (tagString == "cmap") {
+            // Version 0, one Windows Unicode subtable of format 4 with the closing segment only.
+            for (int value : {0, 1, 3, 1, 0, 12, 4, 24, 0, 2, 2, 0, 0, 0xFFFF, 0, 0xFFFF, 1, 0}) AppendU16(table, (uint16_t)value);
         } else {
             if (!OriginalTableBytes(font, tagString, table)) continue;
             if (tagString == "head") {
-                if (table.size() < 54) return false;
                 SetU32(table, 8, 0);
                 SetU16(table, 50, 1);
+            } else if (tagString == "hhea") {
+                SetU16(table, 34, (uint16_t)glyphs.size());
+            } else if (tagString == "maxp") {
+                SetU16(table, 4, (uint16_t)glyphs.size());
+            } else if (tagString == "post") {
+                if (table.size() < 32) continue;
+                table.resize(32);
+                SetU32(table, 0, 0x00030000);
             }
         }
         tables.push_back({ tagString, std::move(table), 0, 0 });
@@ -4807,23 +4860,21 @@ private:
     std::unordered_map<std::string, std::shared_ptr<const std::string>> values;
 };
 
+// The font program of a document: the subset of the glyphs it shows, or the whole font when
+// it cannot be subset (CanSubset).
 static std::shared_ptr<const std::string> CachedFontFileObject(
     const TtfFont& font, const CidList& used, const std::string& key) {
     static BoundedStringCache cache(8, 32u * 1024u * 1024u);
     if (auto cached = cache.Get(key)) return cached;
 
-    std::string subset;
-    const std::string* fontBytes = nullptr;
-    if (BuildSubsetFontBytes(font, used, subset) && subset.size() < font.bytes.size()) fontBytes = &subset;
-
-    std::string full;
-    if (!fontBytes) {
-        full.assign((const char*)font.bytes.data(), font.bytes.size());
-        fontBytes = &full;
+    std::string bytes;
+    if (!CanSubset(font) || !BuildSubsetFontBytes(font, SubsetGlyphs(font, used), bytes)) {
+        bytes.assign((const char*)font.bytes.data(), font.bytes.size());
     }
-    return cache.Insert(key, BuildFontFileObject(*fontBytes));
+    return cache.Insert(key, BuildFontFileObject(bytes));
 }
 
+// The glyph id of every used CID in the font program of CachedFontFileObject.
 static std::shared_ptr<const std::string> MakeCidToGidMap(
     const TtfFont& font, const CidList& used, const std::string& key) {
     static BoundedStringCache cache(64, 8u * 1024u * 1024u);
@@ -4831,8 +4882,10 @@ static std::shared_ptr<const std::string> MakeCidToGidMap(
     uint16_t maxCid = 255;
     for (uint16_t cid : used) maxCid = std::max(maxCid, cid);
     std::string map((size_t)(maxCid + 1) * 2, char(0));
-    for (uint32_t cid = 0; cid <= maxCid; cid++) {
-        uint16_t glyph = font.GlyphFor(cid);
+    const bool subset = CanSubset(font);
+    const std::vector<uint16_t> glyphs = subset ? SubsetGlyphs(font, used) : std::vector<uint16_t>();
+    for (uint16_t cid : used) {
+        const uint16_t glyph = subset ? SubsetGlyphId(glyphs, font.GlyphFor(cid)) : font.GlyphFor(cid);
         map[(size_t)cid * 2] = (char)((glyph >> 8) & 0xff);
         map[(size_t)cid * 2 + 1] = (char)(glyph & 0xff);
     }
