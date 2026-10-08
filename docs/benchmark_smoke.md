@@ -36,7 +36,7 @@ if (pdf.empty()) return smoke_failure;
 
 ![Missing local fallback](assets/missing-smoke-image.png)
 
-## Formula Box
+## Display Math
 
 $$
 x^2 + y^2 = z^2

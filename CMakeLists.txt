@@ -98,10 +98,15 @@ function(rayomd_experiments target)
     endif()
 endfunction()
 
-# Recovery is cold, opt-in code. Optimize its translation unit for package size
-# while leaving the performance-critical renderer on the normal release flags.
+# Recovery is cold, opt-in code, and the math parser and layout run only for documents
+# with formulas. Optimize these translation units for package size while leaving the
+# performance-critical renderer on the normal release flags.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(src/core/rayomd_pdf_source.cpp PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
+    set_source_files_properties(
+        src/core/rayomd_pdf_source.cpp
+        src/core/math_parser.cpp
+        src/core/math_layout.cpp
+        PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
 endif()
 
 if(WIN32)
@@ -112,6 +117,8 @@ if(WIN32)
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
+        src/core/math_parser.cpp
+        src/core/math_layout.cpp
         src/common/text_utils.cpp
         src/win32/main_win32.cpp
         src/win32/rayomd.rc
@@ -170,6 +177,8 @@ else()
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
+        src/core/math_parser.cpp
+        src/core/math_layout.cpp
         src/common/text_utils.cpp
         src/core/rayomd_pdf_source.cpp
         src/cli/main_cli.cpp
@@ -200,6 +209,8 @@ if(BUILD_TESTING)
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
+        src/core/math_parser.cpp
+        src/core/math_layout.cpp
         src/common/text_utils.cpp)
     target_include_directories(rayomd-core-tests PRIVATE include)
     target_compile_definitions(rayomd-core-tests PRIVATE RAYOMD_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

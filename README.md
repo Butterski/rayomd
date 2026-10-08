@@ -44,12 +44,13 @@ native exporter through a small CLI.
 - A single Windows GUI executable and a compact Linux CLI.
 - Bounded parallel batch conversion, stdin, warm serve, and benchmark modes.
 - Unicode, clickable links, tables, lists, code, local images, and opt-in URL images.
+- Natively typeset math for a TeX subset: no LaTeX, no browser, no embedded math fonts.
 - Optional exact Markdown recovery through reversible PDFs.
 - Optional Windows Pandoc mode when the native subset is not enough.
 
 Use native RayoMD for simple reports and bulk conversion when startup time,
 package size, and dependency count matter. Use Pandoc, a browser renderer, or
-LaTeX when you need full CommonMark/Pandoc extensions, TeX math, filters,
+LaTeX when you need full CommonMark/Pandoc extensions, complete LaTeX math, filters,
 templates, citations, syntax highlighting, or HTML/CSS fidelity.
 
 ## Performance snapshot
@@ -136,6 +137,7 @@ and [CLI Reference](https://github.com/Butterski/rayomd/wiki/CLI-Reference).
 Version-specific engineering contracts remain beside the code:
 
 - [`docs/development/reversible_pdf_profile.md`](docs/development/reversible_pdf_profile.md)
+- [`docs/development/native_math.md`](docs/development/native_math.md)
 - [`docs/development/performance.md`](docs/development/performance.md)
 - [`docs/development/arbitrary_pdf_research_decision.md`](docs/development/arbitrary_pdf_research_decision.md)
 
@@ -145,12 +147,15 @@ Native mode supports ATX and Setext headings, paragraphs, structured nested
 lists and block quotes, fenced and indented code, pipe tables, rules, page
 breaks, matching-run code spans, classic emphasis and escapes, inline and
 reference-style links, URL/email autolinks, standalone inline/reference images,
-basic math cleanup/boxes, Unicode fonts, and common status-symbol normalization.
+natively typeset math for a TeX subset (`$...$`, `$$...$$`, fenced `math` blocks, in
+text, lists, quotes, headings and table cells), Unicode fonts, and common
+status-symbol normalization.
 Images embedded in paragraph text use a consistent `image: alt` fallback;
 standalone images retain native image layout and missing-image fallback text.
 
-It deliberately does not promise full CommonMark/Pandoc compatibility, TeX math,
-syntax highlighting, footnotes, citations, filters, templates, or HTML/CSS
+It deliberately does not promise full CommonMark/Pandoc compatibility, complete
+LaTeX math (packages, macros, automatic numbering), syntax highlighting, footnotes,
+citations, filters, templates, or HTML/CSS
 layout fidelity. The complete and current matrix is maintained in
 [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support).
 

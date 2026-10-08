@@ -46,6 +46,19 @@ Correctness verification does not run performance loops. For performance-sensiti
 work, use tools/benchmark.py before and after the change and report platform,
 storage location, suite, worker count, binary-size delta, peak RSS, and headline timing deltas. Use `scripts/concurrency_benchmark.py` for 1/2/4/6-worker changes and keep LTO, profiling, TSAN, and PGO CMake options opt-in. See
 docs/development/performance.md.
+
+## Math Tables
+
+Native math (a TeX subset, see `docs/development/native_math.md`) reads two generated
+tables, `src/core/math_symbols.inc` and `src/core/math_font_metrics.inc`. Never edit them
+by hand. Change the data in `scripts/generate_math_tables.py` and regenerate from the
+Adobe Core 14 AFM files, which are not stored in this repository (Matplotlib ships an
+identical copy under `mpl-data/fonts/pdfcorefonts`; the generator checks their SHA-256):
+
+    python scripts/generate_math_tables.py --afm-dir <directory with the AFM files>
+
+A document without math must keep producing the same PDF bytes; the core tests pin this.
+
 ## Versioning
 
 The project version lives in `VERSION` and is compiled into both binaries.

@@ -35,6 +35,7 @@ jobs:
           test -f docs/assets/demo/show.mp4
           test -f docs/benchmarks/releases/README.md
           test -f docs/development/performance.md
+          test -f docs/development/native_math.md
           test -f tests/verify_cli.py
           test -f tools/benchmark.py
           test -f third_party/imgui/LICENSE.txt
@@ -42,7 +43,7 @@ jobs:
           test -f third_party/simdutf/LICENSE-MIT
       - name: Python helper syntax and entry points
         run: |
-          python3 -m py_compile tests/verify_cli.py tools/benchmark.py scripts/perf_watch.py scripts/compare_pandoc.py scripts/compare_markdown_pdf_tools.py scripts/archive_release_benchmarks.py scripts/concurrency_benchmark.py scripts/reversible_pdf_benchmark.py scripts/train_pgo.py
+          python3 -m py_compile tests/verify_cli.py tools/benchmark.py scripts/perf_watch.py scripts/compare_pandoc.py scripts/compare_markdown_pdf_tools.py scripts/archive_release_benchmarks.py scripts/concurrency_benchmark.py scripts/reversible_pdf_benchmark.py scripts/train_pgo.py scripts/generate_math_tables.py
           python3 -B tests/verify_cli.py --help >/dev/null
           python3 -B tools/benchmark.py --help >/dev/null
           python3 -B tools/benchmark.py run -- --help >/dev/null

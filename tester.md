@@ -24,15 +24,52 @@ func main() {
 }
 ```
 
-## 3. Math And Formula Boxes
+## 3. Math
 
-Inline math markers should be cleaned up: $E = mc^2$.
+Inline math sits on the text baseline: $E = mc^2$, $a^2 + b^2 = c^2$, tight forms such as
+($x_i$), $n$-th and $2^{10}$, Greek $\alpha + \beta \le \gamma$, and a tall inline fraction
+$\frac{\partial f}{\partial x}$ that makes only its own line taller. Currency stays literal:
+$5 and $10, and so does an escaped \$x\$.
 
-A block formula should render as a formula box:
+A display formula is centred and is never shown as source:
 
 $$
-\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
+\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}
 $$
+
+Display math may sit inside a sentence, $$\sum_{k=1}^{n} k = \frac{n(n+1)}{2},$$ and the
+paragraph continues on the next line.
+
+```math
+x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
+```
+
+\[
+\begin{pmatrix} a & b \\ c & d \end{pmatrix} \begin{pmatrix} x \\ y \end{pmatrix}
+= \begin{pmatrix} ax + by \\ cx + dy \end{pmatrix}
+\]
+
+$$
+f(x) = \begin{cases} x^2 & x \ge 0 \\ -x & x < 0 \end{cases}
+\qquad \lim_{n \to \infty} \left(1 + \frac{1}{n}\right)^n = e
+$$
+
+- List item with $\vec{v} \cdot \hat{n} = \|v\| \cos\theta$ and a display child:
+
+    $$\prod_{i=1}^{n} \mathbf{A}_i \in \mathbb{R}^{m \times m}$$
+
+> Quoted math: $\forall \varepsilon > 0\ \exists \delta > 0$ and \( \overline{z} = x - iy \).
+
+| Quantity | Formula |
+| :--- | :---: |
+| Area | $\pi r^2$ |
+| Absolute value | $\|x\|$ |
+| Text | $\text{zażółć} \to \infty$ |
+
+### Heading with $\nabla \cdot \mathbf{E} = \rho / \varepsilon_0$
+
+Unsupported input degrades gracefully: $\notacommand{x} + 1$ stays readable, and an
+unterminated $x stays literal.
 
 ## 4. Tables And Lists
 

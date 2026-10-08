@@ -93,6 +93,32 @@ Keep the candidate comparable to its baseline: same suite, seed, style, margin,
 image mode, worker count, compiler, build type, and storage. Linux release
 claims should use native/ext4 storage. Label WSL `/mnt/*` results explicitly.
 
+## Native math
+
+Native math (see `native_math.md`) must cost nothing for documents without
+formulas, and those documents must keep their PDF bytes. Gate formula-free
+documents with the usual 5 % rule. Report documents with formulas separately:
+they do real typesetting work that 2.6.0 did not do, and the watch corpus
+contains display formulas.
+
+Measured on 2026-10-08, Windows 11, MinGW g++ 15.2 `-O2`, an engine-only warm
+loop pinned to one core, best of nine order-rotated rounds against 2.6.0:
+
+- 1 MiB ASCII and 1 MiB Unicode fixtures without math syntax: +1.4 % each, with
+  identical output bytes. Run-to-run noise on that machine is about 1–2 %.
+- One formula costs 0.4 µs (`$x$`) to 4.3 µs (the quadratic formula) for layout
+  plus emission, with two heap allocations.
+- A 1.0 MiB document with 1,500 display formulas: 22.2 ms to 25.5 ms. A 740 KiB
+  document with 11,200 formulas (five per paragraph): 24.5 ms to 46.2 ms, about
+  1.9 µs per formula including line layout.
+- Executable size: Windows 2,820,608 to 2,952,704 bytes (+132 kB); Linux x64 CLI
+  (g++ 13.3, `-O3`) 432,688 to 571,952 bytes (+139 kB). Both math translation
+  units are built with `-Os`.
+
+Formula-bearing text takes its own wrap and paint functions and must not share
+the small span helpers or vector code of the plain text path: extra call sites
+there stop the compiler from inlining them into the hot wrap functions.
+
 ## Keeping the release light
 
 - Build `Release`; never benchmark Debug binaries.

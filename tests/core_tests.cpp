@@ -2,15 +2,24 @@
 #include "../src/common/text_utils.h"
 #include "../src/core/inline_markdown.h"
 #include "../src/core/markdown_parser.h"
+#include "../src/core/math_layout.h"
+#include "../src/core/math_parser.h"
 #include "../src/core/rayomd_pdf_source.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <sstream>
 #include <cstdio>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifndef RAYOMD_TEST_SOURCE_DIR
@@ -682,6 +691,255 @@ bool CheckImagePolicyCacheIsolation() {
     return true;
 }
 
+// ---- Native math -------------------------------------------------------------------
+
+#include "no_math_golden.inc"
+#include "math_markdown_tests.inc"
+#include "math_parser_tests.inc"
+#include "math_layout_tests.inc"
+
+// Heights of the filled rectangles drawn with the given fill colour ("r g b").
+std::vector<double> FillRectHeights(const std::string& pdf, std::string_view color) {
+    std::vector<double> heights;
+    std::string needle = "q ";
+    needle.append(color);
+    needle += " rg ";
+    size_t position = 0;
+    while ((position = pdf.find(needle, position)) != std::string::npos) {
+        position += needle.size();
+        size_t end = pdf.find(" re f Q", position);
+        if (end == std::string::npos) break;
+        std::istringstream values(pdf.substr(position, end - position));
+        double x = 0.0, y = 0.0, w = 0.0, h = 0.0;
+        if (values >> x >> y >> w >> h) heights.push_back(h);
+    }
+    return heights;
+}
+
+// Largest x at which a text run of the renderers starts ("... Tf 1 0 0 1 x y Tm").
+double MaxTextStartX(const std::string& pdf) {
+    double maxX = 0.0;
+    const std::string_view needle = " Tf 1 0 0 1 ";
+    size_t position = 0;
+    while ((position = pdf.find(needle, position)) != std::string::npos) {
+        position += needle.size();
+        maxX = std::max(maxX, std::atof(pdf.c_str() + position));
+    }
+    return maxX;
+}
+
+bool CheckMathPdf() {
+    const char* const sourceBox = "0.97 0.97 0.95 rg";
+    const char* const mathFonts[] = {
+        "/BaseFont /Times-Roman >>", "/BaseFont /Times-Italic >>", "/BaseFont /Times-Bold >>",
+        "/BaseFont /Times-BoldItalic >>",
+        "/BaseFont /Symbol /FirstChar 32 /LastChar 254 /Widths [250 333 713 ",
+        "/Type /FontDescriptor /FontName /Symbol /Flags 4 "
+    };
+    const std::string mathBody =
+        "# Energy $E=mc^2$\n\n"
+        "Inline $a^2+b^2=c^2$ and a tall $\\frac{\\frac{a}{b}}{\\frac{c}{d}}$ fraction.\n\n"
+        "$$\n\\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx = \\sqrt{\\pi}\n$$\n\n"
+        "- item $x_i$\n\n> quote $q$\n\n"
+        "| f | v |\n|---|---|\n| $\\alpha$ | $\\frac{a}{b}$ |\n";
+
+    // An ASCII document with math stays on the standard-font path and gains exactly the
+    // six math font objects; a document without math gains nothing.
+    std::string asciiPdf;
+    if (!Build(mathBody, asciiPdf) || asciiPdf.find("RayoMD Native Standard PDF") == std::string::npos) {
+        std::cerr << "ASCII math build mismatch" << std::endl;
+        return false;
+    }
+    std::string unicodePdf;
+    if (!Build(u8"Za\u017C\u00F3\u0142\u0107 $\\text{g\u0119\u015Bl\u0105}$\n\n" + mathBody, unicodePdf) ||
+        unicodePdf.find("RayoMD Native Tiny PDF") == std::string::npos) {
+        std::cerr << "Unicode math build mismatch" << std::endl;
+        return false;
+    }
+    std::string plainPdf;
+    if (!Build("# Plain\n\nNo math here, only $5 and $10.\n", plainPdf)) return false;
+    for (const char* font : mathFonts) {
+        if (CountOccurrences(asciiPdf, font) != 1 || CountOccurrences(unicodePdf, font) != 1 ||
+            plainPdf.find(font) != std::string::npos) {
+            std::cerr << "math font object mismatch: " << font << std::endl;
+            return false;
+        }
+    }
+    if (asciiPdf.find("/F3 4 0 R /M1 ") == std::string::npos || asciiPdf.find(" /M5 ") == std::string::npos ||
+        unicodePdf.find(" /M1 ") == std::string::npos || plainPdf.find("/M1 ") != std::string::npos ||
+        plainPdf.find("only $5 and $10.) Tj") == std::string::npos) {
+        std::cerr << "math font resource mismatch" << std::endl;
+        return false;
+    }
+
+    // Formulas are typeset: no TeX source reaches the page, Greek comes from Symbol and a
+    // fraction draws its rule.
+    for (const char* source : { "\\frac", "\\int", "\\alpha", "\\sqrt", "\\infty", "\\text" }) {
+        if (asciiPdf.find(source) != std::string::npos || unicodePdf.find(source) != std::string::npos) {
+            std::cerr << "TeX source left in a math document: " << source << std::endl;
+            return false;
+        }
+    }
+    std::string alphaPdf;
+    std::string fractionPdf;
+    if (!Build("Greek $\\alpha$ here.\n", alphaPdf) || alphaPdf.find("/M5 ") == std::string::npos ||
+        alphaPdf.find("<61> Tj") == std::string::npos ||
+        !Build("Half $\\frac{a}{b}$ here.\n", fractionPdf) || fractionPdf.find("(a) Tj") == std::string::npos ||
+        fractionPdf.find("(b) Tj") == std::string::npos || fractionPdf.find(" l S") == std::string::npos) {
+        std::cerr << "typeset formula mismatch" << std::endl;
+        return false;
+    }
+
+    // A link on a line made taller by a formula keeps its rectangle on the text baseline:
+    // same x and same height as without the formula, only lower on the page.
+    const std::string tall = "$\\frac{\\frac{a}{b}}{\\frac{c}{d}}$";
+    std::string linkPlain;
+    std::string linkTall;
+    std::array<double, 4> plainRect{};
+    std::array<double, 4> tallRect{};
+    if (!Build("[a](https://example.com/a) and text\n", linkPlain) ||
+        !Build("[a](https://example.com/a) and " + tall + "\n", linkTall) ||
+        !FindLinkRectangle(linkPlain, "https://example.com/a", plainRect) ||
+        !FindLinkRectangle(linkTall, "https://example.com/a", tallRect)) {
+        std::cerr << "math link build mismatch" << std::endl;
+        return false;
+    }
+    const double plainHeight = plainRect[3] - plainRect[1];
+    const double tallHeight = tallRect[3] - tallRect[1];
+    if (std::abs(plainRect[0] - tallRect[0]) > 0.011 || std::abs(plainHeight - tallHeight) > 0.011 ||
+        tallRect[1] > plainRect[1] - 1.0) {
+        std::cerr << "math link rectangle mismatch" << std::endl;
+        return false;
+    }
+
+    // The quote strip grows with a tall line; without a formula it keeps its height.
+    std::string quotePlain;
+    std::string quoteTall;
+    if (!Build("> quote text\n", quotePlain) || !Build("> quote " + tall + "\n", quoteTall)) return false;
+    std::vector<double> plainStrips = FillRectHeights(quotePlain, "0.94 0.95 0.96");
+    std::vector<double> tallStrips = FillRectHeights(quoteTall, "0.94 0.95 0.96");
+    if (plainStrips.size() != 1 || tallStrips.size() != 1 || tallStrips[0] < plainStrips[0] + 1.0) {
+        std::cerr << "math quote strip mismatch" << std::endl;
+        return false;
+    }
+
+    // A long word next to a formula still wraps: in a table cell and in a heading it is
+    // split, and nothing starts to the right of the text area (page 595 pt, margin 54 pt).
+    const std::string cellWord(56, 'w');
+    const std::string headingWord(120, 'h');
+    std::string longWordPdf;
+    if (!Build("| a | b | c | d | e | f |\n|---|---|---|---|---|---|\n| $x$" + cellWord + " | 2 | 3 | 4 | 5 | 6 |\n\n"
+            "# Heading $x$" + headingWord + "\n", longWordPdf) ||
+        longWordPdf.find(cellWord) != std::string::npos || longWordPdf.find(headingWord) != std::string::npos ||
+        MaxTextStartX(longWordPdf) > 595.0 - 54.0) {
+        std::cerr << "long word next to a formula is not wrapped" << std::endl;
+        return false;
+    }
+    // The source of an inline formula that cannot fit is shown in code style and wraps too.
+    const std::string wideInline(300, 'b');
+    std::string wideInlinePdf;
+    if (!Build("Text $" + wideInline + "$ after.\n", wideInlinePdf) ||
+        wideInlinePdf.find(wideInline) != std::string::npos || MaxTextStartX(wideInlinePdf) > 595.0 - 54.0) {
+        std::cerr << "over-wide inline math fallback mismatch" << std::endl;
+        return false;
+    }
+
+    // A formula that cannot fit the page falls back to the source box instead of
+    // overflowing, and the build still succeeds.
+    std::string widePdf;
+    if (!Build("$$\n" + std::string(4000, 'x') + "\n$$\n", widePdf) || widePdf.find(sourceBox) == std::string::npos) {
+        std::cerr << "over-wide display math fallback mismatch" << std::endl;
+        return false;
+    }
+    // ... also with a tag: the body must not be painted over the tag or past the page edge.
+    std::string wideTagged = "$$\n";
+    for (int i = 0; i < 400; i++) wideTagged += "x + ";
+    wideTagged += "y \\tag{1}\n$$\n";
+    std::string taggedPdf;
+    if (!Build(wideTagged, taggedPdf) || taggedPdf.find(sourceBox) == std::string::npos) {
+        std::cerr << "over-wide tagged display math fallback mismatch" << std::endl;
+        return false;
+    }
+    // A large aligned block (about 525 x 897 pt at natural size) is shrunk and typeset.
+    std::string aligned = "$$\n\\begin{aligned}\n";
+    for (int row = 0; row < 50; row++) {
+        aligned += "a &= b";
+        for (int i = 0; i < 19; i++) aligned += " + c";
+        aligned += row + 1 < 50 ? " \\\\\n" : "\n";
+    }
+    aligned += "\\end{aligned}\n$$\n";
+    std::string alignedPdf;
+    if (!Build(aligned, alignedPdf) || alignedPdf.find(sourceBox) != std::string::npos ||
+        alignedPdf.find("/M2 ") == std::string::npos) {
+        std::cerr << "large aligned block is not typeset" << std::endl;
+        return false;
+    }
+    // A block over the module's source limit shows its complete source, not a cut.
+    std::string huge = "$$\n";
+    while (huge.size() < 18000) huge += "x + ";
+    huge += "y\nENDMARKER\n$$\n";
+    std::string hugePdf;
+    if (!Build(huge, hugePdf) || hugePdf.find(sourceBox) == std::string::npos ||
+        hugePdf.find("(ENDMARKER) Tj") == std::string::npos) {
+        std::cerr << "over-limit display math does not show its complete source" << std::endl;
+        return false;
+    }
+
+    // Hostile TeX reaches the module (as blocks: inline, most of these are over the inline
+    // cap) and every build terminates with a valid PDF.
+    auto repeated = [](const char* piece, size_t count) {
+        std::string value;
+        for (size_t i = 0; i < count; i++) value += piece;
+        return value;
+    };
+    const std::string hostile[] = {
+        repeated("\\frac{", 1300), repeated("{", 8000), repeated("^", 8000), repeated("\\left(", 1300),
+        "\\begin{matrix}" + repeated("a&", 4000), repeated("\\sqrt{", 1300), repeated("x_", 4000),
+        repeated("\\begin{matrix}", 500), std::string(8000, '\\'),
+        repeated("\\right)", 1000) + "\\tag{" + repeated("{", 2000)
+    };
+    for (const std::string& tex : hostile) {
+        std::string pdf;
+        if (!Build("$$\n" + tex + "\n$$\n\nAfter.\n", pdf) || pdf.find("(After.) Tj") == std::string::npos) {
+            std::cerr << "hostile TeX build mismatch (" << tex.size() << " bytes)" << std::endl;
+            return false;
+        }
+    }
+
+    // Reversible export still recovers the exact source of a math document.
+    std::string reversible;
+    if (!BuildReversible(mathBody, reversible) ||
+        RayoMd::PdfSource::Inspect(reversible, true).source != mathBody) {
+        std::cerr << "math reversible round trip mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// The hard regression rule of the math feature: a document without math syntax is
+// rendered byte-for-byte as before. The digests were recorded from the last release
+// without native math (2.6.0, commit 0d4c53a) and are identical on Windows and Linux.
+bool CheckNoMathGolden() {
+    struct Golden { TinyPdf::PdfStyle style; size_t size; const char* sha256; };
+    const Golden goldens[] = {
+        {TinyPdf::PdfStyle::Modern, 6065, "1633be2ad219bc569e4892542531dc8512f0f7e5f0001261a2f7e54443ed4b94"},
+        {TinyPdf::PdfStyle::Tech, 6059, "e2967c50a305de1ce2102ed713ceebff196a576563b5c83c8bafeb3fbdd9b60f"},
+    };
+    for (const Golden& golden : goldens) {
+        TinyPdf::PdfOptions options;
+        options.style = golden.style;
+        options.margin = TinyPdf::PdfMargin::Normal();
+        std::string pdf;
+        if (!TinyPdf::BuildPdf(kNoMathGoldenDocument, options, pdf).Ok() || pdf.size() != golden.size ||
+            RayoMd::PdfSource::Sha256Hex(pdf) != golden.sha256) {
+            std::cerr << "no-math golden mismatch: " << pdf.size() << " "
+                << RayoMd::PdfSource::Sha256Hex(pdf) << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -693,6 +951,13 @@ int main() {
     if (!CheckClassicInlineExactness()) return 52;
     if (!CheckContainerPdfLayout()) return 53;
     if (!CheckImagePolicyCacheIsolation()) return 54;
+    if (!CheckMathInlineSyntax()) return 55;
+    if (!CheckMathBlockSyntax()) return 56;
+    if (!CheckMathHostileInput()) return 57;
+    if (!CheckMathPdf()) return 58;
+    if (!CheckNoMathGolden()) return 59;
+    if (!CheckMathParser()) return 60;
+    if (!CheckMathLayout()) return 61;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
@@ -701,7 +966,11 @@ int main() {
         "# Failed image\n\n![missing](docs/assets/branding/does-not-exist.png)\n",
         "# Mixed\n\n| Left | Right |\n|---|---:|\n| alpha | 42 |\n| wrapped cell content | 9000 |\n\n> quote\n\n- one\n- two\n",
         "# Remote fallback\n\n![blocked](https://127.0.0.1/image.png)\n",
-        "# Multipage\n\n" + std::string(24000, 'x') + "\n"
+        "# Multipage\n\n" + std::string(24000, 'x') + "\n",
+        // Appended last so the index-based checks below keep their meaning.
+        "# Math $E=mc^2$\n\nInline $\\frac{a}{b}$ and ($x_i$).\n\n$$\n\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}\n$$\n\n"
+            "| f | v |\n|---|---|\n| $\\alpha$ | 1 |\n",
+        u8"# Matematyka $\\alpha$\n\nZa\u017C\u00F3\u0142\u0107 $\\text{g\u0119\u015Bl\u0105} + x^2$.\n\n$$ a^2 + b^2 = c^2 $$\n"
     };
     std::vector<std::string> expected(documents.size());
     for (size_t i = 0; i < documents.size(); i++) {

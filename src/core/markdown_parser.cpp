@@ -298,6 +298,42 @@ static std::vector<std::string> SplitTableRow(std::string_view line) {
     return cells;
 }
 
+// Same cell boundaries as SplitTableRow, but keeps every backslash except the one
+// that escapes a pipe. Only used for rows that may contain math, where "\alpha"
+// must survive until the inline parser has seen it.
+static std::vector<std::string> SplitTableRowRaw(std::string_view line) {
+    std::string_view s = TrimView(line);
+    if (!s.empty() && s.front() == '|') s.remove_prefix(1);
+    if (!s.empty() && s.back() == '|') s.remove_suffix(1);
+
+    std::vector<std::string> cells;
+    cells.reserve(4);
+    std::string cell;
+    bool escaped = false;
+    for (char c : s) {
+        if (escaped) {
+            if (c != '|') cell.push_back('\\');
+            cell.push_back(c);
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '|') {
+            std::string_view v = TrimView(cell);
+            cells.emplace_back(v.data(), v.size());
+            cell.clear();
+        } else {
+            cell.push_back(c);
+        }
+    }
+    std::string_view v = TrimView(cell);
+    cells.emplace_back(v.data(), v.size());
+    return cells;
+}
+
 static bool IsTableSeparatorCell(std::string_view cell, int& align) {
     std::string_view s = TrimView(cell);
     if (s.size() < 3) return false;
@@ -420,15 +456,56 @@ static bool ParseInlineLinkSyntaxAt(std::string_view source, size_t start, size_
 
 static bool ExtractMarkdownDestination(std::string_view target, std::string& dest);
 
-std::string StripInlineMarkdown(std::string_view input) {
+std::string StripInlineMarkdown(std::string_view input, bool recognizeMath) {
     if (input.find_first_of("!*_~`$[<\\") == std::string_view::npos &&
         input.find('\xE2') == std::string_view::npos) {
         return ToString(TrimView(input));
     }
-    std::vector<InlineSpan> spans = ParseInlineSpans(input);
+    std::vector<InlineSpan> spans = ParseInlineSpans(input, recognizeMath);
     std::string visible;
     visible.reserve(input.size());
     for (const InlineSpan& span : spans) visible += span.text;
+    return Trim(std::move(visible));
+}
+
+static bool MayContainMath(std::string_view text) {
+    return text.find('$') != std::string_view::npos || text.find("\\(") != std::string_view::npos;
+}
+
+static void AppendWithoutMathTextBytes(std::string& out, std::string_view text) {
+    for (char ch : text) {
+        if (ch != kMathTextOpen && ch != kMathTextClose) out.push_back(ch);
+    }
+}
+
+static void EraseMathTextBytes(std::string& text) {
+    if (text.find(kMathTextOpen) == std::string::npos && text.find(kMathTextClose) == std::string::npos) return;
+    std::string cleaned;
+    cleaned.reserve(text.size());
+    AppendWithoutMathTextBytes(cleaned, text);
+    text.swap(cleaned);
+}
+
+std::string StripInlineMarkdownKeepMath(std::string_view input, bool& hasMath) {
+    hasMath = false;
+    if (!MayContainMath(input)) return StripInlineMarkdown(input);
+    std::vector<InlineSpan> spans = ParseInlineSpans(input);
+    for (const InlineSpan& span : spans) hasMath = hasMath || span.math != InlineMath::None;
+    std::string visible;
+    visible.reserve(input.size() + 8);
+    if (!hasMath) {
+        for (const InlineSpan& span : spans) visible += span.text;
+        return Trim(std::move(visible));
+    }
+    for (const InlineSpan& span : spans) {
+        if (span.math == InlineMath::None) {
+            AppendWithoutMathTextBytes(visible, span.text);
+            continue;
+        }
+        visible.push_back(kMathTextOpen);
+        AppendWithoutMathTextBytes(visible, span.text);
+        visible.push_back(kMathTextClose);
+    }
     return Trim(std::move(visible));
 }
 
@@ -626,7 +703,8 @@ enum class LineKind {
     Plain,
     Empty,
     Fence,
-    Math,
+    Math,      // a complete one-line display formula; LineInfo::text is the TeX
+    MathOpen,  // "$$" or "\[" that needs a closing line; LineInfo::level is a MathFence
     Rule,
     Heading,
     Bullet,
@@ -661,6 +739,74 @@ static bool IsMatchingClosingFence(const LineInfo& info, std::string_view openin
     return info.trimmed.size() == info.text.size();
 }
 
+enum MathFence : int { kDollarFence = 0, kBracketFence = 1 };
+
+static bool IsEscapedAt(std::string_view text, size_t position) {
+    size_t slashes = 0;
+    while (position > slashes && text[position - slashes - 1] == '\\') slashes++;
+    return (slashes & 1) != 0;
+}
+
+// First "$$" in text that is not preceded by an odd number of backslashes.
+static size_t FindDisplayClose(std::string_view text) {
+    for (size_t position = text.find("$$"); position != std::string_view::npos;
+         position = text.find("$$", position + 1)) {
+        if (!IsEscapedAt(text, position)) return position;
+    }
+    return std::string_view::npos;
+}
+
+// True when text ends with an unescaped "\]".
+static bool EndsWithBracketClose(std::string_view text) {
+    return text.size() >= 2 && text[text.size() - 1] == ']' && text[text.size() - 2] == '\\' &&
+        !IsEscapedAt(text, text.size() - 2);
+}
+
+static bool IsBlankChar(char ch) {
+    return ch == ' ' || ch == '\t';
+}
+
+// Block-level display math. A line that starts with "$$" or "\[" is one of:
+//   Math      "$$ tex $$" or "\[ tex \]" complete on this line;
+//   MathOpen  an opening delimiter whose closing line is looked up later;
+//   (false)   neither: the line is classified like any other text.
+static bool ClassifyMathLine(LineInfo& info) {
+    std::string_view trimmed = info.trimmed;
+    if (StartsWith(trimmed, "$$")) {
+        std::string_view rest = trimmed.substr(2);
+        size_t close = FindDisplayClose(rest);
+        if (close == std::string_view::npos) {
+            info.kind = LineKind::MathOpen;
+            info.level = kDollarFence;
+            info.text = TrimView(rest);
+            return true;
+        }
+        std::string_view content = TrimView(rest.substr(0, close));
+        if (content.empty() || !TrimView(rest.substr(close + 2)).empty()) return false;
+        info.kind = LineKind::Math;
+        info.text = content;
+        return true;
+    }
+    if (!StartsWith(trimmed, "\\[")) return false;
+    if (trimmed.size() == 2) {
+        info.kind = LineKind::MathOpen;
+        info.level = kBracketFence;
+        info.text = {};
+        return true;
+    }
+    // One-line "\[ tex \]" needs the padded form: "\[Illustration\]" and
+    // "\[citation needed\]" are ordinary escaped brackets.
+    if (trimmed.size() < 7 || !EndsWithBracketClose(trimmed) || !IsBlankChar(trimmed[2]) ||
+        !IsBlankChar(trimmed[trimmed.size() - 3])) {
+        return false;
+    }
+    std::string_view content = TrimView(trimmed.substr(2, trimmed.size() - 4));
+    if (content.empty()) return false;
+    info.kind = LineKind::Math;
+    info.text = content;
+    return true;
+}
+
 static LineInfo ClassifyLine(std::string_view line) {
     LineInfo info;
     info.raw = line;
@@ -675,10 +821,8 @@ static LineInfo ClassifyLine(std::string_view line) {
         info.text = fence;
         return info;
     }
-    if (StartsWith(info.trimmed, "$$")) {
-        info.kind = LineKind::Math;
-        info.text = TrimView(info.trimmed.substr(2));
-        return info;
+    if (info.trimmed[0] == '$' || info.trimmed[0] == '\\') {
+        if (ClassifyMathLine(info)) return info;
     }
     if (IsPageBreakLine(info.trimmed)) {
         info.kind = LineKind::PageBreak;
@@ -719,11 +863,120 @@ static bool IsBlockStart(const LineInfo& info) {
     return info.kind != LineKind::Plain;
 }
 
+// Looks for the line that closes the MathOpen line at `open`. The search ends at
+// the first line that holds the closing delimiter, a blank line, a code fence, or
+// another opener of the same kind, so every line is visited at most twice per
+// document no matter how many unterminated openers it contains. On success
+// `lastContent` receives the text that precedes the delimiter on the closing line.
+static size_t FindMathBlockClose(const std::vector<LineInfo>& infos, size_t open, std::string_view& lastContent) {
+    const bool bracket = infos[open].level == kBracketFence;
+    bool hasContent = !infos[open].text.empty();
+    for (size_t index = open + 1; index < infos.size(); index++) {
+        const LineInfo& info = infos[index];
+        if (info.kind == LineKind::Empty || info.kind == LineKind::Fence) break;
+        std::string_view trimmed = info.trimmed;
+        if (bracket) {
+            if (trimmed == "\\[") break;
+            if (EndsWithBracketClose(trimmed)) {
+                lastContent = TrimView(trimmed.substr(0, trimmed.size() - 2));
+                return hasContent || !lastContent.empty() ? index : std::string_view::npos;
+            }
+        } else {
+            size_t close = FindDisplayClose(trimmed);
+            if (close != std::string_view::npos) {
+                if (!TrimView(trimmed.substr(close + 2)).empty()) break;
+                lastContent = TrimView(trimmed.substr(0, close));
+                return hasContent || !lastContent.empty() ? index : std::string_view::npos;
+            }
+        }
+        hasContent = true;
+    }
+    return std::string_view::npos;
+}
+
+// Turns every MathOpen line that has no closing line back into ordinary text, so
+// an unterminated "$$" can neither swallow the rest of the document nor interrupt
+// the paragraph it belongs to.
+static void ResolveMathOpeners(const std::vector<std::string_view>& lines, std::vector<LineInfo>& infos) {
+    std::string_view activeFence;
+    for (size_t index = 0; index < infos.size(); index++) {
+        LineInfo& info = infos[index];
+        if (info.kind == LineKind::Fence) {
+            if (activeFence.empty()) activeFence = info.text;
+            else if (IsMatchingClosingFence(info, activeFence)) activeFence = {};
+            continue;
+        }
+        if (!activeFence.empty() || info.kind != LineKind::MathOpen) continue;
+        std::string_view ignored;
+        if (RemoveIndentLevel(lines[index], ignored)) continue;
+        size_t close = FindMathBlockClose(infos, index, ignored);
+        if (close == std::string_view::npos) {
+            info.kind = LineKind::Plain;
+            info.level = 0;
+            info.text = {};
+        } else {
+            index = close;
+        }
+    }
+}
+
+static bool IsMathFenceInfo(std::string_view infoString) {
+    return EqualsAsciiInsensitive(TrimView(infoString), "math");
+}
+
+// TeX source of a display block: trimmed lines [first, end) joined by '\n', with
+// leading and trailing blank lines dropped.
+static std::string JoinTrimmedLines(const std::vector<LineInfo>& infos, size_t first, size_t end) {
+    while (first < end && infos[first].trimmed.empty()) first++;
+    while (end > first && infos[end - 1].trimmed.empty()) end--;
+    std::string text;
+    for (size_t index = first; index < end; index++) {
+        if (index > first) text.push_back('\n');
+        text.append(infos[index].trimmed.data(), infos[index].trimmed.size());
+    }
+    return text;
+}
+
+struct TableMathCell {
+    size_t row = 0;
+    size_t column = 0;
+    std::string text;
+};
+
+// Turns the cells of one table row (as split by SplitTableRow) into visible text.
+// A row without '$' or "\(" takes the path it always took. Any other row is read
+// again with its backslashes intact, so "\alpha" reaches the inline parser and
+// "\$" stays an escaped dollar; its formula cells are parked in mathCells until
+// the whole table is known.
+static void StripTableRow(std::string_view line, size_t rowIndex, std::vector<std::string>& row,
+    std::vector<TableMathCell>& mathCells) {
+    if (!MayContainMath(line)) {
+        for (auto& cell : row) cell = StripInlineMarkdown(cell);
+        return;
+    }
+    std::vector<std::string> raw = SplitTableRowRaw(line);
+    for (size_t column = 0; column < row.size(); column++) {
+        bool hasMath = false;
+        std::string text = column < raw.size() ? StripInlineMarkdownKeepMath(raw[column], hasMath) : std::string();
+        if (hasMath) {
+            mathCells.push_back({ rowIndex, column, std::move(text) });
+            row[column].clear();
+        } else {
+            row[column] = std::move(text);
+        }
+    }
+}
+
 static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth) {
     std::vector<std::string_view> lines = SplitLineViews(markdown);
     std::vector<LineInfo> infos;
     infos.reserve(lines.size());
-    for (std::string_view line : lines) infos.push_back(ClassifyLine(line));
+    bool hasMathOpeners = false;
+    for (std::string_view line : lines) {
+        infos.push_back(ClassifyLine(line));
+        hasMathOpeners = hasMathOpeners || infos.back().kind == LineKind::MathOpen;
+    }
+    if (hasMathOpeners) ResolveMathOpeners(lines, infos);
 
     ReferenceDefinitions definitions;
     std::vector<unsigned char> suppressed;
@@ -792,10 +1045,12 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         int setextLevel = 0;
         if (info.kind == LineKind::Plain && i + 1 < lines.size() && !isSuppressed(i + 1) &&
             ParseSetextUnderline(lines[i + 1], setextLevel)) {
+            bool headingHasMath = false;
             std::string heading = definitions.empty() || trimmed.find('[') == std::string_view::npos ?
-                StripInlineMarkdown(trimmed) :
-                StripInlineMarkdown(ResolveReferenceLinks(trimmed, definitions));
+                StripInlineMarkdownKeepMath(trimmed, headingHasMath) :
+                StripInlineMarkdownKeepMath(ResolveReferenceLinks(trimmed, definitions), headingHasMath);
             blocks.push_back({ BlockType::Heading, setextLevel, 0, std::move(heading) });
+            blocks.back().hasMath = headingHasMath;
             i += 2;
             continue;
         }
@@ -843,6 +1098,8 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
 
         if (info.kind == LineKind::Fence) {
             std::string_view fence = info.text;
+            const bool mathFence = IsMathFenceInfo(trimmed.substr(fence.size()));
+            const size_t firstContent = i + 1;
             std::string text;
             i++;
             while (i < lines.size() && !IsMatchingClosingFence(infos[i], fence)) {
@@ -850,39 +1107,57 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 if (i + 1 < lines.size()) text += "\n";
                 i++;
             }
+            const size_t contentEnd = i;
+            const bool closed = i < lines.size();
             if (i < lines.size()) i++;
+            if (mathFence && closed) {
+                // ```math ... ``` is display math. An unterminated or empty math
+                // fence stays the code block it has always been.
+                std::string tex = JoinTrimmedLines(infos, firstContent, contentEnd);
+                if (!tex.empty()) {
+                    blocks.push_back({ BlockType::MathBlock, 0, 0, std::move(tex) });
+                    continue;
+                }
+            }
             blocks.push_back({ BlockType::Code, 0, 0, text });
             continue;
         }
 
         if (info.kind == LineKind::Math) {
-            std::string text;
-            std::string_view rest = info.text;
-            if (!rest.empty()) {
-                if (rest.size() >= 2 && rest.compare(rest.size() - 2, 2, "$$") == 0) {
-                    rest = TrimView(rest.substr(0, rest.size() - 2));
-                    blocks.push_back({ BlockType::MathBlock, 0, 0, ToString(rest) });
-                    i++;
-                    continue;
-                }
-                text = ToString(rest);
-            }
-
+            blocks.push_back({ BlockType::MathBlock, 0, 0, ToString(info.text) });
             i++;
-            while (i < lines.size() && infos[i].kind != LineKind::Math) {
-                if (!text.empty()) text += "\n";
-                std::string_view v = infos[i].trimmed;
-                text.append(v.data(), v.size());
-                i++;
-            }
-            if (i < lines.size()) i++;
-            blocks.push_back({ BlockType::MathBlock, 0, 0, text });
             continue;
+        }
+
+        if (info.kind == LineKind::MathOpen) {
+            std::string_view lastContent;
+            size_t close = FindMathBlockClose(infos, i, lastContent);
+            if (close != std::string_view::npos) {
+                std::string text = ToString(info.text);
+                std::string body = JoinTrimmedLines(infos, i + 1, close);
+                if (!body.empty()) {
+                    if (!text.empty()) text += "\n";
+                    text += body;
+                }
+                if (!lastContent.empty()) {
+                    if (!text.empty()) text += "\n";
+                    text.append(lastContent.data(), lastContent.size());
+                }
+                blocks.push_back({ BlockType::MathBlock, 0, 0, std::move(text) });
+                i = close + 1;
+                continue;
+            }
+            // Only an opener that ResolveMathOpeners skipped can get here without a
+            // closing line (it follows a fence marker that turned out to be indented
+            // code). Keep the line as paragraph text.
+            infos[i].kind = LineKind::Plain;
         }
 
         if (IsTableStart(lines, i)) {
             std::vector<std::vector<std::string>> rows;
             std::vector<int> aligns;
+            std::vector<TableMathCell> mathCells;
+            const size_t headerLine = i;
             rows.push_back(SplitTableRow(lines[i]));
             ParseTableSeparator(lines[i + 1], aligns);
             i += 2;
@@ -890,25 +1165,34 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             while (i < lines.size() && infos[i].kind != LineKind::Empty) {
                 std::vector<std::string> row = SplitTableRow(lines[i]);
                 if (row.size() < 2) break;
-                for (auto& cell : row) cell = StripInlineMarkdown(cell);
+                StripTableRow(lines[i], rows.size(), row, mathCells);
                 rows.push_back(row);
                 i++;
             }
 
-            for (auto& cell : rows[0]) cell = StripInlineMarkdown(cell);
+            StripTableRow(lines[headerLine], 0, rows[0], mathCells);
             Block table;
             table.type = BlockType::Table;
             table.rows = std::move(rows);
             table.aligns = std::move(aligns);
+            if (!mathCells.empty()) {
+                // Literal control bytes leave every cell first, so the only
+                // kMathText* bytes in this table are the ones written below.
+                for (auto& row : table.rows) for (auto& cell : row) EraseMathTextBytes(cell);
+                for (TableMathCell& cell : mathCells) table.rows[cell.row][cell.column] = std::move(cell.text);
+                table.hasMath = true;
+            }
             blocks.push_back(std::move(table));
             continue;
         }
 
         if (info.kind == LineKind::Heading) {
+            bool headingHasMath = false;
             std::string heading = definitions.empty() || info.text.find('[') == std::string_view::npos ?
-                StripInlineMarkdown(info.text) :
-                StripInlineMarkdown(ResolveReferenceLinks(info.text, definitions));
+                StripInlineMarkdownKeepMath(info.text, headingHasMath) :
+                StripInlineMarkdownKeepMath(ResolveReferenceLinks(info.text, definitions), headingHasMath);
             blocks.push_back({ BlockType::Heading, info.level, 0, std::move(heading) });
+            blocks.back().hasMath = headingHasMath;
             i++;
             continue;
         }

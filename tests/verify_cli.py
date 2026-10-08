@@ -11,13 +11,16 @@ import sys
 import tempfile
 
 
-def run(binary: Path, *args: str, stdin: str | None = None, expect: int = 0) -> subprocess.CompletedProcess[bytes]:
+def run(
+    binary: Path, *args: str, stdin: str | None = None, expect: int = 0, timeout: float | None = None
+) -> subprocess.CompletedProcess[bytes]:
     proc = subprocess.run(
         [str(binary), *args],
         input=None if stdin is None else stdin.encode("utf-8"),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
+        timeout=timeout,
     )
     if proc.returncode != expect:
         output = proc.stdout.decode("utf-8", errors="replace")
@@ -139,6 +142,54 @@ def verify(binary: Path, keep: Path | None) -> None:
         stdin_pdf = root / "stdin.pdf"
         run(binary, "--stdin", str(stdin_pdf), "native", "modern", "normal", stdin="# Stdin\n\nHello **stdin**.\n")
         require_pdf(stdin_pdf)
+
+        # Native math: formulas are typeset with the PDF standard fonts, currency stays literal,
+        # and a document without math gains no math fonts.
+        math_md = root / "math.md"
+        math_md.write_text(
+            "# Math $E=mc^2$\n\nInline $\\frac{a}{b}$, literal $5 and $10.\n\n"
+            "$$\n\\int_0^1 x\\,dx = \\frac12\n$$\n\n| f |\n|---|\n| $\\alpha$ |\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        math_pdf = root / "math.pdf"
+        run(binary, "--export", str(math_md), str(math_pdf), "native", "modern", "normal")
+        math_data = require_pdf(
+            math_pdf,
+            b"RayoMD Native Standard PDF",
+            b"/BaseFont /Symbol",
+            b"/BaseFont /Times-Italic",
+            b" /M1 ",
+            b"$5 and $10",
+        )
+        if b"\\frac" in math_data or b"\\int" in math_data or b"\\alpha" in math_data:
+            raise AssertionError("TeX source leaked into the page content")
+        if b"/BaseFont /Symbol" in ascii_pdf.read_bytes() or b"/BaseFont /Times" in ascii_pdf.read_bytes():
+            raise AssertionError("math fonts were added to a document without math")
+
+        unicode_math = root / "unicode-math.md"
+        unicode_math.write_text("Zażółć $\\text{gęślą} + x^2$\n", encoding="utf-8", newline="\n")
+        run(binary, "--export", str(unicode_math), str(root / "unicode-math.pdf"), "native", "modern", "normal")
+        require_pdf(root / "unicode-math.pdf", b"RayoMD Native Tiny PDF", b"/BaseFont /Times-Italic")
+
+        run(binary, "--stdin", str(root / "stdin-math.pdf"), "native", "modern", "normal", stdin="$$\nx^2\n$$\n")
+        require_pdf(root / "stdin-math.pdf", b"/BaseFont /Times-Italic")
+
+        # Hostile math must terminate with a valid PDF; the timeout is a hang guard, not a benchmark.
+        hostile = root / "hostile-math.md"
+        hostile.write_text(
+            "$$\n" + "{" * 5000 + "\n$$\n\n$$\n" + "\\frac{" * 2000 + "\n$$\n\n" + "$$x\n" * 20000,
+            encoding="utf-8",
+            newline="\n",
+        )
+        run(binary, "--export", str(hostile), str(root / "hostile-math.pdf"), timeout=60)
+        require_pdf(root / "hostile-math.pdf")
+
+        math_reversible = root / "math-reversible.pdf"
+        run(binary, "--export", str(math_md), str(math_reversible), "native", "modern", "normal", "--embed-source")
+        run(binary, "--recover-source", str(math_reversible), str(root / "math-recovered.md"))
+        if (root / "math-recovered.md").read_bytes() != math_md.read_bytes():
+            raise AssertionError("recovered math Markdown is not byte-exact")
 
         missing = run(binary, "--stdin", expect=2)
         if b"--stdin requires" not in missing.stdout:

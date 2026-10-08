@@ -6,3 +6,7 @@ This product includes third-party software:
 - Dear ImGui v1.92.8, licensed under the MIT License. See third_party/imgui/LICENSE.txt.
 - simdutf, licensed under the Apache License 2.0 or the MIT License.
   See third_party/simdutf/LICENSE-APACHE and third_party/simdutf/LICENSE-MIT.
+
+Math font metrics are derived from the Adobe Core 14 AFM files, Copyright (c) 1985,
+1987, 1989, 1990, 1993, 1997 Adobe Systems Incorporated. All Rights Reserved. See the
+notice at the top of src/core/math_font_metrics.inc.

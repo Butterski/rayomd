@@ -5,6 +5,7 @@
 #include "../common/profiling.h"
 #include "../common/text_utils.h"
 #include "markdown_parser.h"
+#include "math_layout.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -68,6 +69,15 @@
 #endif
 
 namespace TinyPdf {
+
+// HexText and ForEachCodepoint sit on the per-glyph path of every Unicode document.
+// The math fallback painter calls HexText too; without this hint that second call
+// site stops the compiler from inlining them into PaintText.
+#if defined(__GNUC__) || defined(__clang__)
+#define RAYOMD_HOT_INLINE inline __attribute__((always_inline))
+#else
+#define RAYOMD_HOT_INLINE inline
+#endif
 
 using CidList = std::vector<uint16_t>;
 
@@ -436,7 +446,7 @@ struct TtfFont {
 };
 
 template<typename Fn>
-static void ForEachCodepoint(std::wstring_view text, Fn fn) {
+static RAYOMD_HOT_INLINE void ForEachCodepoint(std::wstring_view text, Fn fn) {
     for (size_t i = 0; i < text.size(); i++) {
         uint32_t cp = (uint16_t)text[i];
         if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < text.size()) {
@@ -628,7 +638,7 @@ private:
     mutable bool sorted = true;
 };
 
-static std::string HexText(const TtfFont& font, const std::wstring& text, UsedCidSet& usedCids) {
+static RAYOMD_HOT_INLINE std::string HexText(const TtfFont& font, const std::wstring& text, UsedCidSet& usedCids) {
     std::string out;
     out.reserve(2 + text.size() * 4);
     out.push_back('<');
@@ -2441,6 +2451,247 @@ static void AppendPageAnnotations(std::string& page, const std::vector<int>& ann
     page += "]";
 }
 
+// ---- Native math integration (shared by both renderers) ----------------------
+
+// Code that runs only for documents with formulas: optimise it for size and keep it
+// away from the hot text path.
+#if defined(__GNUC__) || defined(__clang__)
+#define RAYOMD_MATH_COLD __attribute__((cold, noinline))
+#else
+#define RAYOMD_MATH_COLD
+#endif
+
+
+using Internal::MathFallbackFont;
+using Internal::MathFormula;
+
+// Formula-bearing text builds its span, word and line lists with this helper only. It must
+// not share vector code (appending a whole element, reserve) or the small span helpers
+// with the plain text path: every extra call site there stops the compiler from inlining
+// them into the hot wrap functions, which costs a few percent on documents without math.
+template <typename T>
+RAYOMD_MATH_COLD static T& MathAppend(std::vector<T>& values) {
+    values.emplace_back();
+    return values.back();
+}
+
+constexpr double kMathSizeFactor = 1.08;      // Times at the text size looks small next to Helvetica / Segoe UI
+constexpr double kMathLineTolerance = 0.10;   // a line grows only when a formula leaves its box by more than this (x text size)
+constexpr double kMathFallbackAscent = 0.74;  // ink extents of fallback text, in em of the text size
+constexpr double kMathFallbackDescent = 0.21;
+constexpr double kDisplayMathAbove = 5.0;    // block display math: space above the formula
+constexpr double kDisplayMathBelow = 9.0;    // and below it
+constexpr double kDisplayMathLinePad = 3.0;  // $$...$$ inside a paragraph: extra room above and below
+constexpr double kQuoteMathPad = 4.0;        // display math inside a block quote strip
+
+// Extra room a line needs beyond today's fixed line box. Zero for every line
+// without a formula and for formulas that fit the normal line box.
+struct MathLineExtent {
+    double above = 0.0;
+    double below = 0.0;
+};
+
+// Lays out one formula at the text size `size` so that it fits maxWidth x maxHeight; the
+// module shrinks it (re-layout to 75 %, then a uniform scale, never below 50 % overall).
+// False: the formula is empty, hit a hard limit, or does not fit even then, and the caller
+// shows the complete TeX source instead.
+RAYOMD_MATH_COLD static bool LayoutMathToFit(std::string_view tex, double size, bool display, bool bold,
+    double maxWidth, double maxHeight, const MathFallbackFont* fallback, MathFormula& formula) {
+    formula = MathFormula::Layout(tex, size * kMathSizeFactor, display, fallback, maxWidth, bold, maxHeight);
+    return !formula.Empty() && !formula.SourceFallback() && formula.Width() <= maxWidth &&
+        formula.Ascent() + formula.Descent() <= maxHeight;
+}
+
+// The formulas of the paragraph, heading, or table row that is being laid out.
+// Wrapped lines refer to them by index, so copying a line never copies a formula.
+class MathPool {
+public:
+    bool Empty() const { return items.empty(); }
+    // True when the text being laid out contains a formula or the source of one that did
+    // not fit: such text takes the math wrap and paint functions.
+    bool Active() const { return !items.empty() || sourceShown; }
+    void Clear() { items.clear(); sourceShown = false; }
+    bool Used() const { return used; }
+    void MarkSourceShown() { sourceShown = true; }
+
+    int Add(std::string_view tex, double size, bool display, bool bold, double maxWidth, double maxHeight,
+        const MathFallbackFont* fallback) {
+        Item item;
+        item.display = display;
+        if (!LayoutMathToFit(tex, size, display, bold, maxWidth, maxHeight, fallback, item.formula)) return -1;
+        items.push_back(std::move(item));
+        return (int)items.size() - 1;
+    }
+
+    const MathFormula& At(int index) const { return items[(size_t)index].formula; }
+    bool IsDisplay(int index) const { return items[(size_t)index].display; }
+
+    double Emit(int index, std::string& content, double x, double baseline, const char* rgb) {
+        used = true;
+        items[(size_t)index].formula.Emit(content, x, baseline, rgb);
+        return items[(size_t)index].formula.Width();
+    }
+
+    void MarkUsed() { used = true; }
+
+private:
+    struct Item {
+        MathFormula formula;
+        bool display = false;
+    };
+    std::vector<Item> items;
+    bool used = false;
+    bool sourceShown = false;
+};
+
+template <typename SpanType>
+static MathLineExtent MeasureMathLine(const MathPool& math, const std::vector<SpanType>& line,
+    double size, double lineHeight) {
+    MathLineExtent extent;
+    for (const SpanType& span : line) {
+        if (span.math < 0) continue;
+        const MathFormula& formula = math.At(span.math);
+        const double over = formula.Ascent() - size;
+        const double under = formula.Descent() - (lineHeight - size);
+        if (math.IsDisplay(span.math)) {
+            extent.above = std::max(extent.above, over + kDisplayMathLinePad);
+            extent.below = std::max(extent.below, under + kDisplayMathLinePad);
+            continue;
+        }
+        // An inline formula that leaves the line box only slightly does not move the lines.
+        const double tolerance = kMathLineTolerance * size;
+        if (over > tolerance) extent.above = std::max(extent.above, over);
+        if (under > tolerance) extent.below = std::max(extent.below, under);
+    }
+    return extent;
+}
+
+// True when the line is a single $$...$$ formula inside paragraph text.
+template <typename SpanType>
+static bool IsDisplayMathLine(const MathPool& math, const std::vector<SpanType>& line) {
+    return line.size() == 1 && line[0].math >= 0 && math.IsDisplay(line[0].math);
+}
+
+// Source whitespace decides whether a formula touches its neighbours: "($x$)" and
+// "$n$-th" stay tight, "a $x$ b" keeps its spaces. joins[i] != 0 means: no space
+// and no line break between word i and word i - 1. Words that are not next to a
+// formula get 0 and therefore today's spacing.
+template <typename SpanType>
+RAYOMD_MATH_COLD static std::vector<unsigned char> MarkMathJoins(const std::vector<SpanType>& spans, size_t wordCount) {
+    std::vector<unsigned char> joins(wordCount, 0);
+    size_t wordIndex = 0;
+    bool gap = true;
+    bool afterMath = false;
+    for (const SpanType& span : spans) {
+        if (span.math >= 0) {
+            if (wordIndex < wordCount) joins[wordIndex] = !gap && wordIndex > 0;
+            wordIndex++;
+            gap = false;
+            afterMath = true;
+            continue;
+        }
+        bool inWord = false;
+        for (auto ch : span.text) {
+            if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+                gap = true;
+                inWord = false;
+                continue;
+            }
+            if (inWord) continue;
+            if (afterMath && !gap && wordIndex < wordCount) joins[wordIndex] = 1;
+            inWord = true;
+            afterMath = false;
+            gap = false;
+            wordIndex++;
+        }
+    }
+    return joins;
+}
+
+RAYOMD_MATH_COLD static std::string MathSourceText(const Internal::InlineSpan& span) {
+    const char* delimiter = span.math == Internal::InlineMath::Display ? "$$" : "$";
+    return delimiter + span.text + delimiter;
+}
+
+RAYOMD_MATH_COLD static std::vector<int> AddMathFontObjects(PdfObjects& pdf) {
+    std::vector<int> ids;
+    ids.reserve(Internal::kMathFontCount);
+    int descriptorId = pdf.Add(Internal::MathSymbolDescriptorObject());
+    for (int index = 0; index < Internal::kMathFontCount; index++) {
+        ids.push_back(pdf.Add(Internal::MathFontObject(index, descriptorId)));
+    }
+    return ids;
+}
+
+RAYOMD_MATH_COLD static void AppendMathFontResources(std::string& page, const std::vector<int>& mathFontIds) {
+    for (size_t i = 0; i < mathFontIds.size(); i++) {
+        page += " /";
+        page += Internal::kMathFonts[i].resourceName;
+        page += " ";
+        AppendInt(page, mathFontIds[i]);
+        page += " 0 R";
+    }
+}
+
+// A table that contains formulas. Rows are as tall as their tallest cell; cells
+// without a formula wrap exactly as they do in RenderTable.
+template <typename RendererType>
+RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block& block) {
+    const std::vector<std::vector<std::string>>& rows = block.rows;
+    if (rows.empty()) return;
+    size_t columns = 0;
+    for (const auto& row : rows) columns = std::max(columns, row.size());
+    if (columns == 0) return;
+
+    double tableWidth = PAGE_W - renderer.margin * 2.0;
+    double colWidth = tableWidth / columns;
+    double size = 9.6;
+    double lh = size * 1.32;
+    double pad = 5.0;
+    double cellTextWidth = std::max(16.0, colWidth - pad * 2.0);
+    static const std::string emptyCell;
+
+    renderer.y -= 3.0;
+    for (size_t r = 0; r < rows.size(); r++) {
+        renderer.math.Clear();
+        std::vector<decltype(renderer.WrapMathCell(emptyCell, 0.0, 0.0, false))> wrapped(columns);
+        double contentHeight = lh;
+        for (size_t c = 0; c < columns; c++) {
+            const std::string& cell = c < rows[r].size() ? rows[r][c] : emptyCell;
+            wrapped[c] = renderer.WrapMathCell(cell, cellTextWidth, size, r == 0);
+            double height = 0.0;
+            for (const auto& line : wrapped[c]) {
+                MathLineExtent extent = MeasureMathLine(renderer.math, line, size, lh);
+                height += lh + extent.above + extent.below;
+            }
+            contentHeight = std::max(contentHeight, height);
+        }
+
+        double rowHeight = contentHeight + pad * 2.0;
+        renderer.Ensure(rowHeight + 5.0);
+        double top = renderer.y;
+        if (r == 0) renderer.TableFill(renderer.margin, top, tableWidth, rowHeight);
+        for (size_t c = 0; c < columns; c++) {
+            double cellX = renderer.margin + c * colWidth;
+            renderer.TableStroke(cellX, top, colWidth, rowHeight);
+            int align = c < block.aligns.size() ? block.aligns[c] : -1;
+            double lineTop = top - pad;
+            for (const auto& line : wrapped[c]) {
+                MathLineExtent extent = MeasureMathLine(renderer.math, line, size, lh);
+                double lineWidth = renderer.MathLineWidth(line, size, r == 0);
+                double tx = cellX + pad;
+                if (align == 0) tx = cellX + (colWidth - lineWidth) * 0.5;
+                else if (align == 1) tx = cellX + colWidth - pad - lineWidth;
+                renderer.PaintMathTextLine(line, tx, lineTop - extent.above - size, size,
+                    renderer.TableTextColor(r == 0), r == 0);
+                lineTop -= lh + extent.above + extent.below;
+            }
+        }
+        renderer.y -= rowHeight;
+    }
+    renderer.y -= 9.0;
+}
+
 template <typename RendererType>
 static void RenderBlocks(RendererType& renderer, const std::vector<Block>& blocks) {
     if (blocks.empty()) {
@@ -2459,7 +2710,10 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         case BlockType::Quote: renderer.RenderQuote(block); break;
         case BlockType::Code: renderer.RenderCode(block.text); break;
         case BlockType::MathBlock: renderer.RenderMath(block.text); break;
-        case BlockType::Table: renderer.RenderTable(block.rows, block.aligns); break;
+        case BlockType::Table:
+            if (block.hasMath) RenderMathTable(renderer, block);
+            else renderer.RenderTable(block.rows, block.aligns);
+            break;
         case BlockType::Rule: renderer.RenderRule(); break;
         case BlockType::PageBreak: break;
         case BlockType::Image: renderer.RenderImage(block); break;
@@ -2474,6 +2728,8 @@ public:
         margin = ResolveMarginPoints(marginValue);
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
+        mathFallback = { this, &Renderer::MeasureMathFallback, &Renderer::EmitMathFallback,
+            kMathFallbackAscent / kMathSizeFactor, kMathFallbackDescent / kMathSizeFactor };
         NewPage();
     }
 
@@ -2482,10 +2738,13 @@ public:
     const std::vector<std::string>& Pages() const { return pages; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     const CidList& UsedCids() const { return usedCids.Values(); }
+    bool MathUsed() const { return math.Used(); }
 
 private:
     template <typename RendererType>
     friend void RenderBlocks(RendererType&, const std::vector<Block>&);
+    template <typename RendererType>
+    friend void RenderMathTable(RendererType&, const Block&);
 
     const TtfFont& font;
     int fontId = 0;
@@ -2498,6 +2757,36 @@ private:
     std::vector<std::string> pages;
     std::vector<std::vector<LinkRect>> pageLinks;
     UsedCidSet usedCids;
+    MathPool math;
+    MathFallbackFont mathFallback{};
+
+    // Text the standard math fonts cannot show (	ext{...} in another script) is
+    // measured and painted with the embedded document font, at the text size the
+    // formula stands in (the module works at kMathSizeFactor times that size).
+    static double MeasureMathFallback(void* context, std::string_view utf8, double size) {
+        const Renderer* self = static_cast<const Renderer*>(context);
+        return TextWidth(self->font, Utf8ToWide(utf8), size / kMathSizeFactor);
+    }
+
+    static void EmitMathFallback(void* context, std::string& content, std::string_view utf8, double x,
+        double baseline, double size, const char* rgb) {
+        Renderer* self = static_cast<Renderer*>(context);
+        content += "q ";
+        content += rgb;
+        content += " rg BT /F1 ";
+        AppendF(content, size / kMathSizeFactor);
+        content += " Tf 1 0 0 1 ";
+        AppendF(content, x);
+        content += " ";
+        AppendF(content, baseline);
+        content += " Tm ";
+        content += HexText(self->font, Utf8ToWide(utf8), self->usedCids);
+        content += " Tj ET Q\n";
+    }
+
+    double MaxMathHeight() const {
+        return (PAGE_H - margin * 2.0) * 0.5;
+    }
 
     void RenderBullet(const Block& block) {
         RenderListItem("- ", block);
@@ -2529,6 +2818,7 @@ private:
         bool italic = false;
         bool strike = false;
         bool code = false;
+        int math = -1;   // index into `math` when the span is a formula; text is empty then
     };
 
     struct StyledWord {
@@ -2538,6 +2828,7 @@ private:
         bool italic = false;
         bool strike = false;
         bool code = false;
+        int math = -1;
     };
 
     void PushSpan(std::vector<StyledSpan>& spans, std::string_view text, bool bold, bool italic, bool strike,
@@ -2545,21 +2836,88 @@ private:
         if (text.empty()) return;
         std::wstring wide = Utf8ToWide(text);
         if (!spans.empty() && spans.back().bold == bold && spans.back().italic == italic &&
-            spans.back().strike == strike && spans.back().url == url && spans.back().code == code) {
+            spans.back().strike == strike && spans.back().url == url && spans.back().code == code &&
+            spans.back().math < 0) {
             spans.back().text += wide;
         } else {
             spans.push_back({ wide, ToString(url), bold, italic, strike, code });
         }
     }
 
-    std::vector<StyledSpan> ParseInlineStyled(const std::string& input) {
+    // A formula becomes one span that refers to the pool. A formula that is empty
+    // or cannot fit the line is shown as its TeX source in code style instead.
+    RAYOMD_MATH_COLD void PushMathSpan(std::vector<StyledSpan>& spans, const Internal::InlineSpan& span, double size,
+        double width, bool bold) {
+        int index = math.Add(span.text, size, span.math == Internal::InlineMath::Display, bold, width,
+            MaxMathHeight(), &mathFallback);
+        StyledSpan& added = MathAppend(spans);
+        if (index < 0) {
+            added.text = Utf8ToWide(MathSourceText(span));
+            added.code = true;
+            math.MarkSourceShown();
+            return;
+        }
+        added.math = index;
+    }
+
+    std::vector<StyledSpan> ParseInlineStyled(const std::string& input, double size, double width) {
         std::vector<StyledSpan> spans;
         std::vector<Internal::InlineSpan> inlineSpans = Internal::ParseInlineSpans(input);
         spans.reserve(inlineSpans.size());
         for (const Internal::InlineSpan& span : inlineSpans) {
+            if (span.math != Internal::InlineMath::None) {
+                PushMathSpan(spans, span, size, width, false);
+                continue;
+            }
             PushSpan(spans, span.text, span.bold, span.italic, span.strike, span.url, span.code);
         }
         return spans;
+    }
+
+    // Heading and table-cell text (Block::hasMath): plain text with formulas between
+    // kMathTextOpen and kMathTextClose. No Markdown is interpreted here.
+    RAYOMD_MATH_COLD std::vector<StyledSpan> MathTextSpans(const std::string& text, double size, double width, bool bold) {
+        std::vector<StyledSpan> spans;
+        Internal::ForEachMathTextSegment(text, [&](std::string_view segment, bool isMath) {
+            if (!isMath) {
+                if (!segment.empty()) MathAppend(spans).text = Utf8ToWide(segment);
+                return;
+            }
+            Internal::InlineSpan span;
+            span.text.assign(segment.data(), segment.size());
+            span.math = Internal::InlineMath::Inline;
+            PushMathSpan(spans, span, size, width, bold);
+        });
+        return spans;
+    }
+
+    // Word list of formula-bearing text: the words of SplitStyledWords plus one word
+    // per formula.
+    RAYOMD_MATH_COLD std::vector<StyledWord> SplitMathWords(const std::vector<StyledSpan>& spans) {
+        std::vector<StyledWord> words;
+        for (const StyledSpan& span : spans) {
+            if (span.math >= 0) {
+                MathAppend(words).math = span.math;
+                continue;
+            }
+            const size_t length = span.text.size();
+            for (size_t start = 0; start < length;) {
+                while (start < length && IsWideSpace(span.text[start])) start++;
+                size_t end = start;
+                while (end < length && !IsWideSpace(span.text[end])) end++;
+                if (end > start) {
+                    StyledWord& word = MathAppend(words);
+                    word.text.assign(span.text, start, end - start);
+                    word.url = span.url;
+                    word.bold = span.bold;
+                    word.italic = span.italic;
+                    word.strike = span.strike;
+                    word.code = span.code;
+                }
+                start = end;
+            }
+        }
+        return words;
     }
 
     std::vector<StyledWord> SplitStyledWords(const std::vector<StyledSpan>& spans) {
@@ -2600,6 +2958,165 @@ private:
             text[0] == L':' || text[0] == L'!' || text[0] == L'?' || text[0] == L')');
     }
 
+    // Line filling for text that contains at least one formula. Same greedy rule as
+    // WrapStyled, plus: a formula is one unbreakable word, words glued to a formula
+    // (joinPrev) stay on its line, and a $$...$$ formula gets a line of its own.
+    RAYOMD_MATH_COLD std::vector<std::vector<StyledSpan>> WrapMathWords(const std::vector<StyledWord>& words,
+        const std::vector<unsigned char>& joins, double width, double size) {
+        std::vector<std::vector<StyledSpan>> lines;
+        std::vector<StyledSpan> line;
+        double lineWidth = 0.0;
+        double spaceWidth = TextWidth(font, L" ", size);
+        std::vector<double> widths(words.size());
+        for (size_t index = 0; index < words.size(); index++) {
+            const StyledWord& word = words[index];
+            widths[index] = word.math >= 0 ? math.At(word.math).Width() : TextWidth(font, word.text, size);
+        }
+        const std::string noUrl;
+        // Appends text to the line: merged into the previous span when the style is the
+        // same (never into a formula), as AppendStyledSpan does for plain text.
+        auto appendText = [&](std::wstring text, const StyledWord& word, bool styled) {
+            const std::string& url = styled ? word.url : noUrl;
+            const bool bold = styled && word.bold;
+            const bool italic = styled && word.italic;
+            const bool strike = styled && word.strike;
+            const bool code = styled && word.code;
+            if (!line.empty()) {
+                StyledSpan& last = line.back();
+                if (last.math < 0 && last.bold == bold && last.italic == italic && last.strike == strike &&
+                    last.code == code && last.url == url) {
+                    last.text += text;
+                    return;
+                }
+            }
+            StyledSpan& added = MathAppend(line);
+            added.text = std::move(text);
+            added.url = url;
+            added.bold = bold;
+            added.italic = italic;
+            added.strike = strike;
+            added.code = code;
+        };
+        auto flush = [&]() {
+            if (!line.empty()) MathAppend(lines).swap(line);
+            line.clear();
+            lineWidth = 0.0;
+        };
+
+        for (size_t index = 0; index < words.size(); index++) {
+            const StyledWord& word = words[index];
+            if (word.math >= 0 && math.IsDisplay(word.math)) {
+                flush();
+                MathAppend(MathAppend(lines)).math = word.math;
+                continue;
+            }
+            const bool joined = joins[index] != 0;
+            bool needsSpace = !line.empty() && !joined && !IsClosingPunctuation(word.text);
+            if (!line.empty() && !joined) {
+                double groupWidth = widths[index];
+                for (size_t next = index + 1; next < words.size() && joins[next] != 0 &&
+                    !(words[next].math >= 0 && math.IsDisplay(words[next].math)); next++) {
+                    groupWidth += widths[next];
+                }
+                if (lineWidth + groupWidth + (needsSpace ? spaceWidth : 0.0) > width) {
+                    flush();
+                    needsSpace = false;
+                }
+            }
+            if (word.math >= 0) {
+                if (needsSpace) {
+                    appendText(L" ", word, false);
+                    lineWidth += spaceWidth;
+                }
+                MathAppend(line).math = word.math;
+                lineWidth += widths[index];
+                continue;
+            }
+            if (widths[index] > width) {
+                // A word wider than the line is split by character, as PushWrappedWord does.
+                flush();
+                std::wstring part;
+                double partWidth = 0.0;
+                const double scale = size * 0.001;
+                for (wchar_t ch : word.text) {
+                    double chWidth = CodepointWidth(font, (uint16_t)ch, scale);
+                    if (!part.empty() && partWidth + chWidth > width) {
+                        appendText(std::move(part), word, true);
+                        flush();
+                        part.clear();
+                        partWidth = 0.0;
+                    }
+                    part.push_back(ch);
+                    partWidth += chWidth;
+                }
+                appendText(std::move(part), word, true);
+                lineWidth = partWidth;
+                continue;
+            }
+            std::wstring textRun = word.text;
+            double wordWidth = widths[index];
+            if (needsSpace) {
+                if (word.strike) {
+                    appendText(L" ", word, false);
+                    lineWidth += spaceWidth;
+                } else {
+                    textRun.insert(textRun.begin(), L' ');
+                    wordWidth += spaceWidth;
+                }
+            }
+            appendText(std::move(textRun), word, true);
+            lineWidth += wordWidth;
+        }
+
+        flush();
+        if (lines.empty()) MathAppend(lines);
+        return lines;
+    }
+
+    // Wraps heading or table-cell text that carries formulas (Block::hasMath).
+    RAYOMD_MATH_COLD std::vector<std::vector<StyledSpan>> WrapMathText(const std::string& text, double width, double size, bool bold) {
+        std::vector<StyledSpan> spans = MathTextSpans(text, size, width, bold);
+        std::vector<StyledWord> words = SplitMathWords(spans);
+        return WrapMathWords(words, MarkMathJoins(spans, words.size()), width, size);
+    }
+
+    // A table cell inside a table with formulas. A cell without a formula wraps
+    // exactly as RenderTable wraps it.
+    RAYOMD_MATH_COLD std::vector<std::vector<StyledSpan>> WrapMathCell(const std::string& cell, double width, double size, bool bold) {
+        if (cell.find(Internal::kMathTextOpen) != std::string::npos) return WrapMathText(cell, width, size, bold);
+        std::vector<std::vector<StyledSpan>> lines;
+        for (const std::wstring& line : WrapText(font, Utf8ToWide(cell), width, size)) {
+            MathAppend(MathAppend(lines)).text = line;
+        }
+        return lines;
+    }
+
+    double MathLineWidth(const std::vector<StyledSpan>& line, double size, bool) const {
+        double width = 0.0;
+        for (const StyledSpan& span : line) {
+            width += span.math >= 0 ? math.At(span.math).Width() : TextWidth(font, span.text, size);
+        }
+        return width;
+    }
+
+    // Paints a line of plain text and formulas in one colour (headings, table cells).
+    RAYOMD_MATH_COLD void PaintMathTextLine(const std::vector<StyledSpan>& line, double x, double baseline, double size,
+        const char* color, bool bold) {
+        double cursor = x;
+        for (const StyledSpan& span : line) {
+            if (span.math >= 0) {
+                cursor += math.Emit(span.math, pages.back(), cursor, baseline, color);
+                continue;
+            }
+            PaintText(cursor, baseline, size, span.text, color, bold);
+            cursor += TextWidth(font, span.text, size);
+        }
+    }
+
+    void TableFill(double x, double top, double w, double h) { DrawRect(x, top, w, h, "0.91 0.93 0.95"); }
+    void TableStroke(double x, double top, double w, double h) { DrawStrokeRect(x, top, w, h); }
+    const char* TableTextColor(bool header) const { return header ? "0.04 0.04 0.04" : "0.10 0.10 0.10"; }
+
     std::vector<std::vector<StyledSpan>> WrapStyled(const std::string& text, double width, double size) {
         if (text.find('\n') != std::string::npos) {
             std::vector<std::vector<StyledSpan>> explicitLines;
@@ -2625,7 +3142,17 @@ private:
             return lines;
         }
 
-        std::vector<StyledWord> words = SplitStyledWords(ParseInlineStyled(text));
+        std::vector<StyledWord> words;
+        {
+            // The spans are released before the lines are built, as they always were:
+            // the line and word strings then reuse that memory while it is still warm.
+            std::vector<StyledSpan> spans = ParseInlineStyled(text, size, width);
+            if (math.Active()) {
+                std::vector<StyledWord> mathWords = SplitMathWords(spans);
+                return WrapMathWords(mathWords, MarkMathJoins(spans, mathWords.size()), width, size);
+            }
+            words = SplitStyledWords(spans);
+        }
         std::vector<std::vector<StyledSpan>> lines;
         lines.reserve(std::max<size_t>(1, text.size() / 72));
         std::vector<StyledSpan> line;
@@ -2830,11 +3357,77 @@ private:
         double size = sizes[level];
         if (y < PAGE_H - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
 
+        if (block.hasMath) {
+            RenderMathTextLines(block.text, margin, PAGE_W - margin * 2.0, size, "0.02 0.02 0.02", false, false);
+            y -= level <= 2 ? 8.0 : 5.0;
+            return;
+        }
         std::wstring text = Utf8ToWide(block.text);
         for (const auto& line : WrapText(font, text, PAGE_W - margin * 2.0, size)) {
             DrawTextLine(margin, size, line, "0.02 0.02 0.02");
         }
         y -= level <= 2 ? 8.0 : 5.0;
+    }
+
+    // Heading lines that contain formulas: plain text and formulas in one colour,
+    // each line as tall as its tallest formula needs. `quote` adds the quote strip.
+    RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, double x, double width, double size,
+        const char* color, bool bold, bool quote) {
+        math.Clear();
+        double lh = size * 1.35;
+        for (const auto& line : WrapMathText(text, width, size, bold)) {
+            MathLineExtent extent = MeasureMathLine(math, line, size, lh);
+            double extra = extent.above + extent.below;
+            if (quote) {
+                Ensure(lh + 2.0 + extra);
+                DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, lh + 3.0 + extra, "0.94 0.95 0.96");
+                DrawRect(margin, y + 2.0, 3.0, lh + 3.0 + extra, "0.45 0.62 0.72");
+            } else {
+                Ensure(lh + extra);
+            }
+            y -= extent.above;
+            PaintMathTextLine(line, x, y - size, size, color, bold);
+            y -= lh + extent.below;
+        }
+    }
+
+    // Paragraph or quote lines of a text that contains formulas. A line grows by
+    // exactly what its tallest formula needs beyond the normal line box; the text
+    // baseline, code backgrounds and link rectangles keep their usual offsets.
+    RAYOMD_MATH_COLD void RenderMathLines(const std::vector<std::vector<StyledSpan>>& lines, double x, double width, bool quote) {
+        const char* textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
+        const char* codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
+        const char* codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
+        for (const auto& line : lines) {
+            MathLineExtent extent = MeasureMathLine(math, line, bodySize, lineHeight);
+            double extra = extent.above + extent.below;
+            if (quote) {
+                Ensure(lineHeight + 2.0 + extra);
+                DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0 + extra, "0.94 0.95 0.96");
+                DrawRect(margin, y + 2.0, 3.0, lineHeight + 3.0 + extra, "0.45 0.62 0.72");
+            } else {
+                Ensure(lineHeight + extra);
+            }
+            y -= extent.above;
+            double cursor = x;
+            if (IsDisplayMathLine(math, line)) {
+                cursor = x + std::max(0.0, (width - math.At(line[0].math).Width()) * 0.5);
+            }
+            double baseline = y - bodySize;
+            for (const StyledSpan& span : line) {
+                if (span.math >= 0) {
+                    cursor += math.Emit(span.math, pages.back(), cursor, baseline, textColor);
+                    continue;
+                }
+                double spanWidth = TextWidth(font, span.text, bodySize);
+                if (span.code) DrawRect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, codeFill);
+                const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : "0.05 0.30 0.68";
+                PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
+                AddLink(cursor, baseline, spanWidth, bodySize, span.url);
+                cursor += spanWidth;
+            }
+            y -= lineHeight + extent.below;
+        }
     }
 
     void RenderParagraph(const std::string& text) {
@@ -2843,7 +3436,14 @@ private:
 
     void RenderParagraph(const std::string& text, double x, double width) {
         double lh = bodySize * 1.35;
-        for (const auto& line : WrapStyled(text, width, bodySize)) {
+        if (math.Active()) math.Clear();
+        const std::vector<std::vector<StyledSpan>> lines = WrapStyled(text, width, bodySize);
+        if (math.Active()) {
+            RenderMathLines(lines, x, width, false);
+            y -= 5.0;
+            return;
+        }
+        for (const auto& line : lines) {
             Ensure(lh);
             double cursor = x;
             double baseline = y - bodySize;
@@ -2908,15 +3508,15 @@ private:
                 margin = savedMargin;
                 break;
             }
+            case BlockType::MathBlock: RenderDisplayMath(child.text, true); break;
             case BlockType::Code:
-            case BlockType::MathBlock:
             case BlockType::Table:
             case BlockType::Rule:
             case BlockType::Image: {
                 double savedMargin = margin;
                 margin += 14.0;
                 if (child.type == BlockType::Code) RenderCode(child.text);
-                else if (child.type == BlockType::MathBlock) RenderMath(child.text);
+                else if (child.type == BlockType::Table && child.hasMath) RenderMathTable(*this, child);
                 else if (child.type == BlockType::Table) RenderTable(child.rows, child.aligns);
                 else if (child.type == BlockType::Rule) RenderRule();
                 else RenderImage(child);
@@ -2935,6 +3535,11 @@ private:
         double height = size * 1.35;
         double x = margin + 14.0;
         double width = PAGE_W - margin * 2.0 - 22.0;
+        if (block.hasMath) {
+            RenderMathTextLines(block.text, x, width, size, "0.10 0.15 0.18", true, true);
+            y -= 7.0;
+            return;
+        }
         std::wstring text = Utf8ToWide(block.text);
         for (const std::wstring& line : WrapText(font, text, width, size)) {
             Ensure(height + 2.0);
@@ -2948,7 +3553,14 @@ private:
     void RenderQuote(const std::string& text) {
         double x = margin + 14.0;
         double width = PAGE_W - margin * 2.0 - 22.0;
-        for (const auto& line : WrapStyled(text, width, bodySize)) {
+        if (math.Active()) math.Clear();
+        const std::vector<std::vector<StyledSpan>> lines = WrapStyled(text, width, bodySize);
+        if (math.Active()) {
+            RenderMathLines(lines, x, width, true);
+            y -= 7.0;
+            return;
+        }
+        for (const auto& line : lines) {
             Ensure(lineHeight + 2.0);
             DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
             DrawRect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
@@ -2985,21 +3597,62 @@ private:
     }
 
     void RenderMath(const std::string& text) {
+        RenderDisplayMath(text, false);
+    }
+
+    // Display math: one unbreakable formula, centred in the available width.
+    // `quoted` draws it inside the block-quote strip. A formula that is empty or
+    // does not fit the page even at half size is shown as its source.
+    RAYOMD_MATH_COLD void RenderDisplayMath(const std::string& tex, bool quoted) {
+        double left = quoted ? margin + 14.0 : margin;
+        double available = quoted ? PAGE_W - margin * 2.0 - 22.0 : PAGE_W - margin * 2.0;
+        double padTop = quoted ? kQuoteMathPad : kDisplayMathAbove;
+        double padBottom = quoted ? kQuoteMathPad : 0.0;
+        double maxHeight = PAGE_H - margin * 2.0 - padTop - padBottom - 3.0;
+        MathFormula formula;
+        if (!LayoutMathToFit(tex, bodySize, true, false, available, maxHeight, &mathFallback, formula)) {
+            double savedMargin = margin;
+            if (quoted) margin += 14.0;
+            RenderMathSource(tex);
+            margin = savedMargin;
+            return;
+        }
+        double total = padTop + formula.Ascent() + formula.Descent() + padBottom;
+        Ensure(total + 2.0);
+        if (quoted) {
+            DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, total + 3.0, "0.94 0.95 0.96");
+            DrawRect(margin, y + 2.0, 3.0, total + 3.0, "0.45 0.62 0.72");
+        }
+        formula.Emit(pages.back(), left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
+            quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08");
+        math.MarkUsed();
+        y -= total;
+        y -= quoted ? 7.0 : kDisplayMathBelow;
+    }
+
+    // The pre-math rendering of a formula block: its source in a tinted box.
+    RAYOMD_MATH_COLD void RenderMathSource(const std::string& text) {
         std::vector<std::string> raw = SplitLines(text);
         double size = 10.5;
-        double lh = size * 1.45;
+        double pitch = size * 1.35;   // what DrawTextLine advances by
         double x = margin + 12.0;
         double width = PAGE_W - margin * 2.0 - 24.0;
+        bool first = true;
         for (const auto& rawLine : raw) {
             std::wstring wide = Utf8ToWide(rawLine);
             for (const auto& line : WrapCodeLine(font, wide, width, size)) {
-                Ensure(lh + 6.0);
-                DrawRect(margin, y + 4.0, PAGE_W - margin * 2.0, lh + 7.0, "0.97 0.97 0.95");
-                DrawStrokeRect(margin, y + 4.0, PAGE_W - margin * 2.0, lh + 7.0, "0.82 0.78 0.62", 0.4);
+                size_t pageCount = pages.size();
+                Ensure(pitch + 8.0);
+                if (pages.size() != pageCount) first = true;
+                // One tile per line, flush with its neighbours, so the tint never covers text.
+                double pad = first ? 4.0 : 0.0;
+                DrawRect(margin, y + pad, PAGE_W - margin * 2.0, pitch + pad, "0.97 0.97 0.95");
                 DrawTextLine(x, size, line, "0.10 0.10 0.10");
+                first = false;
             }
         }
-        y -= 8.0;
+        DrawRect(margin, y, PAGE_W - margin * 2.0, 4.0, "0.97 0.97 0.95");
+        y -= 12.0;
     }
 
     void RenderTable(const std::vector<std::vector<std::string>>& rows, const std::vector<int>& aligns) {
@@ -3467,7 +4120,8 @@ struct WrappedAsciiLine {
 
 static void WrapAsciiText(const std::string& raw, double maxWidth, double size,
     bool mono, std::vector<WrappedAsciiLine>& lines) {
-    std::string text = StripInlineMarkdown(raw);
+    // Second read of text the parser already stripped: math delimiters are literal here.
+    std::string text = StripInlineMarkdown(raw, false);
     lines.clear();
     std::string line;
     line.reserve(std::min<size_t>(text.size(), 256));
@@ -3568,10 +4222,13 @@ public:
 
     const std::vector<std::string>& Pages() const { return pages; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
+    bool MathUsed() const { return math.Used(); }
 
 private:
     template <typename RendererType>
     friend void RenderBlocks(RendererType&, const std::vector<Block>&);
+    template <typename RendererType>
+    friend void RenderMathTable(RendererType&, const Block&);
 
     ImageRegistry* images = nullptr;
     PdfStyle style = PdfStyle::Elegant;
@@ -3581,6 +4238,11 @@ private:
     double y = 0.0;
     std::vector<std::string> pages;
     std::vector<std::vector<LinkRect>> pageLinks;
+    MathPool math;
+
+    double MaxMathHeight() const {
+        return (PAGE_H - margin * 2.0) * 0.5;
+    }
 
     void RenderBullet(const Block& block) {
         RenderParagraph("- " + block.text, margin + 16.0 + block.level * 18.0,
@@ -3643,12 +4305,14 @@ private:
         std::string text;
         std::string url;
         bool code = false;
+        int math = -1;   // index into `math` when the span is a formula; text is empty then
     };
 
     struct AsciiWord {
         std::string text;
         std::string url;
         bool code = false;
+        int math = -1;
     };
 
     void AddLink(double x, double baseline, double width, double size, const std::string& url) {
@@ -3661,21 +4325,84 @@ private:
         if (text.empty()) return;
         std::string stripped = ToString(text);
         if (stripped.empty()) return;
-        if (!spans.empty() && spans.back().url == url && spans.back().code == code) {
+        if (!spans.empty() && spans.back().url == url && spans.back().code == code && spans.back().math < 0) {
             spans.back().text += stripped;
         } else {
             spans.push_back({ std::move(stripped), ToString(url), code });
         }
     }
 
-    std::vector<AsciiSpan> ParseAsciiLinkSpans(const std::string& text) {
+    // A formula becomes one span that refers to the pool. A formula that is empty
+    // or cannot fit the line is shown as its TeX source in code style instead.
+    RAYOMD_MATH_COLD void PushAsciiMathSpan(std::vector<AsciiSpan>& spans, const Internal::InlineSpan& span, double size,
+        double width, bool bold) {
+        int index = math.Add(span.text, size, span.math == Internal::InlineMath::Display, bold, width,
+            MaxMathHeight(), nullptr);
+        AsciiSpan& added = MathAppend(spans);
+        if (index < 0) {
+            added.text = MathSourceText(span);
+            added.code = true;
+            math.MarkSourceShown();
+            return;
+        }
+        added.math = index;
+    }
+
+    std::vector<AsciiSpan> ParseAsciiLinkSpans(const std::string& text, double size, double width) {
         std::vector<AsciiSpan> spans;
         std::vector<Internal::InlineSpan> inlineSpans = Internal::ParseInlineSpans(text);
         spans.reserve(inlineSpans.size());
         for (const Internal::InlineSpan& span : inlineSpans) {
+            if (span.math != Internal::InlineMath::None) {
+                PushAsciiMathSpan(spans, span, size, width, false);
+                continue;
+            }
             PushAsciiSpan(spans, span.text, span.url, span.code);
         }
         return spans;
+    }
+
+    // Heading and table-cell text (Block::hasMath): plain text with formulas between
+    // kMathTextOpen and kMathTextClose. No Markdown is interpreted here.
+    RAYOMD_MATH_COLD std::vector<AsciiSpan> MathTextSpans(const std::string& text, double size, double width, bool bold) {
+        std::vector<AsciiSpan> spans;
+        Internal::ForEachMathTextSegment(text, [&](std::string_view segment, bool isMath) {
+            if (!isMath) {
+                if (!segment.empty()) MathAppend(spans).text.assign(segment.data(), segment.size());
+                return;
+            }
+            Internal::InlineSpan span;
+            span.text.assign(segment.data(), segment.size());
+            span.math = Internal::InlineMath::Inline;
+            PushAsciiMathSpan(spans, span, size, width, bold);
+        });
+        return spans;
+    }
+
+    // Word list of formula-bearing text: the words of SplitAsciiWords plus one word
+    // per formula.
+    RAYOMD_MATH_COLD std::vector<AsciiWord> SplitAsciiMathWords(const std::vector<AsciiSpan>& spans) {
+        std::vector<AsciiWord> words;
+        for (const AsciiSpan& span : spans) {
+            if (span.math >= 0) {
+                MathAppend(words).math = span.math;
+                continue;
+            }
+            const size_t length = span.text.size();
+            for (size_t start = 0; start < length;) {
+                while (start < length && IsSpace(span.text[start])) start++;
+                size_t end = start;
+                while (end < length && !IsSpace(span.text[end])) end++;
+                if (end > start) {
+                    AsciiWord& word = MathAppend(words);
+                    word.text.assign(span.text, start, end - start);
+                    word.url = span.url;
+                    word.code = span.code;
+                }
+                start = end;
+            }
+        }
+        return words;
     }
 
     std::vector<AsciiWord> SplitAsciiWords(const std::vector<AsciiSpan>& spans) {
@@ -3708,6 +4435,159 @@ private:
         line.push_back({ std::move(text), url, code });
     }
 
+    // Text next to a formula is positioned with the real advance widths of the
+    // standard fonts, not with kAsciiWidthHundredths: the approximation is off by
+    // several points over a long run, which would show as a gap before the formula.
+    // Line breaks are still decided with the approximate table, as everywhere else.
+    static double MathTextWidth(std::string_view text, double size, bool mono, bool bold) {
+        return Internal::StandardTextWidth(text, size, mono ? Internal::StandardTextFont::Mono :
+            (bold ? Internal::StandardTextFont::Bold : Internal::StandardTextFont::Regular));
+    }
+
+    // Line filling for text that contains at least one formula. Same greedy rule as
+    // WrapAsciiLinks, plus: a formula is one unbreakable word, words glued to a
+    // formula (joinPrev) stay on its line, and a $$...$$ formula gets its own line.
+    RAYOMD_MATH_COLD std::vector<std::vector<AsciiSpan>> WrapAsciiMathWords(const std::vector<AsciiWord>& words,
+        const std::vector<unsigned char>& joins, double width, double size) {
+        std::vector<std::vector<AsciiSpan>> lines;
+        std::vector<AsciiSpan> line;
+        double lineWidth = 0.0;
+        double spaceWidth = AsciiTextWidth(" ", size);
+        std::vector<double> widths(words.size());
+        for (size_t index = 0; index < words.size(); index++) {
+            const AsciiWord& word = words[index];
+            widths[index] = word.math >= 0 ? math.At(word.math).Width() :
+                AsciiTextWidth(word.text, size, word.code);
+        }
+        // Appends text to the line: merged into the previous span when the style is the
+        // same (never into a formula), as AppendAsciiLineSpan does for plain text.
+        auto appendText = [&](std::string text, const std::string& url, bool code) {
+            if (!line.empty()) {
+                AsciiSpan& last = line.back();
+                if (last.math < 0 && last.code == code && last.url == url) {
+                    last.text += text;
+                    return;
+                }
+            }
+            AsciiSpan& added = MathAppend(line);
+            added.text = std::move(text);
+            added.url = url;
+            added.code = code;
+        };
+        auto flush = [&]() {
+            if (!line.empty()) MathAppend(lines).swap(line);
+            line.clear();
+            lineWidth = 0.0;
+        };
+
+        for (size_t index = 0; index < words.size(); index++) {
+            const AsciiWord& word = words[index];
+            if (word.math >= 0 && math.IsDisplay(word.math)) {
+                flush();
+                MathAppend(MathAppend(lines)).math = word.math;
+                continue;
+            }
+            const bool joined = joins[index] != 0;
+            bool needsSpace = !line.empty() && !joined;
+            if (!line.empty() && !joined) {
+                double groupWidth = widths[index];
+                for (size_t next = index + 1; next < words.size() && joins[next] != 0 &&
+                    !(words[next].math >= 0 && math.IsDisplay(words[next].math)); next++) {
+                    groupWidth += widths[next];
+                }
+                if (lineWidth + groupWidth + (needsSpace ? spaceWidth : 0.0) > width) {
+                    flush();
+                    needsSpace = false;
+                }
+            }
+            if (word.math >= 0) {
+                if (needsSpace) {
+                    appendText(" ", std::string(), false);
+                    lineWidth += spaceWidth;
+                }
+                MathAppend(line).math = word.math;
+                lineWidth += widths[index];
+                continue;
+            }
+            if (widths[index] > width) {
+                // A word wider than the line is split by character, as WrapAsciiText does.
+                flush();
+                std::string part;
+                double partWidth = 0.0;
+                for (char ch : word.text) {
+                    double chWidth = AsciiCharWidth(ch, size, word.code);
+                    if (!part.empty() && partWidth + chWidth > width) {
+                        appendText(std::move(part), word.url, word.code);
+                        flush();
+                        part.clear();
+                        partWidth = 0.0;
+                    }
+                    part.push_back(ch);
+                    partWidth += chWidth;
+                }
+                appendText(std::move(part), word.url, word.code);
+                lineWidth = partWidth;
+                continue;
+            }
+            std::string textRun = word.text;
+            double wordWidth = widths[index];
+            if (needsSpace) {
+                textRun.insert(textRun.begin(), ' ');
+                wordWidth += spaceWidth;
+            }
+            appendText(std::move(textRun), word.url, word.code);
+            lineWidth += wordWidth;
+        }
+
+        flush();
+        if (lines.empty()) MathAppend(lines);
+        return lines;
+    }
+
+    // Wraps heading or table-cell text that carries formulas (Block::hasMath).
+    RAYOMD_MATH_COLD std::vector<std::vector<AsciiSpan>> WrapMathText(const std::string& text, double width, double size, bool bold) {
+        std::vector<AsciiSpan> spans = MathTextSpans(text, size, width, bold);
+        std::vector<AsciiWord> words = SplitAsciiMathWords(spans);
+        return WrapAsciiMathWords(words, MarkMathJoins(spans, words.size()), width, size);
+    }
+
+    // A table cell inside a table with formulas. A cell without a formula wraps
+    // exactly as RenderTable wraps it.
+    RAYOMD_MATH_COLD std::vector<std::vector<AsciiSpan>> WrapMathCell(const std::string& cell, double width, double size, bool bold) {
+        if (cell.find(Internal::kMathTextOpen) != std::string::npos) return WrapMathText(cell, width, size, bold);
+        std::vector<std::vector<AsciiSpan>> lines;
+        for (WrappedAsciiLine& line : WrapAsciiText(cell, width, size)) {
+            MathAppend(MathAppend(lines)).text = std::move(line.text);
+        }
+        return lines;
+    }
+
+    double MathLineWidth(const std::vector<AsciiSpan>& line, double size, bool bold) const {
+        double width = 0.0;
+        for (const AsciiSpan& span : line) {
+            width += span.math >= 0 ? math.At(span.math).Width() : MathTextWidth(span.text, size, false, bold);
+        }
+        return width;
+    }
+
+    // Paints a line of plain text and formulas in one colour (headings, table cells).
+    RAYOMD_MATH_COLD void PaintMathTextLine(const std::vector<AsciiSpan>& line, double x, double baseline, double size,
+        const char* color, bool bold) {
+        double cursor = x;
+        for (const AsciiSpan& span : line) {
+            if (span.math >= 0) {
+                cursor += math.Emit(span.math, pages.back(), cursor, baseline, color);
+                continue;
+            }
+            Text(cursor, baseline, size, span.text, bold ? "F2" : "F1", color);
+            cursor += MathTextWidth(span.text, size, false, bold);
+        }
+    }
+
+    void TableFill(double x, double top, double w, double h) { Rect(x, top, w, h, "0.91 0.93 0.95"); }
+    void TableStroke(double x, double top, double w, double h) { Rect(x, top, w, h, "0.72 0.72 0.72", true); }
+    const char* TableTextColor(bool) const { return "0.08 0.08 0.08"; }
+
     std::vector<std::vector<AsciiSpan>> WrapAsciiLinks(const std::string& text, double width, double size) {
         if (text.find('\n') != std::string::npos) {
             std::vector<std::vector<AsciiSpan>> explicitLines;
@@ -3723,7 +4603,17 @@ private:
             }
             return explicitLines;
         }
-        std::vector<AsciiWord> words = SplitAsciiWords(ParseAsciiLinkSpans(text));
+        std::vector<AsciiWord> words;
+        {
+            // The spans are released before the lines are built, as they always were:
+            // the line and word strings then reuse that memory while it is still warm.
+            std::vector<AsciiSpan> spans = ParseAsciiLinkSpans(text, size, width);
+            if (math.Active()) {
+                std::vector<AsciiWord> mathWords = SplitAsciiMathWords(spans);
+                return WrapAsciiMathWords(mathWords, MarkMathJoins(spans, mathWords.size()), width, size);
+            }
+            words = SplitAsciiWords(spans);
+        }
         std::vector<std::vector<AsciiSpan>> lines;
         lines.reserve(std::max<size_t>(1, text.size() / 72));
         std::vector<AsciiSpan> line;
@@ -3842,10 +4732,76 @@ private:
         int level = std::max(1, std::min(6, block.level));
         double size = sizes[level];
         if (y < PAGE_H - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
+        if (block.hasMath) {
+            RenderMathTextLines(block.text, margin, PAGE_W - margin * 2.0, size, "0.02 0.02 0.02", true, false);
+            y -= level <= 2 ? 8.0 : 5.0;
+            return;
+        }
         for (const auto& line : WrapAsciiText(block.text, PAGE_W - margin * 2.0, size)) {
             DrawTextLine(margin, size, line.text, "F2", "0.02 0.02 0.02");
         }
         y -= level <= 2 ? 8.0 : 5.0;
+    }
+
+    // Heading lines that contain formulas: plain text and formulas in one colour,
+    // each line as tall as its tallest formula needs. `quote` adds the quote strip.
+    RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, double x, double width, double size,
+        const char* color, bool bold, bool quote) {
+        math.Clear();
+        double lh = size * 1.35;
+        for (const auto& line : WrapMathText(text, width, size, bold)) {
+            MathLineExtent extent = MeasureMathLine(math, line, size, lh);
+            double extra = extent.above + extent.below;
+            if (quote) {
+                Ensure(lh + 2.0 + extra);
+                Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lh + 3.0 + extra, "0.94 0.95 0.96");
+                Rect(margin, y + 2.0, 3.0, lh + 3.0 + extra, "0.45 0.62 0.72");
+            } else {
+                Ensure(lh + extra);
+            }
+            y -= extent.above;
+            PaintMathTextLine(line, x, y - size, size, color, bold);
+            y -= lh + extent.below;
+        }
+    }
+
+    // Paragraph or quote lines of a text that contains formulas. A line grows by
+    // exactly what its tallest formula needs beyond the normal line box; the text
+    // baseline, code backgrounds and link rectangles keep their usual offsets.
+    RAYOMD_MATH_COLD void RenderMathLines(const std::vector<std::vector<AsciiSpan>>& lines, double x, double width, bool quote) {
+        const char* textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
+        const char* codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
+        const char* codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
+        for (const auto& line : lines) {
+            MathLineExtent extent = MeasureMathLine(math, line, bodySize, lineHeight);
+            double extra = extent.above + extent.below;
+            if (quote) {
+                Ensure(lineHeight + 2.0 + extra);
+                Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0 + extra, "0.94 0.95 0.96");
+                Rect(margin, y + 2.0, 3.0, lineHeight + 3.0 + extra, "0.45 0.62 0.72");
+            } else {
+                Ensure(lineHeight + extra);
+            }
+            y -= extent.above;
+            double cursor = x;
+            if (IsDisplayMathLine(math, line)) {
+                cursor = x + std::max(0.0, (width - math.At(line[0].math).Width()) * 0.5);
+            }
+            double baseline = y - bodySize;
+            for (const AsciiSpan& span : line) {
+                if (span.math >= 0) {
+                    cursor += math.Emit(span.math, pages.back(), cursor, baseline, textColor);
+                    continue;
+                }
+                double spanWidth = MathTextWidth(span.text, bodySize, span.code, false);
+                if (span.code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, codeFill);
+                const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : "0.05 0.30 0.68";
+                Text(cursor, baseline, bodySize, span.text, span.code ? "F3" : "F1", color);
+                AddLink(cursor, baseline, spanWidth, bodySize, span.url);
+                cursor += spanWidth;
+            }
+            y -= lineHeight + extent.below;
+        }
     }
 
     void RenderParagraph(const std::string& text) {
@@ -3854,7 +4810,14 @@ private:
 
     void RenderParagraph(const std::string& text, double x, double width) {
         if (text.find_first_of("!*_~`$[<\\\n") != std::string::npos) {
-            for (const auto& line : WrapAsciiLinks(text, width, bodySize)) {
+            if (math.Active()) math.Clear();
+            const std::vector<std::vector<AsciiSpan>> lines = WrapAsciiLinks(text, width, bodySize);
+            if (math.Active()) {
+                RenderMathLines(lines, x, width, false);
+                y -= 5.0;
+                return;
+            }
+            for (const auto& line : lines) {
                 double lh = bodySize * 1.35;
                 Ensure(lh);
                 double cursor = x;
@@ -3921,15 +4884,15 @@ private:
                 margin = savedMargin;
                 break;
             }
+            case BlockType::MathBlock: RenderDisplayMath(child.text, true); break;
             case BlockType::Code:
-            case BlockType::MathBlock:
             case BlockType::Table:
             case BlockType::Rule:
             case BlockType::Image: {
                 double savedMargin = margin;
                 margin += 14.0;
                 if (child.type == BlockType::Code) RenderCode(child.text);
-                else if (child.type == BlockType::MathBlock) RenderMath(child.text);
+                else if (child.type == BlockType::Table && child.hasMath) RenderMathTable(*this, child);
                 else if (child.type == BlockType::Table) RenderTable(child.rows, child.aligns);
                 else if (child.type == BlockType::Rule) RenderRule();
                 else RenderImage(child);
@@ -3948,6 +4911,11 @@ private:
         double height = size * 1.35;
         double x = margin + 14.0;
         double width = PAGE_W - margin * 2.0 - 22.0;
+        if (block.hasMath) {
+            RenderMathTextLines(block.text, x, width, size, "0.10 0.15 0.18", true, true);
+            y -= 7.0;
+            return;
+        }
         for (const WrappedAsciiLine& line : WrapAsciiText(block.text, width, size)) {
             Ensure(height + 2.0);
             Rect(margin, y + 2.0, PAGE_W - margin * 2.0, height + 3.0, "0.94 0.95 0.96");
@@ -3960,7 +4928,14 @@ private:
     void RenderQuote(const std::string& text) {
         double x = margin + 14.0;
         double width = PAGE_W - margin * 2.0 - 22.0;
-        for (const auto& line : WrapAsciiLinks(text, width, bodySize)) {
+        if (math.Active()) math.Clear();
+        const std::vector<std::vector<AsciiSpan>> lines = WrapAsciiLinks(text, width, bodySize);
+        if (math.Active()) {
+            RenderMathLines(lines, x, width, true);
+            y -= 7.0;
+            return;
+        }
+        for (const auto& line : lines) {
             Ensure(lineHeight + 2.0);
             Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
             Rect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
@@ -3996,17 +4971,58 @@ private:
     }
 
     void RenderMath(const std::string& text) {
+        RenderDisplayMath(text, false);
+    }
+
+    // Display math: one unbreakable formula, centred in the available width.
+    // `quoted` draws it inside the block-quote strip. A formula that is empty or
+    // does not fit the page even at half size is shown as its source.
+    RAYOMD_MATH_COLD void RenderDisplayMath(const std::string& tex, bool quoted) {
+        double left = quoted ? margin + 14.0 : margin;
+        double available = quoted ? PAGE_W - margin * 2.0 - 22.0 : PAGE_W - margin * 2.0;
+        double padTop = quoted ? kQuoteMathPad : kDisplayMathAbove;
+        double padBottom = quoted ? kQuoteMathPad : 0.0;
+        double maxHeight = PAGE_H - margin * 2.0 - padTop - padBottom - 3.0;
+        MathFormula formula;
+        if (!LayoutMathToFit(tex, bodySize, true, false, available, maxHeight, nullptr, formula)) {
+            double savedMargin = margin;
+            if (quoted) margin += 14.0;
+            RenderMathSource(tex);
+            margin = savedMargin;
+            return;
+        }
+        double total = padTop + formula.Ascent() + formula.Descent() + padBottom;
+        Ensure(total + 2.0);
+        if (quoted) {
+            Rect(margin, y + 2.0, PAGE_W - margin * 2.0, total + 3.0, "0.94 0.95 0.96");
+            Rect(margin, y + 2.0, 3.0, total + 3.0, "0.45 0.62 0.72");
+        }
+        formula.Emit(pages.back(), left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
+            quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08");
+        math.MarkUsed();
+        y -= total;
+        y -= quoted ? 7.0 : kDisplayMathBelow;
+    }
+
+    // The pre-math rendering of a formula block: its source in a tinted box.
+    RAYOMD_MATH_COLD void RenderMathSource(const std::string& text) {
         double size = 10.5;
-        double lh = size * 1.45;
+        double pitch = size * 1.35;   // what DrawTextLine advances by
+        bool first = true;
         for (const auto& rawLine : SplitLines(text)) {
             for (const auto& line : WrapAsciiLiteral(rawLine, PAGE_W - margin * 2.0 - 24.0, size, true)) {
-                Ensure(lh + 6.0);
-                Rect(margin, y + 4.0, PAGE_W - margin * 2.0, lh + 7.0, "0.97 0.97 0.95");
-                Rect(margin, y + 4.0, PAGE_W - margin * 2.0, lh + 7.0, "0.82 0.78 0.62", true);
+                size_t pageCount = pages.size();
+                Ensure(pitch + 8.0);
+                if (pages.size() != pageCount) first = true;
+                // One tile per line, flush with its neighbours, so the tint never covers text.
+                double pad = first ? 4.0 : 0.0;
+                Rect(margin, y + pad, PAGE_W - margin * 2.0, pitch + pad, "0.97 0.97 0.95");
                 DrawTextLine(margin + 12.0, size, line, "F3", "0.10 0.10 0.10", true);
+                first = false;
             }
         }
-        y -= 8.0;
+        Rect(margin, y, PAGE_W - margin * 2.0, 4.0, "0.97 0.97 0.95");
+        y -= 12.0;
     }
 
     void RenderTable(const std::vector<std::vector<std::string>>& rows, const std::vector<int>& aligns) {
@@ -4092,6 +5108,8 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
     std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks());
+    std::vector<int> mathFontIds;
+    if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
     std::vector<int> pageIds;
     const std::vector<std::string>& renderedPages = renderer.Pages();
@@ -4112,7 +5130,9 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
         AppendInt(page, fontBoldId);
         page += " 0 R /F3 ";
         AppendInt(page, fontMonoId);
-        page += " 0 R >>";
+        page += " 0 R";
+        AppendMathFontResources(page, mathFontIds);
+        page += " >>";
         AppendXObjectResources(page, imageObjectIds);
         page += " >> /Contents ";
         AppendInt(page, contentId);
@@ -4195,6 +5215,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
     std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks());
+    std::vector<int> mathFontIds;
+    if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
     const CidList& used = renderer.UsedCids();
     std::string cidKey = MakeCidKey(used);
@@ -4279,7 +5301,9 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
         AppendF(page, PAGE_H);
         page += "] /Resources << /Font << /F1 ";
         AppendInt(page, type0FontId);
-        page += " 0 R >>";
+        page += " 0 R";
+        AppendMathFontResources(page, mathFontIds);
+        page += " >>";
         AppendXObjectResources(page, imageObjectIds);
         page += " >> /Contents ";
         AppendInt(page, contentId);
