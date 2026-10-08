@@ -312,6 +312,31 @@ within the A/A spread of code placement.
 Link targets of both renderers are now percent-encoded UTF-8: `/URI` strings
 used to lose their non-ASCII bytes (`Größe` became `Gre`).
 
+## Emphasis on the standard fonts, October 2026
+
+The standard-font renderer used to drop emphasis: `**bold**`, `*italic*` and
+`~~strike~~` came out as plain Helvetica. It now shows bold in Helvetica-Bold,
+italic in Helvetica-Oblique, both in Helvetica-BoldOblique and strike-through as
+a line, like the Unicode renderer. The oblique faces go into the PDF only when
+text uses them, so documents without emphasis keep their bytes.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (g++ 13.3 `-O3`, nine
+rounds, against `336e0df`): documents without emphasis build the same bytes in
+the same time (-0.0 % to +0.4 %, within the A/A spread) and run 0.13 % more
+instructions at 96 KiB (0.46 % for `baseline.md`). The watch fixtures with
+emphasis run 5.2 % more instructions and take 4 % to 5 % longer: every change
+of style is a text object of its own, and their PDFs grow by 12 %.
+
+Two details keep documents without emphasis at their old cost:
+
+- Code and emphasis share one style byte in `AsciiRun` and `AsciiSegment`, so
+  placing a word still compares one byte with the run before it. Two fields
+  made `WrapAsciiRuns` 6 % slower.
+- `StyleAdvances` reads the advance table of a style from a table of pointers.
+  From a computed font index GCC kept the table base and the font offset in two
+  registers and added them for every byte the word loop looks up: one
+  instruction more per byte, 0.3 % of a 96 KiB ASCII build.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -346,6 +371,17 @@ moving inlining in the other; that is the option to try before raising it.
 **`ContainsByteClass` is scalar.** Every paragraph is classified with an
 8-byte unrolled table scan, about 0.6 % of a Unicode build. A vector
 classification would cut it, but the gain is small.
+
+**One text object per line.** Every run of a line is a text object of its own
+(`q … rg BT /F1 … Tf 1 0 0 1 x y Tm (…) Tj ET Q`, about 70 bytes besides the
+text). In the 96 KiB ASCII watch fixture 2,322 of 3,999 text objects follow
+another on the same line. Those could switch font and color inside the text
+object of their line and move with `Td` by the width RayoMD computed, so
+placement stays exact: 30 to 55 bytes less each, 70 to 130 KB of that 569 KB
+PDF, and fewer coordinates to format. Code backgrounds and strike lines are
+paths, which a text object cannot hold, so a line would paint its rectangles
+first and its strike lines last. It changes the bytes of every document with
+links, code or emphasis.
 
 ## Keeping the release light
 

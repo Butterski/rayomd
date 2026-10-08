@@ -4864,10 +4864,6 @@ static const StandardWordAdvances& WordAdvances(StandardTextFont font) {
     return Internal::kStandardWordAdvances[static_cast<size_t>(font)];
 }
 
-static StandardTextFont BodyFont(bool code) {
-    return code ? StandardTextFont::Mono : StandardTextFont::Regular;
-}
-
 static double UnitsToPoints(uint64_t units, double size) {
     return static_cast<double>(units) * size / 1000.0;
 }
@@ -5070,6 +5066,9 @@ public:
     const std::vector<size_t>& PageStarts() const { return pageStarts; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     bool MathUsed() const { return math.Used(); }
+    // Whether text was shown in /F4 Helvetica-Oblique or /F5 Helvetica-BoldOblique.
+    bool ObliqueUsed() const { return (facesUsed & (1u << kStyleItalic)) != 0; }
+    bool BoldObliqueUsed() const { return (facesUsed & (1u << (kStyleBold | kStyleItalic))) != 0; }
 
 private:
     template <typename RendererType>
@@ -5190,17 +5189,75 @@ private:
         else out.Lit("f Q\n");
     }
 
+    // Emphasis and code state of a piece of text, one bit each. The standard fonts show bold
+    // and italic in faces of their own and strike-through as a line; code keeps Courier
+    // whatever its emphasis.
+    enum : uint8_t { kStyleBold = 1, kStyleItalic = 2, kStyleCode = 4, kStyleStrike = 8 };
+    // The state of an Internal::InlineSpan or Internal::InlineRun.
+    template <typename Span>
+    static uint8_t SpanStyle(const Span& span) {
+        return static_cast<uint8_t>((span.bold ? kStyleBold : 0) | (span.italic ? kStyleItalic : 0) |
+            (span.code ? kStyleCode : 0) | (span.strike ? kStyleStrike : 0));
+    }
+    // The font whose advances measure text in `style`: Helvetica-Oblique has those of Helvetica.
+    static StandardTextFont StyleFont(uint8_t style) {
+        return (style & kStyleCode) ? StandardTextFont::Mono :
+            (style & kStyleBold) ? StandardTextFont::Bold : StandardTextFont::Regular;
+    }
+    // WordAdvances(StyleFont(style)), read from a table of pointers. A loop that looks up a
+    // byte at a time then indexes one register; from the computed font index GCC keeps the
+    // table base and the font offset apart and adds them for every byte.
+    static const StandardWordAdvances& StyleAdvances(uint8_t style) {
+        constexpr const StandardWordAdvances* R = &Internal::kStandardWordAdvances[0];
+        constexpr const StandardWordAdvances* B = &Internal::kStandardWordAdvances[1];
+        constexpr const StandardWordAdvances* M = &Internal::kStandardWordAdvances[2];
+        static constexpr const StandardWordAdvances* kByStyle[16] = { R, B, R, B, M, M, M, M, R, B, R, B, M, M, M, M };
+        return *kByStyle[style & 15];
+    }
+    // /F1 Helvetica, /F2 Helvetica-Bold, /F4 Helvetica-Oblique, /F5 Helvetica-BoldOblique or
+    // /F3 Courier. The oblique faces go into the PDF only when text was shown in them.
+    const char* StyleFontName(uint8_t style) {
+        static const char* const kFaceNames[8] = { "F1", "F2", "F4", "F5", "F3", "F3", "F3", "F3" };
+        const unsigned face = style & (kStyleBold | kStyleItalic | kStyleCode);
+        facesUsed = static_cast<uint8_t>(facesUsed | (1u << face));
+        return kFaceNames[face];
+    }
+    uint8_t facesUsed = 0;      // bit n set: text was shown in the face of style n
+
+    // A line through struck text, as the Unicode renderer draws it. A leading space of the
+    // piece is not struck.
+    RAYOMD_COLD void StrikeThrough(double x, double baseline, double width, double size, std::string_view text,
+        uint8_t style, const char* color) {
+        size_t spaces = 0;
+        while (spaces < text.size() && text[spaces] == ' ') spaces++;
+        const double skip = UnitsToPoints(StyleAdvances(style).space * spaces, size);
+        if (width <= skip) return;
+        const size_t colorSize = strlen(color);
+        TailWriter out(content, 32 + colorSize + kOperandBytes * 4);
+        out.Lit("q ");
+        out.Bytes(color, colorSize);
+        out.Lit(" RG 0.55 w ");
+        out.Fixed(x + skip);
+        out.Lit(" ");
+        out.Fixed(baseline + size * 0.34);
+        out.Lit(" m ");
+        out.Fixed(x + width);
+        out.Lit(" ");
+        out.Fixed(baseline + size * 0.34);
+        out.Lit(" l S Q\n");
+    }
+
     struct AsciiSpan {
         std::string text;
         std::string url;
-        bool code = false;
+        uint8_t style = 0;  // kStyle* bits
         int math = -1;   // index into `math` when the span is a formula; text is empty then
     };
 
     struct AsciiWord {
         std::string text;
         std::string url;
-        bool code = false;
+        uint8_t style = 0;
         int math = -1;
     };
 
@@ -5209,16 +5266,16 @@ private:
         pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, std::string(url) });
     }
 
-    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string&& text, std::string&& url, bool code) {
+    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string&& text, std::string&& url, uint8_t style) {
         if (text.empty()) return;
-        if (!spans.empty() && spans.back().url == url && spans.back().code == code && spans.back().math < 0) {
+        if (!spans.empty() && spans.back().url == url && spans.back().style == style && spans.back().math < 0) {
             spans.back().text += text;
         } else {
             spans.emplace_back();
             AsciiSpan& span = spans.back();
             span.text = std::move(text);
             span.url = std::move(url);
-            span.code = code;
+            span.style = style;
         }
     }
 
@@ -5232,7 +5289,7 @@ private:
         AsciiSpan& added = MathAppend(spans);
         if (index < 0) {
             added.text = MathSourceText(span);
-            added.code = true;
+            added.style = kStyleCode;
             math.MarkSourceShown();
             return;
         }
@@ -5248,7 +5305,7 @@ private:
                 PushAsciiMathSpan(spans, span, size, width, false);
                 continue;
             }
-            PushAsciiSpan(spans, std::move(span.text), std::move(span.url), span.code);
+            PushAsciiSpan(spans, std::move(span.text), std::move(span.url), SpanStyle(span));
         }
         return spans;
     }
@@ -5288,7 +5345,7 @@ private:
                     AsciiWord& word = MathAppend(words);
                     word.text.assign(span.text, start, end - start);
                     word.url = span.url;
-                    word.code = span.code;
+                    word.style = span.style;
                 }
                 start = end;
             }
@@ -5297,12 +5354,12 @@ private:
     }
 
     // Appends one word to the line being filled, with a leading space when `spaced`. It is
-    // merged into the previous span when link and code state are the same.
+    // merged into the previous span when link, code and emphasis are the same.
     void AppendAsciiWord(std::vector<AsciiSpan>& line, std::string_view word, bool spaced, const std::string& url,
-        bool code) {
+        uint8_t style) {
         if (!line.empty()) {
             AsciiSpan& last = line.back();
-            if (last.url == url && last.code == code) {
+            if (last.url == url && last.style == style) {
                 if (spaced) last.text.push_back(' ');
                 last.text.append(word.data(), word.size());
                 return;
@@ -5314,7 +5371,7 @@ private:
         if (spaced) span.text.push_back(' ');
         span.text.append(word.data(), word.size());
         span.url = url;
-        span.code = code;
+        span.style = style;
     }
 
     // Exact width of text next to formulas and of heading and table-cell text with formulas,
@@ -5327,27 +5384,28 @@ private:
     // Line filling for text that contains at least one formula. Same greedy rule as
     // WrapAsciiRuns: words that touch in the source (joins) stay together without a space,
     // a formula is one unbreakable word, and a $$...$$ formula gets a line of its own.
-    // `bold` text (headings, header cells) is measured in Helvetica-Bold.
+    // `bold` text (headings, header cells) is measured in Helvetica-Bold, like bold emphasis.
     RAYOMD_MATH_COLD std::vector<std::vector<AsciiSpan>> WrapAsciiMathWords(const std::vector<AsciiWord>& words,
         const std::vector<unsigned char>& joins, double width, double size, bool bold) {
         std::vector<std::vector<AsciiSpan>> lines;
         std::vector<AsciiSpan> line;
         double lineWidth = 0.0;
-        const StandardTextFont textFont = bold ? StandardTextFont::Bold : StandardTextFont::Regular;
-        const double spaceWidth = UnitsToPoints(WordAdvances(textFont).space, size);
+        const double spaceWidth = UnitsToPoints(WordAdvances(StandardTextFont::Regular).space, size);
         const double codeSpaceWidth = UnitsToPoints(WordAdvances(StandardTextFont::Mono).space, size);
+        auto wordFont = [bold](const AsciiWord& word) {
+            return StyleFont(bold ? static_cast<uint8_t>(word.style | kStyleBold) : word.style);
+        };
         std::vector<double> widths(words.size());
         for (size_t index = 0; index < words.size(); index++) {
             const AsciiWord& word = words[index];
-            widths[index] = word.math >= 0 ? math.At(word.math).Width() :
-                AsciiTextWidth(word.text, size, word.code ? StandardTextFont::Mono : textFont);
+            widths[index] = word.math >= 0 ? math.At(word.math).Width() : AsciiTextWidth(word.text, size, wordFont(word));
         }
         // Appends text to the line: merged into the previous span when the style is the
         // same (never into a formula), as AppendAsciiWord does for plain text.
-        auto appendText = [&](std::string text, const std::string& url, bool code) {
+        auto appendText = [&](std::string text, const std::string& url, uint8_t style) {
             if (!line.empty()) {
                 AsciiSpan& last = line.back();
-                if (last.math < 0 && last.code == code && last.url == url) {
+                if (last.math < 0 && last.style == style && last.url == url) {
                     last.text += text;
                     return;
                 }
@@ -5355,7 +5413,7 @@ private:
             AsciiSpan& added = MathAppend(line);
             added.text = std::move(text);
             added.url = url;
-            added.code = code;
+            added.style = style;
         };
         auto flush = [&]() {
             if (!line.empty()) MathAppend(lines).swap(line);
@@ -5372,7 +5430,7 @@ private:
                 continue;
             }
             // The space before a word is shown, and measured, in the font of that word.
-            const double space = word.code ? codeSpaceWidth : spaceWidth;
+            const double space = (word.style & kStyleCode) ? codeSpaceWidth : spaceWidth;
             const bool joined = joins[index] != 0;
             bool needsSpace = !line.empty() && !joined;
             if (!joined) {
@@ -5392,7 +5450,7 @@ private:
             }
             if (word.math >= 0) {
                 if (needsSpace) {
-                    appendText(" ", std::string(), false);
+                    appendText(" ", std::string(), 0);
                     lineWidth += spaceWidth;
                 }
                 MathAppend(line).math = word.math;
@@ -5405,9 +5463,9 @@ private:
                 std::string part;
                 double partWidth = 0.0;
                 for (char ch : word.text) {
-                    double chWidth = AsciiCharWidth(ch, size, word.code ? StandardTextFont::Mono : textFont);
+                    double chWidth = AsciiCharWidth(ch, size, wordFont(word));
                     if (!part.empty() && partWidth + chWidth > width) {
-                        appendText(std::move(part), word.url, word.code);
+                        appendText(std::move(part), word.url, word.style);
                         flush();
                         part.clear();
                         partWidth = 0.0;
@@ -5415,7 +5473,7 @@ private:
                     part.push_back(ch);
                     partWidth += chWidth;
                 }
-                appendText(std::move(part), word.url, word.code);
+                appendText(std::move(part), word.url, word.style);
                 lineWidth = partWidth;
                 continue;
             }
@@ -5425,7 +5483,7 @@ private:
                 textRun.insert(textRun.begin(), ' ');
                 wordWidth += space;
             }
-            appendText(std::move(textRun), word.url, word.code);
+            appendText(std::move(textRun), word.url, word.style);
             lineWidth += wordWidth;
         }
 
@@ -5479,21 +5537,20 @@ private:
     const char* TableTextColor(bool) const { return "0.08 0.08 0.08"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer, in the
-    // link and code state of the span it came from.
+    // link, code and emphasis state of the span it came from.
     struct AsciiRun {
         uint32_t begin = 0;
         uint32_t end = 0;
         uint32_t widthUnits = 0;        // advance of the text in AFM units; a run never outgrows its line
-        bool code = false;
+        uint8_t style = 0;              // kStyle* bits
         std::string_view url;           // link target, in AsciiRuns::parsed
     };
 
-    // A stretch of the parsed text in one link and code state. The standard fonts show no
-    // emphasis, so parsed runs that differ only in that are one segment.
+    // A stretch of the parsed text in one link, code and emphasis state.
     struct AsciiSegment {
         uint32_t begin = 0;
         uint32_t end = 0;
-        bool code = false;
+        uint8_t style = 0;
         std::string_view url;
     };
 
@@ -5510,7 +5567,7 @@ private:
         std::string_view Text(const AsciiRun& run) const {
             return std::string_view(text.data() + run.begin, run.end - run.begin);
         }
-        // AsciiTextWidth(Text(run), size, BodyFont(run.code)), without reading the text again.
+        // AsciiTextWidth(Text(run), size, StyleFont(run.style)), without reading the text again.
         double Width(const AsciiRun& run, double size) const {
             return UnitsToPoints(run.widthUnits, size);
         }
@@ -5519,24 +5576,24 @@ private:
 
     // AFM units of parsed text [begin, end) in the font of `segment`.
     static uint64_t AsciiUnits(const AsciiSegment& segment, const char* source, size_t begin, size_t end) {
-        const uint16_t* advances = WordAdvances(BodyFont(segment.code)).byte;
+        const uint16_t* advances = StyleAdvances(segment.style).byte;
         uint64_t units = 0;
         for (size_t at = begin; at < end; at++) units += advances[static_cast<unsigned char>(source[at])];
         return units;
     }
 
-    // Appends `length` bytes of parsed text at `from`, `units` wide, in link and code state
-    // `url` and `code`, to the line whose first run is `lineStart`, after a space `spaceUnits`
+    // Appends `length` bytes of parsed text at `from`, `units` wide, in link and style state
+    // `url` and `style`, to the line whose first run is `lineStart`, after a space `spaceUnits`
     // wide unless that is 0. The text joins the last run of the line when the state is the
     // same. All of it comes by value: a byte written through `cursor` might alias `out`.
     static RAYOMD_HOT_INLINE void AppendAsciiRunText(AsciiRuns& out, char* textBegin, char*& cursor, size_t lineStart,
-        bool code, std::string_view url, const char* from, size_t length, uint32_t units, uint32_t spaceUnits) {
+        uint8_t style, std::string_view url, const char* from, size_t length, uint32_t units, uint32_t spaceUnits) {
         AsciiRun* run = out.runs.size() != lineStart ? &out.runs.back() : nullptr;
-        if (!run || run->code != code || !SameText(run->url, url)) {
+        if (!run || run->style != style || !SameText(run->url, url)) {
             out.runs.emplace_back();
             run = &out.runs.back();
             run->begin = static_cast<uint32_t>(cursor - textBegin);
-            run->code = code;
+            run->style = style;
             run->url = url;
         }
         if (spaceUnits != 0) *cursor++ = ' ';
@@ -5554,7 +5611,7 @@ private:
         const char* const source = out.parsed.text.data();
         for (size_t piece = firstSegment, begin = wordStart; begin < wordEnd; piece++) {
             const AsciiSegment& current = out.segments[piece];
-            const uint16_t* advances = WordAdvances(BodyFont(current.code)).byte;
+            const uint16_t* advances = StyleAdvances(current.style).byte;
             const size_t end = std::min<size_t>(wordEnd, current.end);
             size_t partStart = begin;
             uint32_t partUnits = 0;
@@ -5562,7 +5619,7 @@ private:
                 const unsigned charUnits = advances[static_cast<unsigned char>(source[ch])];
                 if (lineUnits + partUnits + charUnits > maxUnits && (ch > partStart || out.runs.size() != lineStart)) {
                     if (ch > partStart) {
-                        AppendAsciiRunText(out, textBegin, cursor, lineStart, current.code, current.url, source + partStart,
+                        AppendAsciiRunText(out, textBegin, cursor, lineStart, current.style, current.url, source + partStart,
                             ch - partStart, partUnits, 0);
                     }
                     out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
@@ -5574,7 +5631,7 @@ private:
                 partUnits += charUnits;
             }
             if (end > partStart) {
-                AppendAsciiRunText(out, textBegin, cursor, lineStart, current.code, current.url, source + partStart,
+                AppendAsciiRunText(out, textBegin, cursor, lineStart, current.style, current.url, source + partStart,
                     end - partStart, partUnits, 0);
                 lineUnits += partUnits;
             }
@@ -5583,10 +5640,10 @@ private:
     }
 
     // Wraps `text` into `out` with the line breaks and span boundaries of WrapAsciiLinks. A word
-    // is everything between two white spaces of the source, so it may cross link and code
-    // boundaries ("[link](u).", "`code`s"): it gets no space and no line break inside, and is
-    // cut by character only when it is wider than a whole line. Returns false for text with
-    // explicit line breaks or possible formulas, which take the general path.
+    // is everything between two white spaces of the source, so it may cross link, code and
+    // emphasis boundaries ("[link](u).", "`code`s"): it gets no space and no line break inside,
+    // and is cut by character only when it is wider than a whole line. Returns false for text
+    // with explicit line breaks or possible formulas, which take the general path.
     bool WrapAsciiRuns(const std::string& text, double width, double size, AsciiRuns& out) {
         if (text.size() >= 0x40000000u || text.find('\n') != std::string::npos ||
             text.find('$') != std::string::npos || text.find("\\(") != std::string::npos) {
@@ -5598,12 +5655,15 @@ private:
         out.lineEnds.clear();
         const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
         for (size_t first = 0; first < parsed.size();) {
-            const bool code = parsed[first].code;
+            const uint8_t style = SpanStyle(parsed[first]);
             const std::string_view url = out.parsed.Url(parsed[first]);
             size_t last = first;
-            while (last + 1 < parsed.size() && parsed[last + 1].code == code && out.parsed.Url(parsed[last + 1]) == url) last++;
+            while (last + 1 < parsed.size() && SpanStyle(parsed[last + 1]) == style &&
+                out.parsed.Url(parsed[last + 1]) == url) {
+                last++;
+            }
             out.segments.push_back({ static_cast<uint32_t>(parsed[first].begin), static_cast<uint32_t>(parsed[last].end),
-                code, url });
+                style, url });
             first = last + 1;
         }
         // Every word is written once, with at most one space in front of it.
@@ -5615,17 +5675,17 @@ private:
         uint64_t lineUnits = 0;
         const uint64_t maxUnits = MaxUnits(width, size);
         const StandardWordAdvances& regular = WordAdvances(StandardTextFont::Regular);
-        const StandardWordAdvances& mono = WordAdvances(StandardTextFont::Mono);
 
         const size_t segmentCount = out.segments.size();
         const size_t total = segmentCount != 0 ? out.segments.back().end : 0;
         size_t at = 0;
         for (size_t segment = 0; segment < segmentCount; segment++) {
-            const bool code = out.segments[segment].code;
+            const uint8_t style = out.segments[segment].style;
             const std::string_view url = out.segments[segment].url;
             const size_t segmentEnd = out.segments[segment].end;
-            const uint16_t* const advances = code ? mono.byte : regular.byte;
-            const uint32_t segmentSpace = code ? mono.space : regular.space;
+            const StandardWordAdvances& font = StyleAdvances(style);
+            const uint16_t* const advances = font.byte;
+            const uint32_t segmentSpace = font.space;
             while (at < segmentEnd) {
                 if (regular.byte[static_cast<unsigned char>(source[at])] == 0) {
                     at++;
@@ -5644,7 +5704,7 @@ private:
                 if (at == segmentEnd && at < total && regular.byte[static_cast<unsigned char>(source[at])] != 0) {
                     do {
                         const AsciiSegment& next = out.segments[++lastSegment];
-                        const uint16_t* const nextAdvances = next.code ? mono.byte : regular.byte;
+                        const uint16_t* const nextAdvances = StyleAdvances(next.style).byte;
                         for (; at < next.end; at++) {
                             const unsigned charUnits = nextAdvances[static_cast<unsigned char>(source[at])];
                             if (charUnits == 0) break;
@@ -5667,7 +5727,7 @@ private:
                 } else {
                     lineUnits += spaceUnits + wordUnits;
                     if (lastSegment == segment) {
-                        AppendAsciiRunText(out, textBegin, cursor, lineStart, code, url, source + wordStart,
+                        AppendAsciiRunText(out, textBegin, cursor, lineStart, style, url, source + wordStart,
                             wordEnd - wordStart, static_cast<uint32_t>(wordUnits), spaceUnits);
                     } else {
                         // In one piece per segment the word touches.
@@ -5675,7 +5735,7 @@ private:
                             const AsciiSegment& part = out.segments[piece];
                             const size_t end = std::min<size_t>(wordEnd, part.end);
                             if (end == begin) continue;
-                            AppendAsciiRunText(out, textBegin, cursor, lineStart, part.code, part.url, source + begin,
+                            AppendAsciiRunText(out, textBegin, cursor, lineStart, part.style, part.url, source + begin,
                                 end - begin, static_cast<uint32_t>(AsciiUnits(part, source, begin, end)), spaceUnits);
                             spaceUnits = 0;
                             begin = end;
@@ -5732,7 +5792,7 @@ private:
                 const std::string& following = spans[next].text;
                 size_t end = 0;
                 while (end < following.size() && !IsSpace(following[end])) end++;
-                glued += AsciiTextWidth(std::string_view(following.data(), end), size, BodyFont(spans[next].code));
+                glued += AsciiTextWidth(std::string_view(following.data(), end), size, StyleFont(spans[next].style));
                 if (end < following.size()) break;
             }
             return glued;
@@ -5746,7 +5806,7 @@ private:
         for (size_t index = 0; index < spans.size(); index++) {
             const AsciiSpan& span = spans[index];
             const std::string& source = span.text;
-            const StandardTextFont font = BodyFont(span.code);
+            const StandardTextFont font = StyleFont(span.style);
             for (size_t at = 0; at < source.size();) {
                 const bool glued = at == 0 && endsInWord && !IsSpace(source[0]);
                 while (at < source.size() && IsSpace(source[at])) at++;
@@ -5780,20 +5840,20 @@ private:
                     for (size_t ch = 0; ch < word.size(); ch++) {
                         const double chWidth = AsciiCharWidth(word[ch], size, font);
                         if (lineWidth + partWidth + chWidth > width && (ch > partStart || !line.empty())) {
-                            if (ch > partStart) AppendAsciiWord(line, word.substr(partStart, ch - partStart), false, span.url, span.code);
+                            if (ch > partStart) AppendAsciiWord(line, word.substr(partStart, ch - partStart), false, span.url, span.style);
                             newLine();
                             partStart = ch;
                             partWidth = 0.0;
                         }
                         partWidth += chWidth;
                     }
-                    AppendAsciiWord(line, word.substr(partStart), false, span.url, span.code);
+                    AppendAsciiWord(line, word.substr(partStart), false, span.url, span.style);
                     lineWidth += partWidth;
                     continue;
                 }
 
                 if (needsSpace) wordWidth += spaceWidth;
-                AppendAsciiWord(line, word, needsSpace, span.url, span.code);
+                AppendAsciiWord(line, word, needsSpace, span.url, span.style);
                 lineWidth += wordWidth;
             }
             if (!source.empty()) endsInWord = !IsSpace(source.back());
@@ -5954,10 +6014,12 @@ private:
                     cursor += math.Emit(span.math, content, cursor, baseline, textColor);
                     continue;
                 }
-                double spanWidth = MathTextWidth(span.text, bodySize, span.code, false);
-                if (span.code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, codeFill);
-                const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : "0.05 0.30 0.68";
-                Text(cursor, baseline, bodySize, span.text, span.code ? "F3" : "F1", color);
+                const bool code = (span.style & kStyleCode) != 0;
+                double spanWidth = MathTextWidth(span.text, bodySize, code, (span.style & kStyleBold) != 0);
+                if (code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, codeFill);
+                const char* color = span.url.empty() ? (code ? codeColor : textColor) : "0.05 0.30 0.68";
+                Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
+                if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
             }
@@ -5982,9 +6044,13 @@ private:
                     for (; index < lineEnd; index++) {
                         const AsciiRun& run = paragraphRuns.runs[index];
                         double spanWidth = paragraphRuns.Width(run, bodySize);
-                        if (run.code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lh, "0.94 0.94 0.92");
-                        const char* color = run.url.empty() ? (run.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
-                        Text(cursor, baseline, bodySize, paragraphRuns.Text(run), run.code ? "F3" : "F1", color);
+                        const bool code = (run.style & kStyleCode) != 0;
+                        if (code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lh, "0.94 0.94 0.92");
+                        const char* color = run.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
+                        Text(cursor, baseline, bodySize, paragraphRuns.Text(run), StyleFontName(run.style), color);
+                        if (run.style & kStyleStrike) {
+                            StrikeThrough(cursor, baseline, spanWidth, bodySize, paragraphRuns.Text(run), run.style, color);
+                        }
                         AddLink(cursor, baseline, spanWidth, bodySize, run.url);
                         cursor += spanWidth;
                     }
@@ -6005,10 +6071,12 @@ private:
                 double cursor = x;
                 double baseline = y - bodySize;
                 for (const AsciiSpan& span : line) {
-                    double spanWidth = AsciiTextWidth(span.text, bodySize, BodyFont(span.code));
-                    if (span.code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lh, "0.94 0.94 0.92");
-                    const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
-                    Text(cursor, baseline, bodySize, span.text, span.code ? "F3" : "F1", color);
+                    const bool code = (span.style & kStyleCode) != 0;
+                    double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
+                    if (code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lh, "0.94 0.94 0.92");
+                    const char* color = span.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
+                    Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
+                    if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
                     AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                     cursor += spanWidth;
                 }
@@ -6122,9 +6190,13 @@ private:
                 for (; index < lineEnd; index++) {
                     const AsciiRun& run = paragraphRuns.runs[index];
                     double spanWidth = paragraphRuns.Width(run, bodySize);
-                    if (run.code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
-                    const char* color = run.url.empty() ? (run.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
-                    Text(cursor, baseline, bodySize, paragraphRuns.Text(run), run.code ? "F3" : "F1", color);
+                    const bool code = (run.style & kStyleCode) != 0;
+                    if (code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
+                    const char* color = run.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
+                    Text(cursor, baseline, bodySize, paragraphRuns.Text(run), StyleFontName(run.style), color);
+                    if (run.style & kStyleStrike) {
+                        StrikeThrough(cursor, baseline, spanWidth, bodySize, paragraphRuns.Text(run), run.style, color);
+                    }
                     AddLink(cursor, baseline, spanWidth, bodySize, run.url);
                     cursor += spanWidth;
                 }
@@ -6146,10 +6218,12 @@ private:
             double cursor = x;
             double baseline = y - bodySize;
             for (const AsciiSpan& span : line) {
-                double spanWidth = AsciiTextWidth(span.text, bodySize, BodyFont(span.code));
-                if (span.code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
-                const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
-                Text(cursor, baseline, bodySize, span.text, span.code ? "F3" : "F1", color);
+                const bool code = (span.style & kStyleCode) != 0;
+                double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
+                if (code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
+                const char* color = span.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
+                Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
+                if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
             }
@@ -6363,6 +6437,11 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
+    // The italic faces only when emphasis used them, so other documents keep their bytes.
+    const int fontObliqueId = renderer.ObliqueUsed()
+        ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding >>") : 0;
+    const int fontBoldObliqueId = renderer.BoldObliqueUsed()
+        ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-BoldOblique /Encoding /WinAnsiEncoding >>") : 0;
 
     std::vector<int> pageIds;
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
@@ -6384,6 +6463,16 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         page += " 0 R /F3 ";
         AppendInt(page, fontMonoId);
         page += " 0 R";
+        if (fontObliqueId != 0) {
+            page += " /F4 ";
+            AppendInt(page, fontObliqueId);
+            page += " 0 R";
+        }
+        if (fontBoldObliqueId != 0) {
+            page += " /F5 ";
+            AppendInt(page, fontBoldObliqueId);
+            page += " 0 R";
+        }
         AppendMathFontResources(page, mathFontIds);
         page += " >>";
         AppendXObjectResources(page, imageObjectIds);

@@ -925,14 +925,15 @@ bool CheckMathPdf() {
 
 // The hard regression rule of the math feature: a document without math syntax is
 // rendered byte-for-byte the same with and without it. The digests were recorded when the
-// standard-font renderer moved to exact AFM widths, WinAnsiEncoding, CommonMark list
+// standard-font renderer started to show bold, italic and strike-through (Helvetica-Bold,
+// Helvetica-Oblique and a line), after exact AFM widths, WinAnsiEncoding, CommonMark list
 // nesting and source-faithful word spacing. That renderer does not depend on the platform
 // or on installed fonts, so they hold on Windows and Linux alike.
 bool CheckNoMathGolden() {
     struct Golden { TinyPdf::PdfStyle style; size_t size; const char* sha256; };
     const Golden goldens[] = {
-        {TinyPdf::PdfStyle::Modern, 6147, "0c7e9a2ca8f7f3487679666f83906ddde1a927d579768dcc61852f67488a7526"},
-        {TinyPdf::PdfStyle::Tech, 6208, "82341faa6617ab3fc1444e109275077578fb0e48f46d0dc0b4770381c64ebc12"},
+        {TinyPdf::PdfStyle::Modern, 6790, "cb1a26e20f50c3daf60c370c88932842457769ffdd8301eb9026ca42b9666c18"},
+        {TinyPdf::PdfStyle::Tech, 6844, "bbabd65f6f4e47bc3c2ade9710524db88d7515e4fe9253c848e4424a6927dbda"},
     };
     for (const Golden& golden : goldens) {
         TinyPdf::PdfOptions options;
@@ -1171,7 +1172,8 @@ bool CheckStandardLinesFitMargin() {
     std::string words;
     for (int i = 0; i < 60; i++) words += i % 3 == 0 ? "WWWWWW " : i % 3 == 1 ? "MiMiM " : "WiWi ";
     std::string pdf;
-    if (!Build("# " + words + "\n\n" + words + "\n\n> " + words + "\n", pdf) ||
+    const std::string boldWords = "**" + words.substr(0, words.size() - 1) + "**";
+    if (!Build("# " + words + "\n\n" + words + "\n\n" + boldWords + "\n\n> " + words + "\n", pdf) ||
         pdf.find("RayoMD Native Standard PDF") == std::string::npos) {
         std::cerr << "standard line width: build mismatch" << std::endl;
         return false;
@@ -1214,6 +1216,37 @@ bool CheckWordsAcrossInlineBoundaries() {
     for (const StandardTextOp& op : StandardTextOps(pdf)) shown += op.text;
     if (shown != "See GitHub. Call foo(), then bar.") {
         std::cerr << "inline boundary words: shown as \"" << shown << "\"" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// The standard fonts show emphasis: bold in Helvetica-Bold, italic in Helvetica-Oblique,
+// both in Helvetica-BoldOblique, strike-through as a line; code stays in Courier. The
+// italic faces go only into documents that use them.
+bool CheckStandardFontEmphasis() {
+    std::string pdf;
+    if (!Build("Plain **bold** *italic* ***both*** ~~gone~~ `code` end.\n", pdf) ||
+        pdf.find("/BaseFont /Helvetica-Oblique ") == std::string::npos ||
+        pdf.find("/BaseFont /Helvetica-BoldOblique ") == std::string::npos ||
+        pdf.find(" RG 0.55 w ") == std::string::npos) {
+        std::cerr << "standard-font emphasis: fonts or strike line missing" << std::endl;
+        return false;
+    }
+    const std::pair<const char*, const char*> expected[] = {
+        {"Plain", "F1"}, {"bold", "F2"}, {"italic", "F4"}, {"both", "F5"}, {"gone", "F1"}, {"code", "F3"}};
+    const std::vector<StandardTextOp> ops = StandardTextOps(pdf);
+    for (const auto& [word, font] : expected) {
+        const auto op = std::find_if(ops.begin(), ops.end(),
+            [&](const StandardTextOp& candidate) { return candidate.text.find(word) != std::string::npos; });
+        if (op == ops.end() || op->font != font) {
+            std::cerr << "standard-font emphasis: \"" << word << "\" is not in " << font << std::endl;
+            return false;
+        }
+    }
+    std::string plainPdf;
+    if (!Build("Plain words only.\n", plainPdf) || plainPdf.find("Oblique") != std::string::npos) {
+        std::cerr << "standard-font emphasis: italic faces in a document without emphasis" << std::endl;
         return false;
     }
     return true;
@@ -1327,6 +1360,7 @@ int main() {
     if (!CheckStandardLinesFitMargin()) return 68;
     if (!CheckWordsAcrossInlineBoundaries()) return 69;
     if (!CheckLatinText()) return 70;
+    if (!CheckStandardFontEmphasis()) return 71;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
