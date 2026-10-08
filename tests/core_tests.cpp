@@ -15,6 +15,8 @@
 #include <cstdlib>
 #include <sstream>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -1309,6 +1311,116 @@ bool CheckLinkText() {
     return true;
 }
 
+// A TrueType collection that holds one font: square glyphs for ' ' (empty), 'A', '?' and
+// U+4E2D, 1000 units per em and the bounding box [0 0 700 700].
+std::string MinimalTrueTypeCollection() {
+    auto u16 = [](std::string& out, int value) {
+        out.push_back(static_cast<char>((value >> 8) & 0xFF));
+        out.push_back(static_cast<char>(value & 0xFF));
+    };
+    auto u32 = [&](std::string& out, uint32_t value) {
+        u16(out, static_cast<int>(value >> 16));
+        u16(out, static_cast<int>(value & 0xFFFF));
+    };
+    std::string square;
+    for (int value : {1, 0, 0, 700, 700, 3, 0}) u16(square, value);    // contours, box, end point, no hints
+    square.append(4, '\x01');                                           // on-curve points, 16-bit deltas
+    for (int value : {0, 700, 0, -700, 0, 0, 700, 0}) u16(square, value);
+    std::string glyf = square + square + square;                        // glyphs 2 'A', 3 '?', 4 U+4E2D
+    std::string loca;
+    for (uint32_t offset : {0u, 0u, 0u, 34u, 68u, 102u}) u32(loca, offset);  // 34 bytes a square; 0 and 1 empty
+    std::string head;
+    u32(head, 0x00010000);
+    u32(head, 0x00010000);
+    u32(head, 0);
+    u32(head, 0x5F0F3CF5);
+    for (int value : {0, 1000}) u16(head, value);
+    head.append(16, '\0');                                              // created, modified
+    for (int value : {0, 0, 700, 700, 0, 8, 2, 1, 0}) u16(head, value); // box, style, ppem, hint, long loca
+    std::string hhea;
+    u32(hhea, 0x00010000);
+    for (int value : {800, -200, 0, 800, 0, 0, 700, 1, 0, 0, 0, 0, 0, 0, 0, 5}) u16(hhea, value);
+    std::string maxp;
+    u32(maxp, 0x00010000);
+    for (int value : {5, 4, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0}) u16(maxp, value);
+    std::string hmtx;
+    for (int glyph = 0; glyph < 5; glyph++) {
+        u16(hmtx, 800);
+        u16(hmtx, 0);
+    }
+    std::string cmap;
+    for (int value : {0, 1, 3, 1}) u16(cmap, value);
+    u32(cmap, 12);
+    const int codes[] = {0x20, 0x3F, 0x41, 0x4E2D, 0xFFFF};
+    const int glyphs[] = {1, 3, 2, 4, 0};
+    // Format 4: length, language, two bytes per segment, search range, selector, range shift.
+    for (int value : {4, 14 + 2 + 5 * 8, 0, 10, 8, 2, 2}) u16(cmap, value);
+    for (int code : codes) u16(cmap, code);                             // end codes
+    u16(cmap, 0);
+    for (int code : codes) u16(cmap, code);                             // start codes
+    for (int index = 0; index < 5; index++) u16(cmap, (glyphs[index] - codes[index]) & 0xFFFF);
+    for (int index = 0; index < 5; index++) u16(cmap, 0);
+
+    const std::pair<const char*, const std::string*> tables[] = {
+        {"cmap", &cmap}, {"glyf", &glyf}, {"head", &head}, {"hhea", &hhea}, {"hmtx", &hmtx}, {"loca", &loca},
+        {"maxp", &maxp}};
+    const size_t base = 16;                                             // "ttcf", version, count, one offset
+    std::string font;
+    u32(font, 0x00010000);
+    for (int value : {7, 64, 2, 48}) u16(font, value);
+    size_t offset = base + 12 + 7 * 16;
+    std::string data;
+    for (const auto& [tag, table] : tables) {
+        font.append(tag, 4);
+        u32(font, 0);
+        u32(font, static_cast<uint32_t>(offset + data.size()));
+        u32(font, static_cast<uint32_t>(table->size()));
+        data += *table;
+        while (data.size() % 4) data.push_back('\0');
+    }
+    std::string collection = "ttcf";
+    u32(collection, 0x00010000);
+    u32(collection, 1);
+    u32(collection, base);
+    return collection + font + data;
+}
+
+// A document with characters the default font has no glyph for is drawn in a font that has
+// them: here a TrueType collection given in RAYOMD_FALLBACK_FONT. What no font can show, a
+// character beyond the BMP, is counted.
+bool CheckFallbackFont() {
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "rayomd-test-fallback.ttc";
+    {
+        std::ofstream file(path, std::ios::binary);
+        const std::string bytes = MinimalTrueTypeCollection();
+        file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+#ifdef _WIN32
+    _wputenv_s(L"RAYOMD_FALLBACK_FONT", path.wstring().c_str());
+#else
+    setenv("RAYOMD_FALLBACK_FONT", path.string().c_str(), 1);
+#endif
+    TinyPdf::PdfOptions options;
+    std::string pdf;
+    const TinyPdf::BuildResult result = TinyPdf::BuildPdf(u8"A \u4E2D \U0001F680 A\n", options, pdf);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    if (!result.Ok() || pdf.find("RayoMD Native Tiny PDF") == std::string::npos || result.missingCharacters != 1) {
+        std::cerr << "fallback font: build mismatch or " << result.missingCharacters << " missing characters" << std::endl;
+        return false;
+    }
+    // A default font with CJK glyphs needs no fallback; otherwise the test font draws the
+    // document, as a TrueType program of its own taken out of the collection.
+    if (pdf.find("/FontBBox [0 0 700 700]") == std::string::npos) return true;
+    const size_t file = pdf.find("/Length1 ");
+    const size_t stream = file == std::string::npos ? file : pdf.find("stream\n", file);
+    if (stream == std::string::npos || pdf.compare(stream + 7, 4, std::string("\x00\x01\x00\x00", 4)) != 0) {
+        std::cerr << "fallback font: the font program is not a TrueType font" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // GFM table rows: a table goes on up to a blank line or the start of another block, a line
 // without pipes is a row too, and every row has the header's number of cells.
 bool CheckTableRows() {
@@ -1482,6 +1594,7 @@ int main() {
     if (!CheckTableCellMarkdown()) return 72;
     if (!CheckLinkText()) return 73;
     if (!CheckTableRows()) return 74;
+    if (!CheckFallbackFont()) return 75;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

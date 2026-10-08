@@ -323,10 +323,11 @@ void ReportExportError(std::string* deferredError, const std::string& message) {
 void WarnMissingCharacters(const std::string& inputLabel, uint32_t count) {
     std::string message = "Warning: ";
     message += inputLabel.empty() ? std::string("the document") : inputLabel;
-    message += ": no TrueType font was found, so ";
+    message += ": ";
     message += std::to_string(count);
-    message += " character(s) are shown as a base letter or '?'. Install a Unicode font such as DejaVu Sans"
-        " or Noto Sans, or set RAYOMD_FONT to a .ttf file.\n";
+    message += " character(s) have no glyph in the fonts found and are shown as a base letter or '?'."
+        " Install a font that has them (DejaVu Sans or Noto Sans for most alphabets, WenQuanYi Micro Hei"
+        " for Chinese), or set RAYOMD_FONT or RAYOMD_FALLBACK_FONT to a .ttf or .ttc file.\n";
     std::cerr << message << std::flush;
 }
 fs::path PdfNameForMarkdown(const fs::path& path) {

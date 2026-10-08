@@ -289,6 +289,7 @@ struct TtfFont {
     int16_t yMin = -220;
     int16_t xMax = 1000;
     int16_t yMax = 900;
+    uint32_t sfntVersion = 0x00010000;  // of the font's table directory; a collection starts "ttcf"
     bool loaded = false;
 
     // RAYOMD_FONT first, then the sans fonts where the common systems install them, then,
@@ -403,11 +404,19 @@ struct TtfFont {
 
     bool Parse() {
         if (bytes.size() < 12) return false;
-        uint16_t numTables = ReadU16(bytes, 4);
-        if (12 + (size_t)numTables * 16 > bytes.size()) return false;
+        // A TrueType collection (.ttc) holds several fonts: the first one is used. Its table
+        // offsets count from the start of the file, as those of a single font do.
+        size_t directory = 0;
+        if (memcmp(bytes.data(), "ttcf", 4) == 0) {
+            if (ReadU32(bytes, 8) == 0) return false;
+            directory = ReadU32(bytes, 12);
+        }
+        sfntVersion = ReadU32(bytes, directory);
+        uint16_t numTables = ReadU16(bytes, directory + 4);
+        if (directory + 12 + (size_t)numTables * 16 > bytes.size()) return false;
 
         for (uint16_t i = 0; i < numTables; i++) {
-            size_t off = 12 + (size_t)i * 16;
+            size_t off = directory + 12 + (size_t)i * 16;
             std::string tag((const char*)bytes.data() + off, 4);
             Table t{ ReadU32(bytes, off + 8), ReadU32(bytes, off + 12) };
             if ((size_t)t.offset + t.length <= bytes.size()) tables[tag] = t;
@@ -547,6 +556,11 @@ struct TtfFont {
         return 0;
     }
 
+    // Whether the font has a glyph of its own for `cp` (GlyphFor falls back to '?').
+    bool HasGlyph(uint32_t cp) const {
+        return cp < glyphForBmp.size() && glyphForBmp[cp] != 0;
+    }
+
     uint16_t WidthForCid(uint16_t cid) const {
         uint16_t cached = widthCache[cid].load(std::memory_order_relaxed);
         if (cached != 0) return cached;
@@ -578,6 +592,7 @@ static RAYOMD_HOT_INLINE void ForEachCodepoint(std::wstring_view text, Fn fn) {
     }
 }
 
+// CIDs are code points of the BMP; a character beyond it is shown as '?'.
 static uint16_t CidForCodepoint(const TtfFont& font, uint32_t cp) {
     return (cp <= 0xffff && font.GlyphFor(cp) != 0) ? (uint16_t)cp : (uint16_t)'?';
 }
@@ -817,6 +832,10 @@ public:
         return values;
     }
 
+    // Characters shown without a glyph of their own, as '?': those the font lacks and those
+    // beyond the BMP.
+    uint32_t missing = 0;
+
 private:
     std::array<uint64_t, 1024> bits{};
     mutable CidList values;
@@ -832,7 +851,11 @@ static size_t HexTextBytes(std::wstring_view text) {
 static char* WriteHexText(char* out, const TtfFont& font, std::wstring_view text, UsedCidSet& usedCids) {
     *out++ = '<';
     ForEachCodepoint(text, [&](uint32_t cp) {
-        uint16_t cid = CidForCodepoint(font, cp);
+        uint16_t cid = (uint16_t)cp;
+        if (cp > 0xffff || !font.HasGlyph(cp)) {
+            cid = CidForCodepoint(font, cp);
+            usedCids.missing += cp >= 0x20;
+        }
         usedCids.Add(cid);
         out = WriteHex4(out, cid);
     });
@@ -889,9 +912,12 @@ static uint32_t ChecksumString(const std::string& s) {
     return ChecksumBytes(s.data(), s.size());
 }
 
-static std::string MakeCidKey(const CidList& used) {
+// The key of the font objects of a document: the font, then the CIDs it shows.
+static std::string MakeCidKey(const TtfFont& font, const CidList& used) {
     std::string key;
-    key.reserve(used.size() * 2);
+    key.reserve(sizeof(&font) + used.size() * 2);
+    const TtfFont* const identity = &font;
+    key.append(reinterpret_cast<const char*>(&identity), sizeof(identity));
     for (uint16_t cid : used) {
         key.push_back((char)((cid >> 8) & 0xff));
         key.push_back((char)(cid & 0xff));
@@ -3175,6 +3201,7 @@ public:
     const std::vector<size_t>& PageStarts() const { return pageStarts; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     const CidList& UsedCids() const { return usedCids.Values(); }
+    uint32_t MissingCharacters() const { return usedCids.missing; }
     bool MathUsed() const { return math.Used(); }
 
 private:
@@ -4702,7 +4729,7 @@ static bool BuildSubsetFontBytes(const TtfFont& font, const CidList& used, std::
 
     out.clear();
     out.reserve(12 + (size_t)numTables * 16 + glyfData.size() + locaData.size() + 96 * numTables);
-    AppendU32(out, ReadU32(font.bytes, 0));
+    AppendU32(out, font.sfntVersion);
     AppendU16(out, numTables);
     AppendU16(out, searchRange);
     AppendU16(out, entrySelector);
@@ -6654,8 +6681,112 @@ static const TtfFont* GetCachedFont() {
     return cached.loaded ? &cached.font : nullptr;
 }
 
+// Fonts for documents with characters the default font has no glyph for: RAYOMD_FALLBACK_FONT,
+// then broad CJK and multi-script fonts where the common systems install them. Such a document
+// is drawn in one font, so a candidate must show Latin text too (Droid Sans Fallback does
+// not), and only TrueType outlines can be subset (OpenType CFF fonts such as Noto Sans CJK
+// do not load).
+#ifdef _WIN32
+static const wchar_t* const kFallbackFontNames[] = { L"msyh.ttc", L"msjh.ttc", L"YuGothR.ttc", L"meiryo.ttc",
+    L"msgothic.ttc", L"malgun.ttf", L"Nirmala.ttf", L"seguisym.ttf", L"simsun.ttc", L"arialuni.ttf" };
+#else
+static const char* const kFallbackFontNames[] = {
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",                       // Debian, Ubuntu
+    "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",                       // Fedora
+    "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",             // Arch
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",                      // many alphabets, Indic too
+    "/usr/share/fonts/gnu-free/FreeSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",                 // macOS
+    "/Library/Fonts/Arial Unicode.ttf",
+};
+#endif
+static constexpr size_t kFallbackFontCount = 1 + sizeof(kFallbackFontNames) / sizeof(kFallbackFontNames[0]);
+
+// Candidate `index` of the fallback fonts; 0 is RAYOMD_FALLBACK_FONT.
+RAYOMD_COLD static bool LoadFallbackFont(size_t index, TtfFont& font) {
+#ifdef _WIN32
+    if (index == 0) {
+        const wchar_t* path = _wgetenv(L"RAYOMD_FALLBACK_FONT");
+        return path && *path && font.TryLoad(std::wstring(path));
+    }
+    wchar_t winDir[MAX_PATH] = {};
+    if (!GetWindowsDirectoryW(winDir, MAX_PATH)) return false;
+    return font.TryLoad(std::wstring(winDir) + L"\\Fonts\\" + kFallbackFontNames[index - 1]);
+#else
+    if (index == 0) {
+        const char* path = std::getenv("RAYOMD_FALLBACK_FONT");
+        return path && *path && font.TryLoad(std::string(path));
+    }
+    return font.TryLoad(std::string(kFallbackFontNames[index - 1]));
+#endif
+}
+
+// The font that has glyphs for more of the characters `used` than `font`, the most of them;
+// null when no fallback font does better. Each candidate is read once, for the characters it
+// covers; one stays in memory once a document is drawn in it, and is never freed then.
+RAYOMD_COLD static const TtfFont* BetterFontFor(const TtfFont& font, const CidList& used) {
+    // Control characters have no glyph anywhere: no reason to change fonts.
+    auto missingIn = [&](auto&& hasGlyph) {
+        size_t count = 0;
+        for (uint16_t cid : used) count += cid >= 0x20 && !hasGlyph(cid);
+        return count;
+    };
+    size_t fewest = missingIn([&](uint16_t cid) { return font.HasGlyph(cid); });
+    if (fewest == 0) return nullptr;
+
+    struct Candidate {
+        bool probed = false;
+        bool chosen = false;
+        std::vector<uint64_t> coverage;     // a bit per BMP code point it has a glyph for; empty if it did not load
+        std::unique_ptr<TtfFont> font;
+    };
+    static std::mutex mutex;
+    static Candidate candidates[kFallbackFontCount];
+    std::lock_guard<std::mutex> lock(mutex);
+    size_t best = kFallbackFontCount;
+    for (size_t index = 0; index < kFallbackFontCount && fewest != 0; index++) {
+        Candidate& candidate = candidates[index];
+        if (!candidate.probed) {
+            candidate.probed = true;
+            auto loaded = std::make_unique<TtfFont>();
+            if (LoadFallbackFont(index, *loaded)) {
+                candidate.coverage.assign(1024, 0);
+                for (uint32_t cp = 0; cp < 65536; cp++) {
+                    if (loaded->HasGlyph(cp)) candidate.coverage[cp >> 6] |= 1ull << (cp & 63);
+                }
+                candidate.font = std::move(loaded);
+            }
+        }
+        if (candidate.coverage.empty()) continue;
+        const size_t count = missingIn([&](uint16_t cid) { return (candidate.coverage[cid >> 6] >> (cid & 63)) & 1; });
+        if (count < fewest) {
+            best = index;
+            fewest = count;
+        }
+    }
+    for (size_t index = 0; index < kFallbackFontCount; index++) {
+        if (index != best && !candidates[index].chosen) candidates[index].font.reset();
+    }
+    if (best == kFallbackFontCount) return nullptr;
+    Candidate& chosen = candidates[best];
+    if (!chosen.font) {
+        chosen.font = std::make_unique<TtfFont>();
+        if (!LoadFallbackFont(best, *chosen.font)) {
+            chosen.font.reset();
+            return nullptr;
+        }
+    }
+    chosen.chosen = true;
+    return chosen.font.get();
+}
+
+// With `betterFont`, a document with characters that `font` has no glyph for is not built
+// when a fallback font has more of them: *betterFont is set, to build it again in that one.
 static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& font, const PdfOptions& options,
-    std::string& pdfBytes) {
+    std::string& pdfBytes, const TtfFont** betterFont, size_t& missingCharacters) {
     std::vector<Block> blocks;
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
@@ -6686,7 +6817,9 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
     const CidList& used = renderer.UsedCids();
-    std::string cidKey = MakeCidKey(used);
+    if (betterFont && (*betterFont = BetterFontFor(font, used)) != nullptr) return true;
+    missingCharacters = renderer.MissingCharacters();
+    std::string cidKey = MakeCidKey(font, used);
     auto cidMapBytes = MakeCidToGidMap(font, used, cidKey);
     auto toUnicodeBytes = MakeToUnicodeCMap(used, cidKey);
 
@@ -6837,7 +6970,11 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
                 font = GetCachedFont();
             }
             if (font) {
-                built = BuildUnicodePdfBytes(markdown, *font, options, pdfBytes);
+                const TtfFont* better = nullptr;
+                size_t missing = 0;
+                built = BuildUnicodePdfBytes(markdown, *font, options, pdfBytes, &better, missing);
+                if (built && better) built = BuildUnicodePdfBytes(markdown, *better, options, pdfBytes, nullptr, missing);
+                missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
             } else {
                 // No TrueType font on this system: the standard fonts show what they can, and
                 // the caller learns how many characters they could not.

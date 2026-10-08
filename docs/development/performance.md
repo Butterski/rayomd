@@ -395,6 +395,31 @@ Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
 (geometric mean). Their time moved +0.8 % in the release build and +0.1 % with
 alignment pinned, against an A/A spread of 0.2 %: code placement.
 
+## Fallback fonts, October 2026
+
+Characters the default font has no glyph for, such as Chinese with DejaVu Sans
+or Segoe UI, came out as `?`. The Unicode renderer still draws a document in
+one font, chosen after the first render: the characters it showed (a few
+hundred CIDs) are checked against the font, and only when some are missing are
+the system's broad fonts consulted, `RAYOMD_FALLBACK_FONT` first. Each
+candidate is read once per process for the characters it covers, and the
+document is drawn again in the one that shows the most; only fonts that drew a
+document stay in memory. TrueType collections (`.ttc`) load now, the first font
+of them, which brings the CJK fonts of Windows and of most Linux distributions.
+A candidate must show Latin text too, since it draws the whole document, and
+must have TrueType outlines (Noto Sans CJK is OpenType CFF and does not load).
+
+What no font shows, including every character beyond the BMP such as emoji, is
+counted where its text is written: `BuildResult::missingCharacters` now covers
+the TrueType path too, and the CLI warns. A first version counted by decoding
+the whole document again and cost 15 % to 27 % on documents with such
+characters; counting on the path that writes `?` costs nothing measurable.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`65d457e`, no fallback font installed): the same bytes everywhere; the Unicode
+fixtures, which hold CJK text DejaVu Sans lacks, run 0.2 % to 0.4 % more
+instructions for the check and the count, in the same time.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
