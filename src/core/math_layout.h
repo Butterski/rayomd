@@ -3,6 +3,7 @@
 // Native TeX-subset math: box layout and PDF content-stream emission for one formula.
 // Renderer-neutral; knows nothing about pages. Contract: docs/development/native_math.md.
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -35,9 +36,20 @@ std::string MathSymbolDescriptorObject();
 std::string MathFontObject(int index, int symbolDescriptorId);
 
 // ---- exact widths of the standard renderer's text fonts -----------------------------------
-// /F1 Helvetica, /F2 Helvetica-Bold, /F3 Courier. Bytes outside 32..126 count as zero width.
+// /F1 Helvetica, /F2 Helvetica-Bold, /F3 Courier, all in WinAnsiEncoding. Bytes outside
+// 32..126 count as zero width.
 enum class StandardTextFont { Regular, Bold, Mono };
 double StandardTextWidth(std::string_view ascii, double size, StandardTextFont font);
+
+// The same advances by byte, for wrapping text a word at a time: index the array with
+// static_cast<size_t>(font). byte[] is 0 for the four ASCII white-space bytes, so a single
+// lookup both measures a byte and ends a word, and 1 for any other byte the font has no
+// glyph for, which keeps that byte inside its word.
+struct StandardWordAdvances {
+    uint16_t space;         // advance of ' ', AFM units (1/1000 em)
+    uint16_t byte[256];     // advance of each byte, AFM units
+};
+extern const std::array<StandardWordAdvances, 3> kStandardWordAdvances;
 
 // ---- fallback for characters the standard fonts cannot show --------------------------------
 // Only the Unicode renderer provides one. The struct and its context must outlive every

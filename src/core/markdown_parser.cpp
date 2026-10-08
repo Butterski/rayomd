@@ -632,6 +632,29 @@ static int LeadingColumns(std::string_view line, size_t* bytes = nullptr) {
     return columns;
 }
 
+// Column at which the content of the list item on `line` starts (CommonMark): the marker's
+// column, the marker, and the one to four spaces after it. With no content or five and more
+// spaces, the content starts one column after the marker. Lines indented this far belong to
+// the item, so "- a\n  - b" and "1. a\n   1. b" nest like four-space indentation does.
+static int ListItemContentColumn(std::string_view line, bool bullet) {
+    size_t at = 0;
+    int column = LeadingColumns(line, &at);
+    if (!bullet) {
+        while (at < line.size() && line[at] >= '0' && line[at] <= '9') {
+            at++;
+            column++;
+        }
+    }
+    at++;           // the bullet, or the '.' or ')' after the digits
+    column++;
+    const int markerEnd = column;
+    while (at < line.size() && (line[at] == ' ' || line[at] == '\t')) {
+        column += line[at] == '\t' ? 4 - column % 4 : 1;
+        at++;
+    }
+    return at >= line.size() || column - markerEnd > 4 ? markerEnd + 1 : column;
+}
+
 static bool RemoveIndentLevel(std::string_view line, std::string_view& content) {
     int columns = 0;
     size_t i = 0;
@@ -711,6 +734,9 @@ static bool ParseReferenceDefinition(const std::vector<std::string_view>& lines,
     if (LeadingColumns(line, &indentBytes) > 3) return false;
     std::string_view value = line.substr(indentBytes);
     if (value.empty() || value.front() != '[') return false;
+    // "[^label]:" starts a footnote definition (GitHub Flavored Markdown). Footnotes are not
+    // rendered, so the line must stay visible text instead of vanishing as a link definition.
+    if (value.size() > 1 && value[1] == '^') return false;
     size_t close = value.find(']');
     if (close == std::string_view::npos || close == 1 || close + 1 >= value.size() || value[close + 1] != ':') {
         return false;
@@ -1317,6 +1343,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             item.level = info.level;
             item.number = info.number;
             int baseIndent = LeadingColumns(line);
+            const int contentColumn = ListItemContentColumn(line, info.kind == LineKind::Bullet);
             std::string itemMarkdown(info.text);
             bool sawBlank = false;
             i++;
@@ -1331,13 +1358,15 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                     i++;
                     continue;
                 }
+                const int continuationIndent = LeadingColumns(lines[i]);
+                // A list item that does not reach this item's content column is a sibling or
+                // belongs to an outer list; one that does is nested in this item.
                 if ((infos[i].kind == LineKind::Bullet || infos[i].kind == LineKind::Numbered) &&
-                    infos[i].level <= info.level) break;
-                int continuationIndent = LeadingColumns(lines[i]);
+                    continuationIndent < contentColumn) break;
                 bool indented = continuationIndent > baseIndent;
                 if (!indented && (sawBlank || IsBlockStart(infos[i]))) break;
                 std::string_view continuation = indented ?
-                    StripLeadingColumns(lines[i], baseIndent + 2) : infos[i].trimmed;
+                    StripLeadingColumns(lines[i], contentColumn) : infos[i].trimmed;
                 if (!itemMarkdown.empty() && itemMarkdown.back() != '\n') itemMarkdown.push_back('\n');
                 itemMarkdown.append(continuation);
                 sawBlank = false;

@@ -179,7 +179,10 @@ KNOWN_SYMBOL_WIDTH_SUM = 110936
 KNOWN_SYMBOL_WIDTH_TEXT_BYTES = 827
 KNOWN_SYMBOL_FONT_BBOX = "-180 -293 1090 1010"
 KNOWN_SYMBOL_STD_VW = "85"
-KNOWN_TEXT_WIDTH_SUMS = {"H": 49978, "HB": 52352}
+# /F1 /F2 /F3 declare /WinAnsiEncoding: there, unlike in the fonts' built-in StandardEncoding,
+# code 0x27 is the straight quote and code 0x60 the grave accent.
+WIN_ANSI_TEXT_GLYPHS = {0x27: "quotesingle", 0x60: "grave"}
+KNOWN_TEXT_WIDTH_SUMS = {"H": 50058, "HB": 52367}
 KNOWN_COURIER_ADVANCE = 600
 KNOWN_SPACE_ADVANCE = 250
 KNOWN_METRICS = (       # (math font, code, row)
@@ -1378,15 +1381,17 @@ class Tables:
             self.err("Symbol: FontBBox is %r, expected %r" % (symbol.header.get("FontBBox"), KNOWN_SYMBOL_FONT_BBOX))
         if symbol.header.get("StdVW") != KNOWN_SYMBOL_STD_VW:
             self.err("Symbol: StdVW is %r, expected %r" % (symbol.header.get("StdVW"), KNOWN_SYMBOL_STD_VW))
-        # Exact widths of the standard renderer's text fonts.
+        # Exact widths of the standard renderer's text fonts. Their font dictionaries declare
+        # /WinAnsiEncoding, which names other glyphs than the fonts' built-in StandardEncoding
+        # at two of the codes 32..126 (WIN_ANSI_TEXT_GLYPHS).
         self.text_widths = {}
         for short in ("H", "HB"):
             font = fonts[short]
             widths = []
             for code in range(32, 127):
-                name = font.by_code.get(code)
-                if name is None:
-                    self.err("%s: code %d is not encoded" % (font.file_name, code))
+                name = WIN_ANSI_TEXT_GLYPHS.get(code, font.by_code.get(code))
+                if name is None or name not in font.by_name:
+                    self.err("%s: code %d has no glyph" % (font.file_name, code))
                     widths.append(0)
                 else:
                     widths.append(self.fit(font.by_name[name][1], 0, 65535, "%s code %d" % (font.file_name, code)))
@@ -1396,8 +1401,8 @@ class Tables:
                          % (font.base_name, sum(widths), KNOWN_TEXT_WIDTH_SUMS[short]))
         courier = fonts["C"]
         for code in range(32, 127):
-            name = courier.by_code.get(code)
-            if name is None or courier.by_name[name][1] != KNOWN_COURIER_ADVANCE:
+            name = WIN_ANSI_TEXT_GLYPHS.get(code, courier.by_code.get(code))
+            if name is None or name not in courier.by_name or courier.by_name[name][1] != KNOWN_COURIER_ADVANCE:
                 self.err("Courier: code %d does not have advance %d" % (code, KNOWN_COURIER_ADVANCE))
 
     # ----------------------------------------------------------------------------- composites
@@ -2336,8 +2341,8 @@ def render_metrics(tables: Tables, header: list[str]) -> str:
     out += delim_base_rows(tables)
     out += [
         "",
-        "// Advance widths of codes 32..126: [0] Helvetica, [1] Helvetica-Bold. Courier is %d for every code."
-        % KNOWN_COURIER_ADVANCE,
+        "// Advance widths of codes 32..126 in WinAnsiEncoding, the encoding of /F1 /F2 /F3: [0] Helvetica,",
+        "// [1] Helvetica-Bold. Courier is %d for every code." % KNOWN_COURIER_ADVANCE,
         "static constexpr uint16_t kStandardTextWidths[2][95] = {",
     ]
     for short in ("H", "HB"):

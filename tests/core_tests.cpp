@@ -924,13 +924,15 @@ bool CheckMathPdf() {
 }
 
 // The hard regression rule of the math feature: a document without math syntax is
-// rendered byte-for-byte as before. The digests were recorded from the last release
-// without native math (2.6.0, commit 0d4c53a) and are identical on Windows and Linux.
+// rendered byte-for-byte the same with and without it. The digests were recorded when the
+// standard-font renderer moved to exact AFM widths, WinAnsiEncoding, CommonMark list
+// nesting and source-faithful word spacing. That renderer does not depend on the platform
+// or on installed fonts, so they hold on Windows and Linux alike.
 bool CheckNoMathGolden() {
     struct Golden { TinyPdf::PdfStyle style; size_t size; const char* sha256; };
     const Golden goldens[] = {
-        {TinyPdf::PdfStyle::Modern, 6065, "1633be2ad219bc569e4892542531dc8512f0f7e5f0001261a2f7e54443ed4b94"},
-        {TinyPdf::PdfStyle::Tech, 6059, "e2967c50a305de1ce2102ed713ceebff196a576563b5c83c8bafeb3fbdd9b60f"},
+        {TinyPdf::PdfStyle::Modern, 6147, "0c7e9a2ca8f7f3487679666f83906ddde1a927d579768dcc61852f67488a7526"},
+        {TinyPdf::PdfStyle::Tech, 6208, "82341faa6617ab3fc1444e109275077578fb0e48f46d0dc0b4770381c64ebc12"},
     };
     for (const Golden& golden : goldens) {
         TinyPdf::PdfOptions options;
@@ -1016,6 +1018,207 @@ bool CheckOutputBufferReuse() {
     return true;
 }
 
+// ---- Wrapping and layout -----------------------------------------------------------
+
+// The text operations of the standard-font renderer in content order,
+// "BT /F1 9.6 Tf 1 0 0 1 x y Tm (text) Tj", with the literal string unescaped.
+struct StandardTextOp {
+    std::string font;
+    double size = 0.0;
+    double x = 0.0;
+    double y = 0.0;
+    std::string text;
+};
+
+std::vector<StandardTextOp> StandardTextOps(const std::string& pdf) {
+    std::vector<StandardTextOp> ops;
+    size_t position = 0;
+    while ((position = pdf.find("BT /", position)) != std::string::npos) {
+        const size_t operands = pdf.find(' ', position + 4);
+        const size_t literal = pdf.find(" Tm (", position);
+        if (operands == std::string::npos || literal == std::string::npos) break;
+        StandardTextOp op;
+        op.font = pdf.substr(position + 4, operands - position - 4);
+        std::istringstream values(pdf.substr(operands, literal - operands));
+        std::string operatorName;
+        double a = 0.0, b = 0.0, c = 0.0, d = 0.0;
+        values >> op.size >> operatorName >> a >> b >> c >> d >> op.x >> op.y;
+        for (position = literal + 5; position < pdf.size() && pdf[position] != ')'; position++) {
+            if (pdf[position] == '\\' && position + 1 < pdf.size()) position++;
+            op.text.push_back(pdf[position]);
+        }
+        if (operatorName == "Tf") ops.push_back(op);
+    }
+    return ops;
+}
+
+// Smallest baseline at which a text run of the renderers starts ("... Tf 1 0 0 1 x y Tm").
+double MinTextStartY(const std::string& pdf) {
+    double minY = 842.0;
+    const std::string_view needle = " Tf 1 0 0 1 ";
+    size_t position = 0;
+    while ((position = pdf.find(needle, position)) != std::string::npos) {
+        position += needle.size();
+        std::istringstream values(pdf.substr(position, 48));
+        double x = 0.0, y = 0.0;
+        if (values >> x >> y) minY = std::min(minY, y);
+    }
+    return minY;
+}
+
+// A table row taller than a page goes on over as many pages as it needs, in both renderers.
+// Its lines used to run past the bottom of the page and get lost.
+bool CheckTallTableRows() {
+    std::string cell;
+    for (int word = 0; word < 1500; word++) cell += "w" + std::to_string(10000 + word) + " ";
+    const std::string table = "| Key | Value |\n|---|---|\n| tall | " + cell + "|\n| after | row |\n";
+    const double bottomMargin = 54.0;   // PdfMargin::Normal()
+    std::string pdf;
+    if (!Build(table, pdf) || pdf.find("RayoMD Native Standard PDF") == std::string::npos) {
+        std::cerr << "tall table row: standard PDF build mismatch" << std::endl;
+        return false;
+    }
+    std::string shown;
+    for (const StandardTextOp& op : StandardTextOps(pdf)) shown += op.text + " ";
+    for (int word = 0; word < 1500; word++) {
+        if (CountOccurrences(shown, "w" + std::to_string(10000 + word)) != 1) {
+            std::cerr << "tall table row: word " << word << " is not shown exactly once" << std::endl;
+            return false;
+        }
+    }
+    if (shown.find("after row") == std::string::npos || MinTextStartY(pdf) < bottomMargin) {
+        std::cerr << "tall table row: standard text below the page margin: " << MinTextStartY(pdf) << std::endl;
+        return false;
+    }
+    std::string unicodePdf;
+    if (!Build(u8"Za\u017C\u00F3\u0142\u0107\n\n" + table, unicodePdf) ||
+        unicodePdf.find("RayoMD Native Tiny PDF") == std::string::npos || MinTextStartY(unicodePdf) < bottomMargin) {
+        std::cerr << "tall table row: Unicode text below the page margin: " << MinTextStartY(unicodePdf) << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// "[^1]: text" is a footnote definition and stays visible text; only "[label]: target" is
+// a link reference definition, which disappears.
+bool CheckFootnoteDefinitions() {
+    using TinyPdf::Internal::Block;
+    using TinyPdf::Internal::BlockType;
+    const std::string source = "Claim[^1] with [a link][ref].\n\n[^1]: Source.\n\n[ref]: https://example.com/ref\n";
+    std::vector<Block> blocks = TinyPdf::Internal::ParseMarkdown(source);
+    if (blocks.size() != 2 || blocks[1].type != BlockType::Paragraph || blocks[1].text != "[^1]: Source.") {
+        std::cerr << "footnote definition is not kept as text" << std::endl;
+        return false;
+    }
+    bool resolved = false;
+    for (const TinyPdf::Internal::InlineSpan& span : TinyPdf::Internal::ParseInlineSpans(blocks[0].text)) {
+        resolved = resolved || span.url == "https://example.com/ref";
+    }
+    if (!resolved) {
+        std::cerr << "reference definition next to a footnote no longer resolves" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// List items nest by the column of their content, as in CommonMark: two spaces put an item
+// under "- ", three under "1. ".
+bool CheckListNestingByContentColumn() {
+    using TinyPdf::Internal::Block;
+    using TinyPdf::Internal::BlockType;
+    const std::string source =
+        "- parent\n"
+        "  - child\n"
+        "    - grandchild\n"
+        "- sibling\n"
+        "\n"
+        "1. first\n"
+        "   1. nested\n"
+        "2. second\n";
+    std::vector<Block> blocks = TinyPdf::Internal::ParseMarkdown(source);
+    auto item = [](const Block& block, BlockType type, const char* text) {
+        return block.type == type && block.text == text;
+    };
+    if (blocks.size() != 4 || !item(blocks[0], BlockType::Bullet, "parent") || blocks[0].children.size() != 1 ||
+        !item(blocks[0].children[0], BlockType::Bullet, "child") || blocks[0].children[0].children.size() != 1 ||
+        !item(blocks[0].children[0].children[0], BlockType::Bullet, "grandchild") ||
+        !item(blocks[1], BlockType::Bullet, "sibling") || !item(blocks[2], BlockType::Numbered, "first") ||
+        blocks[2].children.size() != 1 || !item(blocks[2].children[0], BlockType::Numbered, "nested") ||
+        !item(blocks[3], BlockType::Numbered, "second")) {
+        std::cerr << "list nesting by content column mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// The standard fonts are declared with WinAnsiEncoding, under which ' and ` are a straight
+// quote and a grave accent; without an encoding, viewers show curly quotes for them.
+bool CheckStandardFontEncoding() {
+    std::string pdf;
+    if (!Build("It's `code` with 'quotes'.\n", pdf) || pdf.find("RayoMD Native Standard PDF") == std::string::npos ||
+        CountOccurrences(pdf, "/Encoding /WinAnsiEncoding") != 3) {
+        std::cerr << "standard fonts lack WinAnsiEncoding" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Standard-font lines are measured with the AFM advances of the font that shows them, so no
+// line ends past the right margin, also in capitals and in bold headings.
+bool CheckStandardLinesFitMargin() {
+    struct Advance { char c; int regular; int bold; };     // Helvetica / Helvetica-Bold AFM
+    const Advance advances[] = { {'W', 944, 944}, {'M', 833, 833}, {'i', 222, 278}, {' ', 278, 278} };
+    std::string words;
+    for (int i = 0; i < 60; i++) words += i % 3 == 0 ? "WWWWWW " : i % 3 == 1 ? "MiMiM " : "WiWi ";
+    std::string pdf;
+    if (!Build("# " + words + "\n\n" + words + "\n\n> " + words + "\n", pdf) ||
+        pdf.find("RayoMD Native Standard PDF") == std::string::npos) {
+        std::cerr << "standard line width: build mismatch" << std::endl;
+        return false;
+    }
+    const double rightEdge = 595.0 - 54.0;     // A4 width less the PdfMargin::Normal() margin
+    size_t lines = 0;
+    for (const StandardTextOp& op : StandardTextOps(pdf)) {
+        int units = 0;
+        for (char c : op.text) {
+            const Advance* advance = std::find_if(std::begin(advances), std::end(advances),
+                [c](const Advance& entry) { return entry.c == c; });
+            if (advance == std::end(advances) || (op.font != "F1" && op.font != "F2")) {
+                std::cerr << "standard line width: unexpected text " << op.font << " (" << op.text << ")" << std::endl;
+                return false;
+            }
+            units += op.font == "F2" ? advance->bold : advance->regular;
+        }
+        if (op.x + units * op.size / 1000.0 > rightEdge + 0.01) {
+            std::cerr << "standard line ends past the margin: " << op.x + units * op.size / 1000.0 << std::endl;
+            return false;
+        }
+        lines++;
+    }
+    if (lines < 12) {
+        std::cerr << "standard line width: the text did not wrap" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// A word is everything between two white spaces of the source, so link, code and emphasis
+// boundaries inside it add no space: "[GitHub](url)." shows "GitHub.".
+bool CheckWordsAcrossInlineBoundaries() {
+    std::string pdf;
+    if (!Build("See [GitHub](https://github.com). Call `foo()`, then **bar**.\n", pdf)) {
+        std::cerr << "inline boundary words: build failed" << std::endl;
+        return false;
+    }
+    std::string shown;
+    for (const StandardTextOp& op : StandardTextOps(pdf)) shown += op.text;
+    if (shown != "See GitHub. Call foo(), then bar.") {
+        std::cerr << "inline boundary words: shown as \"" << shown << "\"" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -1036,6 +1239,12 @@ int main() {
     if (!CheckMathLayout()) return 61;
     if (!CheckOutputBufferReuse()) return 62;
     if (!CheckInlineLookahead()) return 63;
+    if (!CheckTallTableRows()) return 64;
+    if (!CheckFootnoteDefinitions()) return 65;
+    if (!CheckListNestingByContentColumn()) return 66;
+    if (!CheckStandardFontEncoding()) return 67;
+    if (!CheckStandardLinesFitMargin()) return 68;
+    if (!CheckWordsAcrossInlineBoundaries()) return 69;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

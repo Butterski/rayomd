@@ -1522,6 +1522,23 @@ double StandardTextWidth(std::string_view ascii, double size, StandardTextFont f
     return static_cast<double>(units) * size / 1000.0;
 }
 
+static constexpr std::array<StandardWordAdvances, 3> MakeStandardWordAdvances() {
+    std::array<StandardWordAdvances, 3> tables{};
+    for (size_t font = 0; font < tables.size(); ++font) {
+        StandardWordAdvances& table = tables[font];
+        for (unsigned code = 0; code < 256; ++code) {
+            uint16_t advance = 1;
+            if (code >= 32 && code <= 126) advance = font == 2 ? 600 : kStandardTextWidths[font][code - 32];
+            table.byte[code] = advance;
+        }
+        table.space = table.byte[static_cast<unsigned char>(' ')];
+        for (const char white : {' ', '\t', '\r', '\n'}) table.byte[static_cast<unsigned char>(white)] = 0;
+    }
+    return tables;
+}
+
+const std::array<StandardWordAdvances, 3> kStandardWordAdvances = MakeStandardWordAdvances();
+
 MathFormula MathFormula::Layout(std::string_view tex, double fontSize, bool display,
                                 const MathFallbackFont* fallback, double maxWidth, bool bold,
                                 double maxHeight) {

@@ -54,8 +54,9 @@ Important math details (contract: `docs/development/native_math.md`):
 - Math is a TeX subset, not LaTeX. Unknown or malformed input degrades to readable
   output; every hard limit shows the formula's complete source. It must never
   crash, hang, or fail the export.
-- A document without math syntax must keep producing the same PDF bytes;
-  `CheckNoMathGolden` in `tests/core_tests.cpp` pins this. Formula-bearing text
+- Math must not change the PDF bytes of a document without math syntax;
+  `CheckNoMathGolden` in `tests/core_tests.cpp` pins them. Re-pin it only for a
+  deliberate plain-text output change and say why. Formula-bearing text
   takes separate wrap and paint functions (`RAYOMD_MATH_COLD`) so the plain paths
   stay untouched.
 - Math uses the non-embedded PDF standard fonts Times and Symbol (`/M1`..`/M5`),
@@ -107,7 +108,8 @@ Important image/link details:
 - `src/core/math_layout.h` and `src/core/math_layout.cpp`
   Renderer-neutral TeX-like box layout, draw list, PDF operator emission, and the math
   font objects. Uses the generated `src/core/math_font_metrics.inc`. Cold code,
-  compiled with `-Os`.
+  compiled with `-Os`. Also exports `kStandardWordAdvances`, the exact AFM widths the
+  standard-font renderer wraps and paints with.
 
 - `scripts/generate_math_tables.py`
   Regenerates both math tables from the Adobe Core 14 AFM files (not stored in the
@@ -283,6 +285,10 @@ GitHub CI entry points:
   that runs "to the end for every opener" must go there too, or text with
   thousands of unterminated openers becomes quadratic again.
 - Prefer measured changes over plausible micro-optimizations.
+- `src/core/tiny_pdf.cpp` sits at GCC's `-O3` inline-unit-growth limit, so any edit
+  can move which hot calls get inlined. Profile the hot paths after a change; mark
+  hot helpers `RAYOMD_HOT_INLINE` and hot lambdas `RAYOMD_HOT_LAMBDA`, and keep rare
+  paths in `RAYOMD_COLD` functions that do not call small hot helpers directly.
 - Keep image caches bounded. Image support can dominate memory on large or many
   remote images.
 - Do not turn optional experiments such as simdutf ON by default without fresh,
@@ -302,6 +308,11 @@ GitHub CI entry points:
   file-based caller.
 - Keep visible link text and annotation rectangles aligned when changing text
   wrapping, painting, or page splitting.
+- A word is the text between two white spaces of the source, also across emphasis,
+  code, and link boundaries. Never insert a space or break a line inside it; only a
+  word wider than the line is cut by character.
+- Standard-font text is measured with the exact AFM advances of the font that shows
+  it (`kStandardWordAdvances`); keep wrapping, painting, and link rectangles on them.
 - A performance change must not change PDF bytes unless that is its stated
   purpose. Line breaks and coordinates come from floating-point sums, so keep
   the order of those additions when restructuring wrapping or measuring code,

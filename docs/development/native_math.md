@@ -10,10 +10,11 @@ the layout or the Markdown rules change.
 
 ## Guarantees
 
-- **A document without math syntax produces the same PDF bytes as before the feature.**
-  `tests/core_tests.cpp` (`CheckNoMathGolden`) pins this with SHA-256 digests of an ASCII
-  fixture; the standard-font path is platform independent, so the digests hold on Windows
-  and Linux.
+- **Math adds nothing to a document without math syntax: it renders byte for byte as
+  without the feature.** `tests/core_tests.cpp` (`CheckNoMathGolden`) pins this with
+  SHA-256 digests of an ASCII fixture; the standard-font path is platform independent, so
+  the digests hold on Windows and Linux. They move only with a deliberate change of the
+  plain-text output, which re-pins them and says why.
 - An ASCII document with math stays on the standard-font path. Math never loads, embeds or
   subsets a font.
 - Malformed, unsupported or hostile input never crashes, hangs or fails the export. Every
@@ -96,10 +97,11 @@ Deliberate deviations and degradations:
 - `MathFormula::Emit` is graphics-state neutral (one `q … Q`), writes 7-bit ASCII, and
   paints inside the box it reports, except for the documented 0.19 em left overhang of
   the first glyph.
-- The four Times dictionaries are bare, like the existing Helvetica and Courier ones.
-  With `--embed-source` the file is declared PDF 2.0, which no longer exempts the standard
-  fonts from `/FirstChar`, `/LastChar`, `/Widths` and `/FontDescriptor`; no viewer problem
-  is known.
+- The four Times dictionaries are bare. The Helvetica and Courier text fonts declare
+  `/Encoding /WinAnsiEncoding`, under which `'` and `` ` `` are the straight quote and
+  the grave accent. With `--embed-source` the file is declared PDF 2.0, which no longer
+  exempts the standard fonts from `/FirstChar`, `/LastChar`, `/Widths` and
+  `/FontDescriptor`; no viewer problem is known.
 
 ## Layout rules in the renderers
 
@@ -114,9 +116,10 @@ Deliberate deviations and degradations:
   75 %) and then scaled uniformly, never below **50 % of its nominal size**. If it still
   does not fit, the complete TeX source is shown instead (code style inline, a tinted box
   for a block), wrapped inside the page.
-- In formula-bearing lines of ASCII documents, text is positioned with exact Helvetica
-  and Courier advance widths; line breaks are still decided with the approximate width
-  table used everywhere else.
+- ASCII documents measure all text, formula-bearing lines included, with the exact AFM
+  advances of the font that shows it: Helvetica, Helvetica-Bold for headings and table
+  header cells, Courier for code. `kStandardWordAdvances` in `math_layout.cpp` derives the
+  per-byte tables of the text renderer from the same generated metrics.
 - Headings and table header cells pass a bold flag: bold Times faces and heavy Symbol.
 
 ## Limits

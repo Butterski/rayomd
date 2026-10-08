@@ -195,6 +195,84 @@ reordered addition is enough to move a line.
 Tried and dropped: carrying run widths from wrapping to painting in the Unicode
 renderer (no measurable gain once the additions had to stay in order).
 
+## Layout fixes, October 2026
+
+Six output fixes, so output bytes change on purpose:
+
+- The standard renderer measures text with the exact AFM advances of the font
+  that shows it (Helvetica, Helvetica-Bold, Courier) in integer units; the old
+  six-class approximation let capitals and bold headings run past the margin.
+- Its fonts declare `/Encoding /WinAnsiEncoding`, so `'` and `` ` `` are no
+  longer shown as curly quotes.
+- A word is the text between two white spaces of the source, across emphasis,
+  code, and link boundaries: `[GitHub](u).` shows `GitHub.`, not `GitHub .`.
+  Only a word wider than the line is cut by character.
+- List items nest by the column of their content (CommonMark), so two or three
+  spaces nest under `- ` or `1. `.
+- A table row taller than a page continues over pages instead of running off
+  the bottom; `[^1]: text` stays visible instead of vanishing as a reference.
+
+Every ASCII document changes bytes. A Unicode document changes only where one
+of these cases occurs: the 96 KiB Unicode watch fixture keeps identical bytes,
+while `tester.md` and the watch suite's single and batch documents change.
+
+Measured on 2026-10-08: AMD Ryzen 5 PRO 4650GE, Linux x64, g++ 13.3 `-O3` in
+Docker. The engine `--bench` loop ran pinned to one core, as eleven rotated
+rounds of about 0.35 s per binary, against `21b3ef1` and an identical copy of
+that binary, whose difference is the noise:
+
+| Fixture | Before | Change | Alignment pinned | Noise |
+| --- | ---: | ---: | ---: | ---: |
+| watch single document 1 (Unicode) | 2581 µs | +0.2 % | -0.4 % | +0.1 % |
+| watch single document 4 (Unicode) | 1915 µs | -0.0 % | -0.1 % | +0.2 % |
+| watch batch document 1 (Unicode) | 1662 µs | -0.0 % | -0.2 % | +0.1 % |
+| 96 KiB Unicode | 2140 µs | -1.0 % | -0.8 % | +0.4 % |
+| `tester.md` (Unicode) | 296 µs | +0.9 % | +0.8 % | +0.2 % |
+| `README.md` (Unicode) | 168 µs | +1.0 % | +2.1 % | +0.1 % |
+| 96 KiB ASCII | 1511 µs | -3.2 % | — | -0.6 % |
+| 96 KiB tables | 1304 µs | -5.3 % | — | -0.1 % |
+
+"Alignment pinned" builds all binaries with `-falign-functions=64
+-falign-loops=32`, which takes most code-placement effects out; its noise was
+up to 0.7 %. Callgrind counts +0.35 % to +0.62 % instructions on the Unicode
+documents: words across style and link runs, and list nesting by content
+column. `README.md` (+1.0 %) also cuts words wider than a line instead of
+letting them run past the margin.
+
+An intermediate version measured +0.9 % to +1.9 % on the Unicode documents in
+the release build and nothing with alignment pinned, at an instruction count
+within 0.05 % of the final one. Read a release-build difference of that size
+as code placement until the alignment-pinned build and the instruction count
+agree with it.
+
+The watch suite on ext4, as medians of five alternating runs: `warm_avg`
+-0.7 %, cold export +0.7 %, batch +0.4 %, stdin batch +0.0 %, serve -0.3 %,
+`sized_unicode` -1.2 %, `sized_ascii` -3.0 %, `sized_table` -5.4 %; peak RSS
+within run-to-run noise. Against the first record with `--fail-on-slower-pct
+5`, the before binary's own reruns failed 2 of 4 times (`cold_export_ms_p95`),
+the change 2 of 5 times (`cold_export_ms_p95`, and once a `feature_rules` case
+of 0.22 ms that is reported in 0.01 ms steps). On this machine those metrics
+move more than the gate allows. The Linux CLI grew from 596,528 to 612,912
+bytes (text +16.1 kB).
+
+`tiny_pdf.cpp` sits at GCC's `-O3` inline-unit-growth limit: inlining grows the
+unit by 26 % and then stops, and the order is set by the whole file. Any edit
+can therefore move which calls are inlined, also far from the edit: removing a
+style check from `WrapStyledRuns` changed the out-of-line `WriteFixed2` calls
+of a build from 10,472 to 3,590. An unrelated lambda in table cell wrapping and
+`DrawStrokeRect`/`Rect` in the table loops went out of line during this work.
+Countermeasures that held up:
+
+- `RAYOMD_HOT_INLINE` for hot helpers and `RAYOMD_HOT_LAMBDA` for hot lambdas;
+- rare paths in `RAYOMD_COLD` functions that do not call small hot helpers
+  directly. Tall rows only plan their slices out of line; the one table loop
+  paints them;
+- values that a `char*` write could alias (buffer starts, run state) passed by
+  value into hot helpers, so they are not reloaded per word.
+
+Forcing more calls inline was not kept: under the limit it only moves the
+loss to other calls.
+
 ## Keeping the release light
 
 - Build `Release`; never benchmark Debug binaries.
