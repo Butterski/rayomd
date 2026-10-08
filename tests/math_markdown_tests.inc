@@ -258,16 +258,17 @@ bool CheckMathBlockSyntax() {
         {"Mass $m$\n===", "H*:Mass {m}"},
         {"## Costs $5 and $10", "H:Costs $5 and $10"},
         {"# Both $$a$$ and \\( b \\)", "H*:Both {a} and {b}"},
-        // tables: cells split at every unescaped pipe, exactly as without math
+        // tables: cells split at every unescaped pipe, exactly as without math; a table without
+        // formulas keeps the inline Markdown of its cells for the renderers
         {"| f | v |\n|---|---|\n| $\\alpha$ | $\\frac{a}{b}$ |", "T*[f,v][{\\alpha},{\\frac{a}{b}}]"},
         {"| a | b |\n|---|---|\n| $|x|$ | abs |", "T[a,b][$,x,$,abs]"},
         {"| a | b |\n|---|---|\n| $\\|x\\|$ | \\( y \\) |", "T*[a,b][{|x|},{y}]"},
         {"| a | b |\n|---|---|\n| $\\|x\\|$ | $a \\mid b$ |", "T*[a,b][{|x|},{a \\mid b}]"},
         {"| a | b |\n|---|---|\n| $5 | 10$ |", "T[a,b][$5,10$]"},
-        {"| a | b |\n|---|---|\n| \\$5 | x\\|y \\*z\\* |", "T[a,b][$5,x|y *z*]"},
+        {"| a | b |\n|---|---|\n| \\$5 | x\\|y \\*z\\* |", "T[a,b][\\$5,x|y \\*z\\*]"},
         {"| a | b |\n|---|---|\n| \\( x \\) | `$y$` |", "T*[a,b][{x},$y$]"},
-        // a row with '$' keeps its backslashes, a row without drops them as before
-        {"| a | b |\n|---|---|\n| C:\\dir | $x$ |\n| C:\\dir | y |", "T*[a,b][C:\\dir,{x}][C:dir,y]"},
+        // every row keeps its backslashes for the inline parser
+        {"| a | b |\n|---|---|\n| C:\\dir | $x$ |\n| C:\\dir | y |", "T*[a,b][C:\\dir,{x}][C:\\dir,y]"},
     };
     for (const Case& item : cases) {
         std::string shape = BlockShape(TinyPdf::Internal::ParseMarkdown(item.input));

@@ -76,14 +76,22 @@ namespace TinyPdf {
 // shifts with any change to it; hot helpers and lambdas say so explicitly.
 // Rare paths (words wider than a line, table rows taller than a page, font discovery) are
 // out of line and optimised for size, so they stay away from the hot text path.
+// RAYOMD_SHARED keeps one copy of a sizeable helper that several block types call, instead
+// of one inlined into each or a clone for the constant arguments of one caller.
 #if defined(__GNUC__) || defined(__clang__)
 #define RAYOMD_HOT_INLINE inline __attribute__((always_inline))
 #define RAYOMD_HOT_LAMBDA __attribute__((always_inline))
 #define RAYOMD_COLD __attribute__((cold, noinline))
+#if defined(__clang__)
+#define RAYOMD_SHARED __attribute__((noinline))
+#else
+#define RAYOMD_SHARED __attribute__((noinline, noclone))
+#endif
 #else
 #define RAYOMD_HOT_INLINE inline
 #define RAYOMD_HOT_LAMBDA
 #define RAYOMD_COLD
+#define RAYOMD_SHARED
 #endif
 
 using CidList = std::vector<uint16_t>;
@@ -3557,6 +3565,42 @@ private:
         }
     };
     StyledRuns paragraphRuns;
+    std::vector<StyledRuns> tableCells;     // the wrapped cells of a table row, by column
+
+    // Colors of text runs: plain text, code and the background of code.
+    struct RunColors { const char* text; const char* code; const char* codeFill; };
+    static constexpr RunColors kBodyRunColors{ "0.08 0.08 0.08", "0.18 0.18 0.17", "0.94 0.94 0.92" };
+    static constexpr RunColors kQuoteRunColors{ "0.18 0.22 0.25", "0.16 0.16 0.15", "0.88 0.89 0.88" };
+    static constexpr RunColors kHeaderCellRunColors{ "0.04 0.04 0.04", "0.18 0.18 0.17", "0.94 0.94 0.92" };
+    static constexpr RunColors kCellRunColors{ "0.10 0.10 0.10", "0.18 0.18 0.17", "0.94 0.94 0.92" };
+
+    // The background of code `text`, which starts at x and is `width` wide, from its first
+    // glyph on: the space shown before a code word stays clear, and so does the word before.
+    void CodeBackground(double x, double top, double width, double lh, std::wstring_view text, double size,
+        const char* fill) {
+        size_t spaces = 0;
+        while (spaces < text.size() && text[spaces] == L' ') spaces++;
+        const double skip = spaces != 0 ? TextWidth(font, text.substr(0, spaces), size) : 0.0;
+        DrawRect(x + skip - 1.5, top + 1.0, width - skip + 3.0, lh, fill);
+    }
+
+    // Paints runs [begin, end) of `runs` as one line from x: code backgrounds `lh` high from
+    // `top`, the text on `baseline` (all of it bold when `bold`) and link rectangles. The last
+    // run is measured only when its width is drawn.
+    RAYOMD_SHARED void PaintStyledRuns(const StyledRuns& runs, size_t begin, size_t end, double x, double top,
+        double baseline, double size, double lh, const RunColors& colors, bool bold = false) {
+        for (size_t index = begin; index < end; index++) {
+            const StyledRun& run = runs.runs[index];
+            const std::wstring_view runText = runs.Text(run);
+            const bool measured = index + 1 < end || run.code || !run.url.empty();
+            const double spanWidth = measured ? TextWidth(font, runText, size) : 0.0;
+            if (run.code) CodeBackground(x, top, spanWidth, lh, runText, size, colors.codeFill);
+            const char* color = run.url.empty() ? (run.code ? colors.code : colors.text) : "0.05 0.30 0.68";
+            PaintText(x, baseline, size, runText, color, run.bold || bold, run.italic, run.strike);
+            AddLink(x, baseline, spanWidth, size, run.url);
+            x += spanWidth;
+        }
+    }
 
     // Appends `text` to the line whose first run is `lineStart`, after a space when `spaced`.
     // The text joins the last run of the line when the style is the same.
@@ -3625,18 +3669,28 @@ private:
     // by character only when it is wider than a whole line. Returns false for text with
     // explicit line breaks or possible formulas, which take the general path.
     bool WrapStyledRuns(const std::string& text, double width, double size, StyledRuns& out) {
-        if (text.size() >= 0x40000000u || text.find('\n') != std::string::npos ||
-            text.find('$') != std::string::npos || text.find("\\(") != std::string::npos) {
+        if (text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
+            text.find("\\(") != std::string::npos) {
             return false;
         }
+        return WrapStyledInline(text, width, size, out);
+    }
+
+    // WrapStyledRuns for one line of inline Markdown without formulas, such as a table cell.
+    // Text too long for the run offsets gives one empty line and false.
+    RAYOMD_SHARED bool WrapStyledInline(std::string_view text, double width, double size, StyledRuns& out) {
         out.text.clear();
         out.runs.clear();
         out.lineEnds.clear();
+        if (text.size() >= 0x40000000u) {
+            out.lineEnds.push_back(0);
+            return false;
+        }
         if (!RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteInlineSyntax)) {
             // No inline syntax: every line is one unstyled run, also when it is empty.
             out.wide.clear();
-            if (text.find('\xE2') == std::string::npos) AppendUtf8ToWide(out.wide, text);
-            else AppendUtf8ToWide(out.wide, NormalizeSymbols(text));
+            if (text.find('\xE2') == std::string_view::npos) AppendUtf8ToWide(out.wide, text);
+            else AppendUtf8ToWide(out.wide, NormalizeSymbols(std::string(text)));
             WrapWideWords(font, std::wstring_view(out.wide), width, size, [&](std::wstring_view line) {
                 out.runs.emplace_back();
                 StyledRun& run = out.runs.back();
@@ -4123,7 +4177,7 @@ private:
                     continue;
                 }
                 double spanWidth = TextWidth(font, span.text, bodySize);
-                if (span.code) DrawRect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, codeFill);
+                if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
                 const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : "0.05 0.30 0.68";
                 PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
@@ -4144,18 +4198,8 @@ private:
             size_t index = 0;
             for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
                 Ensure(lh);
-                double cursor = x;
-                double baseline = y - bodySize;
-                for (; index < lineEnd; index++) {
-                    const StyledRun& run = paragraphRuns.runs[index];
-                    const std::wstring_view runText = paragraphRuns.Text(run);
-                    double spanWidth = TextWidth(font, runText, bodySize);
-                    if (run.code) DrawRect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.94 0.94 0.92");
-                    const char* color = run.url.empty() ? (run.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
-                    PaintText(cursor, baseline, bodySize, runText, color, run.bold, run.italic, run.strike);
-                    AddLink(cursor, baseline, spanWidth, bodySize, run.url);
-                    cursor += spanWidth;
-                }
+                PaintStyledRuns(paragraphRuns, index, lineEnd, x, y, y - bodySize, bodySize, lineHeight, kBodyRunColors);
+                index = lineEnd;
                 y -= lh;
             }
             y -= 5.0;
@@ -4173,7 +4217,7 @@ private:
             double baseline = y - bodySize;
             for (const auto& span : line) {
                 double spanWidth = TextWidth(font, span.text, bodySize);
-                if (span.code) DrawRect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.94 0.94 0.92");
+                if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.94 0.94 0.92");
                 const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
                 PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
@@ -4284,18 +4328,8 @@ private:
                 Ensure(lineHeight + 2.0);
                 DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
                 DrawRect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
-                double cursor = x;
-                double baseline = y - bodySize;
-                for (; index < lineEnd; index++) {
-                    const StyledRun& run = paragraphRuns.runs[index];
-                    const std::wstring_view runText = paragraphRuns.Text(run);
-                    double spanWidth = TextWidth(font, runText, bodySize);
-                    if (run.code) DrawRect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
-                    const char* color = run.url.empty() ? (run.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
-                    PaintText(cursor, baseline, bodySize, runText, color, run.bold, run.italic, run.strike);
-                    AddLink(cursor, baseline, spanWidth, bodySize, run.url);
-                    cursor += spanWidth;
-                }
+                PaintStyledRuns(paragraphRuns, index, lineEnd, x, y, y - bodySize, bodySize, lineHeight, kQuoteRunColors);
+                index = lineEnd;
                 y -= lineHeight;
             }
             y -= 7.0;
@@ -4315,7 +4349,7 @@ private:
             double baseline = y - bodySize;
             for (const StyledSpan& span : line) {
                 double spanWidth = TextWidth(font, span.text, bodySize);
-                if (span.code) DrawRect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
+                if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
                 const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
                 PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
@@ -4415,16 +4449,16 @@ private:
         double lh = size * 1.32;
         double pad = 5.0;
         double cellTextWidth = std::max(16.0, colWidth - pad * 2.0);
+        // Grows rarely (to the widest table); a new vector keeps resize code out of the binary.
+        if (tableCells.size() < columns) tableCells = std::vector<StyledRuns>(columns);
+        static const std::string emptyCell;
 
         y -= 3.0;
         for (size_t r = 0; r < rows.size(); r++) {
-            std::vector<std::vector<std::wstring>> wrapped(columns);
             size_t maxLines = 1;
-
             for (size_t c = 0; c < columns; c++) {
-                std::string cell = c < rows[r].size() ? rows[r][c] : "";
-                wrapped[c] = WrapText(font, Utf8ToWide(cell), cellTextWidth, size);
-                maxLines = std::max(maxLines, wrapped[c].size());
+                WrapStyledInline(c < rows[r].size() ? rows[r][c] : emptyCell, cellTextWidth, size, tableCells[c]);
+                maxLines = std::max(maxLines, tableCells[c].lineEnds.size());
             }
 
             // A row taller than a page is drawn in slices, each with cell borders of its own.
@@ -4443,16 +4477,24 @@ private:
                     DrawStrokeRect(cellX, top, colWidth, rowHeight);
 
                     int align = c < aligns.size() ? aligns[c] : -1;
-                    const size_t end = std::min(wrapped[c].size(), first + count);
+                    const StyledRuns& cellRuns = tableCells[c];
+                    const size_t end = std::min(cellRuns.lineEnds.size(), first + count);
                     for (size_t lineIdx = first; lineIdx < end; lineIdx++) {
-                        const std::wstring& line = wrapped[c][lineIdx];
+                        const size_t runBegin = lineIdx == 0 ? 0 : cellRuns.lineEnds[lineIdx - 1];
+                        const size_t runEnd = cellRuns.lineEnds[lineIdx];
                         double tx = cellX + pad;
-                        double lineWidth = TextWidth(font, line, size);
-                        if (align == 0) tx = cellX + (colWidth - lineWidth) * 0.5;
-                        else if (align == 1) tx = cellX + colWidth - pad - lineWidth;
+                        if (align == 0 || align == 1) {
+                            double lineWidth = 0.0;
+                            for (size_t run = runBegin; run < runEnd; run++) {
+                                lineWidth += TextWidth(font, cellRuns.Text(cellRuns.runs[run]), size);
+                            }
+                            if (align == 0) tx = cellX + (colWidth - lineWidth) * 0.5;
+                            else tx = cellX + colWidth - pad - lineWidth;
+                        }
 
                         double baseline = top - pad - size - (lineIdx - first) * lh;
-                        PaintText(tx, baseline, size, line, r == 0 ? "0.04 0.04 0.04" : "0.10 0.10 0.10", r == 0);
+                        PaintStyledRuns(cellRuns, runBegin, runEnd, tx, top - pad - (lineIdx - first) * lh, baseline, size,
+                            lh, r == 0 ? kHeaderCellRunColors : kCellRunColors, r == 0);
                     }
                 }
 
@@ -5224,6 +5266,16 @@ private:
     }
     uint8_t facesUsed = 0;      // bit n set: text was shown in the face of style n
 
+    // The background of code `text`, which starts at x and is `width` wide, from its first
+    // glyph on: the space shown before a code word stays clear, and so does the word before.
+    void CodeBackground(double x, double top, double width, double lh, std::string_view text, double size,
+        const char* fill) {
+        size_t spaces = 0;
+        while (spaces < text.size() && text[spaces] == ' ') spaces++;
+        const double skip = UnitsToPoints(WordAdvances(StandardTextFont::Mono).space * spaces, size);
+        Rect(x + skip - 1.5, top + 1.0, width - skip + 3.0, lh, fill);
+    }
+
     // A line through struck text, as the Unicode renderer draws it. A leading space of the
     // piece is not struck.
     RAYOMD_COLD void StrikeThrough(double x, double baseline, double width, double size, std::string_view text,
@@ -5573,6 +5625,29 @@ private:
         }
     };
     AsciiRuns paragraphRuns;
+    std::vector<AsciiRuns> tableCells;      // the cells with inline Markdown of a table row, by column
+
+    // Colors of text runs: plain text, code and the background of code.
+    struct RunColors { const char* text; const char* code; const char* codeFill; };
+    static constexpr RunColors kBodyRunColors{ "0.08 0.08 0.08", "0.18 0.18 0.17", "0.94 0.94 0.92" };
+    static constexpr RunColors kQuoteRunColors{ "0.18 0.22 0.25", "0.16 0.16 0.15", "0.88 0.89 0.88" };
+
+    // Paints runs [begin, end) of `runs` as one line from x: code backgrounds `lh` high from
+    // `top`, the text on `baseline`, strike lines and link rectangles.
+    RAYOMD_SHARED void PaintAsciiRuns(const AsciiRuns& runs, size_t begin, size_t end, double x, double top,
+        double baseline, double size, double lh, const RunColors& colors) {
+        for (size_t index = begin; index < end; index++) {
+            const AsciiRun& run = runs.runs[index];
+            const double spanWidth = runs.Width(run, size);
+            const bool code = (run.style & kStyleCode) != 0;
+            if (code) CodeBackground(x, top, spanWidth, lh, runs.Text(run), size, colors.codeFill);
+            const char* color = run.url.empty() ? (code ? colors.code : colors.text) : "0.05 0.30 0.68";
+            Text(x, baseline, size, runs.Text(run), StyleFontName(run.style), color);
+            if (run.style & kStyleStrike) StrikeThrough(x, baseline, spanWidth, size, runs.Text(run), run.style, color);
+            AddLink(x, baseline, spanWidth, size, run.url);
+            x += spanWidth;
+        }
+    }
 
     // AFM units of parsed text [begin, end) in the font of `segment`.
     static uint64_t AsciiUnits(const AsciiSegment& segment, const char* source, size_t begin, size_t end) {
@@ -5645,20 +5720,28 @@ private:
     // and is cut by character only when it is wider than a whole line. Returns false for text
     // with explicit line breaks or possible formulas, which take the general path.
     bool WrapAsciiRuns(const std::string& text, double width, double size, AsciiRuns& out) {
-        if (text.size() >= 0x40000000u || text.find('\n') != std::string::npos ||
-            text.find('$') != std::string::npos || text.find("\\(") != std::string::npos) {
+        if (text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
+            text.find("\\(") != std::string::npos) {
             return false;
         }
+        return WrapAsciiInline(text, width, size, 0, out);
+    }
+
+    // WrapAsciiRuns for one line of inline Markdown without formulas, such as a table cell;
+    // every run gets the style bits `baseStyle` too (a bold header). Returns false only for
+    // text too long for the run offsets.
+    bool WrapAsciiInline(std::string_view text, double width, double size, uint8_t baseStyle, AsciiRuns& out) {
+        if (text.size() >= 0x40000000u) return false;
         Internal::ParseInlineRuns(text, out.parsed);
         out.segments.clear();
         out.runs.clear();
         out.lineEnds.clear();
         const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
         for (size_t first = 0; first < parsed.size();) {
-            const uint8_t style = SpanStyle(parsed[first]);
+            const uint8_t style = static_cast<uint8_t>(SpanStyle(parsed[first]) | baseStyle);
             const std::string_view url = out.parsed.Url(parsed[first]);
             size_t last = first;
-            while (last + 1 < parsed.size() && SpanStyle(parsed[last + 1]) == style &&
+            while (last + 1 < parsed.size() && (SpanStyle(parsed[last + 1]) | baseStyle) == style &&
                 out.parsed.Url(parsed[last + 1]) == url) {
                 last++;
             }
@@ -6016,7 +6099,7 @@ private:
                 }
                 const bool code = (span.style & kStyleCode) != 0;
                 double spanWidth = MathTextWidth(span.text, bodySize, code, (span.style & kStyleBold) != 0);
-                if (code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, codeFill);
+                if (code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
                 const char* color = span.url.empty() ? (code ? codeColor : textColor) : "0.05 0.30 0.68";
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
@@ -6039,21 +6122,8 @@ private:
                 size_t index = 0;
                 for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
                     Ensure(lh);
-                    double cursor = x;
-                    double baseline = y - bodySize;
-                    for (; index < lineEnd; index++) {
-                        const AsciiRun& run = paragraphRuns.runs[index];
-                        double spanWidth = paragraphRuns.Width(run, bodySize);
-                        const bool code = (run.style & kStyleCode) != 0;
-                        if (code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lh, "0.94 0.94 0.92");
-                        const char* color = run.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
-                        Text(cursor, baseline, bodySize, paragraphRuns.Text(run), StyleFontName(run.style), color);
-                        if (run.style & kStyleStrike) {
-                            StrikeThrough(cursor, baseline, spanWidth, bodySize, paragraphRuns.Text(run), run.style, color);
-                        }
-                        AddLink(cursor, baseline, spanWidth, bodySize, run.url);
-                        cursor += spanWidth;
-                    }
+                    PaintAsciiRuns(paragraphRuns, index, lineEnd, x, y, y - bodySize, bodySize, lh, kBodyRunColors);
+                    index = lineEnd;
                     y -= lh;
                 }
                 y -= 5.0;
@@ -6073,7 +6143,7 @@ private:
                 for (const AsciiSpan& span : line) {
                     const bool code = (span.style & kStyleCode) != 0;
                     double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
-                    if (code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lh, "0.94 0.94 0.92");
+                    if (code) CodeBackground(cursor, y, spanWidth, lh, span.text, bodySize, "0.94 0.94 0.92");
                     const char* color = span.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
                     Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                     if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
@@ -6185,21 +6255,8 @@ private:
                 Ensure(lineHeight + 2.0);
                 Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
                 Rect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
-                double cursor = x;
-                double baseline = y - bodySize;
-                for (; index < lineEnd; index++) {
-                    const AsciiRun& run = paragraphRuns.runs[index];
-                    double spanWidth = paragraphRuns.Width(run, bodySize);
-                    const bool code = (run.style & kStyleCode) != 0;
-                    if (code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
-                    const char* color = run.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
-                    Text(cursor, baseline, bodySize, paragraphRuns.Text(run), StyleFontName(run.style), color);
-                    if (run.style & kStyleStrike) {
-                        StrikeThrough(cursor, baseline, spanWidth, bodySize, paragraphRuns.Text(run), run.style, color);
-                    }
-                    AddLink(cursor, baseline, spanWidth, bodySize, run.url);
-                    cursor += spanWidth;
-                }
+                PaintAsciiRuns(paragraphRuns, index, lineEnd, x, y, y - bodySize, bodySize, lineHeight, kQuoteRunColors);
+                index = lineEnd;
                 y -= lineHeight;
             }
             y -= 7.0;
@@ -6220,7 +6277,7 @@ private:
             for (const AsciiSpan& span : line) {
                 const bool code = (span.style & kStyleCode) != 0;
                 double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
-                if (code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
+                if (code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
                 const char* color = span.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
@@ -6318,15 +6375,24 @@ private:
         double pad = 5.0;
         y -= 3.0;
 
+        // A cell with inline Markdown is wrapped into runs, any other into plain lines.
         std::vector<std::vector<WrappedAsciiLine>> wrapped(columns);
+        std::vector<unsigned char> styled(columns, 0);
+        // Grows rarely (to the widest table); a new vector keeps resize code out of the binary.
+        if (tableCells.size() < columns) tableCells = std::vector<AsciiRuns>(columns);
+        const double cellWidth = std::max(16.0, colWidth - pad * 2.0);
         static const std::string emptyCell;
         for (size_t r = 0; r < rows.size(); r++) {
             size_t maxLines = 1;
             for (size_t c = 0; c < columns; c++) {
                 const std::string& cell = c < rows[r].size() ? rows[r][c] : emptyCell;
-                WrapAsciiText(cell, std::max(16.0, colWidth - pad * 2.0), size,
-                    r == 0 ? StandardTextFont::Bold : StandardTextFont::Regular, wrapped[c]);
-                maxLines = std::max(maxLines, wrapped[c].size());
+                styled[c] = RayoMd::Text::ContainsByteClass(cell, RayoMd::Text::kByteInlineSyntax) &&
+                    WrapAsciiInline(cell, cellWidth, size, r == 0 ? kStyleBold : 0, tableCells[c]);
+                if (!styled[c]) {
+                    WrapAsciiText(cell, cellWidth, size, r == 0 ? StandardTextFont::Bold : StandardTextFont::Regular,
+                        wrapped[c]);
+                }
+                maxLines = std::max(maxLines, styled[c] ? tableCells[c].lineEnds.size() : wrapped[c].size());
             }
 
             // A row taller than a page is drawn in slices, each with cell borders of its own.
@@ -6343,6 +6409,24 @@ private:
                     double cellX = margin + c * colWidth;
                     Rect(cellX, top, colWidth, rowHeight, "0.72 0.72 0.72", true);
                     int align = c < aligns.size() ? aligns[c] : -1;
+                    if (styled[c]) {
+                        const AsciiRuns& cellRuns = tableCells[c];
+                        const size_t end = std::min(cellRuns.lineEnds.size(), first + count);
+                        for (size_t li = first; li < end; li++) {
+                            const size_t runBegin = li == 0 ? 0 : cellRuns.lineEnds[li - 1];
+                            const size_t runEnd = cellRuns.lineEnds[li];
+                            double tx = cellX + pad;
+                            if (align == 0 || align == 1) {
+                                uint64_t units = 0;
+                                for (size_t run = runBegin; run < runEnd; run++) units += cellRuns.runs[run].widthUnits;
+                                const double lw = UnitsToPoints(units, size);
+                                tx = align == 0 ? cellX + (colWidth - lw) * 0.5 : cellX + colWidth - pad - lw;
+                            }
+                            PaintAsciiRuns(cellRuns, runBegin, runEnd, tx, top - pad - (li - first) * lh,
+                                top - pad - size - (li - first) * lh, size, lh, kBodyRunColors);
+                        }
+                        continue;
+                    }
                     const size_t end = std::min(wrapped[c].size(), first + count);
                     for (size_t li = first; li < end; li++) {
                         const WrappedAsciiLine& line = wrapped[c][li];

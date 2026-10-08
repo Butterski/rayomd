@@ -29,7 +29,10 @@ of the machine cancels, and the copy's change is the noise floor. It also says
 whether the two binaries write the same PDF bytes. `--instructions` adds the
 callgrind instruction count of one warm build (Linux, valgrind). That count
 does not move with code placement, which release-build timings do by about a
-percent; see "Layout fixes" below.
+percent; see "Layout fixes" below. It does move with the size of large copies:
+valgrind counts every byte of a `rep movsb`, which glibc's `memmove` uses for
+large copies that do not overlap, so a change that only moves page contents
+further in `BuildInto` can add instructions without adding time.
 
 The `competitors` workflow includes the three deterministic synthetic cases plus
 John Gruber's authentic `Markdown: Syntax` source and deterministic 1 MiB and
@@ -337,6 +340,36 @@ Two details keep documents without emphasis at their old cost:
   registers and added them for every byte the word loop looks up: one
   instruction more per byte, 0.3 % of a 96 KiB ASCII build.
 
+## Table cells with inline Markdown, October 2026
+
+The parser used to flatten every table cell to plain text: emphasis, code and
+links in cells were lost, and `\*` became an emphasis marker once its backslash
+was gone. Cells now keep their inline Markdown (tables with formulas still
+flatten, as before), and both renderers wrap and paint them like paragraph
+text. A cell without inline syntax keeps the plain path and its bytes; any
+other goes through `WrapAsciiInline` or `WrapStyledInline` into buffers that
+are reused from row to row and table to table. Unicode tables no longer build
+a vector of wide strings for every row.
+
+Two fixes came with it. Code backgrounds start at the first glyph of the code;
+they used to cover the space before it and 1.5 pt of the word before. The
+Unicode renderer measures the last run of a line only when it needs the width
+(a link or a code background), so most lines are no longer measured twice.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`28692a1`): Unicode documents take 0.1 % to 4.6 % less time (`unicode_96kb.md`
+-4.6 %, -7.0 % instructions); `baseline.md` +0.3 % and `ascii_96kb.md` +1.4 %,
+whose tables now show formatting; `table_96kb.md` +5.6 %, whose 142 tables now
+show bold, code and 142 links in 9.5 % more output. Its instruction count rises
+10.8 %, of which 0.65 M per build is `memmove` in `BuildInto`: the extra link
+objects move every page further, so the moves no longer overlap and glibc
+copies them with `rep movsb`, which valgrind counts byte by byte.
+
+`PaintAsciiRuns` and `PaintStyledRuns` paint a line for paragraphs, quotes and
+table cells. Inlined into each caller, together with a clone GCC made of
+`WrapStyledInline` for the table's constant text size, they added 13.5 KB of
+code; `RAYOMD_SHARED` keeps one copy of each, and the whole change adds 3.6 KB.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -382,6 +415,19 @@ PDF, and fewer coordinates to format. Code backgrounds and strike lines are
 paths, which a text object cannot hold, so a line would paint its rectangles
 first and its strike lines last. It changes the bytes of every document with
 links, code or emphasis.
+
+**glibc's mmap threshold and per-build temporaries.** glibc serves an
+allocation of 128 KiB or more with `mmap` until it frees such a chunk, and then
+raises the threshold to that chunk's size. When the output buffer outgrows its
+first reservation, its first buffer is freed, the threshold rises, and later
+builds reuse heap memory. A reservation of 8x the input instead of 4x fits the
+96 KiB ASCII fixture at once, so the threshold stays low and every warm build
+maps its large temporaries afresh: 75 page faults per build and 10 % more time
+(`--bench`, 2026-10-09; table fixture +7 %, `baseline.md` +6 %). Batch and serve
+modes meet this for every document that fits its reservation. Fixing
+`M_MMAP_THRESHOLD` and `M_TRIM_THRESHOLD` with `mallopt` in the CLI, or keeping
+the large temporaries alive from one build to the next, would remove the faults;
+measure batch mode before choosing.
 
 ## Keeping the release light
 

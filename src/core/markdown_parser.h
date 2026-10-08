@@ -26,6 +26,8 @@ struct Block {
     int number = 0;
     std::string text;
     std::string imageSrc;
+    // Table cells. Inline Markdown that the renderers parse like paragraph text, except
+    // in a table with hasMath, whose cells are plain text with formulas.
     std::vector<std::vector<std::string>> rows;
     std::vector<Block> children;
     std::vector<int> aligns;

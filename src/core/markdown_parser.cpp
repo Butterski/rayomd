@@ -338,8 +338,7 @@ static std::vector<std::string> SplitTableRow(std::string_view line) {
 }
 
 // Same cell boundaries as SplitTableRow, but keeps every backslash except the one
-// that escapes a pipe. Only used for rows that may contain math, where "\alpha"
-// must survive until the inline parser has seen it.
+// that escapes a pipe, so "\*" and "\alpha" reach the inline parser as written.
 static std::vector<std::string> SplitTableRowRaw(std::string_view line) {
     std::string_view s = TrimView(line);
     if (!s.empty() && s.front() == '|') s.remove_prefix(1);
@@ -1050,32 +1049,24 @@ struct TableMathCell {
     std::string text;
 };
 
-// Turns the cells of one table row (as split by SplitTableRow) into visible text.
-// A row without '$' or "\(" takes the path it always took. Any other row is read
-// again with its backslashes intact, so "\alpha" reaches the inline parser and
-// "\$" stays an escaped dollar; its formula cells are parked in mathCells until
-// the whole table is known.
-static void StripTableRow(std::string_view line, size_t rowIndex, std::vector<std::string>& row,
+// The cells of a table row as inline Markdown: split at every pipe that is not escaped,
+// with the backslash of an escaped pipe removed, as GFM does also inside code spans.
+// Every other backslash stays for the inline parser.
+static std::vector<std::string> SplitTableCells(std::string_view line) {
+    return line.find('\\') == std::string_view::npos ? SplitTableRow(line) : SplitTableRowRaw(line);
+}
+
+// Parks the formula cells of a row (as split by SplitTableCells) in mathCells, as visible
+// text with their formulas, and empties them. Only a row with '$' or "\(" can hold one.
+static void FindTableMath(std::string_view line, size_t rowIndex, std::vector<std::string>& row,
     std::vector<TableMathCell>& mathCells) {
-    if (!MayContainMath(line)) {
-        // Cells are already trimmed, so one without inline syntax is its own visible text.
-        constexpr unsigned char kSyntax = RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteSymbolLead;
-        if (!RayoMd::Text::ContainsByteClass(line, kSyntax)) return;
-        for (auto& cell : row) {
-            if (RayoMd::Text::ContainsByteClass(cell, kSyntax)) cell = StripInlineMarkdown(cell);
-        }
-        return;
-    }
-    std::vector<std::string> raw = SplitTableRowRaw(line);
+    if (!MayContainMath(line)) return;
     for (size_t column = 0; column < row.size(); column++) {
         bool hasMath = false;
-        std::string text = column < raw.size() ? StripInlineMarkdownKeepMath(raw[column], hasMath) : std::string();
-        if (hasMath) {
-            mathCells.push_back({ rowIndex, column, std::move(text) });
-            row[column].clear();
-        } else {
-            row[column] = std::move(text);
-        }
+        std::string text = StripInlineMarkdownKeepMath(row[column], hasMath);
+        if (!hasMath) continue;
+        mathCells.push_back({ rowIndex, column, std::move(text) });
+        row[column].clear();
     }
 }
 
@@ -1271,28 +1262,42 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         if (IsTableStart(lines, i, &aligns)) {
             std::vector<std::vector<std::string>> rows;
             std::vector<TableMathCell> mathCells;
-            const size_t headerLine = i;
             rows.reserve(8);
-            rows.push_back(SplitTableRow(lines[i]));
+            // Reference links resolve cell by cell, so a link target cannot split a row.
+            auto addRow = [&](std::string_view line, std::vector<std::string> row) {
+                if (!definitions.empty()) {
+                    for (std::string& cell : row) {
+                        if (cell.find('[') != std::string::npos) cell = ResolveReferenceLinks(cell, definitions);
+                    }
+                }
+                FindTableMath(line, rows.size(), row, mathCells);
+                rows.push_back(std::move(row));
+            };
+            addRow(lines[i], SplitTableCells(lines[i]));
             i += 2;
 
             while (i < lines.size() && infos[i].kind != LineKind::Empty) {
-                std::vector<std::string> row = SplitTableRow(lines[i]);
+                std::vector<std::string> row = SplitTableCells(lines[i]);
                 if (row.size() < 2) break;
-                StripTableRow(lines[i], rows.size(), row, mathCells);
-                rows.push_back(std::move(row));
+                addRow(lines[i], std::move(row));
                 i++;
             }
 
-            StripTableRow(lines[headerLine], 0, rows[0], mathCells);
             Block table;
             table.type = BlockType::Table;
             table.rows = std::move(rows);
             table.aligns = std::move(aligns);
             if (!mathCells.empty()) {
-                // Literal control bytes leave every cell first, so the only
-                // kMathText* bytes in this table are the ones written below.
-                for (auto& row : table.rows) for (auto& cell : row) EraseMathTextBytes(cell);
+                // A table with formulas shows its other cells as plain text. Literal control
+                // bytes leave every cell first, so the only kMathText* bytes in this table
+                // are the ones written below.
+                constexpr unsigned char kSyntax = RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteSymbolLead;
+                for (auto& row : table.rows) {
+                    for (auto& cell : row) {
+                        if (RayoMd::Text::ContainsByteClass(cell, kSyntax)) cell = StripInlineMarkdown(cell);
+                        EraseMathTextBytes(cell);
+                    }
+                }
                 for (TableMathCell& cell : mathCells) table.rows[cell.row][cell.column] = std::move(cell.text);
                 table.hasMath = true;
             }

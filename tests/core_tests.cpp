@@ -924,16 +924,17 @@ bool CheckMathPdf() {
 }
 
 // The hard regression rule of the math feature: a document without math syntax is
-// rendered byte-for-byte the same with and without it. The digests were recorded when the
-// standard-font renderer started to show bold, italic and strike-through (Helvetica-Bold,
-// Helvetica-Oblique and a line), after exact AFM widths, WinAnsiEncoding, CommonMark list
-// nesting and source-faithful word spacing. That renderer does not depend on the platform
-// or on installed fonts, so they hold on Windows and Linux alike.
+// rendered byte-for-byte the same with and without it. The digests were recorded when code
+// backgrounds started at the first glyph of the code instead of the space before it, after
+// the standard-font renderer started to show bold, italic and strike-through, exact AFM
+// widths, WinAnsiEncoding, CommonMark list nesting and source-faithful word spacing. That
+// renderer does not depend on the platform or on installed fonts, so they hold on Windows
+// and Linux alike.
 bool CheckNoMathGolden() {
     struct Golden { TinyPdf::PdfStyle style; size_t size; const char* sha256; };
     const Golden goldens[] = {
-        {TinyPdf::PdfStyle::Modern, 6790, "cb1a26e20f50c3daf60c370c88932842457769ffdd8301eb9026ca42b9666c18"},
-        {TinyPdf::PdfStyle::Tech, 6844, "bbabd65f6f4e47bc3c2ade9710524db88d7515e4fe9253c848e4424a6927dbda"},
+        {TinyPdf::PdfStyle::Modern, 6790, "f95173c276e607e3c7bf3f48012b580f928a78fe195a489046a3f66e721b6c03"},
+        {TinyPdf::PdfStyle::Tech, 6844, "df7af9736e02ac93b4357880f7b4dc7da79a3f8092f51a87005cfc81499c6c0e"},
     };
     for (const Golden& golden : goldens) {
         TinyPdf::PdfOptions options;
@@ -1252,6 +1253,49 @@ bool CheckStandardFontEmphasis() {
     return true;
 }
 
+// Table cells show their inline Markdown in both renderers: emphasis in its face, code in
+// Courier on a background, links that can be clicked where the cell shows them; escaped
+// markers and other backslashes stay as written.
+bool CheckTableCellMarkdown() {
+    const std::string table =
+        "| Name | *Note* |\n"
+        "|---|---:|\n"
+        "| **bold** cell | [site](https://example.com/cell) |\n"
+        "| `code` x | \\*stars\\* C:\\dir |\n";
+    const double cellRight = 595.0 - 54.0 - 5.0;     // A4 less the normal margin and the cell padding
+    std::string pdf;
+    if (!Build(table, pdf) || pdf.find("RayoMD Native Standard PDF") == std::string::npos) {
+        std::cerr << "table cell Markdown: standard build mismatch" << std::endl;
+        return false;
+    }
+    const std::pair<const char*, const char*> expected[] = {
+        {"Name", "F2"}, {"Note", "F5"}, {"bold", "F2"}, {" cell", "F1"}, {"site", "F1"}, {"code", "F3"},
+        {" x", "F1"}, {"*stars* C:\\dir", "F1"}};
+    const std::vector<StandardTextOp> ops = StandardTextOps(pdf);
+    for (const auto& [text, font] : expected) {
+        const auto op = std::find_if(ops.begin(), ops.end(),
+            [&](const StandardTextOp& candidate) { return candidate.text == text; });
+        if (op == ops.end() || op->font != font) {
+            std::cerr << "table cell Markdown: \"" << text << "\" is not shown in " << font << std::endl;
+            return false;
+        }
+    }
+    std::array<double, 4> link{};
+    if (!FindLinkRectangle(pdf, "https://example.com/cell", link) || std::abs(link[2] - cellRight) > 0.05) {
+        std::cerr << "table cell Markdown: the link is not where its right-aligned cell shows it" << std::endl;
+        return false;
+    }
+    std::string unicodePdf;
+    if (!Build(u8"Za\u017C\u00F3\u0142\u0107\n\n" + table, unicodePdf) ||
+        unicodePdf.find("RayoMD Native Tiny PDF") == std::string::npos ||
+        !FindLinkRectangle(unicodePdf, "https://example.com/cell", link) || std::abs(link[2] - cellRight) > 0.05 ||
+        unicodePdf.find("0.94 0.94 0.92 rg") == std::string::npos) {
+        std::cerr << "table cell Markdown: Unicode link or code background mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // Latin text needs no font file: documents whose characters all have a code in
 // WinAnsiEncoding are transcoded and shown in the standard fonts.
 bool CheckLatinText() {
@@ -1361,6 +1405,7 @@ int main() {
     if (!CheckWordsAcrossInlineBoundaries()) return 69;
     if (!CheckLatinText()) return 70;
     if (!CheckStandardFontEmphasis()) return 71;
+    if (!CheckTableCellMarkdown()) return 72;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
