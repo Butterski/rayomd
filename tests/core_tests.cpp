@@ -125,7 +125,7 @@ bool CheckClassicMarkdownPhaseOne() {
         blocks[2].type != BlockType::Paragraph || blocks[3].type != BlockType::Code ||
         blocks[3].text != "alpha\n  beta" || blocks[4].type != BlockType::Paragraph ||
         blocks[4].text != "first line\nsecond line" || blocks[5].type != BlockType::Image ||
-        blocks[5].imageSrc != "docs/assets/branding/rayomd.png") {
+        !blocks[5].image || blocks[5].image->src != "docs/assets/branding/rayomd.png") {
         std::cerr << "classic block parsing mismatch" << std::endl;
         return false;
     }
@@ -1253,6 +1253,62 @@ bool CheckStandardFontEmphasis() {
     return true;
 }
 
+// Link text is inline Markdown of its own: emphasis and code inside it keep the link, the
+// emphasis around a link applies to it, and "[![alt](src)](target)" is a linked image, inline
+// as its "image: alt" text and on a line of its own as an image block with a link.
+bool CheckLinkText() {
+    using TinyPdf::Internal::InlineSpan;
+    struct Case { const char* input; const char* text; const char* url; bool bold; bool italic; bool code; };
+    const Case cases[] = {
+        {"[**bold** text](https://e.com/a)", "bold", "https://e.com/a", true, false, false},
+        {"[**bold** text](https://e.com/a)", " text", "https://e.com/a", false, false, false},
+        {"*[x](https://e.com/b)*", "x", "https://e.com/b", false, true, false},
+        {"[a\\*b](https://e.com/c)", "a*b", "https://e.com/c", false, false, false},
+        {"[`f()`](https://e.com/d)", "f()", "https://e.com/d", false, false, true},
+        {"[![CI](b.svg)](https://e.com/ci) after", "image: CI", "https://e.com/ci", false, false, false},
+        {"[![CI](b.svg)](https://e.com/ci) after", " after", "", false, false, false},
+        {"[![x](y) and", "[image: x and", "", false, false, false},
+    };
+    for (const Case& item : cases) {
+        bool found = false;
+        for (const InlineSpan& span : TinyPdf::Internal::ParseInlineSpans(item.input)) {
+            found = found || (span.text == item.text && span.url == item.url && span.bold == item.bold &&
+                span.italic == item.italic && span.code == item.code);
+        }
+        if (!found) {
+            std::cerr << "link text mismatch: " << item.input << " has no \"" << item.text << "\"" << std::endl;
+            return false;
+        }
+    }
+
+    using TinyPdf::Internal::BlockType;
+    const auto blocks = TinyPdf::Internal::ParseMarkdown("[![Logo](docs/assets/branding/rayomd.png)](https://e.com/logo)\n");
+    if (blocks.size() != 1 || blocks[0].type != BlockType::Image || blocks[0].text != "Logo" || !blocks[0].image ||
+        blocks[0].image->src != "docs/assets/branding/rayomd.png" || blocks[0].image->link != "https://e.com/logo") {
+        std::cerr << "linked image block mismatch" << std::endl;
+        return false;
+    }
+    // One annotation for link text in several styles, over all of it.
+    const std::string images =
+        "[![Logo](docs/assets/branding/rayomd.png)](https://e.com/logo)\n\n"
+        "[![Gone](missing-image.png)](https://e.com/gone)\n\n"
+        "See [**bold** and `code`](https://e.com/one).\n";
+    for (const std::string& document : {images, u8"Za\u017C\u00F3\u0142\u0107\n\n" + images}) {
+        std::string pdf;
+        std::array<double, 4> logo{};
+        std::array<double, 4> gone{};
+        std::array<double, 4> one{};
+        if (!Build(document, pdf) || !FindLinkRectangle(pdf, "https://e.com/logo", logo) ||
+            !FindLinkRectangle(pdf, "https://e.com/gone", gone) || logo[2] - logo[0] < 50.0 ||
+            logo[3] - logo[1] < 50.0 || gone[3] > logo[1] || !FindLinkRectangle(pdf, "https://e.com/one", one) ||
+            CountOccurrences(pdf, "/URI (https://e.com/one)") != 1 || one[2] - one[0] < 60.0) {
+            std::cerr << "linked image or multi-style link annotations mismatch" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // Table cells show their inline Markdown in both renderers: emphasis in its face, code in
 // Courier on a background, links that can be clicked where the cell shows them; escaped
 // markers and other backslashes stay as written.
@@ -1406,6 +1462,7 @@ int main() {
     if (!CheckLatinText()) return 70;
     if (!CheckStandardFontEmphasis()) return 71;
     if (!CheckTableCellMarkdown()) return 72;
+    if (!CheckLinkText()) return 73;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

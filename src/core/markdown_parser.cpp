@@ -558,7 +558,7 @@ std::string StripInlineMarkdownKeepMath(std::string_view input, bool& hasMath) {
 
 struct ImageSyntax {
     std::string alt;
-    std::string src;
+    ImageSource source;
 };
 
 static std::string UnescapeMarkdownDestination(std::string_view dest) {
@@ -595,22 +595,44 @@ static bool ExtractMarkdownDestination(std::string_view target, std::string& des
     return !dest.empty();
 }
 
+// A line that is one image, "![alt](src)", or one linked image, "[![alt](src)](target)".
 static bool ParseStandaloneImage(std::string_view line, ImageSyntax* image) {
     std::string_view s = TrimView(line);
-    if (s.size() < 5 || s[0] != '!' || s[1] != '[') return false;
+    const size_t start = s.size() >= 3 && s[0] == '[' && s[1] == '!' && s[2] == '[' ? 1 : 0;
+    if (s.size() < start + 5 || s[start] != '!' || s[start + 1] != '[') return false;
 
     MarkdownInlineLink link;
-    if (!ParseInlineLinkSyntaxAt(s, 0, 2, link)) return false;
-    if (!TrimView(s.substr(link.end)).empty()) return false;
+    if (!ParseInlineLinkSyntaxAt(s, start, 2, link)) return false;
+    size_t end = link.end;
+    std::string target;
+    if (start == 1) {
+        if (end + 1 >= s.size() || s[end] != ']' || s[end + 1] != '(') return false;
+        const size_t targetEnd = FindInlineDestinationEnd(s, end + 1);
+        if (targetEnd == std::string_view::npos ||
+            !ExtractMarkdownDestination(s.substr(end + 2, targetEnd - (end + 2)), target)) {
+            return false;
+        }
+        end = targetEnd + 1;
+    }
+    if (!TrimView(s.substr(end)).empty()) return false;
 
     std::string src;
     if (!ExtractMarkdownDestination(link.target, src)) return false;
 
     if (image) {
         image->alt = StripInlineMarkdown(link.label);
-        image->src = std::move(src);
+        image->source.src = std::move(src);
+        image->source.link = std::move(target);
     }
     return true;
+}
+
+static Block ImageBlock(ImageSyntax&& image) {
+    Block block;
+    block.type = BlockType::Image;
+    block.text = std::move(image.alt);
+    block.image = std::make_unique<ImageSource>(std::move(image.source));
+    return block;
 }
 
 static int LeadingColumns(std::string_view line, size_t* bytes = nullptr) {
@@ -904,7 +926,11 @@ static LineInfo ClassifyLine(std::string_view line) {
         info.kind = LineKind::Empty;
         return info;
     }
-    if (!MayStartBlock(info.trimmed[0])) return info;
+    // A line that starts with '[' starts a block only as a linked image, "[![".
+    if (!MayStartBlock(info.trimmed[0]) && (info.trimmed[0] != '[' || info.trimmed.size() < 3 ||
+        info.trimmed[1] != '!' || info.trimmed[2] != '[')) {
+        return info;
+    }
     std::string_view fence = ParseFenceMarker(info.trimmed);
     if (!fence.empty()) {
         info.kind = LineKind::Fence;
@@ -1191,11 +1217,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             std::string resolvedLine = ResolveReferenceLinks(line, definitions);
             ImageSyntax resolvedImage;
             if (ParseStandaloneImage(resolvedLine, &resolvedImage)) {
-                Block block;
-                block.type = BlockType::Image;
-                block.text = std::move(resolvedImage.alt);
-                block.imageSrc = std::move(resolvedImage.src);
-                blocks.push_back(std::move(block));
+                blocks.push_back(ImageBlock(std::move(resolvedImage)));
                 i++;
                 continue;
             }
@@ -1333,11 +1355,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         if (info.kind == LineKind::Image) {
             ImageSyntax image;
             ParseStandaloneImage(line, &image);
-            Block block;
-            block.type = BlockType::Image;
-            block.text = std::move(image.alt);
-            block.imageSrc = std::move(image.src);
-            blocks.push_back(std::move(block));
+            blocks.push_back(ImageBlock(std::move(image)));
             i++;
             continue;
         }

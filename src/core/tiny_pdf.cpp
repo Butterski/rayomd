@@ -1195,6 +1195,23 @@ struct LinkRect {
     std::string url;
 };
 
+// Adds the rectangle of link text that starts at x on `baseline` and is `width` wide. A piece
+// of the same link that goes on where the last one ended (link text in several styles)
+// extends it, so a link is one annotation per line.
+static void AddLinkRect(std::vector<LinkRect>& links, double x, double baseline, double width, double size,
+    std::string_view url) {
+    const double y1 = baseline - 1.0;
+    const double y2 = baseline + size * 1.05;
+    if (!links.empty()) {
+        LinkRect& last = links.back();
+        if (last.x2 == x && last.y1 == y1 && last.y2 == y2 && last.url == url) {
+            last.x2 = x + width;
+            return;
+        }
+    }
+    links.push_back({ x, y1, x + width, y2, std::string(url) });
+}
+
 static bool IsHttpUrl(std::string_view src) {
     return StartsWith(src, "http://") || StartsWith(src, "https://");
 }
@@ -4051,7 +4068,7 @@ private:
 
     void AddLink(double x, double baseline, double width, double size, std::string_view url) {
         if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
-        pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, std::string(url) });
+        AddLinkRect(pageLinks.back(), x, baseline, width, size, url);
     }
 
     void DrawImage(int imageIndex, double x, double top, double w, double h) {
@@ -4070,10 +4087,24 @@ private:
         c += " Do Q\n";
     }
 
+    // An image that cannot be shown: its alt text, or else its source, as a paragraph. The
+    // text of a linked image is a link.
     void RenderImageFallback(const Block& block) {
-        std::string fallback = block.text.empty() ? block.imageSrc : block.text;
+        const Internal::ImageSource& image = *block.image;
+        std::string fallback = block.text.empty() ? image.src : block.text;
         if (fallback.empty()) fallback = "image";
-        RenderParagraph(fallback);
+        if (image.link.empty()) {
+            RenderParagraph(fallback);
+            return;
+        }
+        const double lh = bodySize * 1.35;
+        for (const std::wstring& line : WrapText(font, Utf8ToWide(fallback), PAGE_W - margin * 2.0, bodySize)) {
+            Ensure(lh);
+            PaintText(margin, y - bodySize, bodySize, line, "0.05 0.30 0.68");
+            AddLink(margin, y - bodySize, TextWidth(font, line, bodySize), bodySize, image.link);
+            y -= lh;
+        }
+        y -= 5.0;
     }
 
     void RenderImage(const Block& block) {
@@ -4083,7 +4114,7 @@ private:
         }
 
         int index = -1;
-        if (!images->Resolve(block.imageSrc, block.text, index)) {
+        if (!images->Resolve(block.image->src, block.text, index)) {
             RenderImageFallback(block);
             return;
         }
@@ -4105,6 +4136,8 @@ private:
         Ensure(h + 10.0);
         double x = margin + (maxW - w) * 0.5;
         DrawImage(index, x, y, w, h);
+        const std::string& link = block.image->link;
+        if (!link.empty() && !pageLinks.empty()) pageLinks.back().push_back({ x, y - h, x + w, y, link });
         y -= h + 10.0;
     }
 
@@ -5315,7 +5348,7 @@ private:
 
     void AddLink(double x, double baseline, double width, double size, std::string_view url) {
         if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
-        pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, std::string(url) });
+        AddLinkRect(pageLinks.back(), x, baseline, width, size, url);
     }
 
     void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string&& text, std::string&& url, uint8_t style) {
@@ -5963,10 +5996,24 @@ private:
         c += " Do Q\n";
     }
 
+    // An image that cannot be shown: its alt text, or else its source, as a paragraph. The
+    // text of a linked image is a link.
     void RenderImageFallback(const Block& block) {
-        std::string fallback = block.text.empty() ? block.imageSrc : block.text;
+        const Internal::ImageSource& image = *block.image;
+        std::string fallback = block.text.empty() ? image.src : block.text;
         if (fallback.empty()) fallback = "image";
-        RenderParagraph(fallback);
+        if (image.link.empty()) {
+            RenderParagraph(fallback);
+            return;
+        }
+        const double lh = bodySize * 1.35;
+        for (const WrappedAsciiLine& line : WrapAsciiText(fallback, PAGE_W - margin * 2.0, bodySize, StandardTextFont::Regular)) {
+            Ensure(lh);
+            Text(margin, y - bodySize, bodySize, line.text, "F1", "0.05 0.30 0.68");
+            AddLink(margin, y - bodySize, line.width, bodySize, image.link);
+            y -= lh;
+        }
+        y -= 5.0;
     }
 
     void RenderImage(const Block& block) {
@@ -5978,8 +6025,9 @@ private:
         int index = -1;
         // Paths and URLs are UTF-8; transcoded Latin text goes back first.
         std::string utf8Source;
-        if (winAnsiText && !IsAllAscii(block.imageSrc)) utf8Source = RayoMd::Text::WinAnsiToUtf8(block.imageSrc);
-        if (!images->Resolve(utf8Source.empty() ? block.imageSrc : utf8Source, block.text, index)) {
+        const std::string& source = block.image->src;
+        if (winAnsiText && !IsAllAscii(source)) utf8Source = RayoMd::Text::WinAnsiToUtf8(source);
+        if (!images->Resolve(utf8Source.empty() ? source : utf8Source, block.text, index)) {
             RenderImageFallback(block);
             return;
         }
@@ -6001,6 +6049,8 @@ private:
         Ensure(h + 10.0);
         double x = margin + (maxW - w) * 0.5;
         DrawImage(index, x, y, w, h);
+        const std::string& link = block.image->link;
+        if (!link.empty() && !pageLinks.empty()) pageLinks.back().push_back({ x, y - h, x + w, y, link });
         y -= h + 10.0;
     }
 

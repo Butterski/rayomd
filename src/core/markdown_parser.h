@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,12 +21,21 @@ enum class BlockType {
     Image,
 };
 
+// Where an image block's picture comes from, and for a linked image, "[![alt](src)](target)",
+// what it links to.
+struct ImageSource {
+    std::string src;
+    std::string link;
+};
+
 struct Block {
     BlockType type = BlockType::Paragraph;
     int level = 0;
     int number = 0;
     std::string text;
-    std::string imageSrc;
+    // Set for every Image block and for no other: the other blocks carry a null pointer
+    // instead of two empty strings.
+    std::unique_ptr<ImageSource> image;
     // Table cells. Inline Markdown that the renderers parse like paragraph text, except
     // in a table with hasMath, whose cells are plain text with formulas.
     std::vector<std::vector<std::string>> rows;

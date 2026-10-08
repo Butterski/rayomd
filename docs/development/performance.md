@@ -370,6 +370,31 @@ table cells. Inlined into each caller, together with a clone GCC made of
 `WrapStyledInline` for the table's constant text size, they added 13.5 KB of
 code; `RAYOMD_SHARED` keeps one copy of each, and the whole change adds 3.6 KB.
 
+## Link text with inline Markdown, October 2026
+
+Link text was taken literally: `[**bold**](u)` showed its asterisks, and in a
+linked image, `[![alt](src)](u)`, the link ended at the image's own `]`, which
+left a broken link and stray brackets (the badge rows at the top of many
+READMEs). Link text with inline syntax is now parsed on its own, out of the
+parse loop, and its runs keep the link and the emphasis around it; plain link
+text takes the old path. `[![` either starts a linked image or is a literal `[`,
+so a failed attempt never sends a bracket search backwards. A line that is one
+linked image becomes an image block with a link annotation over the image, or
+over its fallback text. Pieces of one link that follow each other on a line now
+share one annotation: link text in several styles would otherwise get one per
+style, and `[**x` repeated 50,000 times before `](u)` made an 11.7 MB PDF
+instead of 3.8 MB.
+
+An image block's source and target sit behind a pointer, `Block::image`. Kept
+as a second string in every block, the target made each move of a block dearer
+(+0.4 % instructions for `baseline.md`); behind the pointer every block is 24
+bytes smaller than before.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`5404696`): the watch fixtures write the same bytes with +0.06 % instructions
+(geometric mean). Their time moved +0.8 % in the release build and +0.1 % with
+alignment pinned, against an A/A spread of 0.2 %: code placement.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

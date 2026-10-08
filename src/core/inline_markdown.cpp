@@ -174,6 +174,26 @@ public:
         Add(out.text.size()).math = display ? InlineMath::Display : InlineMath::Inline;
     }
 
+    // Appends link text that was parsed on its own: each of its runs links to
+    // out.urls[urlBegin, end) and adds its own emphasis to that around the link.
+    void LinkText(const InlineRuns& label, size_t urlBegin, bool bold, bool italic, bool strike) {
+        const size_t urlEnd = out.urls.size();
+        if (label.runs.empty()) {
+            out.urls.resize(urlBegin);
+            return;
+        }
+        for (const InlineRun& part : label.runs) {
+            out.text.append(label.text, part.begin, part.end - part.begin);
+            InlineRun& run = Add(out.text.size());
+            run.urlBegin = urlBegin;
+            run.urlEnd = urlEnd;
+            run.bold = bold || part.bold;
+            run.italic = italic || part.italic;
+            run.strike = strike || part.strike;
+            run.code = part.code;
+        }
+    }
+
 private:
     InlineRun& Add(size_t end) {
         out.runs.emplace_back();
@@ -398,6 +418,22 @@ bool ParseLinkAt(InlineScanner& scan, size_t start, size_t labelOffset, InlineLi
     size_t end = scan.DestinationEnd(close + 1);
     if (end == std::string_view::npos) return false;
     link.label = source.substr(start + labelOffset, close - (start + labelOffset));
+    link.target = source.substr(close + 2, end - (close + 2));
+    link.end = end + 1;
+    return true;
+}
+
+// A linked image, "[![alt](src)](target)", whose link text is the whole image. ParseLinkAt
+// would end that text at the image's own ']'. `start` is the position of the first '['.
+RAYOMD_NOINLINE bool ParseLinkedImageAt(InlineScanner& scan, size_t start, InlineLink& link) {
+    const std::string_view source = scan.source;
+    InlineLink image;
+    if (!ParseLinkAt(scan, start + 1, 2, image)) return false;
+    const size_t close = image.end;
+    if (close + 1 >= source.size() || source[close] != ']' || source[close + 1] != '(') return false;
+    const size_t end = scan.DestinationEnd(close + 1);
+    if (end == std::string_view::npos) return false;
+    link.label = source.substr(start + 1, close - (start + 1));
     link.target = source.substr(close + 2, end - (close + 2));
     link.end = end + 1;
     return true;
@@ -808,6 +844,16 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
     return output;
 }
 
+// Link text with inline syntax, parsed on its own and appended in runs that link to
+// out.urls from `urlBegin` on. The text ends at the first ']', so it holds no other link;
+// a linked image's text is its image. Out of the parse loop: most link text is plain.
+static RAYOMD_NOINLINE void AppendLinkText(std::string_view label, RunWriter& writer, size_t urlBegin, bool bold,
+    bool italic, bool strike) {
+    InlineRuns runs;
+    ParseInlineRuns(label, runs, false);
+    writer.LinkText(runs, urlBegin, bold, italic, strike);
+}
+
 void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath, size_t lookaheadBudget) {
     // Only text with a status symbol needs a normalised copy; all other text is read in place.
     std::string normalized;
@@ -862,13 +908,19 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
             }
         }
         if (source[i] == '[') {
+            // "[![" either starts a linked image or is a '[' before an image.
+            const bool imageText = i + 2 < source.size() && source[i + 1] == '!' && source[i + 2] == '[';
             InlineLink link;
-            if (ParseLinkAt(scan, i, 1, link)) {
+            if (imageText ? ParseLinkedImageAt(scan, i, link) : ParseLinkAt(scan, i, 1, link)) {
                 flush();
                 const size_t urlBegin = out.urls.size();
                 AppendDestination(link.target, out.urls);
-                text.append(link.label.data(), link.label.size());
-                writer.Close(bold, italic, strike, urlBegin, false);
+                if (RayoMd::Text::ContainsByteClass(link.label, RayoMd::Text::kByteInlineSyntax)) {
+                    AppendLinkText(link.label, writer, urlBegin, bold, italic, strike);
+                } else {
+                    text.append(link.label.data(), link.label.size());
+                    writer.Close(bold, italic, strike, urlBegin, false);
+                }
                 i = link.end;
                 continue;
             }
