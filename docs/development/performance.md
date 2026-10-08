@@ -293,6 +293,41 @@ Countermeasures that held up:
 Forcing more calls inline was not kept: under the limit it only moves the
 loss to other calls.
 
+## Measured opportunities
+
+Findings that could make RayoMD faster later, with the evidence and the reason
+they were not taken yet. Add to this list when a change turns one up.
+
+**`-O2` on Windows.** Windows release builds use `-O2`, Linux `-O3`. The same
+source built both ways with g++ 13.3 on Linux (2026-10-08, `tools/benchmark.py
+ab`, seven rounds, watch fixtures) is 5.8 % slower at `-O2` (geometric mean;
+96 KiB Unicode +14.6 %, ASCII +1.4 %) and runs 3.0 % more instructions, with
+44 KB less code. Next step: measure `-O2` against `-O3` for the engine
+translation units only (`tiny_pdf.cpp`, `inline_markdown.cpp`,
+`markdown_parser.cpp`) with MinGW g++ on Windows hardware, and weigh it
+against the executable size.
+
+**A larger inlining budget for `tiny_pdf.cpp`.** The file sits at GCC's
+`inline-unit-growth` limit, so edits move which hot calls stay inlined.
+Raising the budget for that file alone, against `-O3` at the default
+(597,840 bytes of code):
+
+| `--param=inline-unit-growth` | Code | Time | Instructions | ASCII 96 KiB | Unicode 96 KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 60 | +32 KB | -0.9 % | -0.6 % | -3.5 % | -0.0 % |
+| 100 | +93 KB | -1.9 % | -2.2 % | -4.6 % | -2.0 % |
+| 200 | +242 KB | -2.9 % | -3.2 % | -5.1 % | -3.6 % |
+
+At `-O2`, 60 gave -2.4 % (96 KiB Unicode -7.0 %) for +26 KB. Not adopted:
++5 % to +40 % of the Linux executable for one to three percent, and a larger
+budget only moves the cliff. Splitting the two renderers into their own
+translation units would give each its own budget and stop edits in one from
+moving inlining in the other; that is the option to try before raising it.
+
+**`ContainsByteClass` is scalar.** Every paragraph is classified with an
+8-byte unrolled table scan, about 0.6 % of a Unicode build. A vector
+classification would cut it, but the gain is small.
+
 ## Keeping the release light
 
 - Build `Release`; never benchmark Debug binaries.
