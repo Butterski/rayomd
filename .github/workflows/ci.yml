@@ -30,6 +30,8 @@ jobs:
         run: cmake --build build/linux --config Release
       - name: Verify CLI
         run: python3 -B tests/verify_cli.py --binary build/linux/rayomd
+      - name: Core tests
+        run: ctest --test-dir build/linux --output-on-failure -R rayomd-core
       - name: Check default dependencies
         run: |
           if ldd build/linux/rayomd | grep -q libcurl; then
@@ -67,3 +69,5 @@ jobs:
         run: cmake --build build/windows --config Release
       - name: Verify CLI
         run: python -B tests/verify_cli.py --binary build/windows/rayomd.exe
+      - name: Core tests
+        run: ctest --test-dir build/windows --output-on-failure -R rayomd-core
