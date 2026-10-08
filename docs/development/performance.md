@@ -119,6 +119,82 @@ Formula-bearing text takes its own wrap and paint functions and must not share
 the small span helpers or vector code of the plain text path: extra call sites
 there stop the compiler from inlining them into the hot wrap functions.
 
+## Engine pass, October 2026
+
+A pass over the native engine (`src/core`, `src/common`) that keeps every PDF
+byte. Startup, file I/O, and the executable were left alone.
+
+What changed:
+
+- Page content is rendered straight into the caller's output buffer and the
+  file is assembled in place around it, so there is no string per page and no
+  second copy of the content. This alone was 7-15 % of a warm build on Windows,
+  where allocating and freeing a buffer of 8-64 KiB per page commits and
+  decommits memory every time.
+- Paragraphs are parsed and wrapped as flat runs: one text buffer per paragraph,
+  reused, instead of a string per span and a vector per line. Plain lines are
+  views into the source text.
+- The block parser splits table rows without building them character by
+  character, skips the nested parse for one-line list items and quotes, and
+  classifies a line by its first character.
+- Operators are written through a pointer into a tail reserved once; numbers
+  are formatted without a library call; a line without characters that need
+  escaping is copied into its literal string in one piece.
+- Look-ahead scans of the inline parser (closing emphasis marker, end of a code
+  span or link destination, autolink) are answered from tables once a paragraph
+  has read eight times its own size in look-ahead. Ordinary text never gets
+  there. Text made of unterminated openers used to be quadratic.
+
+Measured on 2026-10-08, Windows 11, MinGW g++ 15.2 `-O2`, an engine-only warm
+loop pinned to one core, best of nine order-rotated rounds, against 2.6.0.
+Fixtures are synthetic and contain no math syntax:
+
+| Fixture | 2.6.0 | Now | Change |
+| --- | ---: | ---: | ---: |
+| 1 MiB ASCII, inline styles, links, lists, tables | 52.5 ms | 12.8 ms | -75.6 % |
+| 1 MiB ASCII, the same without inline styles | 36.9 ms | 9.1 ms | -75.4 % |
+| 1 MiB Unicode | 79.7 ms | 23.7 ms | -70.2 % |
+| 20 KiB ASCII | 1.00 ms | 0.20 ms | -80.0 % |
+| 20 KiB Unicode | 1.65 ms | 0.43 ms | -74.0 % |
+
+The executable's own `--bench` loop agrees: 70.7 ms to 18.0 ms and 117.1 ms to
+34.0 ms for the two styled 1 MiB fixtures, and 0.93 ms to 0.59 ms for
+`tester.md`, which also gained its formulas in between. These are warm numbers:
+a single cold export is still dominated by process start and file I/O.
+
+- Peak working set for the 1 MiB fixtures: 30.0 to 16.0 MiB (ASCII) and 38.6 to
+  19.9 MiB (Unicode). Page faults per warm build: 3,597 to 802 and 5,305 to 754.
+- A 120 kB paragraph made of one unterminated opener: `*a ` 3.3 s to 3 ms,
+  `_a ` 3.7 s to 5 ms, `[a](` 2.3 s to 3 ms, backtick runs of growing length
+  3.1 s to 5 ms, one table cell of `*a ` 7.4 s to 10 ms. Time now grows in
+  proportion to the input: 1 MB of such text takes 25-70 ms.
+- Executable size since the math commit: Windows 2,952,704 to 2,720,768 bytes
+  (a 256 KiB lookup table is gone; 2.6.0 was 2,820,608); Linux x64 CLI
+  (g++ 13.3) 571,952 to 596,528 bytes.
+
+How byte identity was checked, on Windows and on Linux (WSL, native ext4):
+
+- `rayomd-core-tests`, including the golden digests of `CheckNoMathGolden`,
+  `CheckOutputBufferReuse` (reused, oversized, and aliased output buffers), and
+  `CheckInlineLookahead` (scans against tables on fixed and generated text).
+- 76 reference PDFs of the fixtures, `tester.md`, and the math corpus, compared
+  with the build before the pass.
+- Differential fuzzing of the old against the new engine with generated
+  documents: whole PDFs (about 250,000 documents in ASCII, Unicode, and
+  mixed-byte modes), block trees (about 1.5 million documents), and inline
+  spans (about 2.5 million texts, each with scans, with tables, and with a
+  switch between them). Every comparison was equal. Deliberate bugs in each
+  changed function were used to confirm that the generators notice them.
+- The same tests and fuzzers under AddressSanitizer and UBSan on Linux.
+
+The fuzzers compile two source trees side by side and are not part of the
+repository. Rebuild that comparison before any change that claims to keep
+output bytes: floating-point sums decide line breaks and coordinates, so a
+reordered addition is enough to move a line.
+
+Tried and dropped: carrying run widths from wrapping to painting in the Unicode
+renderer (no measurable gain once the additions had to stay in order).
+
 ## Keeping the release light
 
 - Build `Release`; never benchmark Debug binaries.

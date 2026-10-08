@@ -97,7 +97,8 @@ Important image/link details:
 - `src/core/inline_markdown.cpp`
   Renderer-neutral inline span parsing for emphasis, code, images, links, and math
   delimiters. Both renderers consume this model so visible text and link annotations
-  cannot drift.
+  cannot drift. `ParseInlineRuns` is the parser (flat runs for the hot paths);
+  `ParseInlineSpans` is the same result as strings, for tests and cold paths.
 
 - `src/core/math_parser.h` and `src/core/math_parser.cpp`
   Tokenizer, parser, error recovery, and limits for the TeX math subset; produces a
@@ -159,7 +160,9 @@ Important image/link details:
 - tests/core_tests.cpp
   Unit and PDF-level tests linked against the core sources. The math checks live in
   `tests/math_markdown_tests.inc`, `tests/math_parser_tests.inc`,
-  `tests/math_layout_tests.inc`, and `tests/no_math_golden.inc`, which it includes.
+  `tests/math_layout_tests.inc`, and `tests/no_math_golden.inc`, which it includes;
+  `tests/inline_lookahead_tests.inc` holds the checks of the inline parser's
+  look-ahead tables.
 
 - tools/benchmark.py
   Maintained entry point for run, compare, release, and competitor performance
@@ -268,6 +271,17 @@ GitHub CI entry points:
   libraries to the native package.
 - Reuse output buffers in batch/server paths where practical.
 - Be careful with per-line/per-span heap allocation in `tiny_pdf.cpp`.
+- Page content is rendered straight into the caller's output buffer and
+  `PdfObjects::BuildInto` assembles the file in place around it. Do not go back
+  to one string per page: allocating and freeing those buffers cost 7-15 % of a
+  warm build on Windows.
+- Paragraph text is parsed and wrapped as flat runs (`InlineRuns`, `AsciiRuns`,
+  `StyledRuns`): one text buffer per paragraph, reused from paragraph to
+  paragraph. Keep a string or vector per span, word, or line off these paths.
+- Every look-ahead of the inline parser goes through `InlineScanner`, which
+  answers from tables once a paragraph has spent its byte budget. A new scan
+  that runs "to the end for every opener" must go there too, or text with
+  thousands of unterminated openers becomes quadratic again.
 - Prefer measured changes over plausible micro-optimizations.
 - Keep image caches bounded. Image support can dominate memory on large or many
   remote images.
@@ -288,6 +302,10 @@ GitHub CI entry points:
   file-based caller.
 - Keep visible link text and annotation rectangles aligned when changing text
   wrapping, painting, or page splitting.
+- A performance change must not change PDF bytes unless that is its stated
+  purpose. Line breaks and coordinates come from floating-point sums, so keep
+  the order of those additions when restructuring wrapping or measuring code,
+  and compare whole PDFs before and after (see `docs/development/performance.md`).
 
 ## UI Guidance
 

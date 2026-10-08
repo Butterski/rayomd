@@ -70,9 +70,8 @@
 
 namespace TinyPdf {
 
-// HexText and ForEachCodepoint sit on the per-glyph path of every Unicode document.
-// The math fallback painter calls HexText too; without this hint that second call
-// site stops the compiler from inlining them into PaintText.
+// ForEachCodepoint sits on the per-glyph path of every Unicode document (text width,
+// hex strings). Keep it inlined into its callers whatever else comes to call them.
 #if defined(__GNUC__) || defined(__clang__)
 #define RAYOMD_HOT_INLINE inline __attribute__((always_inline))
 #else
@@ -81,13 +80,28 @@ namespace TinyPdf {
 
 using CidList = std::vector<uint16_t>;
 
+static bool IsAllAscii(std::string_view str) {
+    const char* at = str.data();
+    size_t left = str.size();
+    for (; left >= 8; at += 8, left -= 8) {
+        uint64_t chunk;
+        memcpy(&chunk, at, 8);
+        if (chunk & 0x8080808080808080ull) return false;
+    }
+    for (; left > 0; at++, left--) {
+        if ((unsigned char)*at >= 128) return false;
+    }
+    return true;
+}
+
 static std::wstring Utf8ToWideFallback(std::string_view str) {
     if (str.empty()) return L"";
 #ifdef _WIN32
-    int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), nullptr, 0);
+    // UTF-16 never needs more code units than UTF-8 needs bytes, so one call suffices.
+    std::wstring wstr(str.size(), 0);
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), &wstr[0], (int)wstr.size());
     if (len <= 0) return L"";
-    std::wstring wstr(len, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), &wstr[0], len);
+    wstr.resize((size_t)len);
     return wstr;
 #else
     std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
@@ -97,6 +111,8 @@ static std::wstring Utf8ToWideFallback(std::string_view str) {
 
 static std::wstring Utf8ToWide(std::string_view str) {
     if (str.empty()) return L"";
+    // ASCII, the usual case for a span or a table cell, needs no decoder.
+    if (IsAllAscii(str)) return std::wstring(str.begin(), str.end());
 #ifdef RAYOMD_USE_SIMDUTF
 #if defined(_WIN32)
     const size_t units = simdutf::utf16_length_from_utf8(str.data(), str.size());
@@ -122,6 +138,24 @@ static std::wstring Utf8ToWide(std::string_view str) {
 #endif
 #else
     return Utf8ToWideFallback(str);
+#endif
+}
+
+// Appends Utf8ToWide(str) to `out`. ASCII and, on Windows, one decoder call are written
+// straight into `out`, so a caller that reuses the string converts without allocating.
+static void AppendUtf8ToWide(std::wstring& out, std::string_view str) {
+    if (str.empty()) return;
+    if (IsAllAscii(str)) {
+        out.append(str.begin(), str.end());
+        return;
+    }
+#if defined(_WIN32) && !defined(RAYOMD_USE_SIMDUTF)
+    const size_t base = out.size();
+    out.resize(base + str.size());
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), &out[base], (int)str.size());
+    out.resize(base + (len > 0 ? (size_t)len : 0));
+#else
+    out += Utf8ToWide(str);
 #endif
 }
 
@@ -159,10 +193,6 @@ using Internal::StripInlineMarkdown;
 
 static bool IsSpace(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
-
-static std::string ToString(std::string_view s) {
-    return std::string(s.data(), s.size());
 }
 
 static bool StartsWith(std::string_view value, std::string_view prefix) {
@@ -229,7 +259,7 @@ struct TtfFont {
 
     std::vector<uint8_t> bytes;
     std::map<std::string, Table> tables;
-    std::unordered_map<uint16_t, uint16_t> glyphForBmp;
+    std::vector<uint16_t> glyphForBmp;   // glyph index by BMP code point, 0 = no glyph
     std::vector<uint16_t> advances;
     std::vector<uint32_t> loca;
     mutable std::array<std::atomic<uint16_t>, 65536> widthCache{};
@@ -338,8 +368,7 @@ struct TtfFont {
     }
 
     bool ParseCmap() {
-        glyphForBmp.clear();
-        glyphForBmp.reserve(4096);
+        glyphForBmp.assign(65536, 0);
         Table cmap = tables["cmap"];
         if (cmap.offset + 4 > bytes.size()) return false;
         uint16_t count = ReadU16(bytes, cmap.offset + 2);
@@ -421,9 +450,9 @@ struct TtfFont {
     }
 
     uint16_t GlyphFor(uint32_t cp) const {
-        if (cp <= 0xffff) {
-            auto it = glyphForBmp.find((uint16_t)cp);
-            if (it != glyphForBmp.end()) return it->second;
+        if (cp < glyphForBmp.size()) {
+            uint16_t glyph = glyphForBmp[cp];
+            if (glyph != 0) return glyph;
         }
         if (cp != '?') return GlyphFor('?');
         return 0;
@@ -481,74 +510,104 @@ static bool IsWideSpace(wchar_t ch) {
     return ch == L' ' || ch == L'\t' || ch == L'\n' || ch == L'\r';
 }
 
-static void PushWrappedWord(const TtfFont& font, std::wstring_view word, double wordWidth,
-    double maxWidth, double size, double spaceWidth, std::wstring& line,
-    double& lineWidth, std::vector<std::wstring>& lines) {
-    if (word.empty()) return;
-
-    if (!line.empty() && lineWidth + spaceWidth + wordWidth <= maxWidth) {
-        line.push_back(L' ');
-        line.append(word.data(), word.size());
-        lineWidth += spaceWidth + wordWidth;
-        return;
+// Appends the words of `text`, which starts and ends with a word, one space apart.
+static void AppendSingleSpaced(std::wstring& out, std::wstring_view text) {
+    for (size_t i = 0; i < text.size();) {
+        size_t end = i;
+        while (end < text.size() && !IsWideSpace(text[end])) end++;
+        if (i != 0) out.push_back(L' ');
+        out.append(text.data() + i, end - i);
+        i = end;
+        while (i < text.size() && IsWideSpace(text[i])) i++;
     }
+}
 
-    if (line.empty() && wordWidth <= maxWidth) {
-        line.assign(word.data(), word.size());
-        lineWidth = wordWidth;
-        return;
-    }
-
-    if (!line.empty()) {
-        lines.push_back(line);
-        line.clear();
-        lineWidth = 0.0;
-    }
-
-    if (wordWidth <= maxWidth) {
-        line.assign(word.data(), word.size());
-        lineWidth = wordWidth;
-        return;
-    }
-
-    std::wstring part;
-    part.reserve(word.size());
-    double partWidth = 0.0;
-    const double scale = size * 0.001;
-    for (wchar_t ch : word) {
-        double chWidth = CodepointWidth(font, (uint16_t)ch, scale);
-        if (!part.empty() && partWidth + chWidth > maxWidth) {
-            lines.push_back(part);
-            part.clear();
-            partWidth = 0.0;
+// Greedy word wrap of text without inline styles: emit(line) receives every line. A line
+// is the piece of `raw` from its first to its last word; only when two of its words are
+// not exactly one space apart is it rebuilt in a scratch string. The view passed to emit
+// is valid until emit returns.
+template <typename Emit>
+static void WrapWideWords(const TtfFont& font, std::wstring_view raw, double maxWidth, double size, Emit emit) {
+    const double spaceWidth = TextWidth(font, L" ", size);
+    std::wstring respaced;
+    size_t lineStart = 0;
+    size_t lineEnd = 0;         // the line is raw[lineStart, lineEnd); empty when they are equal
+    bool singleSpaced = true;
+    double lineWidth = 0.0;
+    bool emitted = false;
+    auto flush = [&]() {
+        std::wstring_view line = raw.substr(lineStart, lineEnd - lineStart);
+        if (!singleSpaced) {
+            respaced.clear();
+            AppendSingleSpaced(respaced, line);
+            line = respaced;
         }
-        part.push_back(ch);
-        partWidth += chWidth;
+        emit(line);
+        emitted = true;
+    };
+    auto startLine = [&](size_t start, size_t end, double width) {
+        lineStart = start;
+        lineEnd = end;
+        lineWidth = width;
+        singleSpaced = true;
+    };
+
+    size_t i = 0;
+    while (i < raw.size()) {
+        while (i < raw.size() && IsWideSpace(raw[i])) i++;
+        const size_t start = i;
+        while (i < raw.size() && !IsWideSpace(raw[i])) i++;
+        if (i == start) continue;
+        const std::wstring_view word = raw.substr(start, i - start);
+        const double wordWidth = TextWidth(font, word, size);
+        const bool lineEmpty = lineEnd == lineStart;
+
+        if (!lineEmpty && lineWidth + spaceWidth + wordWidth <= maxWidth) {
+            if (start - lineEnd != 1 || raw[lineEnd] != L' ') singleSpaced = false;
+            lineEnd = i;
+            lineWidth += spaceWidth + wordWidth;
+            continue;
+        }
+        if (lineEmpty && wordWidth <= maxWidth) {
+            startLine(start, i, wordWidth);
+            continue;
+        }
+        if (!lineEmpty) {
+            flush();
+            lineStart = lineEnd = 0;
+            lineWidth = 0.0;
+        }
+        if (wordWidth <= maxWidth) {
+            startLine(start, i, wordWidth);
+            continue;
+        }
+
+        // A word wider than the line is cut into pieces; the last piece stays open.
+        size_t partStart = start;
+        double partWidth = 0.0;
+        const double scale = size * 0.001;
+        for (size_t at = start; at < i; at++) {
+            const double chWidth = CodepointWidth(font, (uint16_t)raw[at], scale);
+            if (at > partStart && partWidth + chWidth > maxWidth) {
+                emit(raw.substr(partStart, at - partStart));
+                emitted = true;
+                partStart = at;
+                partWidth = 0.0;
+            }
+            partWidth += chWidth;
+        }
+        startLine(partStart, i, partWidth);
     }
-    line = std::move(part);
-    lineWidth = partWidth;
+    if (lineEnd != lineStart) flush();
+    if (!emitted) emit(std::wstring_view(L""));
 }
 
 static std::vector<std::wstring> WrapText(const TtfFont& font, std::wstring_view raw, double maxWidth, double size) {
     std::vector<std::wstring> lines;
     lines.reserve(std::max<size_t>(1, raw.size() / 72));
-    std::wstring line;
-    line.reserve(std::min<size_t>(raw.size(), 256));
-    double lineWidth = 0.0;
-    double spaceWidth = TextWidth(font, L" ", size);
-    size_t i = 0;
-
-    while (i < raw.size()) {
-        while (i < raw.size() && IsWideSpace(raw[i])) i++;
-        size_t start = i;
-        while (i < raw.size() && !IsWideSpace(raw[i])) i++;
-        std::wstring_view word = raw.substr(start, i - start);
-        double wordWidth = TextWidth(font, word, size);
-        PushWrappedWord(font, word, wordWidth, maxWidth, size, spaceWidth, line, lineWidth, lines);
-    }
-
-    if (!line.empty()) lines.push_back(line);
-    if (lines.empty()) lines.push_back(L"");
+    WrapWideWords(font, raw, maxWidth, size, [&](std::wstring_view line) {
+        lines.emplace_back(line.data(), line.size());
+    });
     return lines;
 }
 
@@ -596,21 +655,53 @@ static void AppendSize(std::string& out, size_t value) {
     if (result.ec == std::errc()) out.append(buf, (size_t)(result.ptr - buf));
 }
 
+// Grows a content stream once by an upper bound, lets one drawing operation write its
+// operators through a raw pointer, and trims to what was written. The per-span paint
+// functions used a dozen small appends each; this is one growth and no temporaries.
+class TailWriter {
+public:
+    TailWriter(std::string& target, size_t maxBytes) : out(target) {
+        const size_t base = out.size();
+        out.resize(base + maxBytes);
+        cursor = &out[base];
+    }
+    ~TailWriter() { out.resize((size_t)(cursor - out.data())); }
+    TailWriter(const TailWriter&) = delete;
+    TailWriter& operator=(const TailWriter&) = delete;
+
+    template <size_t N>
+    void Lit(const char (&text)[N]) {
+        memcpy(cursor, text, N - 1);
+        cursor += N - 1;
+    }
+    void Bytes(const char* text, size_t size) {
+        memcpy(cursor, text, size);
+        cursor += size;
+    }
+    void Fixed(double value) { cursor = RayoMd::Text::WriteFixed2(cursor, value); }
+    void Number(size_t value) { cursor = std::to_chars(cursor, cursor + 20, value).ptr; }
+    char* cursor = nullptr;
+
+private:
+    std::string& out;
+};
+
+// Room for one operand written by TailWriter::Fixed, with its separator.
+constexpr size_t kOperandBytes = RayoMd::Text::kFixed2MaxChars + 1;
+
+static char* WriteHex4(char* out, uint16_t value) {
+    static constexpr char digits[] = "0123456789ABCDEF";
+    out[0] = digits[(value >> 12) & 0xf];
+    out[1] = digits[(value >> 8) & 0xf];
+    out[2] = digits[(value >> 4) & 0xf];
+    out[3] = digits[value & 0xf];
+    return out + 4;
+}
+
 static void AppendHex4(std::string& out, uint16_t value) {
-    struct HexTable {
-        std::array<std::array<char, 4>, 65536> values{};
-        HexTable() {
-            static constexpr char digits[] = "0123456789ABCDEF";
-            for (uint32_t i = 0; i < values.size(); i++) {
-                values[i][0] = digits[(i >> 12) & 0xf];
-                values[i][1] = digits[(i >> 8) & 0xf];
-                values[i][2] = digits[(i >> 4) & 0xf];
-                values[i][3] = digits[i & 0xf];
-            }
-        }
-    };
-    static const HexTable table;
-    out.append(table.values[value].data(), 4);
+    char hex[4];
+    WriteHex4(hex, value);
+    out.append(hex, 4);
 }
 
 class UsedCidSet {
@@ -638,16 +729,26 @@ private:
     mutable bool sorted = true;
 };
 
-static RAYOMD_HOT_INLINE std::string HexText(const TtfFont& font, const std::wstring& text, UsedCidSet& usedCids) {
-    std::string out;
-    out.reserve(2 + text.size() * 4);
-    out.push_back('<');
-    ForEachCodepoint(std::wstring_view(text), [&](uint32_t cp) {
+// Writes the hex string "<....>" of `text` (four digits per CID) and records the CIDs.
+// `out` must have room for HexTextBytes(text) characters; returns the end.
+static size_t HexTextBytes(std::wstring_view text) {
+    return 2 + text.size() * 4;
+}
+
+static char* WriteHexText(char* out, const TtfFont& font, std::wstring_view text, UsedCidSet& usedCids) {
+    *out++ = '<';
+    ForEachCodepoint(text, [&](uint32_t cp) {
         uint16_t cid = CidForCodepoint(font, cp);
         usedCids.Add(cid);
-        AppendHex4(out, cid);
+        out = WriteHex4(out, cid);
     });
-    out.push_back('>');
+    *out++ = '>';
+    return out;
+}
+
+static std::string HexText(const TtfFont& font, const std::wstring& text, UsedCidSet& usedCids) {
+    std::string out(HexTextBytes(text), '\0');
+    out.resize((size_t)(WriteHexText(&out[0], font, text, usedCids) - out.data()));
     return out;
 }
 
@@ -704,96 +805,247 @@ static std::string MakeCidKey(const CidList& used) {
     return key;
 }
 
+static size_t DecimalDigits(size_t value) {
+    size_t digits = 1;
+    while (value >= 10) {
+        value /= 10;
+        digits++;
+    }
+    return digits;
+}
+
 class PdfObjects {
 public:
     int Reserve() {
-        objects.push_back("");
+        objects.emplace_back();
         return (int)objects.size();
     }
 
     int Add(const std::string& body) {
-        objects.push_back(body);
+        objects.emplace_back();
+        objects.back().head = body;
         return (int)objects.size();
     }
 
     int Add(std::string&& body) {
-        objects.push_back(std::move(body));
+        objects.emplace_back();
+        objects.back().head = std::move(body);
         return (int)objects.size();
     }
 
-    void Set(int id, const std::string& body) {
-        if (id > 0 && id <= (int)objects.size()) objects[id - 1] = body;
-    }
-
     void Set(int id, std::string&& body) {
-        if (id > 0 && id <= (int)objects.size()) objects[id - 1] = std::move(body);
+        if (Object* object = At(id)) {
+            *object = Object();
+            object->head = std::move(body);
+        }
     }
 
+    // The View forms below reference their payload instead of copying it. The caller keeps
+    // that memory alive and unchanged until BuildInto has run: image data and the font file
+    // are then written exactly once, straight into the final buffer.
+
+    // The whole object body is `body`.
+    void SetView(int id, std::string_view body) {
+        if (Object* object = At(id)) {
+            *object = Object();
+            object->view = body;
+        }
+    }
+
+    // A stream object whose dictionary text, up to and including "stream\n", is `head`.
+    void SetStreamView(int id, std::string&& head, std::string_view data) {
+        if (Object* object = At(id)) {
+            *object = Object();
+            object->head = std::move(head);
+            object->view = data;
+            object->stream = true;
+        }
+    }
+
+    int AddStreamView(const std::string& dict, std::string_view data) {
+        objects.emplace_back();
+        Object& object = objects.back();
+        object.head = StreamHead(dict, data.size());
+        object.view = data;
+        object.stream = true;
+        return (int)objects.size();
+    }
+
+    // A stream object whose payload already lies in the buffer BuildInto assembles the file
+    // in, at [offset, offset + length). Page content is rendered straight into that buffer.
+    // The payloads are added in the order they lie in the buffer.
+    int AddStreamInPlace(const std::string& dict, size_t offset, size_t length) {
+        objects.emplace_back();
+        Object& object = objects.back();
+        object.head = StreamHead(dict, length);
+        object.inPlaceOffset = offset;
+        object.inPlaceBytes = length;
+        object.inPlace = true;
+        object.stream = true;
+        return (int)objects.size();
+    }
+
+    // Copies `data`; for small payloads that do not outlive the call.
     int AddStream(const std::string& dict, const std::string& data) {
-        std::string body;
-        body.reserve(data.size() + dict.size() + 64);
-        body += "<< ";
-        body += dict;
-        body += " /Length ";
-        AppendSize(body, data.size());
-        body += " >>\nstream\n";
+        std::string body = StreamHead(dict, data.size());
+        body.reserve(body.size() + data.size() + 10);
         body += data;
         body += "\nendstream";
         return Add(std::move(body));
     }
 
+    // Assembles the file in `pdf`, which holds the in-place payloads and nothing else.
+    //
+    // Every object ends up at or after the place its payload was rendered to, because the
+    // header and the objects before it only add bytes in front. Writing the objects from
+    // the last to the first therefore moves each payload once, towards the end of the
+    // buffer, without ever overwriting one that has not been moved yet. A buffer the
+    // caller reuses for the next export is assembled without any allocation.
     void BuildInto(int rootId, int infoId, std::string& pdf, bool pdf20 = false) const {
-        size_t reserveBytes = 64 * 1024;
-        for (const auto& object : objects) reserveBytes += object.size() + 64;
+        constexpr size_t kHeaderBytes = 15;
+        constexpr size_t kObjectOpenBytes = 7;      // " 0 obj\n"
+        constexpr size_t kStreamCloseBytes = 10;    // "\nendstream"
+        constexpr size_t kObjectCloseBytes = 8;     // "\nendobj\n"
+        const size_t count = objects.size();
+
+        std::vector<size_t> offsets(count + 1, 0);
+        size_t position = kHeaderBytes;
+        size_t unmoved = 0;         // end of the in-place payloads of the objects seen so far
+        bool movable = true;
+        for (size_t i = 0; i < count; i++) {
+            const Object& object = objects[i];
+            offsets[i + 1] = position;
+            const size_t payloadAt = position + DecimalDigits(i + 1) + kObjectOpenBytes + object.head.size();
+            if (object.inPlace) {
+                const size_t payloadEnd = object.inPlaceOffset + object.inPlaceBytes;
+                if (object.inPlaceOffset < unmoved || payloadAt < object.inPlaceOffset || payloadEnd > pdf.size()) {
+                    movable = false;
+                }
+                unmoved = payloadEnd;
+            }
+            position = payloadAt + PayloadBytes(object) + (object.stream ? kStreamCloseBytes : 0) + kObjectCloseBytes;
+        }
+        const size_t xref = position;
+        const size_t total = xref + WriteTail(nullptr, offsets, xref, rootId, infoId);
+
+        // A buffer far larger than this file needs is given back, and payloads that do not
+        // lie in rendering order cannot be moved in place: both cases assemble the file in
+        // a new buffer and read the payloads from the old one.
         constexpr size_t kRetentionFloor = 4u * 1024u * 1024u;
-        if (pdf.capacity() > kRetentionFloor && reserveBytes < pdf.capacity() / 4) {
-            std::string replacement;
-            replacement.reserve(reserveBytes);
-            pdf.swap(replacement);
-        } else {
-            pdf.clear();
-            if (pdf.capacity() < reserveBytes) pdf.reserve(reserveBytes);
+        const size_t wanted = total + 64 * 1024;
+        std::string rendered;
+        const bool relocate = !movable || (pdf.capacity() > kRetentionFloor && wanted < pdf.capacity() / 4);
+        if (relocate) {
+            rendered.swap(pdf);
+            pdf.reserve(wanted);
         }
-        pdf += pdf20 ? "%PDF-2.0\n%" : "%PDF-1.7\n%";
-        pdf.push_back((char)0xE2);
-        pdf.push_back((char)0xE3);
-        pdf.push_back((char)0xCF);
-        pdf.push_back((char)0xD3);
-        pdf += "\n";
+        pdf.resize(total);
+        char* const base = &pdf[0];
+        const char* const payloads = relocate ? rendered.data() : base;
+        const size_t payloadLimit = relocate ? rendered.size() : total;
 
-        std::vector<size_t> offsets(objects.size() + 1, 0);
-        for (size_t i = 0; i < objects.size(); i++) {
-            offsets[i + 1] = pdf.size();
-            AppendSize(pdf, i + 1);
-            pdf += " 0 obj\n";
-            pdf += objects[i];
-            pdf += "\nendobj\n";
+        WriteTail(base + xref, offsets, xref, rootId, infoId);
+        for (size_t i = count; i-- > 0;) {
+            const Object& object = objects[i];
+            char* const at = base + offsets[i + 1];
+            const size_t idDigits = DecimalDigits(i + 1);
+            char* const payload = at + idDigits + kObjectOpenBytes + object.head.size();
+            const size_t payloadBytes = PayloadBytes(object);
+            // The payload moves first: its old place may overlap the object's opening text.
+            if (object.inPlace) {
+                if (object.inPlaceOffset + payloadBytes <= payloadLimit) {
+                    memmove(payload, payloads + object.inPlaceOffset, payloadBytes);
+                } else {
+                    memset(payload, ' ', payloadBytes);
+                }
+            } else if (payloadBytes != 0) {
+                memcpy(payload, object.view.data(), payloadBytes);
+            }
+            std::to_chars(at, at + idDigits, i + 1);
+            memcpy(at + idDigits, " 0 obj\n", kObjectOpenBytes);
+            memcpy(at + idDigits + kObjectOpenBytes, object.head.data(), object.head.size());
+            char* cursor = payload + payloadBytes;
+            if (object.stream) {
+                memcpy(cursor, "\nendstream", kStreamCloseBytes);
+                cursor += kStreamCloseBytes;
+            }
+            memcpy(cursor, "\nendobj\n", kObjectCloseBytes);
         }
-
-        size_t xref = pdf.size();
-        pdf += "xref\n0 ";
-        AppendSize(pdf, objects.size() + 1);
-        pdf += "\n0000000000 65535 f \n";
-
-        char entry[32];
-        for (size_t i = 1; i <= objects.size(); i++) {
-            snprintf(entry, sizeof(entry), "%010zu 00000 n \n", offsets[i]);
-            pdf += entry;
-        }
-
-        pdf += "trailer\n<< /Size ";
-        AppendSize(pdf, objects.size() + 1);
-        pdf += " /Root ";
-        AppendInt(pdf, rootId);
-        pdf += " 0 R /Info ";
-        AppendInt(pdf, infoId);
-        pdf += " 0 R >>\nstartxref\n";
-        AppendSize(pdf, xref);
-        pdf += "\n%%EOF\n";
+        memcpy(base, pdf20 ? "%PDF-2.0\n%\xE2\xE3\xCF\xD3\n" : "%PDF-1.7\n%\xE2\xE3\xCF\xD3\n", kHeaderBytes);
     }
 
 private:
-    std::vector<std::string> objects;
+    struct Object {
+        std::string head;           // owned text of the object, or the stream dictionary
+        std::string_view view;      // referenced payload written after `head`
+        size_t inPlaceOffset = 0;   // in-place payload: where it lies in the output buffer
+        size_t inPlaceBytes = 0;
+        bool inPlace = false;
+        bool stream = false;        // "\nendstream" follows the payload
+    };
+
+    Object* At(int id) {
+        return id > 0 && id <= (int)objects.size() ? &objects[(size_t)id - 1] : nullptr;
+    }
+
+    static size_t PayloadBytes(const Object& object) {
+        return object.inPlace ? object.inPlaceBytes : object.view.size();
+    }
+
+    static std::string StreamHead(const std::string& dict, size_t length) {
+        std::string head;
+        head.reserve(dict.size() + 48);
+        head += "<< ";
+        head += dict;
+        head += " /Length ";
+        AppendSize(head, length);
+        head += " >>\nstream\n";
+        return head;
+    }
+
+    // The cross-reference table and the trailer. Returns their size; with `out` null
+    // nothing is written, so one function both measures and writes them.
+    size_t WriteTail(char* out, const std::vector<size_t>& offsets, size_t xref, int rootId, int infoId) const {
+        size_t size = 0;
+        auto text = [&](std::string_view value) {
+            if (out) memcpy(out + size, value.data(), value.size());
+            size += value.size();
+        };
+        auto number = [&](size_t value) {
+            const size_t digits = DecimalDigits(value);
+            if (out) std::to_chars(out + size, out + size + digits, value);
+            size += digits;
+        };
+        const size_t count = objects.size();
+        text("xref\n0 ");
+        number(count + 1);
+        text("\n0000000000 65535 f \n");
+        // One fixed-width entry per object: ten digits of the offset, then " 00000 n \n".
+        if (out) {
+            char* entry = out + size;
+            for (size_t i = 1; i <= count; i++, entry += 20) {
+                size_t offset = offsets[i];
+                for (int digit = 9; digit >= 0; digit--) {
+                    entry[digit] = (char)('0' + offset % 10);
+                    offset /= 10;
+                }
+                memcpy(entry + 10, " 00000 n \n", 10);
+            }
+        }
+        size += count * 20;
+        text("trailer\n<< /Size ");
+        number(count + 1);
+        text(" /Root ");
+        number((size_t)rootId);
+        text(" 0 R /Info ");
+        number((size_t)infoId);
+        text(" 0 R >>\nstartxref\n");
+        number(xref);
+        text("\n%%EOF\n");
+        return size;
+    }
+
+    std::vector<Object> objects;
 };
 
 constexpr size_t kMaxImageBytes = 32u * 1024u * 1024u;
@@ -802,7 +1054,7 @@ static void AddReversibleSource(PdfObjects& pdf, std::string& catalog, const std
     std::string sourceDictionary = "/Type /EmbeddedFile /Subtype /text#2Fmarkdown /Params << /Size ";
     AppendSize(sourceDictionary, markdown.size());
     sourceDictionary += " >>";
-    int sourceId = pdf.AddStream(sourceDictionary, markdown);
+    int sourceId = pdf.AddStreamView(sourceDictionary, markdown);
 
     std::string fileSpec;
     fileSpec.reserve(144);
@@ -2392,9 +2644,9 @@ static std::vector<int> AddImageObjects(PdfObjects& pdf, const std::vector<Share
         const PdfImage& image = *shared;
         int smaskId = 0;
         if (!image.maskStream.empty()) {
-            smaskId = pdf.AddStream(BuildMaskStreamDict(image), image.maskStream);
+            smaskId = pdf.AddStreamView(BuildMaskStreamDict(image), image.maskStream);
         }
-        ids.push_back(pdf.AddStream(BuildImageStreamDict(image, smaskId), image.stream));
+        ids.push_back(pdf.AddStreamView(BuildImageStreamDict(image, smaskId), image.stream));
     }
     return ids;
 }
@@ -2723,8 +2975,10 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
 
 class Renderer {
 public:
-    Renderer(const TtfFont& f, int fontObject, PdfStyle styleValue, const PdfMargin& marginValue, ImageRegistry* imageRegistry)
-        : font(f), fontId(fontObject), images(imageRegistry), style(styleValue) {
+    // The content streams of all pages are appended to `output`, one after another.
+    Renderer(std::string& output, const TtfFont& f, int fontObject, PdfStyle styleValue, const PdfMargin& marginValue,
+        ImageRegistry* imageRegistry)
+        : font(f), fontId(fontObject), images(imageRegistry), style(styleValue), content(output) {
         margin = ResolveMarginPoints(marginValue);
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
@@ -2735,7 +2989,8 @@ public:
 
     void Render(const std::vector<Block>& blocks) { RenderBlocks(*this, blocks); }
 
-    const std::vector<std::string>& Pages() const { return pages; }
+    // Offset in the output buffer at which the content stream of each page starts.
+    const std::vector<size_t>& PageStarts() const { return pageStarts; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     const CidList& UsedCids() const { return usedCids.Values(); }
     bool MathUsed() const { return math.Used(); }
@@ -2754,13 +3009,15 @@ private:
     double bodySize = 11.5;
     double lineHeight = 15.5;
     double y = 0.0;
-    std::vector<std::string> pages;
+    // The page being rendered is the tail of `content`, so painting is a plain append.
+    std::string& content;
+    std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     UsedCidSet usedCids;
     MathPool math;
     MathFallbackFont mathFallback{};
 
-    // Text the standard math fonts cannot show (	ext{...} in another script) is
+    // Text the standard math fonts cannot show (\text{...} in another script) is
     // measured and painted with the embedded document font, at the text size the
     // formula stands in (the module works at kMathSizeFactor times that size).
     static double MeasureMathFallback(void* context, std::string_view utf8, double size) {
@@ -2832,7 +3089,7 @@ private:
     };
 
     void PushSpan(std::vector<StyledSpan>& spans, std::string_view text, bool bold, bool italic, bool strike,
-        std::string_view url = {}, bool code = false) {
+        std::string&& url, bool code) {
         if (text.empty()) return;
         std::wstring wide = Utf8ToWide(text);
         if (!spans.empty() && spans.back().bold == bold && spans.back().italic == italic &&
@@ -2840,7 +3097,14 @@ private:
             spans.back().math < 0) {
             spans.back().text += wide;
         } else {
-            spans.push_back({ wide, ToString(url), bold, italic, strike, code });
+            spans.emplace_back();
+            StyledSpan& span = spans.back();
+            span.text = std::move(wide);
+            span.url = std::move(url);
+            span.bold = bold;
+            span.italic = italic;
+            span.strike = strike;
+            span.code = code;
         }
     }
 
@@ -2864,12 +3128,12 @@ private:
         std::vector<StyledSpan> spans;
         std::vector<Internal::InlineSpan> inlineSpans = Internal::ParseInlineSpans(input);
         spans.reserve(inlineSpans.size());
-        for (const Internal::InlineSpan& span : inlineSpans) {
+        for (Internal::InlineSpan& span : inlineSpans) {
             if (span.math != Internal::InlineMath::None) {
                 PushMathSpan(spans, span, size, width, false);
                 continue;
             }
-            PushSpan(spans, span.text, span.bold, span.italic, span.strike, span.url, span.code);
+            PushSpan(spans, span.text, span.bold, span.italic, span.strike, std::move(span.url), span.code);
         }
         return spans;
     }
@@ -2891,7 +3155,7 @@ private:
         return spans;
     }
 
-    // Word list of formula-bearing text: the words of SplitStyledWords plus one word
+    // Word list of formula-bearing text: the words WrapStyled walks, plus one word
     // per formula.
     RAYOMD_MATH_COLD std::vector<StyledWord> SplitMathWords(const std::vector<StyledSpan>& spans) {
         std::vector<StyledWord> words;
@@ -2920,40 +3184,32 @@ private:
         return words;
     }
 
-    std::vector<StyledWord> SplitStyledWords(const std::vector<StyledSpan>& spans) {
-        std::vector<StyledWord> words;
-        words.reserve(spans.size() * 3);
-        for (const auto& span : spans) {
-            std::wstring current;
-            for (wchar_t ch : span.text) {
-                if (ch == L' ' || ch == L'\t' || ch == L'\n' || ch == L'\r') {
-                    if (!current.empty()) {
-                        words.push_back({ current, span.url, span.bold, span.italic, span.strike, span.code });
-                        current.clear();
-                    }
-                } else {
-                    current.push_back(ch);
-                }
-            }
-            if (!current.empty()) {
-                words.push_back({ current, span.url, span.bold, span.italic, span.strike, span.code });
+    // Appends one word to the line being filled, with a leading space when `spaced`. It is
+    // merged into the previous span when the style is the same.
+    void AppendStyledWord(std::vector<StyledSpan>& line, std::wstring_view word, bool spaced, bool bold, bool italic,
+        bool strike, const std::string& url, bool code) {
+        if (!line.empty()) {
+            StyledSpan& last = line.back();
+            if (last.bold == bold && last.italic == italic && last.strike == strike && last.url == url &&
+                last.code == code) {
+                if (spaced) last.text.push_back(L' ');
+                last.text.append(word.data(), word.size());
+                return;
             }
         }
-        return words;
+        line.emplace_back();
+        StyledSpan& span = line.back();
+        span.text.reserve(word.size() + 1);
+        if (spaced) span.text.push_back(L' ');
+        span.text.append(word.data(), word.size());
+        span.url = url;
+        span.bold = bold;
+        span.italic = italic;
+        span.strike = strike;
+        span.code = code;
     }
 
-    void AppendStyledSpan(std::vector<StyledSpan>& line, std::wstring text, bool bold, bool italic, bool strike,
-        const std::string& url = std::string(), bool code = false) {
-        if (text.empty()) return;
-        if (!line.empty() && line.back().bold == bold && line.back().italic == italic &&
-            line.back().strike == strike && line.back().url == url && line.back().code == code) {
-            line.back().text += text;
-            return;
-        }
-        line.push_back({ std::move(text), url, bold, italic, strike, code });
-    }
-
-    bool IsClosingPunctuation(const std::wstring& text) {
+    bool IsClosingPunctuation(std::wstring_view text) {
         return text.size() == 1 && (text[0] == L'.' || text[0] == L',' || text[0] == L';' ||
             text[0] == L':' || text[0] == L'!' || text[0] == L'?' || text[0] == L')');
     }
@@ -2974,7 +3230,7 @@ private:
         }
         const std::string noUrl;
         // Appends text to the line: merged into the previous span when the style is the
-        // same (never into a formula), as AppendStyledSpan does for plain text.
+        // same (never into a formula), as AppendStyledWord does for plain text.
         auto appendText = [&](std::wstring text, const StyledWord& word, bool styled) {
             const std::string& url = styled ? word.url : noUrl;
             const bool bold = styled && word.bold;
@@ -3105,7 +3361,7 @@ private:
         double cursor = x;
         for (const StyledSpan& span : line) {
             if (span.math >= 0) {
-                cursor += math.Emit(span.math, pages.back(), cursor, baseline, color);
+                cursor += math.Emit(span.math, content, cursor, baseline, color);
                 continue;
             }
             PaintText(cursor, baseline, size, span.text, color, bold);
@@ -3116,6 +3372,130 @@ private:
     void TableFill(double x, double top, double w, double h) { DrawRect(x, top, w, h, "0.91 0.93 0.95"); }
     void TableStroke(double x, double top, double w, double h) { DrawStrokeRect(x, top, w, h); }
     const char* TableTextColor(bool header) const { return header ? "0.04 0.04 0.04" : "0.10 0.10 0.10"; }
+
+    // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer in one style.
+    struct StyledRun {
+        uint32_t begin = 0;
+        uint32_t end = 0;
+        std::string_view url;       // link target, in StyledRuns::parsed
+        bool bold = false;
+        bool italic = false;
+        bool strike = false;
+        bool code = false;
+    };
+
+    // The wrapped lines of one paragraph, kept flat: the text of every run lies in one
+    // buffer and a line is a range of runs. One object serves all paragraphs, so wrapping
+    // builds no string and no vector per line.
+    struct StyledRuns {
+        Internal::InlineRuns parsed;        // the paragraph as parsed; holds the link targets
+        std::wstring wide;                  // one parsed run, or the whole plain paragraph, as wide text
+        std::wstring text;
+        std::vector<StyledRun> runs;
+        std::vector<uint32_t> lineEnds;     // one past the last run of each line
+
+        std::wstring_view Text(const StyledRun& run) const {
+            return std::wstring_view(text.data() + run.begin, run.end - run.begin);
+        }
+    };
+    StyledRuns paragraphRuns;
+
+    // Wraps `text` into `out` with the line breaks and span boundaries of WrapStyled.
+    // Returns false for text with explicit line breaks or possible formulas, which take
+    // the general path.
+    bool WrapStyledRuns(const std::string& text, double width, double size, StyledRuns& out) {
+        if (text.size() >= 0x40000000u || text.find('\n') != std::string::npos ||
+            text.find('$') != std::string::npos || text.find("\\(") != std::string::npos) {
+            return false;
+        }
+        out.text.clear();
+        out.runs.clear();
+        out.lineEnds.clear();
+        if (!RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteInlineSyntax)) {
+            // No inline syntax: every line is one unstyled run, also when it is empty.
+            out.wide.clear();
+            if (text.find('\xE2') == std::string::npos) AppendUtf8ToWide(out.wide, text);
+            else AppendUtf8ToWide(out.wide, NormalizeSymbols(text));
+            WrapWideWords(font, std::wstring_view(out.wide), width, size, [&](std::wstring_view line) {
+                out.runs.emplace_back();
+                StyledRun& run = out.runs.back();
+                run.begin = static_cast<uint32_t>(out.text.size());
+                out.text.append(line.data(), line.size());
+                run.end = static_cast<uint32_t>(out.text.size());
+                out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+            });
+            return true;
+        }
+
+        Internal::ParseInlineRuns(text, out.parsed);
+        size_t lineStart = 0;       // index of the first run of the line being filled
+        double lineWidth = 0.0;
+        const double spaceWidth = TextWidth(font, L" ", size);
+        // The word joins the last run of the line when the style is the same.
+        auto append = [&](std::wstring_view word, bool spaced, bool bold, bool italic, bool strike, std::string_view url,
+            bool code) {
+            StyledRun* run = out.runs.size() != lineStart ? &out.runs.back() : nullptr;
+            if (!run || run->bold != bold || run->italic != italic || run->strike != strike || run->code != code ||
+                run->url != url) {
+                out.runs.emplace_back();
+                run = &out.runs.back();
+                run->begin = static_cast<uint32_t>(out.text.size());
+                run->url = url;
+                run->bold = bold;
+                run->italic = italic;
+                run->strike = strike;
+                run->code = code;
+            }
+            if (spaced) out.text.push_back(L' ');
+            out.text.append(word.data(), word.size());
+            run->end = static_cast<uint32_t>(out.text.size());
+        };
+
+        for (const Internal::InlineRun& span : out.parsed.runs) {
+            // Parsed runs differ in style or link target, so each one is a span of its own.
+            out.wide.clear();
+            AppendUtf8ToWide(out.wide, out.parsed.Text(span));
+            const std::wstring& source = out.wide;
+            const std::string_view url = out.parsed.Url(span);
+            for (size_t at = 0; at < source.size();) {
+                while (at < source.size() && IsWideSpace(source[at])) at++;
+                size_t end = at;
+                while (end < source.size() && !IsWideSpace(source[end])) end++;
+                if (end == at) break;
+                std::wstring_view word(source.data() + at, end - at);
+                at = end;
+
+                double wordWidth = TextWidth(font, word, size);
+                const bool lineEmpty = out.runs.size() == lineStart;
+                bool needsSpace = !lineEmpty && !IsClosingPunctuation(word);
+                double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
+
+                if (!lineEmpty && lineWidth + addWidth > width) {
+                    out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+                    lineStart = out.runs.size();
+                    lineWidth = 0.0;
+                    needsSpace = false;
+                }
+
+                bool spaced = false;
+                if (needsSpace) {
+                    if (span.strike) {
+                        append(std::wstring_view(L" ", 1), false, false, false, false, std::string_view(), false);
+                        lineWidth += spaceWidth;
+                    } else {
+                        spaced = true;
+                        wordWidth += spaceWidth;
+                    }
+                }
+                append(word, spaced, span.bold, span.italic, span.strike, url, span.code);
+                lineWidth += wordWidth;
+            }
+        }
+
+        if (out.runs.size() != lineStart) out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+        if (out.lineEnds.empty()) out.lineEnds.push_back(0);
+        return true;
+    }
 
     std::vector<std::vector<StyledSpan>> WrapStyled(const std::string& text, double width, double size) {
         if (text.find('\n') != std::string::npos) {
@@ -3132,26 +3512,24 @@ private:
             }
             return explicitLines;
         }
-        if (text.find_first_of("!*_~`$[<\\") == std::string::npos) {
+        if (!RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteInlineSyntax)) {
             std::vector<std::vector<StyledSpan>> lines;
             std::wstring wide = Utf8ToWide(NormalizeSymbols(text));
-            for (const auto& line : WrapText(font, std::wstring_view(wide), width, size)) {
-                lines.push_back({ { line, "", false, false, false } });
+            std::vector<std::wstring> wrapped = WrapText(font, std::wstring_view(wide), width, size);
+            lines.reserve(wrapped.size());
+            for (std::wstring& line : wrapped) {
+                lines.emplace_back();
+                lines.back().emplace_back();
+                lines.back().back().text = std::move(line);
             }
             if (lines.empty()) lines.push_back({});
             return lines;
         }
 
-        std::vector<StyledWord> words;
-        {
-            // The spans are released before the lines are built, as they always were:
-            // the line and word strings then reuse that memory while it is still warm.
-            std::vector<StyledSpan> spans = ParseInlineStyled(text, size, width);
-            if (math.Active()) {
-                std::vector<StyledWord> mathWords = SplitMathWords(spans);
-                return WrapMathWords(mathWords, MarkMathJoins(spans, mathWords.size()), width, size);
-            }
-            words = SplitStyledWords(spans);
+        std::vector<StyledSpan> spans = ParseInlineStyled(text, size, width);
+        if (math.Active()) {
+            std::vector<StyledWord> mathWords = SplitMathWords(spans);
+            return WrapMathWords(mathWords, MarkMathJoins(spans, mathWords.size()), width, size);
         }
         std::vector<std::vector<StyledSpan>> lines;
         lines.reserve(std::max<size_t>(1, text.size() / 72));
@@ -3159,98 +3537,114 @@ private:
         line.reserve(16);
         double lineWidth = 0.0;
         double spaceWidth = TextWidth(font, L" ", size);
+        const std::string noUrl;
 
-        for (const auto& word : words) {
-            double wordWidth = TextWidth(font, word.text, size);
-            bool needsSpace = !line.empty() && !IsClosingPunctuation(word.text);
-            double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
+        // The words are views into the spans: nothing is copied until a word lands in a line.
+        for (const StyledSpan& span : spans) {
+            const std::wstring& source = span.text;
+            for (size_t at = 0; at < source.size();) {
+                while (at < source.size() && IsWideSpace(source[at])) at++;
+                size_t end = at;
+                while (end < source.size() && !IsWideSpace(source[end])) end++;
+                if (end == at) break;
+                std::wstring_view word(source.data() + at, end - at);
+                at = end;
 
-            if (!line.empty() && lineWidth + addWidth > width) {
-                lines.push_back(line);
-                line.clear();
-                lineWidth = 0.0;
-                needsSpace = false;
-                addWidth = wordWidth;
-            }
+                double wordWidth = TextWidth(font, word, size);
+                bool needsSpace = !line.empty() && !IsClosingPunctuation(word);
+                double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
 
-            std::wstring textRun = word.text;
-            if (needsSpace) {
-                if (word.strike) {
-                    AppendStyledSpan(line, L" ", false, false, false);
-                    lineWidth += spaceWidth;
-                } else {
-                    textRun.insert(textRun.begin(), L' ');
-                    wordWidth += spaceWidth;
+                if (!line.empty() && lineWidth + addWidth > width) {
+                    lines.push_back(std::move(line));
+                    line.clear();
+                    line.reserve(16);
+                    lineWidth = 0.0;
+                    needsSpace = false;
                 }
+
+                bool spaced = false;
+                if (needsSpace) {
+                    if (span.strike) {
+                        AppendStyledWord(line, std::wstring_view(L" ", 1), false, false, false, false, noUrl, false);
+                        lineWidth += spaceWidth;
+                    } else {
+                        spaced = true;
+                        wordWidth += spaceWidth;
+                    }
+                }
+                AppendStyledWord(line, word, spaced, span.bold, span.italic, span.strike, span.url, span.code);
+                lineWidth += wordWidth;
             }
-            AppendStyledSpan(line, std::move(textRun), word.bold, word.italic, word.strike, word.url, word.code);
-            lineWidth += wordWidth;
         }
 
-        if (!line.empty()) lines.push_back(line);
+        if (!line.empty()) lines.push_back(std::move(line));
         if (lines.empty()) lines.push_back({});
         return lines;
     }
 
     void NewPage() {
-        pages.push_back("");
+        pageStarts.push_back(content.size());
         pageLinks.push_back({});
-        pages.back().reserve(64 * 1024);
         y = PAGE_H - margin;
     }
 
     void RenderPageBreak() {
-        if (!pages.empty() && !pages.back().empty()) NewPage();
+        if (!pageStarts.empty() && content.size() > pageStarts.back()) NewPage();
     }
 
     void Ensure(double needed) {
         if (y - needed < margin) NewPage();
     }
 
-    void PaintText(double x, double baseline, double size, const std::wstring& line, const char* color,
+    void PaintText(double x, double baseline, double size, std::wstring_view line, const char* color,
         bool fauxBold = false, bool italic = false, bool strike = false) {
-        std::string& c = pages.back();
-        c += "q ";
-        c += color;
-        c += " rg BT /F1 ";
-        AppendF(c, size);
-        c += " Tf 1 0 ";
-        c += italic ? "0.18 " : "0 ";
-        c += "1 ";
-        AppendF(c, x);
-        c += " ";
-        AppendF(c, baseline);
-        c += " Tm ";
-        std::string hex = HexText(font, line, usedCids);
-        c += hex;
-        c += " Tj";
+        const size_t colorSize = strlen(color);
+        const size_t hexBytes = HexTextBytes(line);
+        TailWriter w(content, 96 + colorSize * 2 + kOperandBytes * 9 + hexBytes * 2);
+        w.Lit("q ");
+        w.Bytes(color, colorSize);
+        w.Lit(" rg BT /F1 ");
+        w.Fixed(size);
+        w.Lit(" Tf 1 0 ");
+        if (italic) w.Lit("0.18 ");
+        else w.Lit("0 ");
+        w.Lit("1 ");
+        w.Fixed(x);
+        w.Lit(" ");
+        w.Fixed(baseline);
+        w.Lit(" Tm ");
+        const char* hex = w.cursor;
+        w.cursor = WriteHexText(w.cursor, font, line, usedCids);
+        const size_t hexSize = (size_t)(w.cursor - hex);
+        w.Lit(" Tj");
         if (fauxBold) {
-            c += " 1 0 ";
-            c += italic ? "0.18 " : "0 ";
-            c += "1 ";
-            AppendF(c, x + 0.28);
-            c += " ";
-            AppendF(c, baseline);
-            c += " Tm ";
-            c += hex;
-            c += " Tj";
+            w.Lit(" 1 0 ");
+            if (italic) w.Lit("0.18 ");
+            else w.Lit("0 ");
+            w.Lit("1 ");
+            w.Fixed(x + 0.28);
+            w.Lit(" ");
+            w.Fixed(baseline);
+            w.Lit(" Tm ");
+            w.Bytes(hex, hexSize);
+            w.Lit(" Tj");
         }
-        c += " ET";
+        w.Lit(" ET");
         if (strike && !line.empty()) {
             double width = TextWidth(font, line, size);
-            c += " ";
-            c += color;
-            c += " RG 0.55 w ";
-            AppendF(c, x);
-            c += " ";
-            AppendF(c, baseline + size * 0.34);
-            c += " m ";
-            AppendF(c, x + width);
-            c += " ";
-            AppendF(c, baseline + size * 0.34);
-            c += " l S";
+            w.Lit(" ");
+            w.Bytes(color, colorSize);
+            w.Lit(" RG 0.55 w ");
+            w.Fixed(x);
+            w.Lit(" ");
+            w.Fixed(baseline + size * 0.34);
+            w.Lit(" m ");
+            w.Fixed(x + width);
+            w.Lit(" ");
+            w.Fixed(baseline + size * 0.34);
+            w.Lit(" l S");
         }
-        c += " Q\n";
+        w.Lit(" Q\n");
     }
 
     void DrawTextLine(double x, double size, const std::wstring& line, const char* color = "0.08 0.08 0.08") {
@@ -3261,44 +3655,46 @@ private:
     }
 
     void DrawRect(double x, double top, double w, double h, const char* color) {
-        std::string& c = pages.back();
-        c += "q ";
-        c += color;
-        c += " rg ";
-        AppendF(c, x);
-        c += " ";
-        AppendF(c, top - h);
-        c += " ";
-        AppendF(c, w);
-        c += " ";
-        AppendF(c, h);
-        c += " re f Q\n";
+        const size_t colorSize = strlen(color);
+        TailWriter out(content, 24 + colorSize + kOperandBytes * 4);
+        out.Lit("q ");
+        out.Bytes(color, colorSize);
+        out.Lit(" rg ");
+        out.Fixed(x);
+        out.Lit(" ");
+        out.Fixed(top - h);
+        out.Lit(" ");
+        out.Fixed(w);
+        out.Lit(" ");
+        out.Fixed(h);
+        out.Lit(" re f Q\n");
     }
 
     void DrawStrokeRect(double x, double top, double w, double h, const char* color = "0.72 0.72 0.72", double lineWidth = 0.45) {
-        std::string& c = pages.back();
-        c += "q ";
-        c += color;
-        c += " RG ";
-        AppendF(c, lineWidth);
-        c += " w ";
-        AppendF(c, x);
-        c += " ";
-        AppendF(c, top - h);
-        c += " ";
-        AppendF(c, w);
-        c += " ";
-        AppendF(c, h);
-        c += " re S Q\n";
+        const size_t colorSize = strlen(color);
+        TailWriter out(content, 24 + colorSize + kOperandBytes * 5);
+        out.Lit("q ");
+        out.Bytes(color, colorSize);
+        out.Lit(" RG ");
+        out.Fixed(lineWidth);
+        out.Lit(" w ");
+        out.Fixed(x);
+        out.Lit(" ");
+        out.Fixed(top - h);
+        out.Lit(" ");
+        out.Fixed(w);
+        out.Lit(" ");
+        out.Fixed(h);
+        out.Lit(" re S Q\n");
     }
 
-    void AddLink(double x, double baseline, double width, double size, const std::string& url) {
+    void AddLink(double x, double baseline, double width, double size, std::string_view url) {
         if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
-        pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, url });
+        pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, std::string(url) });
     }
 
     void DrawImage(int imageIndex, double x, double top, double w, double h) {
-        std::string& c = pages.back();
+        std::string& c = content;
         c += "q ";
         AppendF(c, w);
         c += " 0 0 ";
@@ -3416,7 +3812,7 @@ private:
             double baseline = y - bodySize;
             for (const StyledSpan& span : line) {
                 if (span.math >= 0) {
-                    cursor += math.Emit(span.math, pages.back(), cursor, baseline, textColor);
+                    cursor += math.Emit(span.math, content, cursor, baseline, textColor);
                     continue;
                 }
                 double spanWidth = TextWidth(font, span.text, bodySize);
@@ -3437,6 +3833,27 @@ private:
     void RenderParagraph(const std::string& text, double x, double width) {
         double lh = bodySize * 1.35;
         if (math.Active()) math.Clear();
+        if (WrapStyledRuns(text, width, bodySize, paragraphRuns)) {
+            size_t index = 0;
+            for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
+                Ensure(lh);
+                double cursor = x;
+                double baseline = y - bodySize;
+                for (; index < lineEnd; index++) {
+                    const StyledRun& run = paragraphRuns.runs[index];
+                    const std::wstring_view runText = paragraphRuns.Text(run);
+                    double spanWidth = TextWidth(font, runText, bodySize);
+                    if (run.code) DrawRect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.94 0.94 0.92");
+                    const char* color = run.url.empty() ? (run.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
+                    PaintText(cursor, baseline, bodySize, runText, color, run.bold, run.italic, run.strike);
+                    AddLink(cursor, baseline, spanWidth, bodySize, run.url);
+                    cursor += spanWidth;
+                }
+                y -= lh;
+            }
+            y -= 5.0;
+            return;
+        }
         const std::vector<std::vector<StyledSpan>> lines = WrapStyled(text, width, bodySize);
         if (math.Active()) {
             RenderMathLines(lines, x, width, false);
@@ -3554,6 +3971,29 @@ private:
         double x = margin + 14.0;
         double width = PAGE_W - margin * 2.0 - 22.0;
         if (math.Active()) math.Clear();
+        if (WrapStyledRuns(text, width, bodySize, paragraphRuns)) {
+            size_t index = 0;
+            for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
+                Ensure(lineHeight + 2.0);
+                DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
+                DrawRect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
+                double cursor = x;
+                double baseline = y - bodySize;
+                for (; index < lineEnd; index++) {
+                    const StyledRun& run = paragraphRuns.runs[index];
+                    const std::wstring_view runText = paragraphRuns.Text(run);
+                    double spanWidth = TextWidth(font, runText, bodySize);
+                    if (run.code) DrawRect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
+                    const char* color = run.url.empty() ? (run.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
+                    PaintText(cursor, baseline, bodySize, runText, color, run.bold, run.italic, run.strike);
+                    AddLink(cursor, baseline, spanWidth, bodySize, run.url);
+                    cursor += spanWidth;
+                }
+                y -= lineHeight;
+            }
+            y -= 7.0;
+            return;
+        }
         const std::vector<std::vector<StyledSpan>> lines = WrapStyled(text, width, bodySize);
         if (math.Active()) {
             RenderMathLines(lines, x, width, true);
@@ -3623,7 +4063,7 @@ private:
             DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, total + 3.0, "0.94 0.95 0.96");
             DrawRect(margin, y + 2.0, 3.0, total + 3.0, "0.45 0.62 0.72");
         }
-        formula.Emit(pages.back(), left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
+        formula.Emit(content, left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
             quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08");
         math.MarkUsed();
         y -= total;
@@ -3641,9 +4081,9 @@ private:
         for (const auto& rawLine : raw) {
             std::wstring wide = Utf8ToWide(rawLine);
             for (const auto& line : WrapCodeLine(font, wide, width, size)) {
-                size_t pageCount = pages.size();
+                size_t pageCount = pageStarts.size();
                 Ensure(pitch + 8.0);
-                if (pages.size() != pageCount) first = true;
+                if (pageStarts.size() != pageCount) first = true;
                 // One tile per line, flush with its neighbours, so the tint never covers text.
                 double pad = first ? 4.0 : 0.0;
                 DrawRect(margin, y + pad, PAGE_W - margin * 2.0, pitch + pad, "0.97 0.97 0.95");
@@ -3710,7 +4150,7 @@ private:
     void RenderRule() {
         Ensure(18.0);
         y -= 5.0;
-        std::string& c = pages.back();
+        std::string& c = content;
         c += "q 0.68 0.68 0.68 RG 0.8 w ";
         AppendF(c, margin);
         c += " ";
@@ -4041,6 +4481,22 @@ static std::string EscapeLiteral(const std::string& s) {
     return out;
 }
 
+// EscapeLiteral written straight into a buffer with room for two bytes per input byte.
+// Returns the end of what was written.
+static char* WriteEscapedLiteral(char* out, std::string_view text) {
+    // Most lines hold no parenthesis, backslash or control byte and are copied in one piece.
+    if (!RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteLiteralSpecial)) {
+        if (!text.empty()) memcpy(out, text.data(), text.size());
+        return out + text.size();
+    }
+    for (char c : text) {
+        if ((unsigned char)c < 32 || (unsigned char)c >= 127) continue;
+        if (c == '(' || c == ')' || c == '\\') *out++ = '\\';
+        *out++ = c;
+    }
+    return out;
+}
+
 static bool IsAsciiDocument(const std::string& s) {
     auto isAsciiAfterSymbolNormalization = [](std::string_view text) {
         for (size_t i = 0; i < text.size();) {
@@ -4101,6 +4557,17 @@ static constexpr std::array<unsigned char, 128> MakeAsciiWidthTable() {
 
 static constexpr auto kAsciiWidthHundredths = MakeAsciiWidthTable();
 
+// kAsciiWidthHundredths for the bytes of a word and 0 for the four space characters: one
+// lookup per byte both ends a word and measures it.
+static constexpr std::array<unsigned char, 256> MakeAsciiWordWidthTable() {
+    std::array<unsigned char, 256> widths{};
+    for (size_t c = 0; c < widths.size(); c++) widths[c] = c < 128 ? kAsciiWidthHundredths[c] : 52;
+    for (char c : { ' ', '\t', '\r', '\n' }) widths[static_cast<unsigned char>(c)] = 0;
+    return widths;
+}
+
+static constexpr auto kAsciiWordWidths = MakeAsciiWordWidthTable();
+
 static double AsciiCharWidth(char c, double size, bool mono = false) {
     if (mono) return size * 0.60;
     return size * kAsciiWidthHundredths[static_cast<unsigned char>(c)] * 0.01;
@@ -4118,65 +4585,123 @@ struct WrappedAsciiLine {
     double width = 0.0;
 };
 
-static void WrapAsciiText(const std::string& raw, double maxWidth, double size,
-    bool mono, std::vector<WrappedAsciiLine>& lines) {
-    // Second read of text the parser already stripped: math delimiters are literal here.
-    std::string text = StripInlineMarkdown(raw, false);
-    lines.clear();
-    std::string line;
-    line.reserve(std::min<size_t>(text.size(), 256));
-    double lineWidth = 0.0;
-    const double spaceWidth = mono ? size * 0.60 : size * 0.28;
-    size_t i = 0;
-
-    while (i < text.size()) {
+// Appends the words of `text`, which starts and ends with a word, one space apart.
+static void AppendSingleSpaced(std::string& out, std::string_view text) {
+    for (size_t i = 0; i < text.size();) {
+        size_t end = i;
+        while (end < text.size() && !IsSpace(text[end])) end++;
+        if (i != 0) out.push_back(' ');
+        out.append(text.data() + i, end - i);
+        i = end;
         while (i < text.size() && IsSpace(text[i])) i++;
-        size_t start = i;
-        while (i < text.size() && !IsSpace(text[i])) i++;
-        std::string_view word(text.data() + start, i - start);
-        if (word.empty()) continue;
-        double wordWidth = AsciiTextWidth(word, size, mono);
+    }
+}
 
-        if (!line.empty() && lineWidth + spaceWidth + wordWidth <= maxWidth) {
-            line.push_back(' ');
-            line.append(word.data(), word.size());
+// Greedy word wrap of text without inline syntax: emit(line, width) receives every line.
+// A line is the piece of `text` from its first to its last word; only when two of its
+// words are not exactly one space apart is it rebuilt in a scratch string. The view
+// passed to emit is valid until emit returns.
+template <typename Emit>
+static void WrapAsciiWords(std::string_view text, double maxWidth, double size, bool mono, Emit emit) {
+    const double spaceWidth = mono ? size * 0.60 : size * 0.28;
+    std::string respaced;
+    size_t lineStart = 0;
+    size_t lineEnd = 0;         // the line is text[lineStart, lineEnd); empty when they are equal
+    bool singleSpaced = true;
+    double lineWidth = 0.0;
+    bool emitted = false;
+    auto flush = [&]() {
+        std::string_view line = text.substr(lineStart, lineEnd - lineStart);
+        if (!singleSpaced) {
+            respaced.clear();
+            AppendSingleSpaced(respaced, line);
+            line = respaced;
+        }
+        emit(line, lineWidth);
+        emitted = true;
+    };
+    auto startLine = [&](size_t start, size_t end, double width) {
+        lineStart = start;
+        lineEnd = end;
+        lineWidth = width;
+        singleSpaced = true;
+    };
+
+    size_t i = 0;
+    while (i < text.size()) {
+        while (i < text.size() && kAsciiWordWidths[static_cast<unsigned char>(text[i])] == 0) i++;
+        const size_t start = i;
+        unsigned wordHundredths = 0;
+        for (; i < text.size(); i++) {
+            const unsigned charHundredths = kAsciiWordWidths[static_cast<unsigned char>(text[i])];
+            if (charHundredths == 0) break;
+            wordHundredths += charHundredths;
+        }
+        if (i == start) continue;
+        // AsciiTextWidth of the word.
+        const double wordWidth = mono ? static_cast<double>(i - start) * size * 0.60 :
+            static_cast<double>(wordHundredths) * size * 0.01;
+        const bool lineEmpty = lineEnd == lineStart;
+
+        if (!lineEmpty && lineWidth + spaceWidth + wordWidth <= maxWidth) {
+            if (start - lineEnd != 1 || text[lineEnd] != ' ') singleSpaced = false;
+            lineEnd = i;
             lineWidth += spaceWidth + wordWidth;
             continue;
         }
-        if (line.empty() && wordWidth <= maxWidth) {
-            line.assign(word.data(), word.size());
-            lineWidth = wordWidth;
+        if (lineEmpty && wordWidth <= maxWidth) {
+            startLine(start, i, wordWidth);
             continue;
         }
-        if (!line.empty()) {
-            lines.push_back({std::move(line), lineWidth});
-            line.clear();
+        if (!lineEmpty) {
+            flush();
+            lineStart = lineEnd = 0;
             lineWidth = 0.0;
         }
         if (wordWidth <= maxWidth) {
-            line.assign(word.data(), word.size());
-            lineWidth = wordWidth;
+            startLine(start, i, wordWidth);
             continue;
         }
 
-        std::string part;
-        part.reserve(word.size());
+        // A word wider than the line is cut into pieces; the last piece stays open.
+        size_t partStart = start;
         double partWidth = 0.0;
-        for (char c : word) {
-            double charWidth = AsciiCharWidth(c, size, mono);
-            if (!part.empty() && partWidth + charWidth > maxWidth) {
-                lines.push_back({std::move(part), partWidth});
-                part.clear();
+        for (size_t at = start; at < i; at++) {
+            const double charWidth = AsciiCharWidth(text[at], size, mono);
+            if (at > partStart && partWidth + charWidth > maxWidth) {
+                emit(text.substr(partStart, at - partStart), partWidth);
+                emitted = true;
+                partStart = at;
                 partWidth = 0.0;
             }
-            part.push_back(c);
             partWidth += charWidth;
         }
-        line = std::move(part);
-        lineWidth = partWidth;
+        startLine(partStart, i, partWidth);
     }
-    if (!line.empty()) lines.push_back({std::move(line), lineWidth});
-    if (lines.empty()) lines.push_back({"", 0.0});
+    if (lineEnd != lineStart) flush();
+    if (!emitted) emit(std::string_view(""), 0.0);
+}
+
+// Wraps text the parser already stripped. It is read a second time, with math delimiters
+// literal; text without inline syntax, the usual case, is wrapped in place.
+template <typename Emit>
+static void ForEachWrappedAsciiLine(const std::string& raw, double maxWidth, double size, bool mono, Emit emit) {
+    if (!RayoMd::Text::ContainsByteClass(raw, RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteSymbolLead)) {
+        WrapAsciiWords(raw, maxWidth, size, mono, emit);
+        return;
+    }
+    const std::string text = StripInlineMarkdown(raw, false);
+    WrapAsciiWords(text, maxWidth, size, mono, emit);
+}
+
+static void WrapAsciiText(const std::string& raw, double maxWidth, double size,
+    bool mono, std::vector<WrappedAsciiLine>& lines) {
+    lines.clear();
+    ForEachWrappedAsciiLine(raw, maxWidth, size, mono, [&](std::string_view line, double width) {
+        lines.emplace_back();
+        lines.back().text.assign(line.data(), line.size());
+        lines.back().width = width;
+    });
 }
 
 static std::vector<WrappedAsciiLine> WrapAsciiText(
@@ -4211,7 +4736,9 @@ static std::vector<std::string> WrapAsciiLiteral(std::string_view raw, double ma
 
 class StandardRenderer {
 public:
-    StandardRenderer(PdfStyle styleValue, const PdfMargin& marginValue, ImageRegistry* imageRegistry) : images(imageRegistry), style(styleValue) {
+    // The content streams of all pages are appended to `output`, one after another.
+    StandardRenderer(std::string& output, PdfStyle styleValue, const PdfMargin& marginValue, ImageRegistry* imageRegistry)
+        : images(imageRegistry), style(styleValue), content(output) {
         margin = ResolveMarginPoints(marginValue);
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
@@ -4220,7 +4747,8 @@ public:
 
     void Render(const std::vector<Block>& blocks) { RenderBlocks(*this, blocks); }
 
-    const std::vector<std::string>& Pages() const { return pages; }
+    // Offset in the output buffer at which the content stream of each page starts.
+    const std::vector<size_t>& PageStarts() const { return pageStarts; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     bool MathUsed() const { return math.Used(); }
 
@@ -4236,7 +4764,9 @@ private:
     double bodySize = 11.5;
     double lineHeight = 15.5;
     double y = 0.0;
-    std::vector<std::string> pages;
+    // The page being rendered is the tail of `content`, so painting is a plain append.
+    std::string& content;
+    std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     MathPool math;
 
@@ -4271,14 +4801,13 @@ private:
     }
 
     void NewPage() {
-        pages.push_back("");
+        pageStarts.push_back(content.size());
         pageLinks.push_back({});
-        pages.back().reserve(64 * 1024);
         y = PAGE_H - margin;
     }
 
     void RenderPageBreak() {
-        if (!pages.empty() && !pages.back().empty()) NewPage();
+        if (!pageStarts.empty() && content.size() > pageStarts.back()) NewPage();
     }
 
     void Ensure(double needed) {
@@ -4286,19 +4815,22 @@ private:
     }
 
     void Rect(double x, double top, double w, double h, const char* color, bool stroke = false) {
-        std::string& c = pages.back();
-        c += "q ";
-        c += color;
-        c += stroke ? " RG 0.45 w " : " rg ";
-        AppendF(c, x);
-        c += " ";
-        AppendF(c, top - h);
-        c += " ";
-        AppendF(c, w);
-        c += " ";
-        AppendF(c, h);
-        c += " re ";
-        c += stroke ? "S Q\n" : "f Q\n";
+        const size_t colorSize = strlen(color);
+        TailWriter out(content, 32 + colorSize + kOperandBytes * 4);
+        out.Lit("q ");
+        out.Bytes(color, colorSize);
+        if (stroke) out.Lit(" RG 0.45 w ");
+        else out.Lit(" rg ");
+        out.Fixed(x);
+        out.Lit(" ");
+        out.Fixed(top - h);
+        out.Lit(" ");
+        out.Fixed(w);
+        out.Lit(" ");
+        out.Fixed(h);
+        out.Lit(" re ");
+        if (stroke) out.Lit("S Q\n");
+        else out.Lit("f Q\n");
     }
 
     struct AsciiSpan {
@@ -4315,20 +4847,21 @@ private:
         int math = -1;
     };
 
-    void AddLink(double x, double baseline, double width, double size, const std::string& url) {
+    void AddLink(double x, double baseline, double width, double size, std::string_view url) {
         if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
-        pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, url });
+        pageLinks.back().push_back({ x, baseline - 1.0, x + width, baseline + size * 1.05, std::string(url) });
     }
 
-    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string_view text, std::string_view url = {},
-        bool code = false) {
+    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string&& text, std::string&& url, bool code) {
         if (text.empty()) return;
-        std::string stripped = ToString(text);
-        if (stripped.empty()) return;
         if (!spans.empty() && spans.back().url == url && spans.back().code == code && spans.back().math < 0) {
-            spans.back().text += stripped;
+            spans.back().text += text;
         } else {
-            spans.push_back({ std::move(stripped), ToString(url), code });
+            spans.emplace_back();
+            AsciiSpan& span = spans.back();
+            span.text = std::move(text);
+            span.url = std::move(url);
+            span.code = code;
         }
     }
 
@@ -4352,12 +4885,12 @@ private:
         std::vector<AsciiSpan> spans;
         std::vector<Internal::InlineSpan> inlineSpans = Internal::ParseInlineSpans(text);
         spans.reserve(inlineSpans.size());
-        for (const Internal::InlineSpan& span : inlineSpans) {
+        for (Internal::InlineSpan& span : inlineSpans) {
             if (span.math != Internal::InlineMath::None) {
                 PushAsciiMathSpan(spans, span, size, width, false);
                 continue;
             }
-            PushAsciiSpan(spans, span.text, span.url, span.code);
+            PushAsciiSpan(spans, std::move(span.text), std::move(span.url), span.code);
         }
         return spans;
     }
@@ -4379,7 +4912,7 @@ private:
         return spans;
     }
 
-    // Word list of formula-bearing text: the words of SplitAsciiWords plus one word
+    // Word list of formula-bearing text: the words WrapAsciiLinks walks, plus one word
     // per formula.
     RAYOMD_MATH_COLD std::vector<AsciiWord> SplitAsciiMathWords(const std::vector<AsciiSpan>& spans) {
         std::vector<AsciiWord> words;
@@ -4405,34 +4938,25 @@ private:
         return words;
     }
 
-    std::vector<AsciiWord> SplitAsciiWords(const std::vector<AsciiSpan>& spans) {
-        std::vector<AsciiWord> words;
-        words.reserve(spans.size() * 3);
-        for (const AsciiSpan& span : spans) {
-            std::string current;
-            for (char ch : span.text) {
-                if (IsSpace(ch)) {
-                    if (!current.empty()) {
-                        words.push_back({ current, span.url, span.code });
-                        current.clear();
-                    }
-                } else {
-                    current.push_back(ch);
-                }
+    // Appends one word to the line being filled, with a leading space when `spaced`. It is
+    // merged into the previous span when link and code state are the same.
+    void AppendAsciiWord(std::vector<AsciiSpan>& line, std::string_view word, bool spaced, const std::string& url,
+        bool code) {
+        if (!line.empty()) {
+            AsciiSpan& last = line.back();
+            if (last.url == url && last.code == code) {
+                if (spaced) last.text.push_back(' ');
+                last.text.append(word.data(), word.size());
+                return;
             }
-            if (!current.empty()) words.push_back({ current, span.url, span.code });
         }
-        return words;
-    }
-
-    void AppendAsciiLineSpan(std::vector<AsciiSpan>& line, std::string text, const std::string& url,
-        bool code = false) {
-        if (text.empty()) return;
-        if (!line.empty() && line.back().url == url && line.back().code == code) {
-            line.back().text += text;
-            return;
-        }
-        line.push_back({ std::move(text), url, code });
+        line.emplace_back();
+        AsciiSpan& span = line.back();
+        span.text.reserve(word.size() + 1);
+        if (spaced) span.text.push_back(' ');
+        span.text.append(word.data(), word.size());
+        span.url = url;
+        span.code = code;
     }
 
     // Text next to a formula is positioned with the real advance widths of the
@@ -4460,7 +4984,7 @@ private:
                 AsciiTextWidth(word.text, size, word.code);
         }
         // Appends text to the line: merged into the previous span when the style is the
-        // same (never into a formula), as AppendAsciiLineSpan does for plain text.
+        // same (never into a formula), as AppendAsciiWord does for plain text.
         auto appendText = [&](std::string text, const std::string& url, bool code) {
             if (!line.empty()) {
                 AsciiSpan& last = line.back();
@@ -4576,7 +5100,7 @@ private:
         double cursor = x;
         for (const AsciiSpan& span : line) {
             if (span.math >= 0) {
-                cursor += math.Emit(span.math, pages.back(), cursor, baseline, color);
+                cursor += math.Emit(span.math, content, cursor, baseline, color);
                 continue;
             }
             Text(cursor, baseline, size, span.text, bold ? "F2" : "F1", color);
@@ -4587,6 +5111,116 @@ private:
     void TableFill(double x, double top, double w, double h) { Rect(x, top, w, h, "0.91 0.93 0.95"); }
     void TableStroke(double x, double top, double w, double h) { Rect(x, top, w, h, "0.72 0.72 0.72", true); }
     const char* TableTextColor(bool) const { return "0.08 0.08 0.08"; }
+
+    // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer, in the
+    // link and code state of the span it came from.
+    struct AsciiRun {
+        uint32_t begin = 0;
+        uint32_t end = 0;
+        uint32_t widthHundredths = 0;   // sum of kAsciiWidthHundredths over the text
+        bool code = false;
+        std::string_view url;           // link target, in AsciiRuns::parsed
+    };
+
+    // The wrapped lines of one paragraph, kept flat: the text of every run lies in one
+    // buffer and a line is a range of runs. One object serves all paragraphs, so wrapping
+    // builds no string and no vector per line.
+    struct AsciiRuns {
+        Internal::InlineRuns parsed;        // the paragraph as parsed; holds the link targets
+        std::string text;
+        std::vector<AsciiRun> runs;
+        std::vector<uint32_t> lineEnds;     // one past the last run of each line
+
+        std::string_view Text(const AsciiRun& run) const {
+            return std::string_view(text.data() + run.begin, run.end - run.begin);
+        }
+        // The value of AsciiTextWidth(Text(run), size, run.code), without reading the text again.
+        double Width(const AsciiRun& run, double size) const {
+            if (run.code) return static_cast<double>(run.end - run.begin) * size * 0.60;
+            return static_cast<double>(run.widthHundredths) * size * 0.01;
+        }
+    };
+    AsciiRuns paragraphRuns;
+
+    // Wraps `text` into `out` with the line breaks and span boundaries of WrapAsciiLinks.
+    // Returns false for text with explicit line breaks or possible formulas, which take
+    // the general path.
+    bool WrapAsciiRuns(const std::string& text, double width, double size, AsciiRuns& out) {
+        if (text.size() >= 0x40000000u || text.find('\n') != std::string::npos ||
+            text.find('$') != std::string::npos || text.find("\\(") != std::string::npos) {
+            return false;
+        }
+        Internal::ParseInlineRuns(text, out.parsed);
+        out.runs.clear();
+        out.lineEnds.clear();
+        // Every word is written once, with at most one space in front of it.
+        out.text.resize(out.parsed.text.size() * 2 + 1);
+        char* const textBegin = &out.text[0];
+        char* cursor = textBegin;
+        size_t lineStart = 0;       // index of the first run of the line being filled
+        double lineWidth = 0.0;
+        const double spaceWidth = AsciiTextWidth(" ", size);
+
+        const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
+        for (size_t first = 0; first < parsed.size();) {
+            // The standard fonts show no emphasis: parsed runs that differ only in that are
+            // one span of text, and a word may run across them.
+            const bool code = parsed[first].code;
+            const std::string_view url = out.parsed.Url(parsed[first]);
+            size_t last = first;
+            while (last + 1 < parsed.size() && parsed[last + 1].code == code && out.parsed.Url(parsed[last + 1]) == url) last++;
+            const std::string_view source(out.parsed.text.data() + parsed[first].begin, parsed[last].end - parsed[first].begin);
+            first = last + 1;
+            for (size_t at = 0; at < source.size();) {
+                while (at < source.size() && kAsciiWordWidths[static_cast<unsigned char>(source[at])] == 0) at++;
+                const size_t start = at;
+                unsigned wordHundredths = 0;
+                for (; at < source.size(); at++) {
+                    const unsigned charHundredths = kAsciiWordWidths[static_cast<unsigned char>(source[at])];
+                    if (charHundredths == 0) break;
+                    wordHundredths += charHundredths;
+                }
+                if (at == start) break;
+                const size_t wordBytes = at - start;
+                double wordWidth = code ? static_cast<double>(wordBytes) * size * 0.60 :
+                    static_cast<double>(wordHundredths) * size * 0.01;
+                bool needsSpace = out.runs.size() != lineStart;
+                const double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
+
+                if (needsSpace && lineWidth + addWidth > width) {
+                    out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+                    lineStart = out.runs.size();
+                    lineWidth = 0.0;
+                    needsSpace = false;
+                }
+
+                // The word joins the last run of the line when link and code state are the same.
+                AsciiRun* run = out.runs.size() != lineStart ? &out.runs.back() : nullptr;
+                if (!run || run->code != code || run->url != url) {
+                    out.runs.emplace_back();
+                    run = &out.runs.back();
+                    run->begin = static_cast<uint32_t>(cursor - textBegin);
+                    run->code = code;
+                    run->url = url;
+                }
+                if (needsSpace) {
+                    wordWidth += spaceWidth;
+                    *cursor++ = ' ';
+                    run->widthHundredths += kAsciiWidthHundredths[static_cast<unsigned char>(' ')];
+                }
+                memcpy(cursor, source.data() + start, wordBytes);
+                cursor += wordBytes;
+                run->widthHundredths += wordHundredths;
+                run->end = static_cast<uint32_t>(cursor - textBegin);
+                lineWidth += wordWidth;
+            }
+        }
+
+        out.text.resize(static_cast<size_t>(cursor - textBegin));
+        if (out.runs.size() != lineStart) out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+        if (out.lineEnds.empty()) out.lineEnds.push_back(0);
+        return true;
+    }
 
     std::vector<std::vector<AsciiSpan>> WrapAsciiLinks(const std::string& text, double width, double size) {
         if (text.find('\n') != std::string::npos) {
@@ -4603,16 +5237,10 @@ private:
             }
             return explicitLines;
         }
-        std::vector<AsciiWord> words;
-        {
-            // The spans are released before the lines are built, as they always were:
-            // the line and word strings then reuse that memory while it is still warm.
-            std::vector<AsciiSpan> spans = ParseAsciiLinkSpans(text, size, width);
-            if (math.Active()) {
-                std::vector<AsciiWord> mathWords = SplitAsciiMathWords(spans);
-                return WrapAsciiMathWords(mathWords, MarkMathJoins(spans, mathWords.size()), width, size);
-            }
-            words = SplitAsciiWords(spans);
+        std::vector<AsciiSpan> spans = ParseAsciiLinkSpans(text, size, width);
+        if (math.Active()) {
+            std::vector<AsciiWord> mathWords = SplitAsciiMathWords(spans);
+            return WrapAsciiMathWords(mathWords, MarkMathJoins(spans, mathWords.size()), width, size);
         }
         std::vector<std::vector<AsciiSpan>> lines;
         lines.reserve(std::max<size_t>(1, text.size() / 72));
@@ -4620,36 +5248,41 @@ private:
         double lineWidth = 0.0;
         double spaceWidth = AsciiTextWidth(" ", size);
 
-        for (const AsciiWord& word : words) {
-            double wordWidth = AsciiTextWidth(word.text, size, word.code);
-            bool needsSpace = !line.empty();
-            double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
+        // The words are views into the spans: nothing is copied until a word lands in a line.
+        for (const AsciiSpan& span : spans) {
+            const std::string& source = span.text;
+            for (size_t at = 0; at < source.size();) {
+                while (at < source.size() && IsSpace(source[at])) at++;
+                size_t end = at;
+                while (end < source.size() && !IsSpace(source[end])) end++;
+                if (end == at) break;
+                std::string_view word(source.data() + at, end - at);
+                at = end;
 
-            if (!line.empty() && lineWidth + addWidth > width) {
-                lines.push_back(line);
-                line.clear();
-                lineWidth = 0.0;
-                needsSpace = false;
-                addWidth = wordWidth;
+                double wordWidth = AsciiTextWidth(word, size, span.code);
+                bool needsSpace = !line.empty();
+                double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
+
+                if (!line.empty() && lineWidth + addWidth > width) {
+                    lines.push_back(std::move(line));
+                    line.clear();
+                    lineWidth = 0.0;
+                    needsSpace = false;
+                }
+
+                if (needsSpace) wordWidth += spaceWidth;
+                AppendAsciiWord(line, word, needsSpace, span.url, span.code);
+                lineWidth += wordWidth;
             }
-
-            std::string textRun = word.text;
-            if (needsSpace) {
-                textRun.insert(textRun.begin(), ' ');
-                wordWidth += spaceWidth;
-            }
-
-            AppendAsciiLineSpan(line, std::move(textRun), word.url, word.code);
-            lineWidth += wordWidth;
         }
 
-        if (!line.empty()) lines.push_back(line);
+        if (!line.empty()) lines.push_back(std::move(line));
         if (lines.empty()) lines.push_back({});
         return lines;
     }
 
     void DrawImage(int imageIndex, double x, double top, double w, double h) {
-        std::string& c = pages.back();
+        std::string& c = content;
         c += "q ";
         AppendF(c, w);
         c += " 0 0 ";
@@ -4702,25 +5335,27 @@ private:
         y -= h + 10.0;
     }
 
-    void Text(double x, double baseline, double size, const std::string& text, const char* fontName, const char* color = "0.08 0.08 0.08") {
+    void Text(double x, double baseline, double size, std::string_view text, const char* fontName, const char* color = "0.08 0.08 0.08") {
         if (text.empty()) return;
-        std::string& c = pages.back();
-        c += "q ";
-        c += color;
-        c += " rg BT /";
-        c += fontName;
-        c += " ";
-        AppendF(c, size);
-        c += " Tf 1 0 0 1 ";
-        AppendF(c, x);
-        c += " ";
-        AppendF(c, baseline);
-        c += " Tm (";
-        c += EscapeLiteral(text);
-        c += ") Tj ET Q\n";
+        const size_t colorSize = strlen(color);
+        const size_t fontSize = strlen(fontName);
+        TailWriter out(content, 48 + colorSize + fontSize + kOperandBytes * 3 + text.size() * 2);
+        out.Lit("q ");
+        out.Bytes(color, colorSize);
+        out.Lit(" rg BT /");
+        out.Bytes(fontName, fontSize);
+        out.Lit(" ");
+        out.Fixed(size);
+        out.Lit(" Tf 1 0 0 1 ");
+        out.Fixed(x);
+        out.Lit(" ");
+        out.Fixed(baseline);
+        out.Lit(" Tm (");
+        out.cursor = WriteEscapedLiteral(out.cursor, text);
+        out.Lit(") Tj ET Q\n");
     }
 
-    void DrawTextLine(double x, double size, const std::string& line, const char* fontName = "F1", const char* color = "0.08 0.08 0.08", bool mono = false) {
+    void DrawTextLine(double x, double size, std::string_view line, const char* fontName = "F1", const char* color = "0.08 0.08 0.08", bool mono = false) {
         double lh = size * 1.35;
         Ensure(lh);
         Text(x, y - size, size, line, fontName, color);
@@ -4737,9 +5372,9 @@ private:
             y -= level <= 2 ? 8.0 : 5.0;
             return;
         }
-        for (const auto& line : WrapAsciiText(block.text, PAGE_W - margin * 2.0, size)) {
-            DrawTextLine(margin, size, line.text, "F2", "0.02 0.02 0.02");
-        }
+        ForEachWrappedAsciiLine(block.text, PAGE_W - margin * 2.0, size, false, [&](std::string_view line, double) {
+            DrawTextLine(margin, size, line, "F2", "0.02 0.02 0.02");
+        });
         y -= level <= 2 ? 8.0 : 5.0;
     }
 
@@ -4790,7 +5425,7 @@ private:
             double baseline = y - bodySize;
             for (const AsciiSpan& span : line) {
                 if (span.math >= 0) {
-                    cursor += math.Emit(span.math, pages.back(), cursor, baseline, textColor);
+                    cursor += math.Emit(span.math, content, cursor, baseline, textColor);
                     continue;
                 }
                 double spanWidth = MathTextWidth(span.text, bodySize, span.code, false);
@@ -4809,8 +5444,29 @@ private:
     }
 
     void RenderParagraph(const std::string& text, double x, double width) {
-        if (text.find_first_of("!*_~`$[<\\\n") != std::string::npos) {
+        if (RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteLineFeed)) {
             if (math.Active()) math.Clear();
+            if (WrapAsciiRuns(text, width, bodySize, paragraphRuns)) {
+                const double lh = bodySize * 1.35;
+                size_t index = 0;
+                for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
+                    Ensure(lh);
+                    double cursor = x;
+                    double baseline = y - bodySize;
+                    for (; index < lineEnd; index++) {
+                        const AsciiRun& run = paragraphRuns.runs[index];
+                        double spanWidth = paragraphRuns.Width(run, bodySize);
+                        if (run.code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lh, "0.94 0.94 0.92");
+                        const char* color = run.url.empty() ? (run.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
+                        Text(cursor, baseline, bodySize, paragraphRuns.Text(run), run.code ? "F3" : "F1", color);
+                        AddLink(cursor, baseline, spanWidth, bodySize, run.url);
+                        cursor += spanWidth;
+                    }
+                    y -= lh;
+                }
+                y -= 5.0;
+                return;
+            }
             const std::vector<std::vector<AsciiSpan>> lines = WrapAsciiLinks(text, width, bodySize);
             if (math.Active()) {
                 RenderMathLines(lines, x, width, false);
@@ -4836,9 +5492,9 @@ private:
             return;
         }
 
-        for (const auto& line : WrapAsciiText(text, width, bodySize)) {
-            DrawTextLine(x, bodySize, line.text);
-        }
+        ForEachWrappedAsciiLine(text, width, bodySize, false, [&](std::string_view line, double) {
+            DrawTextLine(x, bodySize, line);
+        });
         y -= 5.0;
     }
 
@@ -4929,6 +5585,28 @@ private:
         double x = margin + 14.0;
         double width = PAGE_W - margin * 2.0 - 22.0;
         if (math.Active()) math.Clear();
+        if (WrapAsciiRuns(text, width, bodySize, paragraphRuns)) {
+            size_t index = 0;
+            for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
+                Ensure(lineHeight + 2.0);
+                Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
+                Rect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
+                double cursor = x;
+                double baseline = y - bodySize;
+                for (; index < lineEnd; index++) {
+                    const AsciiRun& run = paragraphRuns.runs[index];
+                    double spanWidth = paragraphRuns.Width(run, bodySize);
+                    if (run.code) Rect(cursor - 1.5, y + 1.0, spanWidth + 3.0, lineHeight, "0.88 0.89 0.88");
+                    const char* color = run.url.empty() ? (run.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
+                    Text(cursor, baseline, bodySize, paragraphRuns.Text(run), run.code ? "F3" : "F1", color);
+                    AddLink(cursor, baseline, spanWidth, bodySize, run.url);
+                    cursor += spanWidth;
+                }
+                y -= lineHeight;
+            }
+            y -= 7.0;
+            return;
+        }
         const std::vector<std::vector<AsciiSpan>> lines = WrapAsciiLinks(text, width, bodySize);
         if (math.Active()) {
             RenderMathLines(lines, x, width, true);
@@ -4997,7 +5675,7 @@ private:
             Rect(margin, y + 2.0, PAGE_W - margin * 2.0, total + 3.0, "0.94 0.95 0.96");
             Rect(margin, y + 2.0, 3.0, total + 3.0, "0.45 0.62 0.72");
         }
-        formula.Emit(pages.back(), left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
+        formula.Emit(content, left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
             quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08");
         math.MarkUsed();
         y -= total;
@@ -5011,9 +5689,9 @@ private:
         bool first = true;
         for (const auto& rawLine : SplitLines(text)) {
             for (const auto& line : WrapAsciiLiteral(rawLine, PAGE_W - margin * 2.0 - 24.0, size, true)) {
-                size_t pageCount = pages.size();
+                size_t pageCount = pageStarts.size();
                 Ensure(pitch + 8.0);
-                if (pages.size() != pageCount) first = true;
+                if (pageStarts.size() != pageCount) first = true;
                 // One tile per line, flush with its neighbours, so the tint never covers text.
                 double pad = first ? 4.0 : 0.0;
                 Rect(margin, y + pad, PAGE_W - margin * 2.0, pitch + pad, "0.97 0.97 0.95");
@@ -5073,7 +5751,7 @@ private:
     void RenderRule() {
         Ensure(18.0);
         y -= 5.0;
-        std::string& c = pages.back();
+        std::string& c = content;
         c += "q 0.68 0.68 0.68 RG 0.8 w ";
         AppendF(c, margin);
         c += " ";
@@ -5086,6 +5764,16 @@ private:
         y -= 13.0;
     }
 };
+
+// Page content is rendered straight into the output buffer. A buffer the caller reuses
+// keeps its capacity; a new one starts at the size a document of this length usually
+// needs, so it does not grow several times while the pages are rendered.
+static void PrepareOutput(std::string& pdfBytes, size_t expectedBytes) {
+    constexpr size_t kMaxInitialReserve = 64u * 1024u * 1024u;
+    pdfBytes.clear();
+    expectedBytes = std::min(expectedBytes, kMaxInitialReserve);
+    if (pdfBytes.capacity() < expectedBytes) pdfBytes.reserve(expectedBytes);
+}
 
 static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes) {
     std::vector<Block> blocks;
@@ -5100,7 +5788,8 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
     int fontMonoId = pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
 
     ImageRegistry imageRegistry(options);
-    StandardRenderer renderer(options.style, options.margin, &imageRegistry);
+    PrepareOutput(pdfBytes, markdown.size() * 4 + 32 * 1024);
+    StandardRenderer renderer(pdfBytes, options.style, options.margin, &imageRegistry);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         renderer.Render(blocks);
@@ -5112,10 +5801,10 @@ static bool BuildStandardPdfBytes(const std::string& markdown, const PdfOptions&
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
     std::vector<int> pageIds;
-    const std::vector<std::string>& renderedPages = renderer.Pages();
-    for (size_t pageIndex = 0; pageIndex < renderedPages.size(); pageIndex++) {
-        const std::string& pageContent = renderedPages[pageIndex];
-        int contentId = pdf.AddStream("", pageContent);
+    const std::vector<size_t>& pageStarts = renderer.PageStarts();
+    for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
+        const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
+        int contentId = pdf.AddStreamInPlace("", pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         std::string page;
         page.reserve(192);
         page += "<< /Type /Page /Parent ";
@@ -5207,7 +5896,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     int pagesId = pdf.Reserve();
 
     ImageRegistry imageRegistry(options);
-    Renderer renderer(font, type0FontId, options.style, options.margin, &imageRegistry);
+    PrepareOutput(pdfBytes, markdown.size() * 8 + 256 * 1024);
+    Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, &imageRegistry);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         renderer.Render(blocks);
@@ -5223,24 +5913,20 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     auto cidMapBytes = MakeCidToGidMap(font, used, cidKey);
     auto toUnicodeBytes = MakeToUnicodeCMap(used, cidKey);
 
-    pdf.Set(fontFileId, *CachedFontFileObject(font, used, cidKey));
-    std::string cidMapObject;
-    cidMapObject.reserve(cidMapBytes->size() + 48);
-    cidMapObject += "<< /Length ";
-    AppendSize(cidMapObject, cidMapBytes->size());
-    cidMapObject += " >>\nstream\n";
-    cidMapObject += *cidMapBytes;
-    cidMapObject += "\nendstream";
-    pdf.Set(cidMapId, std::move(cidMapObject));
+    // The cached font objects are referenced, not copied: the shared pointers keep them
+    // alive until BuildInto below.
+    std::shared_ptr<const std::string> fontFileObject = CachedFontFileObject(font, used, cidKey);
+    pdf.SetView(fontFileId, *fontFileObject);
 
-    std::string toUnicodeObject;
-    toUnicodeObject.reserve(toUnicodeBytes->size() + 48);
-    toUnicodeObject += "<< /Length ";
-    AppendSize(toUnicodeObject, toUnicodeBytes->size());
-    toUnicodeObject += " >>\nstream\n";
-    toUnicodeObject += *toUnicodeBytes;
-    toUnicodeObject += "\nendstream";
-    pdf.Set(toUnicodeId, std::move(toUnicodeObject));
+    std::string cidMapHead = "<< /Length ";
+    AppendSize(cidMapHead, cidMapBytes->size());
+    cidMapHead += " >>\nstream\n";
+    pdf.SetStreamView(cidMapId, std::move(cidMapHead), *cidMapBytes);
+
+    std::string toUnicodeHead = "<< /Length ";
+    AppendSize(toUnicodeHead, toUnicodeBytes->size());
+    toUnicodeHead += " >>\nstream\n";
+    pdf.SetStreamView(toUnicodeId, std::move(toUnicodeHead), *toUnicodeBytes);
 
     std::string desc;
     desc.reserve(224);
@@ -5287,10 +5973,10 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
     pdf.Set(type0FontId, std::move(type0));
 
     std::vector<int> pageIds;
-    const std::vector<std::string>& renderedPages = renderer.Pages();
-    for (size_t pageIndex = 0; pageIndex < renderedPages.size(); pageIndex++) {
-        const std::string& pageContent = renderedPages[pageIndex];
-        int contentId = pdf.AddStream("", pageContent);
+    const std::vector<size_t>& pageStarts = renderer.PageStarts();
+    for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
+        const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
+        int contentId = pdf.AddStreamInPlace("", pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         std::string page;
         page.reserve(160);
         page += "<< /Type /Page /Parent ";
@@ -5341,6 +6027,11 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const PdfOptions& 
 }
 
 BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes) {
+    if (&markdown == &pdfBytes) {
+        // Pages are rendered straight into pdfBytes, so the source needs storage of its own.
+        const std::string source = markdown;
+        return BuildPdf(source, options, pdfBytes);
+    }
     const auto profileBefore = RayoMd::Profiling::Capture();
     if (options.embedSource) {
         if (markdown.size() > RayoMd::PdfSource::kMaxSourceBytes) {

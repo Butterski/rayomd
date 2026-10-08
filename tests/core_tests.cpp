@@ -35,7 +35,13 @@ bool CheckFormatter() {
     struct Case { double value; const char* expected; };
     const Case cases[] = {
         {0.0, "0"}, {-0.0, "-0"}, {1.0, "1"}, {-1.25, "-1.25"},
-        {12.30, "12.3"}, {12.345, "12.35"}, {595.0, "595"}, {0.004, "0"}
+        {12.30, "12.3"}, {12.345, "12.35"}, {595.0, "595"}, {0.004, "0"},
+        // Halves round away from zero on the value the double holds, whatever its size.
+        {0.005, "0.01"}, {0.0049, "0"}, {0.995, "1"}, {0.994, "0.99"}, {2.675, "2.68"}, {9.995, "9.99"},
+        {99.995, "100"}, {999.995, "1000"}, {9999.99, "9999.99"}, {9999.995, "10000"}, {10000.0, "10000"},
+        {12345.678, "12345.68"}, {841.89, "841.89"}, {-841.895, "-841.9"}, {999999.99, "999999.99"},
+        {1000000.0, "1000000"}, {123456789.125, "123456789.13"}, {-0.004, "-0"}, {-0.005, "-0.01"},
+        {0.1 + 0.2, "0.3"}, {1.005, "1"}, {4503599627370.5, "4503599627370.5"}, {1e15, "1000000000000000"}
     };
     for (const Case& item : cases) {
         std::string actual;
@@ -697,6 +703,7 @@ bool CheckImagePolicyCacheIsolation() {
 #include "math_markdown_tests.inc"
 #include "math_parser_tests.inc"
 #include "math_layout_tests.inc"
+#include "inline_lookahead_tests.inc"
 
 // Heights of the filled rectangles drawn with the given fill colour ("r g b").
 std::vector<double> FillRectHeights(const std::string& pdf, std::string_view color) {
@@ -940,6 +947,75 @@ bool CheckNoMathGolden() {
     return true;
 }
 
+// Pages are rendered straight into the caller's output buffer and the file is assembled
+// in place around them. Whatever the buffer held before and however large it is, the
+// bytes must equal those of a build into a new string.
+bool CheckOutputBufferReuse() {
+    std::string longUnicode = u8"# Unicode\n\n";
+    for (int i = 0; i < 400; i++) longUnicode += u8"Zażółć gęślą jaźń [link](https://example.com). ";
+    longUnicode += "\n";
+    const std::vector<std::string> documents = {
+        "# Small\n\nOne paragraph with a [link](https://example.com).\n",
+        "# Multipage\n\n" + std::string(60000, 'x') + "\n\n- item\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        longUnicode,
+        "# Image\n\n![RayoMD](docs/assets/branding/rayomd.png)\n\n" + std::string(9000, 'y') + "\n",
+        "$$\n\\frac{a}{b}\n$$\n\n" + std::string(9000, 'z') + "\n",
+        std::string()
+    };
+    std::vector<std::string> fresh(documents.size());
+    for (size_t i = 0; i < documents.size(); i++) {
+        if (!Build(documents[i], fresh[i])) {
+            std::cerr << "buffer reuse: baseline build failed for document " << i << std::endl;
+            return false;
+        }
+    }
+    if (fresh[1].find("/Count 1 ") != std::string::npos || fresh[3].find("/Subtype /Image") == std::string::npos) {
+        std::cerr << "buffer reuse: the documents do not cover several pages and an image" << std::endl;
+        return false;
+    }
+
+    // One buffer for every document: a large file after a small one and the reverse.
+    std::string reused;
+    for (int pass = 0; pass < 2; pass++) {
+        for (size_t step = 0; step < documents.size(); step++) {
+            const size_t i = pass == 0 ? step : documents.size() - 1 - step;
+            if (!Build(documents[i], reused) || reused != fresh[i]) {
+                std::cerr << "buffer reuse: document " << i << " differs in a reused buffer" << std::endl;
+                return false;
+            }
+            std::string reversible;
+            std::string reversibleReused = reused;
+            if (!BuildReversible(documents[i], reversible) || !BuildReversible(documents[i], reversibleReused) ||
+                reversible != reversibleReused || RayoMd::PdfSource::Inspect(reversibleReused, true).source != documents[i]) {
+                std::cerr << "buffer reuse: reversible document " << i << " differs in a reused buffer" << std::endl;
+                return false;
+            }
+        }
+    }
+
+    // A buffer far larger than the file is given back instead of being kept.
+    std::string oversized;
+    oversized.reserve(48u * 1024u * 1024u);
+    oversized.assign(4096, '#');
+    for (size_t i = 0; i < documents.size(); i++) {
+        if (i > 0) oversized.reserve(48u * 1024u * 1024u);
+        if (!Build(documents[i], oversized) || oversized != fresh[i] || oversized.capacity() > 8u * 1024u * 1024u) {
+            std::cerr << "buffer reuse: document " << i << " differs in an oversized buffer" << std::endl;
+            return false;
+        }
+    }
+
+    // Source and output in the same string.
+    for (size_t i = 0; i < documents.size(); i++) {
+        std::string aliased = documents[i];
+        if (!Build(aliased, aliased) || aliased != fresh[i]) {
+            std::cerr << "buffer reuse: document " << i << " differs when it is built over its own source" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -958,6 +1034,8 @@ int main() {
     if (!CheckNoMathGolden()) return 59;
     if (!CheckMathParser()) return 60;
     if (!CheckMathLayout()) return 61;
+    if (!CheckOutputBufferReuse()) return 62;
+    if (!CheckInlineLookahead()) return 63;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

@@ -1,5 +1,6 @@
 #include "markdown_parser.h"
 #include "inline_markdown.h"
+#include "../common/text_utils.h"
 
 #include <algorithm>
 #include <cctype>
@@ -266,13 +267,51 @@ static bool ParseNumberedView(std::string_view line, int& level, int& number, st
     return true;
 }
 
-static std::vector<std::string> SplitTableRow(std::string_view line) {
+// The text between the outer pipes of a table row.
+static std::string_view TableRowBody(std::string_view line) {
     std::string_view s = TrimView(line);
     if (!s.empty() && s.front() == '|') s.remove_prefix(1);
     if (!s.empty() && s.back() == '|') s.remove_suffix(1);
+    return s;
+}
+
+// Cells of a row body that holds no backslash: every pipe separates two cells, so
+// each cell is a trimmed piece of the line and fn(cell) can read it in place.
+template <typename Fn>
+static void ForEachPlainTableCell(std::string_view body, Fn fn) {
+    for (;;) {
+        size_t bar = body.find('|');
+        if (bar == std::string_view::npos) {
+            fn(TrimView(body));
+            return;
+        }
+        fn(TrimView(body.substr(0, bar)));
+        body.remove_prefix(bar + 1);
+    }
+}
+
+// Number of cells SplitTableRow returns for this line.
+static size_t CountTableCells(std::string_view line) {
+    std::string_view s = TableRowBody(line);
+    size_t cells = 1;
+    bool escaped = false;
+    for (char c : s) {
+        if (escaped) escaped = false;
+        else if (c == '\\') escaped = true;
+        else if (c == '|') cells++;
+    }
+    return cells;
+}
+
+static std::vector<std::string> SplitTableRow(std::string_view line) {
+    std::string_view s = TableRowBody(line);
 
     std::vector<std::string> cells;
     cells.reserve(4);
+    if (s.find('\\') == std::string_view::npos) {
+        ForEachPlainTableCell(s, [&](std::string_view cell) { cells.emplace_back(cell.data(), cell.size()); });
+        return cells;
+    }
     std::string cell;
     bool escaped = false;
     for (char c : s) {
@@ -353,30 +392,43 @@ static bool IsTableSeparatorCell(std::string_view cell, int& align) {
 }
 
 static bool ParseTableSeparator(std::string_view line, std::vector<int>& aligns) {
-    std::vector<std::string> cells = SplitTableRow(line);
-    if (cells.empty()) return false;
-
     std::vector<int> parsed;
-    for (const auto& cell : cells) {
-        int align = -1;
-        if (!IsTableSeparatorCell(cell, align)) return false;
-        parsed.push_back(align);
+    if (line.find('\\') == std::string_view::npos) {
+        bool valid = true;
+        ForEachPlainTableCell(TableRowBody(line), [&](std::string_view cell) {
+            int align = -1;
+            valid = valid && IsTableSeparatorCell(cell, align);
+            if (valid) parsed.push_back(align);
+        });
+        if (!valid) return false;
+    } else {
+        std::vector<std::string> cells = SplitTableRow(line);
+        if (cells.empty()) return false;
+        for (const auto& cell : cells) {
+            int align = -1;
+            if (!IsTableSeparatorCell(cell, align)) return false;
+            parsed.push_back(align);
+        }
     }
 
-    aligns = parsed;
+    aligns = std::move(parsed);
     return true;
 }
 
-static bool IsTableStart(const std::vector<std::string_view>& lines, size_t i) {
+// True when lines[i] is a table header followed by its separator line. `aligns`, when
+// given, receives the column alignments of a table that starts here.
+static bool IsTableStart(const std::vector<std::string_view>& lines, size_t i, std::vector<int>* aligns = nullptr) {
     if (i + 1 >= lines.size()) return false;
     if (lines[i].find('|') == std::string_view::npos ||
         lines[i + 1].find('|') == std::string_view::npos ||
         lines[i + 1].find('-') == std::string_view::npos) {
         return false;
     }
-    if (SplitTableRow(lines[i]).size() < 2) return false;
-    std::vector<int> aligns;
-    return ParseTableSeparator(lines[i + 1], aligns);
+    if (CountTableCells(lines[i]) < 2) return false;
+    std::vector<int> parsed;
+    if (!ParseTableSeparator(lines[i + 1], parsed)) return false;
+    if (aligns) *aligns = std::move(parsed);
+    return true;
 }
 
 static void ReplaceAll(std::string& s, const std::string& from, const std::string& to) {
@@ -457,15 +509,13 @@ static bool ParseInlineLinkSyntaxAt(std::string_view source, size_t start, size_
 static bool ExtractMarkdownDestination(std::string_view target, std::string& dest);
 
 std::string StripInlineMarkdown(std::string_view input, bool recognizeMath) {
-    if (input.find_first_of("!*_~`$[<\\") == std::string_view::npos &&
-        input.find('\xE2') == std::string_view::npos) {
+    if (!RayoMd::Text::ContainsByteClass(input, RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteSymbolLead)) {
         return ToString(TrimView(input));
     }
-    std::vector<InlineSpan> spans = ParseInlineSpans(input, recognizeMath);
-    std::string visible;
-    visible.reserve(input.size());
-    for (const InlineSpan& span : spans) visible += span.text;
-    return Trim(std::move(visible));
+    // The parsed runs cover the text they were written to without a gap: it is the visible text.
+    InlineRuns runs;
+    ParseInlineRuns(input, runs, recognizeMath);
+    return Trim(std::move(runs.text));
 }
 
 static bool MayContainMath(std::string_view text) {
@@ -489,21 +539,19 @@ static void EraseMathTextBytes(std::string& text) {
 std::string StripInlineMarkdownKeepMath(std::string_view input, bool& hasMath) {
     hasMath = false;
     if (!MayContainMath(input)) return StripInlineMarkdown(input);
-    std::vector<InlineSpan> spans = ParseInlineSpans(input);
-    for (const InlineSpan& span : spans) hasMath = hasMath || span.math != InlineMath::None;
+    InlineRuns runs;
+    ParseInlineRuns(input, runs);
+    for (const InlineRun& run : runs.runs) hasMath = hasMath || run.math != InlineMath::None;
+    if (!hasMath) return Trim(std::move(runs.text));
     std::string visible;
     visible.reserve(input.size() + 8);
-    if (!hasMath) {
-        for (const InlineSpan& span : spans) visible += span.text;
-        return Trim(std::move(visible));
-    }
-    for (const InlineSpan& span : spans) {
-        if (span.math == InlineMath::None) {
-            AppendWithoutMathTextBytes(visible, span.text);
+    for (const InlineRun& run : runs.runs) {
+        if (run.math == InlineMath::None) {
+            AppendWithoutMathTextBytes(visible, runs.Text(run));
             continue;
         }
         visible.push_back(kMathTextOpen);
-        AppendWithoutMathTextBytes(visible, span.text);
+        AppendWithoutMathTextBytes(visible, runs.Text(run));
         visible.push_back(kMathTextClose);
     }
     return Trim(std::move(visible));
@@ -715,13 +763,30 @@ enum class LineKind {
 };
 
 struct LineInfo {
-    std::string_view raw;
     std::string_view trimmed;
     std::string_view text;
     LineKind kind = LineKind::Plain;
     int level = 0;
     int number = 0;
 };
+
+// Every block marker starts with one of these characters (after the indent). A line
+// that begins with anything else is paragraph text and needs none of the checks below.
+static bool MayStartBlock(char first) {
+    switch (first) {
+    case '`': case '~':             // code fence
+    case '$': case '\\':            // display math, \pagebreak
+    case '<':                       // page-break comment
+    case '!':                       // standalone image
+    case '-': case '*': case '_':   // rule, bullet
+    case '+':                       // bullet
+    case '#':                       // heading
+    case '>':                       // quote
+        return true;
+    default:
+        return std::isdigit((unsigned char)first) != 0;   // numbered item
+    }
+}
 
 static std::string_view ParseFenceMarker(std::string_view trimmed) {
     if (trimmed.empty()) return {};
@@ -809,12 +874,12 @@ static bool ClassifyMathLine(LineInfo& info) {
 
 static LineInfo ClassifyLine(std::string_view line) {
     LineInfo info;
-    info.raw = line;
     info.trimmed = TrimView(line);
     if (info.trimmed.empty()) {
         info.kind = LineKind::Empty;
         return info;
     }
+    if (!MayStartBlock(info.trimmed[0])) return info;
     std::string_view fence = ParseFenceMarker(info.trimmed);
     if (!fence.empty()) {
         info.kind = LineKind::Fence;
@@ -861,6 +926,22 @@ static LineInfo ClassifyLine(std::string_view line) {
 
 static bool IsBlockStart(const LineInfo& info) {
     return info.kind != LineKind::Plain;
+}
+
+// True when ParseMarkdownImpl would turn `text` into exactly one paragraph whose text is
+// `text` itself: a single trimmed line that starts no block and cannot be a reference
+// definition. List items and quotes are mostly such lines and skip the nested parse.
+static bool IsSingleParagraphLine(std::string_view text) {
+    if (text.empty() || IsSpace(text.front()) || IsSpace(text.back())) return false;
+    if (text.find('\n') != std::string_view::npos || text.find("]:") != std::string_view::npos) return false;
+    if (StartsWith(text, std::string_view("\xEF\xBB\xBF", 3))) return false;
+    return ClassifyLine(text).kind == LineKind::Plain;
+}
+
+static Block& AppendBlock(std::vector<Block>& blocks, BlockType type) {
+    blocks.emplace_back();
+    blocks.back().type = type;
+    return blocks.back();
 }
 
 // Looks for the line that closes the MathOpen line at `open`. The search ends at
@@ -951,7 +1032,12 @@ struct TableMathCell {
 static void StripTableRow(std::string_view line, size_t rowIndex, std::vector<std::string>& row,
     std::vector<TableMathCell>& mathCells) {
     if (!MayContainMath(line)) {
-        for (auto& cell : row) cell = StripInlineMarkdown(cell);
+        // Cells are already trimmed, so one without inline syntax is its own visible text.
+        constexpr unsigned char kSyntax = RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteSymbolLead;
+        if (!RayoMd::Text::ContainsByteClass(line, kSyntax)) return;
+        for (auto& cell : row) {
+            if (RayoMd::Text::ContainsByteClass(cell, kSyntax)) cell = StripInlineMarkdown(cell);
+        }
         return;
     }
     std::vector<std::string> raw = SplitTableRowRaw(line);
@@ -1016,7 +1102,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
     };
 
     std::vector<Block> blocks;
-    blocks.reserve(std::max<size_t>(8, lines.size() / 2));
+    blocks.reserve(std::min(lines.size(), std::max<size_t>(8, lines.size() / 2)));
     size_t i = 0;
 
     if (!infos.empty() && infos[0].trimmed == "---") {
@@ -1035,7 +1121,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             continue;
         }
         const LineInfo& info = infos[i];
-        std::string_view line = info.raw;
+        std::string_view line = lines[i];
         std::string_view trimmed = info.trimmed;
         if (info.kind == LineKind::Empty) {
             i++;
@@ -1049,8 +1135,10 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             std::string heading = definitions.empty() || trimmed.find('[') == std::string_view::npos ?
                 StripInlineMarkdownKeepMath(trimmed, headingHasMath) :
                 StripInlineMarkdownKeepMath(ResolveReferenceLinks(trimmed, definitions), headingHasMath);
-            blocks.push_back({ BlockType::Heading, setextLevel, 0, std::move(heading) });
-            blocks.back().hasMath = headingHasMath;
+            Block& block = AppendBlock(blocks, BlockType::Heading);
+            block.level = setextLevel;
+            block.text = std::move(heading);
+            block.hasMath = headingHasMath;
             i += 2;
             continue;
         }
@@ -1078,7 +1166,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 if (codeIndex) text.push_back('\n');
                 text.append(codeLines[codeIndex]);
             }
-            blocks.push_back({ BlockType::Code, 0, 0, std::move(text) });
+            AppendBlock(blocks, BlockType::Code).text = std::move(text);
             continue;
         }
 
@@ -1115,16 +1203,16 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 // fence stays the code block it has always been.
                 std::string tex = JoinTrimmedLines(infos, firstContent, contentEnd);
                 if (!tex.empty()) {
-                    blocks.push_back({ BlockType::MathBlock, 0, 0, std::move(tex) });
+                    AppendBlock(blocks, BlockType::MathBlock).text = std::move(tex);
                     continue;
                 }
             }
-            blocks.push_back({ BlockType::Code, 0, 0, text });
+            AppendBlock(blocks, BlockType::Code).text = std::move(text);
             continue;
         }
 
         if (info.kind == LineKind::Math) {
-            blocks.push_back({ BlockType::MathBlock, 0, 0, ToString(info.text) });
+            AppendBlock(blocks, BlockType::MathBlock).text = ToString(info.text);
             i++;
             continue;
         }
@@ -1143,7 +1231,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                     if (!text.empty()) text += "\n";
                     text.append(lastContent.data(), lastContent.size());
                 }
-                blocks.push_back({ BlockType::MathBlock, 0, 0, std::move(text) });
+                AppendBlock(blocks, BlockType::MathBlock).text = std::move(text);
                 i = close + 1;
                 continue;
             }
@@ -1153,20 +1241,20 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             infos[i].kind = LineKind::Plain;
         }
 
-        if (IsTableStart(lines, i)) {
+        std::vector<int> aligns;
+        if (IsTableStart(lines, i, &aligns)) {
             std::vector<std::vector<std::string>> rows;
-            std::vector<int> aligns;
             std::vector<TableMathCell> mathCells;
             const size_t headerLine = i;
+            rows.reserve(8);
             rows.push_back(SplitTableRow(lines[i]));
-            ParseTableSeparator(lines[i + 1], aligns);
             i += 2;
 
             while (i < lines.size() && infos[i].kind != LineKind::Empty) {
                 std::vector<std::string> row = SplitTableRow(lines[i]);
                 if (row.size() < 2) break;
                 StripTableRow(lines[i], rows.size(), row, mathCells);
-                rows.push_back(row);
+                rows.push_back(std::move(row));
                 i++;
             }
 
@@ -1191,20 +1279,22 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             std::string heading = definitions.empty() || info.text.find('[') == std::string_view::npos ?
                 StripInlineMarkdownKeepMath(info.text, headingHasMath) :
                 StripInlineMarkdownKeepMath(ResolveReferenceLinks(info.text, definitions), headingHasMath);
-            blocks.push_back({ BlockType::Heading, info.level, 0, std::move(heading) });
-            blocks.back().hasMath = headingHasMath;
+            Block& block = AppendBlock(blocks, BlockType::Heading);
+            block.level = info.level;
+            block.text = std::move(heading);
+            block.hasMath = headingHasMath;
             i++;
             continue;
         }
 
         if (info.kind == LineKind::Rule) {
-            blocks.push_back({ BlockType::Rule, 0, 0, "" });
+            AppendBlock(blocks, BlockType::Rule);
             i++;
             continue;
         }
 
         if (info.kind == LineKind::PageBreak) {
-            blocks.push_back({ BlockType::PageBreak, 0, 0, "" });
+            AppendBlock(blocks, BlockType::PageBreak);
             i++;
             continue;
         }
@@ -1222,8 +1312,8 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         }
 
         if (info.kind == LineKind::Bullet || info.kind == LineKind::Numbered) {
-            Block item;
-            item.type = info.kind == LineKind::Bullet ? BlockType::Bullet : BlockType::Numbered;
+            // Built in place: nothing else is appended to `blocks` while `item` is in use.
+            Block& item = AppendBlock(blocks, info.kind == LineKind::Bullet ? BlockType::Bullet : BlockType::Numbered);
             item.level = info.level;
             item.number = info.number;
             int baseIndent = LeadingColumns(line);
@@ -1255,7 +1345,15 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             }
             if (!definitions.empty() && itemMarkdown.find('[') != std::string::npos) itemMarkdown = ResolveReferenceLinks(itemMarkdown, definitions);
             if (depth < 8) {
-                item.children = ParseMarkdownImpl(itemMarkdown, depth + 1);
+                // Blank lines after the item only add line feeds, which the nested parse skips.
+                std::string_view single = itemMarkdown;
+                while (!single.empty() && single.back() == '\n') single.remove_suffix(1);
+                if (IsSingleParagraphLine(single)) {
+                    itemMarkdown.resize(single.size());
+                    item.text = std::move(itemMarkdown);
+                } else {
+                    item.children = ParseMarkdownImpl(itemMarkdown, depth + 1);
+                }
             } else {
                 item.text = StripInlineMarkdown(itemMarkdown);
             }
@@ -1263,7 +1361,6 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 item.text = std::move(item.children.front().text);
                 item.children.erase(item.children.begin());
             }
-            blocks.push_back(std::move(item));
             continue;
         }
 
@@ -1288,21 +1385,26 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 break;
             }
             if (!definitions.empty() && quoteMarkdown.find('[') != std::string::npos) quoteMarkdown = ResolveReferenceLinks(quoteMarkdown, definitions);
-            Block quote;
-            quote.type = BlockType::Quote;
+            Block& quote = AppendBlock(blocks, BlockType::Quote);
             if (depth < 8) {
-                quote.children = ParseMarkdownImpl(quoteMarkdown, depth + 1);
+                if (IsSingleParagraphLine(quoteMarkdown)) {
+                    AppendBlock(quote.children, BlockType::Paragraph).text = std::move(quoteMarkdown);
+                } else {
+                    quote.children = ParseMarkdownImpl(quoteMarkdown, depth + 1);
+                }
             } else {
                 quote.text = StripInlineMarkdown(quoteMarkdown);
             }
             if (quote.children.empty()) quote.text = StripInlineMarkdown(quoteMarkdown);
-            blocks.push_back(std::move(quote));
             continue;
         }
 
         std::string paragraph;
         bool previousHardBreak = false;
-        while (i < lines.size() && !isSuppressed(i) && !IsBlockStart(infos[i]) && !IsTableStart(lines, i)) {
+        // Line i was checked above and starts no table; only the lines after it can.
+        const size_t paragraphStart = i;
+        while (i < lines.size() && !isSuppressed(i) && !IsBlockStart(infos[i]) &&
+            (i == paragraphStart || !IsTableStart(lines, i))) {
             if (!paragraph.empty()) paragraph += previousHardBreak ? "\n" : " ";
             std::string_view v = HasHardLineBreak(lines[i]) ? RTrimView(lines[i]) : infos[i].trimmed;
             paragraph.append(v.data(), v.size());
@@ -1314,7 +1416,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             i++;
         }
         if (!definitions.empty() && paragraph.find('[') != std::string::npos) paragraph = ResolveReferenceLinks(paragraph, definitions);
-        blocks.push_back({ BlockType::Paragraph, 0, 0, std::move(paragraph) });
+        AppendBlock(blocks, BlockType::Paragraph).text = std::move(paragraph);
     }
 
     return blocks;
