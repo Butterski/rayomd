@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -32,6 +33,9 @@ struct Block {
     BlockType type = BlockType::Paragraph;
     int level = 0;
     int number = 0;
+    // Bullet and Numbered only: 1 for a task list item "[ ]", 2 for a done one "[x]". In the
+    // padding after `number`, which keeps the moves of a block as they were.
+    uint8_t task = 0;
     std::string text;
     // Set for every Image block and for no other: the other blocks carry a null pointer
     // instead of two empty strings.

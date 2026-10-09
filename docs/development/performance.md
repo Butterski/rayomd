@@ -531,6 +531,22 @@ Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
 reference, a comment or `<br>`; the watch fixtures write the same bytes with
 0.09 % more instructions (geometric mean, at most 0.18 %) in the same time.
 
+## Task lists, October 2026
+
+A list item that starts with `[ ]`, `[x]` or `[X]` shows a checkbox, a check mark
+in it when done, where its bullet or number would be (as on GitHub), and its text
+indented after it. The box and the mark are paths (`AppendCheckbox`), so the
+standard fonts need no glyph for them. The parser keeps the state in
+`Block::task`.
+
+Where that byte sits mattered. After `bool hasMath`, at the end of `Block`, it
+left the size at 136 bytes but changed how GCC copies the tail: the
+reallocation of the block vector grew from 1,143 to 1,716 bytes of code and
+`baseline.md`, which has no task, ran 0.47 % more instructions. In the padding
+after `int number` it costs nothing. Measured on 2026-10-09 against `e19cf7d`:
+the 1,407 corpus PDFs that changed hold task items, and the watch fixtures
+write the same bytes with the same instructions.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

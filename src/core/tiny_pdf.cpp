@@ -829,6 +829,37 @@ private:
 // Room for one operand written by TailWriter::Fixed, with its separator.
 constexpr size_t kOperandBytes = RayoMd::Text::kFixed2MaxChars + 1;
 
+// The checkbox of a task list item, a square `side` points wide standing on (x, bottom), with
+// a check mark when the task is done. Paths, not a glyph, so every font shows it.
+static void AppendCheckbox(std::string& content, double x, double bottom, double side, bool done) {
+    TailWriter out(content, 96 + kOperandBytes * 10);
+    out.Lit("q 0.42 0.47 0.53 RG 0.7 w ");
+    out.Fixed(x);
+    out.Lit(" ");
+    out.Fixed(bottom);
+    out.Lit(" ");
+    out.Fixed(side);
+    out.Lit(" ");
+    out.Fixed(side);
+    out.Lit(" re S");
+    if (done) {
+        out.Lit(" 0.10 0.10 0.10 RG 1.2 w 1 J 1 j ");
+        out.Fixed(x + side * 0.2);
+        out.Lit(" ");
+        out.Fixed(bottom + side * 0.52);
+        out.Lit(" m ");
+        out.Fixed(x + side * 0.42);
+        out.Lit(" ");
+        out.Fixed(bottom + side * 0.25);
+        out.Lit(" l ");
+        out.Fixed(x + side * 0.82);
+        out.Lit(" ");
+        out.Fixed(bottom + side * 0.8);
+        out.Lit(" l S");
+    }
+    out.Lit(" Q\n");
+}
+
 static char* WriteHex4(char* out, uint16_t value) {
     static constexpr char digits[] = "0123456789ABCDEF";
     out[0] = digits[(value >> 12) & 0xf];
@@ -3715,12 +3746,31 @@ private:
     }
 
     void RenderBullet(const Block& block) {
+        if (block.task != 0) {
+            RenderTaskItem(block);
+            return;
+        }
         RenderListItem("- ", block);
         y -= 2.0;
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
 
+    // A task list item: its checkbox where a bullet or number would go, its text after it.
+    void RenderTaskItem(const Block& block) {
+        const double x = margin + 16.0 + block.level * 18.0;
+        const double side = bodySize * 0.7;
+        Ensure(bodySize * 1.35);
+        AppendCheckbox(content, x, y - bodySize - 0.4, side, block.task == 2);
+        RenderParagraph(block.text, x + side + 5.0, PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0 - side - 5.0);
+        y -= 2.0;
+        if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
+    }
+
     void RenderNumbered(const Block& block) {
+        if (block.task != 0) {
+            RenderTaskItem(block);
+            return;
+        }
         std::string marker;
         marker.reserve(8);
         AppendInt(marker, block.number);
@@ -4785,7 +4835,7 @@ private:
             case BlockType::Paragraph: RenderQuote(child.text); break;
             case BlockType::Heading: RenderQuoteHeading(child); break;
             case BlockType::Bullet:
-                RenderQuote("- " + child.text);
+                RenderQuote((child.task == 0 ? "- " : child.task == 2 ? "- [x] " : "- [ ] ") + child.text);
                 if (!child.children.empty()) {
                     double savedMargin = margin;
                     margin += 14.0;
@@ -4796,7 +4846,8 @@ private:
             case BlockType::Numbered: {
                 std::string item;
                 AppendInt(item, child.number);
-                item += ". " + child.text;
+                item += child.task == 0 ? ". " : child.task == 2 ? ". [x] " : ". [ ] ";
+                item += child.text;
                 RenderQuote(item);
                 if (!child.children.empty()) {
                     double savedMargin = margin;
@@ -5768,13 +5819,32 @@ private:
     const MathFallbackFont* MathFallback() const { return winAnsiText ? &latinMathFallback : nullptr; }
 
     void RenderBullet(const Block& block) {
+        if (block.task != 0) {
+            RenderTaskItem(block);
+            return;
+        }
         RenderParagraph("- " + block.text, margin + 16.0 + block.level * 18.0,
             PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0);
         y -= 2.0;
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
 
+    // A task list item: its checkbox where a bullet or number would go, its text after it.
+    void RenderTaskItem(const Block& block) {
+        const double x = margin + 16.0 + block.level * 18.0;
+        const double side = bodySize * 0.7;
+        Ensure(bodySize * 1.35);
+        AppendCheckbox(content, x, y - bodySize - 0.4, side, block.task == 2);
+        RenderParagraph(block.text, x + side + 5.0, PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0 - side - 5.0);
+        y -= 2.0;
+        if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
+    }
+
     void RenderNumbered(const Block& block) {
+        if (block.task != 0) {
+            RenderTaskItem(block);
+            return;
+        }
         std::string item;
         item.reserve(block.text.size() + 8);
         AppendInt(item, block.number);
@@ -6813,7 +6883,7 @@ private:
             case BlockType::Paragraph: RenderQuote(child.text); break;
             case BlockType::Heading: RenderQuoteHeading(child); break;
             case BlockType::Bullet:
-                RenderQuote("- " + child.text);
+                RenderQuote((child.task == 0 ? "- " : child.task == 2 ? "- [x] " : "- [ ] ") + child.text);
                 if (!child.children.empty()) {
                     double savedMargin = margin;
                     margin += 14.0;
@@ -6824,7 +6894,8 @@ private:
             case BlockType::Numbered: {
                 std::string item;
                 AppendInt(item, child.number);
-                item += ". " + child.text;
+                item += child.task == 0 ? ". " : child.task == 2 ? ". [x] " : ". [ ] ";
+                item += child.text;
                 RenderQuote(item);
                 if (!child.children.empty()) {
                     double savedMargin = margin;

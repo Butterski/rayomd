@@ -1394,7 +1394,14 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             item.number = info.number;
             int baseIndent = LeadingColumns(line);
             const int contentColumn = ListItemContentColumn(line, info.kind == LineKind::Bullet);
-            std::string itemMarkdown(info.text);
+            // "[ ]", "[x]" or "[X]" and white space before the text make a task list item.
+            std::string_view first = info.text;
+            if (first.size() >= 4 && first[0] == '[' && first[2] == ']' && (first[3] == ' ' || first[3] == '\t') &&
+                (first[1] == ' ' || first[1] == 'x' || first[1] == 'X')) {
+                item.task = first[1] == ' ' ? 1 : 2;
+                first = LTrimView(first.substr(4));
+            }
+            std::string itemMarkdown(first);
             bool sawBlank = false;
             i++;
             while (i < lines.size()) {

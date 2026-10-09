@@ -145,7 +145,7 @@ Version-specific engineering contracts remain beside the code:
 
 Native mode supports ATX and Setext headings (as PDF bookmarks, and as targets of
 GitHub-style `#anchor` links), paragraphs, structured nested
-lists and block quotes, fenced and indented code, pipe tables, rules, page
+lists (with GitHub task lists) and block quotes, fenced and indented code, pipe tables, rules, page
 breaks, matching-run code spans, classic emphasis and escapes, inline and
 reference-style links, URL/email autolinks, standalone inline/reference images,
 natively typeset math for a TeX subset (`$...$`, `$$...$$`, fenced `math` blocks, in

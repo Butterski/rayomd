@@ -1387,6 +1387,24 @@ std::string MinimalTrueTypeCollection() {
     return collection + font + data;
 }
 
+// A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
+// where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
+// a task item in a quote, keep it as text. In both renderers.
+bool CheckTaskLists() {
+    const std::string document = "- [ ] open\n- [x] done\n1. [X] numbered\n- normal\n\nText [ ] literal.\n\n> - [ ] quoted\n";
+    for (const std::string& text : { document, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + document }) {
+        std::string pdf;
+        const bool unicode = text != document;
+        if (!Build(text, pdf) || CountOccurrences(pdf, "0.42 0.47 0.53 RG") != 3 || CountOccurrences(pdf, " 1 J 1 j ") != 2 ||
+            (!unicode && (pdf.find("(open) Tj") == std::string::npos || pdf.find("(- normal) Tj") == std::string::npos ||
+                pdf.find("(Text [ ] literal.) Tj") == std::string::npos || pdf.find("(- [ ] quoted) Tj") == std::string::npos))) {
+            std::cerr << "task lists mismatch (" << (unicode ? "Unicode" : "standard") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // HTML comments are not shown, <br> ends a line, also in a table cell, and character references
 // show the characters they stand for, except in code. "&copy;" keeps a document on the
 // standard fonts in WinAnsiEncoding; "&rarr;" needs the Unicode renderer.
@@ -1735,6 +1753,7 @@ int main() {
     if (!CheckDocumentTitle()) return 78;
     if (!CheckPageNumbers()) return 79;
     if (!CheckHtmlInText()) return 80;
+    if (!CheckTaskLists()) return 81;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
