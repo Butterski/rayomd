@@ -1123,7 +1123,22 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
         }
         return bracketAt;
     };
+    // "[text](<destination>)", the inline link a resolved reference becomes.
+    const auto appendLink = [&](bool image, std::string_view text, const ReferenceDefinition& definition) {
+        if (image) output.push_back('!');
+        output.push_back('[');
+        output.append(text);
+        output += "](<";
+        output.append(definition.destination);
+        output += ">)";
+    };
     for (size_t i = 0; i < input.size();) {
+        // An escaped character, "\[" among them, starts no reference.
+        if (input[i] == '\\' && i + 1 < input.size()) {
+            output.append(input.substr(i, 2));
+            i += 2;
+            continue;
+        }
         if (input[i] == '`') {
             size_t run = DelimiterRun(input, i, '`');
             size_t end = FindExactDelimiterRun(input, i + run, '`', run);
@@ -1150,7 +1165,18 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
         size_t cursor = close + 1;
         while (cursor < input.size() && (input[cursor] == ' ' || input[cursor] == '\t')) cursor++;
         if (cursor >= input.size() || input[cursor] != '[') {
-            output.push_back(input[i++]);
+            // A shortcut reference, "[label]" alone, when the label is defined. A label holds no
+            // '[', so the labels tried never overlap: "[[[[a]" looks up "a" alone, once.
+            const std::string_view label = input.substr(labelStart + 1, close - labelStart - 1);
+            const auto found = label.empty() || input.find('[', labelStart + 1) < close
+                ? definitions.end()
+                : definitions.find(NormalizeReferenceLabel(label));
+            if (found == definitions.end()) {
+                output.push_back(input[i++]);
+                continue;
+            }
+            appendLink(image, label, found->second);
+            i = close + 1;
             continue;
         }
         size_t referenceClose = input.find(']', cursor + 1);
@@ -1168,12 +1194,7 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
             i = unresolvedEnd;
             continue;
         }
-        if (image) output.push_back('!');
-        output.push_back('[');
-        output.append(visible);
-        output += "](<";
-        output.append(found->second.destination);
-        output += ">)";
+        appendLink(image, visible, found->second);
         i = referenceClose + 1;
     }
     return output;

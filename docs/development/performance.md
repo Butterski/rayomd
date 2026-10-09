@@ -580,6 +580,24 @@ Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
 watch fixtures write the same bytes with 0.19 % more instructions (geometric
 mean, at most 0.26 %) in 0.7 % more time (0.84 % with pinned alignment).
 
+## Shortcut reference links, October 2026
+
+`[label]` and `![label]` alone resolve when the label is defined, as in
+CommonMark; before, only the full (`[text][label]`) and collapsed (`[label][]`)
+forms did. An escaped `\[` no longer starts a reference of any form. Only
+documents with a reference definition pay: `ResolveReferenceLinks` returns at once
+without one. A label holds no `[`, so the labels tried never overlap. Without
+that rule each `[` in front of one `]` normalized everything up to it: 20,000 of
+them took 0.57 s, growing with the square of their number; 400,000 take 13 ms
+now, and `CheckInlineLookahead` holds 120,000. Each label tried is
+normalized into a string and looked up, which is why `tester.md`, whose
+bracketed text resolves to nothing, runs 0.16 % more instructions.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`54d89b0`): the 435 corpus PDFs that changed come from documents with a
+reference definition; the watch fixtures write the same bytes with 0.02 % more
+instructions (geometric mean) in the same time.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

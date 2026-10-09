@@ -1417,6 +1417,35 @@ bool CheckAutolinks() {
     return true;
 }
 
+// "[label]" and "![label]" alone are links and images when the label is defined, in any case
+// and spacing. Undefined labels, escaped and code brackets and footnote markers stay text; of
+// "[[docs]]", whose outer label holds a '[', the inner one resolves. In both renderers.
+bool CheckShortcutReferences() {
+    const std::string document =
+        "See [Docs] and [the  DOCS] and ![Logo] and [missing], \\[docs], `[docs]`, [^1], [[docs]], [docs][] and "
+        "[x][docs].\n\n[docs]: https://docs.example\n[the docs]: https://the.example\n[logo]: logo.png\n";
+    for (const std::string& text : { document, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + document }) {
+        std::string pdf;
+        const bool unicode = text != document;
+        if (!Build(text, pdf)) return false;
+        std::vector<std::string> uris;
+        for (size_t at = pdf.find("/URI ("); at != std::string::npos; at = pdf.find("/URI (", at + 1)) {
+            const size_t end = pdf.find(") >>", at);
+            uris.push_back(pdf.substr(at + 6, end - at - 6));
+        }
+        const std::vector<std::string> expected = { "https://docs.example", "https://the.example", "https://docs.example",
+            "https://docs.example", "https://docs.example" };
+        if (uris != expected || (!unicode && (pdf.find("image: Logo") == std::string::npos ||
+            pdf.find("[missing], [docs],") == std::string::npos || pdf.find("(, [^1],) Tj") == std::string::npos))) {
+            std::cerr << "shortcut references mismatch (" << (unicode ? "Unicode" : "standard") << " renderer):";
+            for (const std::string& uri : uris) std::cerr << " " << uri;
+            std::cerr << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -1785,6 +1814,7 @@ int main() {
     if (!CheckHtmlInText()) return 80;
     if (!CheckTaskLists()) return 81;
     if (!CheckAutolinks()) return 82;
+    if (!CheckShortcutReferences()) return 83;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

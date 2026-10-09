@@ -114,6 +114,8 @@ bool CheckInlineLookahead() {
     // Each "://" looks like a bare URL until the byte behind it; a scan to the next white space
     // per "://" took a minute here.
     large.push_back(Repeat("http://(", 125000) + "\n");
+    // Every '[' in front of one ']' could be a shortcut reference; only the last one is tried.
+    large.push_back(Repeat("[", 120000) + "docs]\n\n[docs]: https://docs.example\n");
     large.push_back(Repeat("[a ", 40000) + "]\n");
     large.push_back("| a | b |\n|---|---|\n| " + Repeat("*a ", 30000) + " | x |\n");
     large.push_back("- " + Repeat("_a ", 30000) + "\n");
