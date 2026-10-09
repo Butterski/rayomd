@@ -41,9 +41,10 @@ GitHub alerts, fenced code blocks, pipe tables (whose header row repeats on ever
 page), rule lines, natively typeset math for a TeX subset, inline emphasis
 cleanup, clickable Markdown links (also bare URLs, email addresses and shortcut
 references), bookmarks and `#anchor` links from headings, HTML comments, `<br>`
-and character references, a document title, opt-in page numbers, standalone local
-images, and HTTP/HTTPS images on Windows or curl-enabled Linux builds with
-fallback text.
+and character references, a document title, opt-in page numbers, page sizes (A4 by
+default, presets, landscape and custom sizes; the renderers' `pageW`/`pageH`, never
+constants), standalone local images, and HTTP/HTTPS images on Windows or
+curl-enabled Linux builds with fallback text.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and

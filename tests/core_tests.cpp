@@ -1,5 +1,6 @@
 #include "rayomd/tiny_pdf.h"
 #include "../src/common/text_utils.h"
+#include "../src/core/export_options.h"
 #include "../src/core/inline_markdown.h"
 #include "../src/core/markdown_parser.h"
 #include "../src/core/math_layout.h"
@@ -1526,6 +1527,61 @@ bool CheckTableHeaderRepeat() {
     return true;
 }
 
+// The page size sets every media box, the width text wraps to, where "#top" leads and where
+// page numbers sit; sides stay within 144 to 14,400 points, and a margin too wide for the page
+// shrinks to leave 72 points of text. ParsePageSize takes the presets, "-landscape" and sizes
+// with a unit, and nothing else. In both renderers.
+bool CheckPageSize() {
+    using TinyPdf::Internal::ParsePageSize;
+    TinyPdf::PdfPageSize size;
+    const bool parsed = ParsePageSize("Letter", size) && size.width == 612.0 && size.height == 792.0 &&
+        ParsePageSize("a4-landscape", size) && size.width == 842.0 && size.height == 595.0 &&
+        ParsePageSize("8.5x11in", size) && size.width == 612.0 && size.height == 792.0 &&
+        ParsePageSize("21x29.7cm", size) && std::abs(size.width - 595.2756) < 0.001 &&
+        !ParsePageSize("210x297", size) && !ParsePageSize("x297mm", size) && !ParsePageSize("1x1mm", size) &&
+        !ParsePageSize("letter-portrait", size) && !ParsePageSize("210x297mm-landscape", size) &&
+        !ParsePageSize("b5", size);
+    if (!parsed) {
+        std::cerr << "page size parsing mismatch" << std::endl;
+        return false;
+    }
+    std::string document = "# Size\n\n[top](#top)\n\n";
+    for (int line = 0; line < 80; line++) document += "Line " + std::to_string(line) + " of words that wrap across the page.\n\n";
+    const auto numberX = [](const std::string& pdf) {
+        const size_t text = pdf.find(" Tm (1 / ");
+        const size_t matrix = text == std::string::npos ? text : pdf.rfind("1 0 0 1 ", text);
+        return matrix == std::string::npos ? -1.0 : std::strtod(pdf.c_str() + matrix + 8, nullptr);
+    };
+    for (const std::string& text : { document, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + document }) {
+        TinyPdf::PdfOptions options;
+        options.style = TinyPdf::PdfStyle::Modern;
+        options.pageNumbers = true;
+        std::string a4;
+        std::string letter;
+        std::string landscape;
+        std::string tiny;
+        bool ok = TinyPdf::BuildPdf(text, options, a4).Ok() && ValidPdf(a4);
+        options.pageSize = TinyPdf::PdfPageSize::Letter();
+        ok = ok && TinyPdf::BuildPdf(text, options, letter).Ok() && ValidPdf(letter);
+        options.pageSize = { 842.0, 595.0 };
+        ok = ok && TinyPdf::BuildPdf(text, options, landscape).Ok() && ValidPdf(landscape);
+        options.pageSize = { 10.0, 1.0e9 };
+        options.margin = TinyPdf::PdfMargin::Wide();
+        ok = ok && TinyPdf::BuildPdf(text, options, tiny).Ok() && ValidPdf(tiny);
+        const size_t landscapePages = CountOccurrences(landscape, "/Type /Page ");
+        ok = ok && CountOccurrences(letter, "/MediaBox [0 0 612 792]") == CountOccurrences(letter, "/Type /Page ") &&
+            letter.find("/XYZ null 792 null") != std::string::npos &&
+            CountOccurrences(landscape, "/MediaBox [0 0 842 595]") == landscapePages &&
+            landscapePages > CountOccurrences(a4, "/Type /Page ") && tiny.find("/MediaBox [0 0 144 14400]") != std::string::npos &&
+            std::abs(numberX(letter) - numberX(a4) - 8.5) < 0.02;
+        if (!ok) {
+            std::cerr << "page size mismatch (" << (text == document ? "standard" : "Unicode") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -1898,6 +1954,7 @@ int main() {
     if (!CheckAlerts()) return 84;
     if (!CheckHeadingKeep()) return 85;
     if (!CheckTableHeaderRepeat()) return 86;
+    if (!CheckPageSize()) return 87;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

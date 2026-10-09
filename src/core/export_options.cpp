@@ -79,6 +79,42 @@ bool ParsePdfMargin(std::string_view value, PdfMargin& margin) {
     return true;
 }
 
+bool ParsePageSize(std::string_view value, PdfPageSize& size) {
+    std::string normalized = Lower(value);
+    constexpr std::string_view kLandscape = "-landscape";
+    const bool landscape = normalized.size() > kLandscape.size() &&
+        normalized.compare(normalized.size() - kLandscape.size(), kLandscape.size(), kLandscape) == 0;
+    if (landscape) normalized.resize(normalized.size() - kLandscape.size());
+    PdfPageSize parsed;
+    if (normalized == "a4") parsed = PdfPageSize::A4();
+    else if (normalized == "a3") parsed = PdfPageSize::A3();
+    else if (normalized == "a5") parsed = PdfPageSize::A5();
+    else if (normalized == "letter") parsed = PdfPageSize::Letter();
+    else if (normalized == "legal") parsed = PdfPageSize::Legal();
+    else {
+        if (landscape) return false;  // a custom size states its own orientation
+        const char* widthStart = normalized.c_str();
+        char* end = nullptr;
+        const double width = std::strtod(widthStart, &end);
+        if (end == widthStart || *end != 'x') return false;
+        const char* heightStart = end + 1;
+        const double height = std::strtod(heightStart, &end);
+        if (end == heightStart) return false;
+        double unit = 0.0;
+        if (std::strcmp(end, "mm") == 0) unit = 72.0 / 25.4;
+        else if (std::strcmp(end, "cm") == 0) unit = 72.0 / 2.54;
+        else if (std::strcmp(end, "in") == 0) unit = 72.0;
+        else if (std::strcmp(end, "pt") == 0) unit = 1.0;
+        else return false;
+        parsed = { width * unit, height * unit };
+        const auto inRange = [](double side) { return side >= kMinPageSide && side <= kMaxPageSide; };
+        if (!inRange(parsed.width) || !inRange(parsed.height)) return false;
+    }
+    if (landscape) std::swap(parsed.width, parsed.height);
+    size = parsed;
+    return true;
+}
+
 const char* PdfStyleName(PdfStyle style) {
     switch (style) {
     case PdfStyle::Elegant: return "elegant";
@@ -107,6 +143,16 @@ double ResolveMarginPoints(const PdfMargin& margin) {
         return std::max(18.0, std::min(144.0, margin.customPoints));
     }
     return 54.0;
+}
+
+PdfPageSize ResolvePageSize(const PdfPageSize& size) {
+    // Not ">=" fails for NaN too, which then gets the smallest side.
+    const auto side = [](double points) { return points >= kMinPageSide ? std::min(points, kMaxPageSide) : kMinPageSide; };
+    return { side(size.width), side(size.height) };
+}
+
+double ResolveMarginPoints(const PdfMargin& margin, const PdfPageSize& page) {
+    return std::min(ResolveMarginPoints(margin), (std::min(page.width, page.height) - 72.0) * 0.5);
 }
 
 PdfStyle PdfStyleFromLegacyIndex(int index) {

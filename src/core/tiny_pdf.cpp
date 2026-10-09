@@ -219,18 +219,14 @@ static std::string WideToUtf8(std::wstring_view str) {
 }
 #endif
 
-constexpr double PAGE_W = 595.0;  // A4, points
-constexpr double PAGE_H = 842.0;
 static thread_local int g_lastError = 0;
 
 int GetLastError() {
     return g_lastError;
 }
 
-static double ResolveMarginPoints(const PdfMargin& margin) {
-    return Internal::ResolveMarginPoints(margin);
-}
-
+using Internal::ResolveMarginPoints;
+using Internal::ResolvePageSize;
 using Internal::Block;
 using Internal::BlockType;
 using Internal::NormalizeSymbols;
@@ -3220,8 +3216,8 @@ RAYOMD_COLD static std::string PercentDecoded(std::string_view text) {
 // document without one does no work for them.
 class HeadingTargets {
 public:
-    HeadingTargets(const std::vector<HeadingMark>& headingMarks, bool winAnsiText)
-        : headings(headingMarks), winAnsi(winAnsiText) {}
+    HeadingTargets(const std::vector<HeadingMark>& headingMarks, bool winAnsiText, double pageHeight)
+        : headings(headingMarks), winAnsi(winAnsiText), pageTop(pageHeight) {}
 
     // Reserves the annotation of `link`, to "#fragment", in `out`; false when no heading has that
     // anchor. The fragment may be percent-encoded and differ from the anchor in case and
@@ -3240,7 +3236,7 @@ public:
         }
         const bool top = fragment.empty() || (fragment.size() == 3 && (fragment[0] | 0x20) == 't' &&
             (fragment[1] | 0x20) == 'o' && (fragment[2] | 0x20) == 'p');
-        if (top) out.push_back({ pdf.Reserve(), &link, 0, PAGE_H });
+        if (top) out.push_back({ pdf.Reserve(), &link, 0, pageTop });
         return top;
     }
 
@@ -3273,6 +3269,7 @@ private:
 
     const std::vector<HeadingMark>& headings;
     bool winAnsi = false;
+    double pageTop = 0.0;   // the top of a page, where "#top" goes
     bool indexed = false;
     std::unordered_map<std::string, Anchor> anchors;
 };
@@ -3530,7 +3527,7 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
     for (const auto& row : rows) columns = std::max(columns, row.size());
     if (columns == 0) return;
 
-    double tableWidth = PAGE_W - renderer.margin * 2.0;
+    double tableWidth = renderer.pageW - renderer.margin * 2.0;
     double colWidth = tableWidth / columns;
     double size = 9.6;
     double lh = size * 1.32;
@@ -3575,7 +3572,7 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
         }
 
         double rowHeight = contentHeight + pad * 2.0;
-        if (rowHeight + 5.0 > PAGE_H - renderer.margin * 2.0) {
+        if (rowHeight + 5.0 > renderer.pageH - renderer.margin * 2.0) {
             // Taller than a page: every page gets as many lines of each cell as fit, inside
             // cell borders of its own. A fresh page takes at least one line of every cell.
             std::vector<size_t> next(columns, 0);
@@ -3629,7 +3626,7 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
             renderer.Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
         } else if (renderer.y - rowHeight - 5.0 < renderer.margin) {
             renderer.NewPage();
-            if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= PAGE_H - renderer.margin * 2.0) {
+            if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= renderer.pageH - renderer.margin * 2.0) {
                 resumeRow = r;
                 r = static_cast<size_t>(-1);
                 continue;
@@ -3709,9 +3706,12 @@ class Renderer {
 public:
     // The content streams of all pages are appended to `output`, one after another.
     Renderer(std::string& output, const TtfFont& f, int fontObject, PdfStyle styleValue, const PdfMargin& marginValue,
-        ImageRegistry* imageRegistry)
+        const PdfPageSize& pageSize, ImageRegistry* imageRegistry)
         : font(f), fontId(fontObject), images(imageRegistry), style(styleValue), content(output) {
-        margin = ResolveMarginPoints(marginValue);
+        const PdfPageSize page = ResolvePageSize(pageSize);
+        pageW = page.width;
+        pageH = page.height;
+        margin = ResolveMarginPoints(marginValue, page);
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
         mathFallback = { this, &Renderer::MeasureMathFallback, &Renderer::EmitMathFallback,
@@ -3729,6 +3729,8 @@ public:
     bool MathUsed() const { return math.Used(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
     double Margin() const { return margin; }
+    double PageWidth() const { return pageW; }
+    double PageHeight() const { return pageH; }
 
 private:
     template <typename RendererType>
@@ -3744,6 +3746,8 @@ private:
     double bodySize = 11.5;
     double lineHeight = 15.5;
     double y = 0.0;
+    double pageW = 595.0;
+    double pageH = 842.0;
     // The page being rendered is the tail of `content`, so painting is a plain append.
     std::string& content;
     std::vector<size_t> pageStarts;
@@ -3789,7 +3793,7 @@ private:
     }
 
     double MaxMathHeight() const {
-        return (PAGE_H - margin * 2.0) * 0.5;
+        return (pageH - margin * 2.0) * 0.5;
     }
 
     void RenderBullet(const Block& block) {
@@ -3808,7 +3812,7 @@ private:
         const double side = bodySize * 0.7;
         Ensure(bodySize * 1.35);
         AppendCheckbox(content, x, y - bodySize - 0.4, side, block.task == 2);
-        RenderParagraph(block.text, x + side + 5.0, PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0 - side - 5.0);
+        RenderParagraph(block.text, x + side + 5.0, pageW - margin * 2.0 - 16.0 - block.level * 18.0 - side - 5.0);
         y -= 2.0;
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
@@ -4557,7 +4561,7 @@ private:
     void NewPage() {
         pageStarts.push_back(content.size());
         pageLinks.push_back({});
-        y = PAGE_H - margin;
+        y = pageH - margin;
     }
 
     void RenderPageBreak() {
@@ -4645,7 +4649,7 @@ private:
     // The strip behind one line of quoted content, `height` tall: the tint, and the bar at its
     // left in the colour of the quote.
     void QuoteStrip(double height) {
-        DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, height, "0.94 0.95 0.96");
+        DrawRect(margin, y + 2.0, pageW - margin * 2.0, height, "0.94 0.95 0.96");
         DrawRect(margin, y + 2.0, 3.0, height, quoteBar);
     }
 
@@ -4699,7 +4703,7 @@ private:
             return;
         }
         const double lh = bodySize * 1.35;
-        for (const std::wstring& line : WrapText(font, Utf8ToWide(fallback), PAGE_W - margin * 2.0, bodySize)) {
+        for (const std::wstring& line : WrapText(font, Utf8ToWide(fallback), pageW - margin * 2.0, bodySize)) {
             Ensure(lh);
             PaintText(margin, y - bodySize, bodySize, line, "0.05 0.30 0.68");
             AddLink(margin, y - bodySize, TextWidth(font, line, bodySize), bodySize, image.link);
@@ -4721,8 +4725,8 @@ private:
         }
 
         const PdfImage& image = images->Get(index);
-        double maxW = PAGE_W - margin * 2.0;
-        double maxH = PAGE_H - margin * 2.0;
+        double maxW = pageW - margin * 2.0;
+        double maxH = pageH - margin * 2.0;
         double w = (double)image.width * 72.0 / 96.0;
         double h = (double)image.height * 72.0 / 96.0;
         if (w <= 0.0 || h <= 0.0) {
@@ -4746,17 +4750,17 @@ private:
     void RenderHeading(const Block& block, double keep) {
         int level = std::max(1, std::min(6, block.level));
         double size = kHeadingSizes[level];
-        if (y < PAGE_H - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
+        if (y < pageH - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
         Ensure(size * 1.35 + keep);
 
         if (block.hasMath) {
-            RenderMathTextLines(block.text, level, margin, PAGE_W - margin * 2.0, size, "0.02 0.02 0.02", false, false);
+            RenderMathTextLines(block.text, level, margin, pageW - margin * 2.0, size, "0.02 0.02 0.02", false, false);
             y -= level <= 2 ? 8.0 : 5.0;
             return;
         }
         MarkHeading(level, block.text, size * 1.35);
         std::wstring text = Utf8ToWide(block.text);
-        for (const auto& line : WrapText(font, text, PAGE_W - margin * 2.0, size)) {
+        for (const auto& line : WrapText(font, text, pageW - margin * 2.0, size)) {
             DrawTextLine(margin, size, line, "0.02 0.02 0.02");
         }
         y -= level <= 2 ? 8.0 : 5.0;
@@ -4828,7 +4832,7 @@ private:
     }
 
     void RenderParagraph(const std::string& text) {
-        RenderParagraph(text, margin, PAGE_W - margin * 2.0);
+        RenderParagraph(text, margin, pageW - margin * 2.0);
     }
 
     void RenderParagraph(const std::string& text, double x, double width) {
@@ -4870,7 +4874,7 @@ private:
 
     void RenderListItem(const std::string& marker, const Block& block) {
         double x = margin + 16.0 + block.level * 18.0;
-        double width = PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0;
+        double width = pageW - margin * 2.0 - 16.0 - block.level * 18.0;
         RenderParagraph(marker + block.text, x, width);
     }
 
@@ -4965,7 +4969,7 @@ private:
         double size = sizes[level];
         double height = size * 1.35;
         double x = margin + 14.0;
-        double width = PAGE_W - margin * 2.0 - 22.0;
+        double width = pageW - margin * 2.0 - 22.0;
         if (block.hasMath) {
             RenderMathTextLines(block.text, level, x, width, size, "0.10 0.15 0.18", true, true);
             y -= 7.0;
@@ -4983,7 +4987,7 @@ private:
     }
     void RenderQuote(const std::string& text) {
         double x = margin + 14.0;
-        double width = PAGE_W - margin * 2.0 - 22.0;
+        double width = pageW - margin * 2.0 - 22.0;
         if (math.Active()) math.Clear();
         if (WrapStyledRuns(text, width, bodySize, paragraphRuns)) {
             size_t index = 0;
@@ -5026,12 +5030,12 @@ private:
         double size = 9.5;
         double lh = size * 1.35;
         double x = margin + 8.0;
-        double width = PAGE_W - margin * 2.0 - 16.0;
+        double width = pageW - margin * 2.0 - 16.0;
         for (const auto& rawLine : raw) {
             std::wstring wide = Utf8ToWide(rawLine);
             for (const auto& line : WrapCodeLine(font, wide, width, size)) {
                 Ensure(lh + 4.0);
-                DrawRect(margin, y + 3.0, PAGE_W - margin * 2.0, lh + 5.0, "0.95 0.95 0.93");
+                DrawRect(margin, y + 3.0, pageW - margin * 2.0, lh + 5.0, "0.95 0.95 0.93");
                 DrawTextLine(x, size, line, "0.12 0.12 0.12");
             }
         }
@@ -5047,10 +5051,10 @@ private:
     // does not fit the page even at half size is shown as its source.
     RAYOMD_MATH_COLD void RenderDisplayMath(const std::string& tex, bool quoted) {
         double left = quoted ? margin + 14.0 : margin;
-        double available = quoted ? PAGE_W - margin * 2.0 - 22.0 : PAGE_W - margin * 2.0;
+        double available = quoted ? pageW - margin * 2.0 - 22.0 : pageW - margin * 2.0;
         double padTop = quoted ? kQuoteMathPad : kDisplayMathAbove;
         double padBottom = quoted ? kQuoteMathPad : 0.0;
-        double maxHeight = PAGE_H - margin * 2.0 - padTop - padBottom - 3.0;
+        double maxHeight = pageH - margin * 2.0 - padTop - padBottom - 3.0;
         MathFormula formula;
         if (!LayoutMathToFit(tex, bodySize, true, false, available, maxHeight, &mathFallback, formula)) {
             double savedMargin = margin;
@@ -5077,7 +5081,7 @@ private:
         double size = 10.5;
         double pitch = size * 1.35;   // what DrawTextLine advances by
         double x = margin + 12.0;
-        double width = PAGE_W - margin * 2.0 - 24.0;
+        double width = pageW - margin * 2.0 - 24.0;
         bool first = true;
         for (const auto& rawLine : raw) {
             std::wstring wide = Utf8ToWide(rawLine);
@@ -5087,12 +5091,12 @@ private:
                 if (pageStarts.size() != pageCount) first = true;
                 // One tile per line, flush with its neighbours, so the tint never covers text.
                 double pad = first ? 4.0 : 0.0;
-                DrawRect(margin, y + pad, PAGE_W - margin * 2.0, pitch + pad, "0.97 0.97 0.95");
+                DrawRect(margin, y + pad, pageW - margin * 2.0, pitch + pad, "0.97 0.97 0.95");
                 DrawTextLine(x, size, line, "0.10 0.10 0.10");
                 first = false;
             }
         }
-        DrawRect(margin, y, PAGE_W - margin * 2.0, 4.0, "0.97 0.97 0.95");
+        DrawRect(margin, y, pageW - margin * 2.0, 4.0, "0.97 0.97 0.95");
         y -= 12.0;
     }
 
@@ -5103,7 +5107,7 @@ private:
         for (const auto& row : rows) columns = std::max(columns, row.size());
         if (columns == 0) return;
 
-        double tableWidth = PAGE_W - margin * 2.0;
+        double tableWidth = pageW - margin * 2.0;
         double colWidth = tableWidth / columns;
         double size = 9.6;
         double lh = size * 1.32;
@@ -5129,7 +5133,7 @@ private:
             size_t first = 0;
             size_t count = maxLines;
             double rowHeight = maxLines * lh + pad * 2.0;
-            if (rowHeight + 5.0 > PAGE_H - margin * 2.0) {
+            if (rowHeight + 5.0 > pageH - margin * 2.0) {
                 count = TallTableRowSlice(first, maxLines, lh, pad);
             } else if (r == 0) {
                 // The header row keeps a line of the next row with it.
@@ -5137,7 +5141,7 @@ private:
                 Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
             } else if (y - rowHeight - 5.0 < margin) {
                 NewPage();
-                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= PAGE_H - margin * 2.0) {
+                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= pageH - margin * 2.0) {
                     resumeRow = r;
                     r = static_cast<size_t>(-1);
                     continue;
@@ -5214,7 +5218,7 @@ private:
         c += " ";
         AppendF(c, y);
         c += " m ";
-        AppendF(c, PAGE_W - margin);
+        AppendF(c, pageW - margin);
         c += " ";
         AppendF(c, y);
         c += " l S Q\n";
@@ -5816,10 +5820,13 @@ class StandardRenderer {
 public:
     // The content streams of all pages are appended to `output`, one after another. With
     // `winAnsi`, the text is a document transcoded to WinAnsiEncoding (Latin text).
-    StandardRenderer(std::string& output, PdfStyle styleValue, const PdfMargin& marginValue, ImageRegistry* imageRegistry,
-        bool winAnsi)
+    StandardRenderer(std::string& output, PdfStyle styleValue, const PdfMargin& marginValue, const PdfPageSize& pageSize,
+        ImageRegistry* imageRegistry, bool winAnsi)
         : images(imageRegistry), style(styleValue), winAnsiText(winAnsi), content(output) {
-        margin = ResolveMarginPoints(marginValue);
+        const PdfPageSize page = ResolvePageSize(pageSize);
+        pageW = page.width;
+        pageH = page.height;
+        margin = ResolveMarginPoints(marginValue, page);
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
         latinMathFallback = { this, &StandardRenderer::MeasureLatinMathFallback,
@@ -5835,6 +5842,8 @@ public:
     bool MathUsed() const { return math.Used(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
     double Margin() const { return margin; }
+    double PageWidth() const { return pageW; }
+    double PageHeight() const { return pageH; }
     // Whether text was shown in /F4 Helvetica-Oblique or /F5 Helvetica-BoldOblique.
     bool ObliqueUsed() const { return (facesUsed & (1u << kStyleItalic)) != 0; }
     bool BoldObliqueUsed() const { return (facesUsed & (1u << (kStyleBold | kStyleItalic))) != 0; }
@@ -5852,6 +5861,8 @@ private:
     double bodySize = 11.5;
     double lineHeight = 15.5;
     double y = 0.0;
+    double pageW = 595.0;
+    double pageH = 842.0;
     // The page being rendered is the tail of `content`, so painting is a plain append.
     std::string& content;
     std::vector<size_t> pageStarts;
@@ -5872,7 +5883,7 @@ private:
     MathFallbackFont latinMathFallback{};
 
     double MaxMathHeight() const {
-        return (PAGE_H - margin * 2.0) * 0.5;
+        return (pageH - margin * 2.0) * 0.5;
     }
 
     // Latin text in a formula (\text{café}, a degree sign) is measured and painted in
@@ -5917,7 +5928,7 @@ private:
             return;
         }
         RenderParagraph("- " + block.text, margin + 16.0 + block.level * 18.0,
-            PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0);
+            pageW - margin * 2.0 - 16.0 - block.level * 18.0);
         y -= 2.0;
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
@@ -5928,7 +5939,7 @@ private:
         const double side = bodySize * 0.7;
         Ensure(bodySize * 1.35);
         AppendCheckbox(content, x, y - bodySize - 0.4, side, block.task == 2);
-        RenderParagraph(block.text, x + side + 5.0, PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0 - side - 5.0);
+        RenderParagraph(block.text, x + side + 5.0, pageW - margin * 2.0 - 16.0 - block.level * 18.0 - side - 5.0);
         y -= 2.0;
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
@@ -5944,7 +5955,7 @@ private:
         item += ". ";
         item += block.text;
         RenderParagraph(item, margin + 16.0 + block.level * 18.0,
-            PAGE_W - margin * 2.0 - 16.0 - block.level * 18.0);
+            pageW - margin * 2.0 - 16.0 - block.level * 18.0);
         y -= 2.0;
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
@@ -5959,7 +5970,7 @@ private:
     void NewPage() {
         pageStarts.push_back(content.size());
         pageLinks.push_back({});
-        y = PAGE_H - margin;
+        y = pageH - margin;
     }
 
     void RenderPageBreak() {
@@ -5992,7 +6003,7 @@ private:
     // The strip behind one line of quoted content, `height` tall: the tint, and the bar at its
     // left in the colour of the quote.
     void QuoteStrip(double height) {
-        Rect(margin, y + 2.0, PAGE_W - margin * 2.0, height, "0.94 0.95 0.96");
+        Rect(margin, y + 2.0, pageW - margin * 2.0, height, "0.94 0.95 0.96");
         Rect(margin, y + 2.0, 3.0, height, quoteBar);
     }
 
@@ -6757,7 +6768,7 @@ private:
             return;
         }
         const double lh = bodySize * 1.35;
-        for (const WrappedAsciiLine& line : WrapAsciiText(fallback, PAGE_W - margin * 2.0, bodySize, StandardTextFont::Regular)) {
+        for (const WrappedAsciiLine& line : WrapAsciiText(fallback, pageW - margin * 2.0, bodySize, StandardTextFont::Regular)) {
             Ensure(lh);
             Text(margin, y - bodySize, bodySize, line.text, "F1", "0.05 0.30 0.68");
             AddLink(margin, y - bodySize, line.width, bodySize, image.link);
@@ -6783,8 +6794,8 @@ private:
         }
 
         const PdfImage& image = images->Get(index);
-        double maxW = PAGE_W - margin * 2.0;
-        double maxH = PAGE_H - margin * 2.0;
+        double maxW = pageW - margin * 2.0;
+        double maxH = pageH - margin * 2.0;
         double w = (double)image.width * 72.0 / 96.0;
         double h = (double)image.height * 72.0 / 96.0;
         if (w <= 0.0 || h <= 0.0) {
@@ -6835,15 +6846,15 @@ private:
     void RenderHeading(const Block& block, double keep) {
         int level = std::max(1, std::min(6, block.level));
         double size = kHeadingSizes[level];
-        if (y < PAGE_H - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
+        if (y < pageH - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
         Ensure(size * 1.35 + keep);
         if (block.hasMath) {
-            RenderMathTextLines(block.text, level, margin, PAGE_W - margin * 2.0, size, "0.02 0.02 0.02", true, false);
+            RenderMathTextLines(block.text, level, margin, pageW - margin * 2.0, size, "0.02 0.02 0.02", true, false);
             y -= level <= 2 ? 8.0 : 5.0;
             return;
         }
         MarkHeading(level, block.text, size * 1.35);
-        ForEachWrappedAsciiLine(block.text, PAGE_W - margin * 2.0, size, StandardTextFont::Bold, [&](std::string_view line, double) {
+        ForEachWrappedAsciiLine(block.text, pageW - margin * 2.0, size, StandardTextFont::Bold, [&](std::string_view line, double) {
             DrawTextLine(margin, size, line, "F2", "0.02 0.02 0.02");
         });
         y -= level <= 2 ? 8.0 : 5.0;
@@ -6917,7 +6928,7 @@ private:
     }
 
     void RenderParagraph(const std::string& text) {
-        RenderParagraph(text, margin, PAGE_W - margin * 2.0);
+        RenderParagraph(text, margin, pageW - margin * 2.0);
     }
 
     void RenderParagraph(const std::string& text, double x, double width) {
@@ -7058,7 +7069,7 @@ private:
         double size = sizes[level];
         double height = size * 1.35;
         double x = margin + 14.0;
-        double width = PAGE_W - margin * 2.0 - 22.0;
+        double width = pageW - margin * 2.0 - 22.0;
         if (block.hasMath) {
             RenderMathTextLines(block.text, level, x, width, size, "0.10 0.15 0.18", true, true);
             y -= 7.0;
@@ -7075,7 +7086,7 @@ private:
     }
     void RenderQuote(const std::string& text) {
         double x = margin + 14.0;
-        double width = PAGE_W - margin * 2.0 - 22.0;
+        double width = pageW - margin * 2.0 - 22.0;
         if (math.Active()) math.Clear();
         if (WrapAsciiRuns(text, width, bodySize, paragraphRuns)) {
             size_t index = 0;
@@ -7120,11 +7131,11 @@ private:
         double size = 9.5;
         double lh = size * 1.35;
         double x = margin + 8.0;
-        double width = PAGE_W - margin * 2.0 - 16.0;
+        double width = pageW - margin * 2.0 - 16.0;
         for (const auto& rawLine : raw) {
             for (const auto& line : WrapAsciiLiteral(rawLine, width, size)) {
                 Ensure(lh + 4.0);
-                Rect(margin, y + 3.0, PAGE_W - margin * 2.0, lh + 5.0, "0.95 0.95 0.93");
+                Rect(margin, y + 3.0, pageW - margin * 2.0, lh + 5.0, "0.95 0.95 0.93");
                 DrawTextLine(x, size, line, "F3", "0.12 0.12 0.12", true);
             }
         }
@@ -7140,10 +7151,10 @@ private:
     // does not fit the page even at half size is shown as its source.
     RAYOMD_MATH_COLD void RenderDisplayMath(const std::string& tex, bool quoted) {
         double left = quoted ? margin + 14.0 : margin;
-        double available = quoted ? PAGE_W - margin * 2.0 - 22.0 : PAGE_W - margin * 2.0;
+        double available = quoted ? pageW - margin * 2.0 - 22.0 : pageW - margin * 2.0;
         double padTop = quoted ? kQuoteMathPad : kDisplayMathAbove;
         double padBottom = quoted ? kQuoteMathPad : 0.0;
-        double maxHeight = PAGE_H - margin * 2.0 - padTop - padBottom - 3.0;
+        double maxHeight = pageH - margin * 2.0 - padTop - padBottom - 3.0;
         MathFormula formula;
         std::string utf8;
         if (!LayoutMathToFit(MathSource(tex, utf8), bodySize, true, false, available, maxHeight, MathFallback(),
@@ -7172,18 +7183,18 @@ private:
         double pitch = size * 1.35;   // what DrawTextLine advances by
         bool first = true;
         for (const auto& rawLine : SplitLines(text)) {
-            for (const auto& line : WrapAsciiLiteral(rawLine, PAGE_W - margin * 2.0 - 24.0, size)) {
+            for (const auto& line : WrapAsciiLiteral(rawLine, pageW - margin * 2.0 - 24.0, size)) {
                 size_t pageCount = pageStarts.size();
                 Ensure(pitch + 8.0);
                 if (pageStarts.size() != pageCount) first = true;
                 // One tile per line, flush with its neighbours, so the tint never covers text.
                 double pad = first ? 4.0 : 0.0;
-                Rect(margin, y + pad, PAGE_W - margin * 2.0, pitch + pad, "0.97 0.97 0.95");
+                Rect(margin, y + pad, pageW - margin * 2.0, pitch + pad, "0.97 0.97 0.95");
                 DrawTextLine(margin + 12.0, size, line, "F3", "0.10 0.10 0.10", true);
                 first = false;
             }
         }
-        Rect(margin, y, PAGE_W - margin * 2.0, 4.0, "0.97 0.97 0.95");
+        Rect(margin, y, pageW - margin * 2.0, 4.0, "0.97 0.97 0.95");
         y -= 12.0;
     }
 
@@ -7193,7 +7204,7 @@ private:
         for (const auto& row : rows) columns = std::max(columns, row.size());
         if (columns == 0) return;
 
-        double tableWidth = PAGE_W - margin * 2.0;
+        double tableWidth = pageW - margin * 2.0;
         double colWidth = tableWidth / columns;
         double size = 9.6;
         double lh = size * 1.32;
@@ -7228,7 +7239,7 @@ private:
             size_t first = 0;
             size_t count = maxLines;
             double rowHeight = maxLines * lh + pad * 2.0;
-            if (rowHeight + 5.0 > PAGE_H - margin * 2.0) {
+            if (rowHeight + 5.0 > pageH - margin * 2.0) {
                 count = TallTableRowSlice(first, maxLines, lh, pad);
             } else if (r == 0) {
                 // The header row keeps a line of the next row with it.
@@ -7236,7 +7247,7 @@ private:
                 Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
             } else if (y - rowHeight - 5.0 < margin) {
                 NewPage();
-                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= PAGE_H - margin * 2.0) {
+                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= pageH - margin * 2.0) {
                     resumeRow = r;
                     r = static_cast<size_t>(-1);
                     continue;
@@ -7318,7 +7329,7 @@ private:
         c += " ";
         AppendF(c, y);
         c += " m ";
-        AppendF(c, PAGE_W - margin);
+        AppendF(c, pageW - margin);
         c += " ";
         AppendF(c, y);
         c += " l S Q\n";
@@ -7329,7 +7340,8 @@ private:
 // The page number at the foot of a page: "N / M" centred in the bottom margin, small and grey,
 // in Helvetica, which the page names `font`. A content stream of its own, after the page's,
 // which was rendered before the page count was known.
-RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t pages, double margin, const char* font) {
+RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t pages, double margin, double pageWidth,
+    const char* font) {
     char label[48];
     char* end = std::to_chars(label, label + 20, page).ptr;
     memcpy(end, " / ", 3);
@@ -7339,7 +7351,7 @@ RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t pages,
     std::string stream = "q 0.45 0.45 0.45 rg BT /";
     stream += font;
     stream += " 9 Tf 1 0 0 1 ";
-    AppendF(stream, (PAGE_W - Internal::StandardTextWidth(text, kSize, StandardTextFont::Regular)) * 0.5);
+    AppendF(stream, (pageWidth - Internal::StandardTextWidth(text, kSize, StandardTextFont::Regular)) * 0.5);
     stream += " ";
     AppendF(stream, margin * 0.5 - 3.0);
     stream += " Tm (";
@@ -7393,14 +7405,14 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
 
     ImageRegistry imageRegistry(options);
     PrepareOutput(pdfBytes, text.size() * 4 + 32 * 1024);
-    StandardRenderer renderer(pdfBytes, options.style, options.margin, &imageRegistry, winAnsi);
+    StandardRenderer renderer(pdfBytes, options.style, options.margin, options.pageSize, &imageRegistry, winAnsi);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         renderer.Render(blocks);
     }
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
-    HeadingTargets headingTargets(renderer.Headings(), winAnsi);
+    HeadingTargets headingTargets(renderer.Headings(), winAnsi, renderer.PageHeight());
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds =
         AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks);
@@ -7418,15 +7430,15 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
         int contentId = pdf.AddStreamInPlace("", pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = options.pageNumbers
-            ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), "F1") : 0;
+            ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "F1") : 0;
         std::string page;
         page.reserve(192);
         page += "<< /Type /Page /Parent ";
         AppendInt(page, pagesId);
         page += " 0 R /MediaBox [0 0 ";
-        AppendF(page, PAGE_W);
+        AppendF(page, renderer.PageWidth());
         page += " ";
-        AppendF(page, PAGE_H);
+        AppendF(page, renderer.PageHeight());
         page += "] /Resources << /Font << /F1 ";
         AppendInt(page, fontRegularId);
         page += " 0 R /F2 ";
@@ -7616,14 +7628,14 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
 
     ImageRegistry imageRegistry(options);
     PrepareOutput(pdfBytes, markdown.size() * 8 + 256 * 1024);
-    Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, &imageRegistry);
+    Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, options.pageSize, &imageRegistry);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         renderer.Render(blocks);
     }
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
-    HeadingTargets headingTargets(renderer.Headings(), false);
+    HeadingTargets headingTargets(renderer.Headings(), false, renderer.PageHeight());
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds =
         AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks);
@@ -7705,15 +7717,15 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
         int contentId = pdf.AddStreamInPlace("", pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = options.pageNumbers
-            ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), "FN") : 0;
+            ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "FN") : 0;
         std::string page;
         page.reserve(160);
         page += "<< /Type /Page /Parent ";
         AppendInt(page, pagesId);
         page += " 0 R /MediaBox [0 0 ";
-        AppendF(page, PAGE_W);
+        AppendF(page, renderer.PageWidth());
         page += " ";
-        AppendF(page, PAGE_H);
+        AppendF(page, renderer.PageHeight());
         page += "] /Resources << /Font << /F1 ";
         AppendInt(page, type0FontId);
         page += " 0 R";

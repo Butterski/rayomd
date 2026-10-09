@@ -29,6 +29,19 @@ struct PdfMargin {
     static PdfMargin CustomPoints(double points) { return { MarginPreset::Custom, points }; }
 };
 
+// Page width and height in points (1/72 inch). Each side is kept between 144 and 14,400
+// points, and a margin too wide for the page shrinks to leave 72 points of text.
+struct PdfPageSize {
+    double width = 595.0;
+    double height = 842.0;
+
+    static PdfPageSize A4() { return { 595.0, 842.0 }; }
+    static PdfPageSize A3() { return { 842.0, 1191.0 }; }
+    static PdfPageSize A5() { return { 420.0, 595.0 }; }
+    static PdfPageSize Letter() { return { 612.0, 792.0 }; }
+    static PdfPageSize Legal() { return { 612.0, 1008.0 }; }
+};
+
 enum class BuildError : uint8_t {
     None,
     // No longer returned: a document whose characters need a TrueType font that cannot be
@@ -52,6 +65,7 @@ struct BuildResult {
 struct PdfOptions {
     PdfStyle style = PdfStyle::Elegant;
     PdfMargin margin = PdfMargin::Normal();
+    PdfPageSize pageSize = PdfPageSize::A4();
     std::string sourcePath;
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;

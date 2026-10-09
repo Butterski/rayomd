@@ -664,6 +664,20 @@ break in another order, as words. Fixtures whose tables fit a page run the same
 instructions; the table fixture draws 20 more header rows on its 61 pages with
 1.7 % more instructions, about 0.3 % of them for wrapping again.
 
+## Page sizes, October 2026
+
+`PdfOptions::pageSize` (CLI `--page-size`) sets the page: the presets A4 (still the
+default), A3, A5, Letter and Legal, each also in landscape, or any size in mm, cm,
+in or pt. Each side stays within 144 to 14,400 points, PDF's own limit, and a
+margin too wide for the page shrinks to leave 72 points of text. The 62 uses of
+the `PAGE_W`/`PAGE_H` constants became the renderers' `pageW`/`pageH` members, read
+where the constants were, so A4 runs the same arithmetic in the same order.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`8b06b99`): all 2,883 corpus PDFs are byte-identical at A4, and the watch fixtures
+run the same instructions (within 0.02 % each); time moved +0.19 % with pinned
+alignment (A/A -0.60 %), which is noise for a load in place of a constant.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

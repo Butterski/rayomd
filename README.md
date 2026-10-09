@@ -118,7 +118,7 @@ Common CLI workflows:
 rayomd --export input.md output.pdf
 rayomd --batch input-folder output-folder native modern normal --workers=4
 rayomd --export input.md reversible.pdf native elegant normal --embed-source
-rayomd --export input.md numbered.pdf --page-numbers
+rayomd --export input.md numbered.pdf --page-numbers --page-size=letter
 rayomd --recover-source reversible.pdf recovered.md
 ```
 

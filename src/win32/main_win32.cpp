@@ -151,6 +151,7 @@ struct WinExportOptions {
     int engine = 0;
     TinyPdf::PdfStyle style = TinyPdf::PdfStyle::Elegant;
     TinyPdf::PdfMargin margin = TinyPdf::PdfMargin::Normal();
+    TinyPdf::PdfPageSize pageSize;
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
     unsigned workers = 0;
@@ -498,6 +499,7 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
     TinyPdf::PdfOptions options;
     options.style = exportOptions.style;
     options.margin = exportOptions.margin;
+    options.pageSize = exportOptions.pageSize;
     options.sourcePath = WideToUtf8(sourcePath);
     options.enableUrlImages = exportOptions.enableUrlImages;
     options.allowUnsafeLocalImages = exportOptions.allowUnsafeLocalImages;
@@ -645,6 +647,12 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.embedSource = true;
         } else if (lstrcmpiW(argv[i], L"--page-numbers") == 0) {
             options.pageNumbers = true;
+        } else if (_wcsnicmp(argv[i], L"--page-size=", 12) == 0) {
+            if (!TinyPdf::Internal::ParsePageSize(WideToUtf8(argv[i] + 12), options.pageSize)) {
+                error = L"--page-size must be a4, a3, a5, letter or legal (each also with -landscape), or "
+                    L"WIDTHxHEIGHT in mm, cm, in or pt, such as 210x297mm";
+                return false;
+            }
         } else if (_wcsnicmp(argv[i], L"--workers=", 10) == 0) {
             wchar_t* end = nullptr;
             unsigned long parsed = std::wcstoul(argv[i] + 10, &end, 10);

@@ -82,6 +82,13 @@ def verify(binary: Path, keep: Path | None) -> None:
         numbered_pdf = root / "numbered.pdf"
         run(binary, "--export", str(ascii_md), str(numbered_pdf), "native", "modern", "normal", "--page-numbers")
         require_pdf(numbered_pdf, b"/Contents [", b"(1 / 1) Tj")
+        letter_pdf = root / "letter.pdf"
+        run(binary, "--export", str(ascii_md), str(letter_pdf), "native", "modern", "normal", "--page-size=letter")
+        require_pdf(letter_pdf, b"/MediaBox [0 0 612 792]")
+        bad_size_pdf = root / "bad-size.pdf"
+        bad_size = run(binary, "--export", str(ascii_md), str(bad_size_pdf), "--page-size=b5", expect=2)
+        if b"--page-size must be" not in bad_size.stdout or bad_size_pdf.exists():
+            raise AssertionError("an invalid --page-size was not rejected")
 
         if os.name == "nt":
             adjacent_quote_pdf = root / "adjacent-quote.pdf"
