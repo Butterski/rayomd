@@ -46,6 +46,7 @@ native exporter through a small CLI.
 - Unicode, clickable links (also bare URLs), bookmarks, tables, task lists, GitHub alerts, footnotes (as on GitHub, at the end of the text), code highlighted as on GitHub in 29 languages and formats, local images, and opt-in URL images.
 - Natively typeset math for a TeX subset: no LaTeX, no browser, no embedded math fonts.
 - Optional exact Markdown recovery through reversible PDFs.
+- Tables of contents (`[TOC]` or `--toc`) with dot leaders, page numbers and links to the headings.
 - Optional compression (`--compress`) with a built-in DEFLATE encoder: text-heavy PDFs come out two to five times smaller.
 - Company themes (`--theme=FILE`): your TrueType font, colours, header and footer text with a logo, and a cover page.
 - PDF/A-3b archives (`--pdfa`): every font embedded, sRGB output intent and XMP metadata; formulas show their TeX source.
@@ -54,7 +55,7 @@ native exporter through a small CLI.
 Use native RayoMD for simple reports and bulk conversion when startup time,
 package size, and dependency count matter. Use Pandoc, a browser renderer, or
 LaTeX when you need full CommonMark/Pandoc extensions, complete LaTeX math, filters,
-templates, citations, syntax highlighting, or HTML/CSS fidelity.
+templates, citations, highlighting for every language, or HTML/CSS fidelity.
 
 ## Performance snapshot
 
@@ -170,7 +171,8 @@ text, lists, quotes, headings and table cells), Unicode fonts (or the PDF standa
 fonts when no system font is found), HTML comments (hidden), `<br>` line breaks,
 character references such as `&copy;`, PDF metadata from the front matter (title,
 else the first heading; author, subject, keywords and language), opt-in page numbers,
-and common status-symbol normalization.
+a table of contents at a `[TOC]` or `[[_TOC_]]` paragraph or with `--toc`, and common
+status-symbol normalization.
 Images embedded in paragraph text use a consistent `image: alt` fallback;
 standalone images retain native image layout and missing-image fallback text.
 

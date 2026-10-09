@@ -21,6 +21,8 @@ enum class BlockType {
     Rule,
     PageBreak,
     Image,
+    // The table of contents (contents.h), which the builder places after the parse.
+    Contents,
 };
 
 // Where an image block's picture comes from, and for a linked image, "[![alt](src)](target)",

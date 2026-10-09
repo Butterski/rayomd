@@ -177,6 +177,22 @@ def verify_highlight(binary: Path, root: Path) -> None:
         raise AssertionError("--no-highlight still coloured the code")
 
 
+def verify_contents(binary: Path, root: Path) -> None:
+    """--toc: a table of contents after the title heading, its entries linked to the headings to
+    --toc-depth levels; a depth outside 1-6 fails with exit 2."""
+    source = root / "manual.md"
+    source.write_text("# Manual\n\n## Install\n\nText.\n\n### Linux\n\nText.\n", encoding="utf-8")
+    shallow_pdf = root / "manual-shallow.pdf"
+    run(binary, "--export", str(source), str(shallow_pdf), "--toc", "--toc-depth=1")
+    deep_pdf = root / "manual-deep.pdf"
+    run(binary, "--export", str(source), str(deep_pdf), "--toc")
+    # Three bookmarks, and one or two entries' links.
+    if (require_pdf(shallow_pdf, b"(Contents) Tj").count(b"/Dest [") != 4 or
+            require_pdf(deep_pdf, b"(Contents) Tj").count(b"/Dest [") != 5):
+        raise AssertionError("--toc: unexpected table of contents links")
+    run(binary, "--export", str(source), str(root / "manual-bad.pdf"), "--toc-depth=7", expect=2)
+
+
 def pdf_streams(data: bytes) -> list[tuple[bytes, bytes]]:
     """The dictionary and payload of every stream of a PDF, in file order."""
     streams = []
@@ -263,6 +279,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_pdfa(binary, root)
         verify_footnotes(binary, root)
         verify_highlight(binary, root)
+        verify_contents(binary, root)
         verify_batch(binary, root)
 
         if os.name == "nt":

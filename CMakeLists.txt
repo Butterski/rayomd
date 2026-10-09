@@ -112,6 +112,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/theme.cpp
         src/core/pdfa.cpp
         src/core/footnotes.cpp
+        src/core/contents.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
     # The opt-in DEFLATE encoder: -O2 is within 1 % of -O3 on RayoMD's streams at half the code.
     # The highlighter's lexers read every byte of a code block: 1.5 times as fast at -O2 as at -Os.
@@ -131,6 +132,7 @@ if(WIN32)
         src/core/markdown_parser.cpp
         src/core/footnotes.cpp
         src/core/highlight.cpp
+        src/core/contents.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp
         src/common/text_utils.cpp
@@ -197,6 +199,7 @@ else()
         src/core/markdown_parser.cpp
         src/core/footnotes.cpp
         src/core/highlight.cpp
+        src/core/contents.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp
         src/common/text_utils.cpp
@@ -235,6 +238,7 @@ if(BUILD_TESTING)
         src/core/markdown_parser.cpp
         src/core/footnotes.cpp
         src/core/highlight.cpp
+        src/core/contents.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp
         src/common/text_utils.cpp

@@ -10,6 +10,7 @@
 #include "../src/core/rayomd_pdf_source.h"
 #include "../src/core/pdfa.h"
 #include "../src/core/highlight.h"
+#include "../src/core/contents.h"
 
 #include <algorithm>
 #include <array>
@@ -2184,6 +2185,61 @@ bool CheckHighlighting() {
     return true;
 }
 
+// A table of contents: the first paragraph "[TOC]" or "[[_TOC_]]", in any case, becomes it and
+// later ones go, unless a link definition makes "[TOC]" a link; PdfOptions::toc puts one first, or
+// after a title heading. It lists the headings to its depth below its top level, a document's only
+// level-1 heading, its first, being its title; each entry links to its heading and shows its page,
+// after a row of dots below the top level. In both renderers.
+bool CheckContents() {
+    using TinyPdf::Internal::Block;
+    using TinyPdf::Internal::BlockType;
+    using TinyPdf::Internal::ParseMarkdown;
+    using TinyPdf::Internal::PlaceContents;
+    std::vector<Block> blocks = ParseMarkdown("# Title\n\nText.\n\n[toc]\n\n## A\n\n### B\n\n#### C\n\n[[_TOC_]]\n\n[TOC] text\n");
+    const auto contentsBlocks = [&blocks]() {
+        return std::count_if(blocks.begin(), blocks.end(), [](const Block& block) { return block.type == BlockType::Contents; });
+    };
+    const auto entries = PlaceContents(blocks, false, 2);
+    if (blocks.size() != 8 || blocks[2].type != BlockType::Contents || blocks[6].type != BlockType::Contents ||
+        contentsBlocks() != 2 || blocks.back().text != "[TOC] text" || entries.size() != 2 || entries[0].text != "A" ||
+        entries[0].level != 1 || entries[1].text != "B" || entries[1].level != 2 || entries[0].heading != blocks[3].text.data()) {
+        std::cerr << "table of contents marker mismatch" << std::endl;
+        return false;
+    }
+    blocks = ParseMarkdown("[TOC]\n\n# Heading\n\n[toc]: https://example.com\n");
+    const bool linked = !PlaceContents(blocks, false, 3).empty() || contentsBlocks() != 0;
+    blocks = ParseMarkdown("# Title\n\nText.\n\n## A\n");
+    const bool afterTitle = PlaceContents(blocks, true, 3).size() == 1 && blocks[1].type == BlockType::Contents;
+    blocks = ParseMarkdown("# One\n\n# Two\n");
+    const bool first = PlaceContents(blocks, true, 1).size() == 2 && blocks[0].type == BlockType::Contents;
+    // A heading of footnote references alone shows nothing to list; a depth out of 1 to 6 is taken as the nearest.
+    const auto listedEntries = [](int depth) {
+        TinyPdf::Internal::Footnotes notes;
+        std::vector<Block> parsed =
+            ParseMarkdown("# One\n\n[TOC]\n\n## [^1]\n\n## Two\n\n### Three\n\n#### Four\n\n[^1]: Note.\n", &notes);
+        return PlaceContents(parsed, false, depth);   // only the levels and texts are compared
+    };
+    const auto all = listedEntries(1000);
+    const bool listed = all.size() == 3 && all[0].text == "Two" && all[2].text == "Four" && all[2].level == 3 &&
+        listedEntries(-5).size() == 1;
+    if (linked || !afterTitle || !first || !listed) {
+        std::cerr << "table of contents placement mismatch" << std::endl;
+        return false;
+    }
+    const std::string document = "# Title\n\n[TOC]\n\n## One\n\nText.\n\n### Two\n\nText.\n\n[[_toc_]]\n";
+    for (const std::string& text : { document, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + document }) {
+        std::string pdf;
+        // Three bookmarks and two entries' links, one table; dots before the second entry's number only.
+        if (!Build(text, pdf) || CountOccurrences(pdf, "/Dest [") != 5 || CountOccurrences(pdf, " Tc 1 0 0 1 ") != 1 ||
+            (text == document && (CountOccurrences(pdf, "(Contents) Tj") != 1 || pdf.find("/F2 11.5 Tf 1 0 0 1 ") == std::string::npos ||
+                pdf.find("(1) Tj ET Q") == std::string::npos))) {
+            std::cerr << "table of contents mismatch (" << (text == document ? "standard" : "Unicode") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -2583,6 +2639,7 @@ int main() {
     if (!CheckFootnotes()) return 92;
     if (!CheckCodeTiles()) return 93;
     if (!CheckHighlighting()) return 94;
+    if (!CheckContents()) return 95;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

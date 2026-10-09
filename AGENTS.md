@@ -64,6 +64,14 @@ Dockerfile, diff) is drawn in the colours of GitHub's light theme; `--no-highlig
 and its bytes. The lexers in `highlight.cpp` read every byte once in one forward pass;
 every rule is bounded, so time stays linear for any input. Keep it that way: a new rule
 that scans ahead must stop at the end of its line or mark what it scanned, never rescan.
+A table of contents comes at the first paragraph `[TOC]` or `[[_TOC_]]` (later ones draw
+nothing), or with `--toc` (`PdfOptions::toc`) first or after a title heading; it lists
+the top-level headings to `--toc-depth` levels, without a document's only level-1 heading
+when that comes first and without headings of footnote references alone. The renderers
+lay out its entries in the flow and link them to the headings; the builder adds the page
+numbers and the dot leaders afterwards as a content stream of each table page's own,
+beside a theme's header and footer, so one layout pass suffices. A TOC entry finds its
+heading by the address of the heading's text, which `HeadingMark::text` keeps.
 Opt-in compression (`--compress`, `PdfOptions::compress`) writes page content, the
 font program and both CMaps as FlateDecode where that makes the file smaller, with
 RayoMD's own DEFLATE encoder; never the XMP metadata or an embedded source, which
@@ -151,6 +159,11 @@ Important image/link details:
   time), the lexers that give each byte of a code block a token class, and the colours.
   Built at `-O2`: per-byte code, 1.5 times as fast as at `-Os`. The renderers split a
   line into runs of one colour (`SplitCodeRuns`) and draw them in one text object.
+
+- `src/core/contents.h` and `src/core/contents.cpp`
+  The table of contents: turning the marker paragraph into a `BlockType::Contents` block
+  (or inserting one for `--toc`) and listing the headings it shows. Built at `-Os`; the
+  marker scan runs for every document, so it looks at a block's text length first.
 
 - `src/core/rayomd_pdf_source.h` and `src/core/rayomd_pdf_source.cpp`
   Bounded reversible-profile metadata, SHA-256 integrity, hostile-input

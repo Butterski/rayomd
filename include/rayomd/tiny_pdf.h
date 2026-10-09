@@ -118,6 +118,11 @@ struct PdfOptions {
     // Fenced code whose info string names a language GitHub knows (python, js, bash, ...) in
     // the colours of GitHub's light theme; false shows every code block in one colour.
     bool highlightCode = true;
+    // A table of contents, with links and page numbers: where the document has a paragraph
+    // "[TOC]" or "[[_TOC_]]" (which always gets one), else first, after the title heading.
+    bool toc = false;
+    // The heading levels the table lists, from its top one: 1 to 6.
+    int tocDepth = 3;
     PdfTheme theme;
 };
 

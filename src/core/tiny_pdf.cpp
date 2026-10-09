@@ -5,6 +5,7 @@
 #include "inline_markdown.h"
 #include "../common/profiling.h"
 #include "../common/text_utils.h"
+#include "contents.h"
 #include "markdown_parser.h"
 #include "highlight.h"
 #include "math_layout.h"
@@ -3638,23 +3639,34 @@ RAYOMD_COLD static void AppendFootnoteRule(std::string& c, const char* color, do
 }
 
 // The headings that links to "#anchor" name. The anchors are made at the first such link, so a
-// document without one does no work for them.
+// document without one (links to footnotes and table entries do not count) does no work for them.
 class HeadingTargets {
 public:
     HeadingTargets(const std::vector<HeadingMark>& headingMarks, bool winAnsiText, double pageHeight,
         const NoteMarks& noteMarks)
         : headings(headingMarks), winAnsi(winAnsiText), pageTop(pageHeight), notes(noteMarks) {}
 
+    // The heading of each entry of the table of contents, an index into the headings, or npos.
+    void SetContents(const std::vector<size_t>* entryHeadings) { contents = entryHeadings; }
+
     // Reserves the annotation of `link`, to "#fragment", in `out`; false when no heading has that
     // anchor. The fragment may be percent-encoded and differ from the anchor in case and
     // punctuation. An empty fragment and "top" go to the top of the first page, as in a browser,
-    // and in a document with footnotes "^N" to note N and "^rN" to its first reference.
+    // in a document with footnotes "^N" to note N and "^rN" to its first reference, and in one
+    // with a table of contents "\x01N" to the heading of its entry N.
     RAYOMD_COLD bool Reserve(PdfObjects& pdf, const LinkRect& link, std::vector<InternalLink>& out) {
-        if (!indexed) Index();
         std::string fragment(std::string_view(link.url).substr(1));
         if (winAnsi && !IsAllAscii(fragment)) fragment = RayoMd::Text::WinAnsiToUtf8(fragment);
         fragment = PercentDecoded(fragment);
         if (!notes.notes.empty() && !fragment.empty() && fragment[0] == '^') return ReserveNote(pdf, link, fragment, out);
+        if (contents != nullptr && !fragment.empty() && fragment[0] == '\x01') {
+            const size_t entry = (size_t)std::strtoull(fragment.c_str() + 1, nullptr, 10);
+            if (entry >= contents->size() || (*contents)[entry] >= headings.size()) return false;
+            const HeadingMark& heading = headings[(*contents)[entry]];
+            out.push_back({ pdf.Reserve(), &link, heading.page, heading.top + 4.0 });
+            return true;
+        }
+        if (!indexed) Index();
         auto found = anchors.find(fragment);
         if (found == anchors.end()) found = anchors.find(HeadingSlug(fragment));
         if (found != anchors.end()) {
@@ -3717,6 +3729,7 @@ private:
     bool indexed = false;
     std::unordered_map<std::string, Anchor> anchors;
     const NoteMarks& notes;
+    const std::vector<size_t>* contents = nullptr;
 };
 
 // "<< /Type /Annot /Subtype /Link /Rect [...] /Border [0 0 0]": the start of a link annotation;
@@ -4145,6 +4158,15 @@ static double HeadingKeep(const Block& heading, const Block* next, const Block* 
     return keep;
 }
 
+// Where an entry of the table of contents ends: the page, baseline and right end of its last line,
+// for the page number and the dots the builder adds to it (ContentsNumbers).
+struct ContentsLine {
+    size_t entry = 0;
+    size_t page = 0;
+    double baseline = 0.0;
+    double end = 0.0;
+};
+
 // A run of a line of highlighted code: where it ends, and the colour index of its characters
 // (Internal::kCodeColorOfClass).
 struct CodeRun {
@@ -4196,6 +4218,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         case BlockType::Rule: renderer.RenderRule(); break;
         case BlockType::PageBreak: break;
         case BlockType::Image: renderer.RenderImage(block); break;
+        case BlockType::Contents: renderer.RenderContents(); break;
         }
     }
 }
@@ -4305,6 +4328,36 @@ public:
     void RenderFootnotes() {
         if (footnotes != nullptr && !footnotes->notes.empty()) RenderFootnoteSection(*this, *footnotes);
     }
+    // The entries of the table of contents (contents.h), which RenderContents draws.
+    void SetContents(const std::vector<Internal::ContentsEntry>* entries) { contents = entries; }
+
+    // The page numbers of the table's entries, right-aligned on the last line of each and after a
+    // row of dots below the top level: one stream for each page, for the builder to add to the
+    // table's. `pages[i]` is the page of entry i's heading, npos for one not drawn. The digits and
+    // the dot join the font subset.
+    RAYOMD_COLD void ContentsNumbers(const std::vector<size_t>& pages, std::vector<std::string>& overlays) {
+        overlays.resize(pageStarts.size());
+        const double em = bodySize;
+        const double dotWidth = TextWidth(font, L".", bodySize);
+        const double pitch = em * 0.5 + dotWidth;
+        for (const ContentsLine& line : contentsLines) {
+            if (pages[line.entry] == std::string::npos) continue;
+            char digits[24];
+            char* const digitsEnd = std::to_chars(digits, digits + sizeof(digits), pages[line.entry] + 1).ptr;
+            const std::wstring number(digits + 0, digitsEnd);
+            const double numberLeft = pageW - margin - TextWidth(font, number, bodySize);
+            const bool top = (*contents)[line.entry].level == 1;
+            std::string& out = overlays[line.page];
+            // The dots stand on a grid from the left margin, so that those of all entries line up.
+            const double first = margin + std::ceil((line.end + em * 0.3 - margin) / pitch) * pitch;
+            const double limit = numberLeft - em * 0.3 - dotWidth;
+            if (!top && first <= limit) {
+                const std::wstring dots((size_t)((limit - first) / pitch) + 1, L'.');
+                AppendOverlayText(out, first, line.baseline, dots, "0.45 0.45 0.45", false, pitch - dotWidth);
+            }
+            AppendOverlayText(out, numberLeft, line.baseline, number, "0.08 0.08 0.08", top, 0.0);
+        }
+    }
 
     // Offset in the output buffer at which the content stream of each page starts; with
     // --compress, CompressPageContents moves the streams and these with them.
@@ -4376,6 +4429,9 @@ private:
     std::string codeText;
     std::vector<uint8_t> codeClasses;
     std::vector<CodeRun> codeRuns;
+    // The table of contents' entries, and where each ended (RenderContents).
+    const std::vector<Internal::ContentsEntry>* contents = nullptr;
+    std::vector<ContentsLine> contentsLines;
 
     // Text the standard math fonts cannot show (\text{...} in another script) is
     // measured and painted with the embedded document font, at the text size the
@@ -5600,6 +5656,7 @@ private:
                 break;
             }
             case BlockType::PageBreak: RenderPageBreak(); break;
+            case BlockType::Contents: break;
             }
         }
     }
@@ -5786,6 +5843,76 @@ private:
             begin = run.end;
         }
         w.Lit("ET Q\n");
+    }
+
+    // The table of contents (contents.h), once: a title, then each entry indented by its level and
+    // linked to its heading, the top level in bold with room above it. The page numbers come later
+    // (ContentsNumbers), so the entries' text ends 2.55 em before the right margin.
+    RAYOMD_COLD void RenderContents() {
+        if (contents == nullptr || contents->empty() || !contentsLines.empty()) return;
+        const double titleSize = kHeadingSizes[1];
+        if (y < pageH - margin - 4.0) y -= 12.0;
+        Ensure(titleSize * 1.35 + lineHeight * 2.0);
+        DrawTextLine(margin, titleSize, std::wstring(L"Contents"), headingColor);
+        y -= 8.0;
+        const double em = bodySize;
+        const double lh = bodySize * 1.35;
+        contentsLines.resize(contents->size());
+        for (size_t index = 0; index < contents->size(); index++) {
+            const Internal::ContentsEntry& entry = (*contents)[index];
+            const bool top = entry.level == 1;
+            if (top && index > 0) y -= em * 0.5;
+            const double x = margin + (entry.level - 1) * 1.5 * em;
+            char url[24] = "#\x01";
+            const std::string_view link(url, (size_t)(std::to_chars(url + 2, url + sizeof(url), index).ptr - url));
+            ContentsLine& last = contentsLines[index];
+            last = { index, pageStarts.size() - 1, y - bodySize, x };
+            for (const std::wstring& line : WrapText(font, Utf8ToWide(entry.text), pageW - margin - x - 2.55 * em, bodySize)) {
+                Ensure(lh);
+                const double baseline = y - bodySize;
+                const double width = TextWidth(font, line, bodySize);
+                PaintText(x, baseline, bodySize, line, "0.08 0.08 0.08", top);
+                AddLink(x, baseline, width, bodySize, link);
+                last = { index, pageStarts.size() - 1, baseline, x + width };
+                y -= lh;
+            }
+        }
+        y -= 5.0;
+    }
+
+    // Text at (x, baseline) in the body size, appended to `out`, a stream of its own; `spacing` is
+    // added after each character (Tc), and `bold` draws it twice, a little apart, as PaintText does.
+    RAYOMD_COLD void AppendOverlayText(std::string& out, double x, double baseline, std::wstring_view text,
+        const char* color, bool bold, double spacing) {
+        TailWriter w(out, 128 + kOperandBytes * 6 + HexTextBytes(text) * 2);
+        w.Lit("q ");
+        w.Bytes(color, strlen(color));
+        w.Lit(" rg BT /F1 ");
+        w.Fixed(bodySize);
+        w.Lit(" Tf ");
+        if (spacing > 0.0) {
+            w.Fixed(spacing);
+            w.Lit(" Tc ");
+        }
+        w.Lit("1 0 0 1 ");
+        w.Fixed(x);
+        w.Lit(" ");
+        w.Fixed(baseline);
+        w.Lit(" Tm ");
+        const char* hex = w.cursor;
+        w.cursor = WriteHexText(w.cursor, font, text, usedCids);
+        const size_t hexSize = (size_t)(w.cursor - hex);
+        w.Lit(" Tj");
+        if (bold) {
+            w.Lit(" 1 0 0 1 ");
+            w.Fixed(x + 0.28);
+            w.Lit(" ");
+            w.Fixed(baseline);
+            w.Lit(" Tm ");
+            w.Bytes(hex, hexSize);
+            w.Lit(" Tj");
+        }
+        w.Lit(" ET Q\n");
     }
 
     void RenderMath(const std::string& text) {
@@ -6610,6 +6737,36 @@ public:
     void RenderFootnotes() {
         if (footnotes != nullptr && !footnotes->notes.empty()) RenderFootnoteSection(*this, *footnotes);
     }
+    // The entries of the table of contents (contents.h), which RenderContents draws.
+    void SetContents(const std::vector<Internal::ContentsEntry>* entries) { contents = entries; }
+
+    // The page numbers of the table's entries, right-aligned on the last line of each and after a
+    // row of dots below the top level: one stream for each page, for the builder to add to the
+    // table's. `pages[i]` is the page of entry i's heading, npos for one not drawn.
+    RAYOMD_COLD void ContentsNumbers(const std::vector<size_t>& pages, std::vector<std::string>& overlays) const {
+        overlays.resize(pageStarts.size());
+        const double em = bodySize;
+        const double dotWidth = Internal::StandardTextWidth(".", bodySize, StandardTextFont::Regular);
+        const double pitch = em * 0.5 + dotWidth;
+        for (const ContentsLine& line : contentsLines) {
+            if (pages[line.entry] == std::string::npos) continue;
+            char digits[24];
+            const std::string_view number(digits,
+                (size_t)(std::to_chars(digits, digits + sizeof(digits), pages[line.entry] + 1).ptr - digits));
+            const bool top = (*contents)[line.entry].level == 1;
+            const double numberLeft = pageW - margin -
+                Internal::StandardTextWidth(number, bodySize, top ? StandardTextFont::Bold : StandardTextFont::Regular);
+            std::string& out = overlays[line.page];
+            // The dots stand on a grid from the left margin, so that those of all entries line up.
+            const double first = margin + std::ceil((line.end + em * 0.3 - margin) / pitch) * pitch;
+            const double limit = numberLeft - em * 0.3 - dotWidth;
+            if (!top && first <= limit) {
+                const std::string dots((size_t)((limit - first) / pitch) + 1, '.');
+                AppendOverlayText(out, first, line.baseline, dots, "F1", "0.45 0.45 0.45", pitch - dotWidth);
+            }
+            AppendOverlayText(out, numberLeft, line.baseline, number, top ? "F2" : "F1", "0.08 0.08 0.08", 0.0);
+        }
+    }
 
     // Offset in the output buffer at which the content stream of each page starts; with
     // --compress, CompressPageContents moves the streams and these with them.
@@ -6677,6 +6834,9 @@ private:
     std::string codeLine;
     std::vector<uint8_t> codeLineClasses;
     std::vector<CodeRun> codeRuns;
+    // The table of contents' entries, and where each ended (RenderContents).
+    const std::vector<Internal::ContentsEntry>* contents = nullptr;
+    std::vector<ContentsLine> contentsLines;
 
     double MaxMathHeight() const {
         return (pageH - margin * 2.0) * 0.5;
@@ -7887,6 +8047,7 @@ private:
                 break;
             }
             case BlockType::PageBreak: RenderPageBreak(); break;
+            case BlockType::Contents: break;
             }
         }
     }
@@ -8072,6 +8233,68 @@ private:
             begin = run.end;
         }
         out.Lit("ET Q\n");
+    }
+
+    // The table of contents (contents.h), once: a title, then each entry indented by its level and
+    // linked to its heading, the top level in bold with room above it. The page numbers come later
+    // (ContentsNumbers), so the entries' text ends 2.55 em before the right margin.
+    RAYOMD_COLD void RenderContents() {
+        if (contents == nullptr || contents->empty() || !contentsLines.empty()) return;
+        const double titleSize = kHeadingSizes[1];
+        if (y < pageH - margin - 4.0) y -= 12.0;
+        Ensure(titleSize * 1.35 + lineHeight * 2.0);
+        DrawTextLine(margin, titleSize, "Contents", "F2", headingColor);
+        y -= 8.0;
+        const double em = bodySize;
+        const double lh = bodySize * 1.35;
+        std::vector<WrappedAsciiLine> lines;
+        contentsLines.resize(contents->size());
+        for (size_t index = 0; index < contents->size(); index++) {
+            const Internal::ContentsEntry& entry = (*contents)[index];
+            const bool top = entry.level == 1;
+            if (top && index > 0) y -= em * 0.5;
+            const double x = margin + (entry.level - 1) * 1.5 * em;
+            char url[24] = "#\x01";
+            const std::string_view link(url, (size_t)(std::to_chars(url + 2, url + sizeof(url), index).ptr - url));
+            ContentsLine& last = contentsLines[index];
+            last = { index, pageStarts.size() - 1, y - bodySize, x };
+            WrapAsciiText(entry.text, pageW - margin - x - 2.55 * em, bodySize,
+                top ? StandardTextFont::Bold : StandardTextFont::Regular, lines);
+            for (const WrappedAsciiLine& line : lines) {
+                Ensure(lh);
+                const double baseline = y - bodySize;
+                Text(x, baseline, bodySize, line.text, top ? "F2" : "F1", "0.08 0.08 0.08");
+                AddLink(x, baseline, line.width, bodySize, link);
+                last = { index, pageStarts.size() - 1, baseline, x + line.width };
+                y -= lh;
+            }
+        }
+        y -= 5.0;
+    }
+
+    // Text at (x, baseline) in the body size and `fontName`, appended to `out`, a stream of its own;
+    // `spacing` is added after each character (Tc).
+    RAYOMD_COLD void AppendOverlayText(std::string& out, double x, double baseline, std::string_view text,
+        const char* fontName, const char* color, double spacing) const {
+        TailWriter w(out, 96 + kOperandBytes * 4 + text.size() * 2);
+        w.Lit("q ");
+        w.Bytes(color, strlen(color));
+        w.Lit(" rg BT /");
+        w.Bytes(fontName, strlen(fontName));
+        w.Lit(" ");
+        w.Fixed(bodySize);
+        w.Lit(" Tf ");
+        if (spacing > 0.0) {
+            w.Fixed(spacing);
+            w.Lit(" Tc ");
+        }
+        w.Lit("1 0 0 1 ");
+        w.Fixed(x);
+        w.Lit(" ");
+        w.Fixed(baseline);
+        w.Lit(" Tm (");
+        w.cursor = WriteEscapedLiteral(w.cursor, text);
+        w.Lit(") Tj ET Q\n");
     }
 
     void RenderMath(const std::string& text) {
@@ -8435,18 +8658,63 @@ static std::string PagesDictionary(const std::vector<int>& pageIds, int coverId)
     return pages;
 }
 
-// A page's /Contents: its own stream, and that of the page number, or the theme's header and
-// footer, when there is one.
-static void AppendContents(std::string& page, int contentId, int numberId) {
+// A page's /Contents: its own stream, and those of the page number, or the theme's header and
+// footer, and of the table of contents' page numbers, when there are.
+static void AppendContents(std::string& page, int contentId, int numberId, int contentsId) {
     page += " /Contents ";
-    if (numberId != 0) page += "[";
+    if (numberId == 0 && contentsId == 0) {
+        AppendInt(page, contentId);
+        page += " 0 R";
+        return;
+    }
+    page += "[";
     AppendInt(page, contentId);
     page += " 0 R";
     if (numberId != 0) {
         page += " ";
         AppendInt(page, numberId);
-        page += " 0 R]";
+        page += " 0 R";
     }
+    if (contentsId != 0) {
+        page += " ";
+        AppendInt(page, contentsId);
+        page += " 0 R";
+    }
+    page += "]";
+}
+
+// The heading of each entry of the table of contents, an index into the renderer's `headings`, or
+// npos for one not drawn: found by the address of its text, which a heading mark keeps. Both are in
+// the order of the document, the marks with those of quotes, lists and notes between.
+RAYOMD_COLD static std::vector<size_t> ContentsHeadings(const std::vector<Internal::ContentsEntry>& entries,
+    const std::vector<HeadingMark>& headings) {
+    std::vector<size_t> found(entries.size(), std::string::npos);
+    size_t mark = 0;
+    for (size_t index = 0; index < entries.size(); index++) {
+        size_t at = mark;
+        while (at < headings.size() && headings[at].text.data() != entries[index].heading) at++;
+        if (at == headings.size()) continue;
+        found[index] = at;
+        mark = at + 1;
+    }
+    return found;
+}
+
+// The table of contents' page numbers, one stream per page (ContentsNumbers), once the pages of
+// its headings are known; `targets` gets the heading of each entry, for the links to them.
+template <typename RendererType>
+RAYOMD_COLD static std::vector<std::string> ContentsOverlays(RendererType& renderer,
+    const std::vector<Internal::ContentsEntry>& entries, std::vector<size_t>& targets) {
+    std::vector<std::string> overlays;
+    if (entries.empty()) return overlays;
+    const std::vector<HeadingMark>& headings = renderer.Headings();
+    targets = ContentsHeadings(entries, headings);
+    std::vector<size_t> pages(targets.size(), std::string::npos);
+    for (size_t index = 0; index < targets.size(); index++) {
+        if (targets[index] != std::string::npos) pages[index] = headings[targets[index]].page;
+    }
+    renderer.ContentsNumbers(pages, overlays);
+    return overlays;
 }
 
 // Page content is rendered straight into the output buffer. A buffer the caller reuses
@@ -8467,9 +8735,11 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     const Internal::WinAnsiReferences references;
     std::vector<Block> blocks;
     Internal::Footnotes footnotes;
+    std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
         blocks = ParseMarkdown(text, &footnotes);
+        contents = Internal::PlaceContents(blocks, options.toc, options.tocDepth);
     }
     PdfObjects pdf;
     int pagesId = pdf.Reserve();
@@ -8485,6 +8755,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     const ThemePalette palette(options.theme);
     StandardRenderer renderer(pdfBytes, options.style, options.margin, options.pageSize, &imageRegistry, winAnsi, palette);
     if (!options.highlightCode) renderer.DisableHighlighting();
+    if (!contents.empty()) renderer.SetContents(&contents);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         if (footnotes.notes.empty()) renderer.Render(blocks);
@@ -8498,7 +8769,10 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
+    std::vector<size_t> contentsTargets;   // the heading of each entry of the table of contents
+    const std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);
     HeadingTargets headingTargets(headings, winAnsi, renderer.PageHeight(), renderer.Notes());
+    if (!contents.empty()) headingTargets.SetContents(&contentsTargets);
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds =
         AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks, false);
@@ -8528,6 +8802,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
             : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "F1")
             : 0;
+        const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
+            ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
         std::string page;
         page.reserve(192);
         page += "<< /Type /Page /Parent ";
@@ -8557,7 +8833,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         page += " >>";
         AppendXObjectResources(page, imageObjectIds);
         page += " >>";
-        AppendContents(page, contentId, numberId);
+        AppendContents(page, contentId, numberId, contentsId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
         page += " >>";
         pageIds.push_back(pdf.Add(std::move(page)));
@@ -8740,9 +9016,11 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     std::string& pdfBytes, const TtfFont** betterFont, size_t& missingCharacters, BuildResult& stats) {
     std::vector<Block> blocks;
     Internal::Footnotes footnotes;
+    std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
         blocks = ParseMarkdown(markdown, &footnotes);
+        contents = Internal::PlaceContents(blocks, options.toc, options.tocDepth);
     }
 
     PdfObjects pdf;
@@ -8761,6 +9039,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, options.pageSize, &imageRegistry, palette);
     if (options.pdfa) renderer.DisableMath();
     if (!options.highlightCode) renderer.DisableHighlighting();
+    if (!contents.empty()) renderer.SetContents(&contents);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         if (footnotes.notes.empty()) renderer.Render(blocks);
@@ -8774,7 +9053,11 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
+    // The table of contents' page numbers, before the font subset is made, which then has their glyphs.
+    std::vector<size_t> contentsTargets;   // the heading of each entry of the table of contents
+    const std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);
     HeadingTargets headingTargets(headings, false, renderer.PageHeight(), renderer.Notes());
+    if (!contents.empty()) headingTargets.SetContents(&contentsTargets);
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds =
         AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa);
@@ -8867,6 +9150,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
             : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "FN")
             : 0;
+        const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
+            ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
         std::string page;
         page.reserve(160);
         page += "<< /Type /Page /Parent ";
@@ -8887,7 +9172,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         page += " >>";
         AppendXObjectResources(page, imageObjectIds);
         page += " >>";
-        AppendContents(page, contentId, numberId);
+        AppendContents(page, contentId, numberId, contentsId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
         page += " >>";
         pageIds.push_back(pdf.Add(std::move(page)));

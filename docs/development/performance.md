@@ -980,6 +980,53 @@ sites of 400 KB each (2 to 23 % code, the Unicode renderer): -0.13 % instruction
 -0.43 % against A/A -0.74 %. The binary grew by 44 KB: the lexers' 28 KB of code and
 11 KB of word lists, alias table and colours, and 7 KB in the renderers.
 
+## Tables of contents, October 2026
+
+A top-level paragraph `[TOC]` or `[[_TOC_]]`, in any case (the markers of GitLab, Azure
+DevOps and Python-Markdown), becomes a table of contents, and `--toc` (`PdfOptions::toc`)
+puts one first, or after the title heading, in a document without a marker. Only the
+first marker draws a table, and a document that defines the label `toc` keeps `[TOC]` as
+that link, as CommonMark reads it. The table lists the top-level headings to
+`--toc-depth` levels (3, as in Pandoc) from the highest level it shows, without the title
+heading (the first heading, when it is the document's only level-1 heading) and without
+headings of footnote references alone.
+
+- One layout pass. The renderers lay out the entries in the flow of the text: a
+  "Contents" title, entries indented 1.5 em a level, the top level in bold with half an em
+  above it, every line a link to its heading. A heading's page is known only once it is
+  laid out, so each entry keeps where its last line ends (`ContentsLine`), and the builder
+  writes the numbers and the dot leaders afterwards into one more content stream for each
+  page of the table, as it does for page numbers and a theme's header and footer; LaTeX
+  lays out twice instead. The entries end 2.55 em before the right margin, room for four
+  digits.
+- The dots stand on a grid from the left margin, half an em plus a dot apart, so those of
+  all entries line up. A row is one string drawn with character spacing (`Tc`), not a
+  text object a dot; the top level has none, as in LaTeX's book and report classes.
+- An entry finds its heading by the address of the heading's text, which the heading mark
+  keeps, and links to it through the reserved fragment `\x01N`, so no anchor is made for
+  it. Links to footnotes and table entries no longer build the anchor index either: a
+  document without `#anchor` links does no work for anchors.
+- Every document pays for looking for a marker: one pass over the top-level blocks that
+  compares a block's text length with 5 and 9 before its type and text, about 3,100
+  instructions on `baseline.md` (0.1 %); the first version compared every paragraph's
+  text, 5,200. `AppendContents`, which writes a page's `/Contents`, had become a loop
+  over its extra streams, 33 instructions a page more; it is straight-line code again.
+
+A table costs about what text of its length with a link on every line costs: with `--toc`,
+`baseline.md` runs 18.4 % more instructions for 72 table lines (16 pages to 18), the
+kubernetes documentation (400 KB, Unicode) 6.7 % for 357 (197 pages to 205). Inserting
+the table's block moves every block after it, 0.35 % of that build; a slot the parser left
+would avoid it, at the price of a test in the parser.
+
+Measured on 2026-10-09 against the previous commit: of the 2,883 corpus PDFs, the 2,583
+of documents without a marker are byte-identical, also with `--page-numbers --compress`,
+and the 300 that differ (100 documents in three styles) all have one. The watch fixtures,
+which have no marker, run 0.06 % more instructions (`baseline.md` 0.14 %, the marker
+scan); time +0.47 % against A/A -0.36 %, pinned -0.06 % against A/A -0.33 %. Eight
+documentation sites of 400 KB each: +0.03 % instructions, time +0.82 % against A/A
+-0.35 %, pinned -0.48 % against A/A -0.09 %: code placement. The binary grew by 16 KB:
+8.4 KB of code in `tiny_pdf.cpp` and 4.1 KB in `contents.cpp`.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1101,6 +1148,13 @@ without branches (an out-of-window candidate made to fail) and taking the
 longest with conditional moves would leave one unpredictable branch per
 position, match or literal. Single large exports could also compress their
 pages on several threads; batches already use every core.
+
+**Two-byte CID strings.** The Unicode renderer writes text as hex strings, four digits a
+character (`WriteHexText`): 16.9 % of the instructions of a `unicode_96kb.md` build and
+22.7 % of the kubernetes documentation's (callgrind, 2026-10-09). Literal strings of two
+bytes a CID would halve those bytes of every content stream; a byte that is `(`, `)`, `\`
+or CR needs a backslash before it (a reader takes a CR in a literal string for LF). It
+changes every Unicode PDF; weigh the escape test per byte against the shorter output.
 
 ## Keeping the release light
 

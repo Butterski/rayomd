@@ -161,6 +161,8 @@ struct WinExportOptions {
     bool compress = false;
     bool pdfa = false;
     bool highlightCode = true;
+    bool toc = false;
+    int tocDepth = 3;
     TinyPdf::PdfTheme theme;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
@@ -520,6 +522,8 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
     options.compress = exportOptions.compress;
     options.pdfa = exportOptions.pdfa;
     options.highlightCode = exportOptions.highlightCode;
+    options.toc = exportOptions.toc;
+    options.tocDepth = exportOptions.tocDepth;
     options.theme = exportOptions.theme;
     TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (details) *details = result;
@@ -670,6 +674,15 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.pdfa = true;
         } else if (lstrcmpiW(argv[i], L"--no-highlight") == 0) {
             options.highlightCode = false;
+        } else if (lstrcmpiW(argv[i], L"--toc") == 0) {
+            options.toc = true;
+        } else if (_wcsnicmp(argv[i], L"--toc-depth=", 12) == 0) {
+            const wchar_t* depth = argv[i] + 12;
+            if (depth[0] < L'1' || depth[0] > L'6' || depth[1] != L'\0') {
+                error = L"--toc-depth must be 1 to 6";
+                return false;
+            }
+            options.tocDepth = depth[0] - L'0';
         } else if (_wcsnicmp(argv[i], L"--theme=", 8) == 0) {
             const std::wstring themePath = argv[i] + 8;
             const size_t slash = themePath.find_last_of(L"\\/");

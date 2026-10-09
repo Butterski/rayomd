@@ -283,6 +283,8 @@ struct CliExportOptions {
     bool compress = false;
     bool pdfa = false;
     bool highlightCode = true;
+    bool toc = false;
+    int tocDepth = 3;
     TinyPdf::PdfTheme theme;
     unsigned workers = 0;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
@@ -305,6 +307,14 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--compress") options.compress = true;
         else if (value == "--pdfa") options.pdfa = true;
         else if (value == "--no-highlight") options.highlightCode = false;
+        else if (value == "--toc") options.toc = true;
+        else if (value.rfind("--toc-depth=", 0) == 0) {
+            if (value.size() != 13 || value[12] < '1' || value[12] > '6') {
+                error = "--toc-depth must be 1 to 6";
+                return false;
+            }
+            options.tocDepth = value[12] - '0';
+        }
         else if (value.rfind("--theme=", 0) == 0) {
             const fs::path themePath(argv[i] + 8);
             std::string text;
@@ -399,6 +409,8 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     pdfOptions.compress = options.compress;
     pdfOptions.pdfa = options.pdfa;
     pdfOptions.highlightCode = options.highlightCode;
+    pdfOptions.toc = options.toc;
+    pdfOptions.tocDepth = options.tocDepth;
     pdfOptions.theme = options.theme;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, pdfOptions, pdfBuffer);
     if (!buildResult) {
@@ -718,6 +730,8 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     options.compress = cliOptions.compress;
     options.pdfa = cliOptions.pdfa;
     options.highlightCode = cliOptions.highlightCode;
+    options.toc = cliOptions.toc;
+    options.tocDepth = cliOptions.tocDepth;
     options.theme = cliOptions.theme;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (!buildResult) {
@@ -849,7 +863,9 @@ void PrintUsage() {
         << "  every font embedded, formulas as TeX source), --theme=FILE (key = value lines: font, logo,\n"
         << "  heading-color, link-color, accent-color, header-left/center/right, footer-left/center/right\n"
         << "  with {title} {author} {subject} {date} {page} {pages} {logo}, cover), --no-highlight (code\n"
-        << "  blocks in one colour; by default fenced code in a language GitHub knows is coloured).\n"
+        << "  blocks in one colour; by default fenced code in a language GitHub knows is coloured), --toc\n"
+        << "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
+        << "  --toc-depth=N (heading levels it lists, 1-6; default 3).\n"
         << "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         << "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4).\n"
         << "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
