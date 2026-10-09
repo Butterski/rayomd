@@ -1387,6 +1387,22 @@ std::string MinimalTrueTypeCollection() {
     return collection + font + data;
 }
 
+// Text that is not UTF-8 is drawn with U+FFFD for the bytes that break it and the rest as it
+// is: the Unicode renderer's decoder threw on such bytes and ended the process. In the front
+// matter, a heading, a paragraph, link text and table cells.
+bool CheckInvalidUtf8() {
+    const std::string document =
+        "---\ntitle: Bad \xFF title\n---\n\n# Head \xC3 ing\n\nhello \xC3\x28 world \xE2\x82\n\n"
+        "[li\xFFnk](https://example.com) after\n\n| x\xE0 | y |\n|---|---|\n| 1 | 2\xF0\x9F |\n";
+    std::string pdf;
+    if (!Build(document, pdf) || pdf.find("0077006F0072006C0064") == std::string::npos ||   // "world"
+        pdf.find("/Type0") == std::string::npos || pdf.compare(pdf.size() - 6, 6, "%%EOF\n") != 0) {
+        std::cerr << "invalid UTF-8 mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // Headings get an outline entry, nested by level, and a link to "#anchor" goes where the entry
 // of its heading goes: anchors as GitHub makes them, "-1" for a repeated one, the fragment
 // percent-decoded and in any case. A link to an anchor the document lacks is dropped, and
@@ -1635,6 +1651,7 @@ int main() {
     if (!CheckTableRows()) return 74;
     if (!CheckFallbackFont()) return 75;
     if (!CheckHeadingAnchors()) return 76;
+    if (!CheckInvalidUtf8()) return 77;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

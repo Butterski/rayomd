@@ -26,38 +26,6 @@ int WinAnsiCode(uint32_t codePoint) {
     return -1;
 }
 
-} // namespace
-
-// The scalar value of the UTF-8 sequence at text[at], or false when it is not well formed.
-bool DecodeUtf8(std::string_view text, size_t at, uint32_t& codePoint, size_t& length) {
-    const unsigned char lead = static_cast<unsigned char>(text[at]);
-    uint32_t minimum = 0;
-    if (lead >= 0xC2 && lead <= 0xDF) {
-        length = 2;
-        codePoint = lead & 0x1Fu;
-        minimum = 0x80;
-    } else if (lead >= 0xE0 && lead <= 0xEF) {
-        length = 3;
-        codePoint = lead & 0x0Fu;
-        minimum = 0x800;
-    } else if (lead >= 0xF0 && lead <= 0xF4) {
-        length = 4;
-        codePoint = lead & 0x07u;
-        minimum = 0x10000;
-    } else {
-        return false;
-    }
-    if (at + length > text.size()) return false;
-    for (size_t index = 1; index < length; index++) {
-        const unsigned char next = static_cast<unsigned char>(text[at + index]);
-        if ((next & 0xC0u) != 0x80u) return false;
-        codePoint = (codePoint << 6) | (next & 0x3Fu);
-    }
-    return codePoint >= minimum && codePoint <= 0x10FFFF && !(codePoint >= 0xD800 && codePoint <= 0xDFFF);
-}
-
-namespace {
-
 // Bytes from text[at] that are ASCII, eight at a time.
 size_t AsciiRunLength(std::string_view text, size_t at) {
     const size_t start = at;

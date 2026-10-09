@@ -25,7 +25,6 @@
 #include <charconv>
 #include <cmath>
 #include <cctype>
-#include <codecvt>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -33,7 +32,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <locale>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -110,19 +108,48 @@ static bool IsAllAscii(std::string_view str) {
     return true;
 }
 
+// Writes the UTF-16 code units of `str` at `out`, which has room for one per byte, and returns
+// the end. A sequence that is not UTF-8 becomes U+FFFD, as MultiByteToWideChar makes it on
+// Windows; std::wstring_convert threw, which ended the process.
+static wchar_t* WriteUtf8Units(wchar_t* out, std::string_view str) {
+    for (size_t at = 0; at < str.size();) {
+        const unsigned char lead = (unsigned char)str[at];
+        if (lead < 0x80) {
+            *out++ = (wchar_t)lead;
+            at++;
+            continue;
+        }
+        uint32_t codePoint = 0;
+        size_t length = 0;
+        if (!RayoMd::Text::DecodeUtf8(str, at, codePoint, length)) {
+            *out++ = (wchar_t)0xFFFD;
+            at++;
+            continue;
+        }
+        at += length;
+        if (codePoint >= 0x10000) {
+            codePoint -= 0x10000;
+            *out++ = (wchar_t)(0xD800 + (codePoint >> 10));
+            *out++ = (wchar_t)(0xDC00 + (codePoint & 0x3FF));
+        } else {
+            *out++ = (wchar_t)codePoint;
+        }
+    }
+    return out;
+}
+
 static std::wstring Utf8ToWideFallback(std::string_view str) {
     if (str.empty()) return L"";
-#ifdef _WIN32
-    // UTF-16 never needs more code units than UTF-8 needs bytes, so one call suffices.
+    // UTF-16 never needs more code units than UTF-8 needs bytes.
     std::wstring wstr(str.size(), 0);
+#ifdef _WIN32
     int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), &wstr[0], (int)wstr.size());
     if (len <= 0) return L"";
     wstr.resize((size_t)len);
-    return wstr;
 #else
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
-    return conv.from_bytes(str.data(), str.data() + str.size());
+    wstr.resize((size_t)(WriteUtf8Units(&wstr[0], str) - wstr.data()));
 #endif
+    return wstr;
 }
 
 static std::wstring Utf8ToWide(std::string_view str) {
@@ -157,21 +184,25 @@ static std::wstring Utf8ToWide(std::string_view str) {
 #endif
 }
 
-// Appends Utf8ToWide(str) to `out`. ASCII and, on Windows, one decoder call are written
-// straight into `out`, so a caller that reuses the string converts without allocating.
+// Appends Utf8ToWide(str) to `out`. ASCII and, without simdutf, other text are written straight
+// into `out`, so a caller that reuses the string converts without allocating.
 static void AppendUtf8ToWide(std::wstring& out, std::string_view str) {
     if (str.empty()) return;
     if (IsAllAscii(str)) {
         out.append(str.begin(), str.end());
         return;
     }
-#if defined(_WIN32) && !defined(RAYOMD_USE_SIMDUTF)
+#if defined(RAYOMD_USE_SIMDUTF)
+    out += Utf8ToWide(str);
+#else
     const size_t base = out.size();
     out.resize(base + str.size());
+#if defined(_WIN32)
     int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), &out[base], (int)str.size());
     out.resize(base + (len > 0 ? (size_t)len : 0));
 #else
-    out += Utf8ToWide(str);
+    out.resize((size_t)(WriteUtf8Units(&out[base], str) - out.data()));
+#endif
 #endif
 }
 

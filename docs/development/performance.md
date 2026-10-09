@@ -473,6 +473,22 @@ headings with 20,000 links to them export in 55 ms; a document of nothing but
 20,000 headings grows from 3.6 MB to 6.6 MB, as an outline entry is about as
 large as the heading it points to. The executable grows by 12 KB.
 
+## UTF-8 decoding, October 2026
+
+Text that is not UTF-8 ended the process. On Linux the Unicode renderer decoded
+with `std::wstring_convert`, which throws on a malformed sequence, and nothing
+caught it: one stray byte in a document the standard fonts cannot show aborted
+the export. A small decoder (`WriteUtf8Units`, on the now inline
+`RayoMd::Text::DecodeUtf8`) writes U+FFFD for each byte that breaks a sequence,
+as `MultiByteToWideChar` does on Windows, and `AppendUtf8ToWide` decodes
+straight into the caller's buffer instead of a temporary string.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`224b722`): all 2,757 corpus PDFs are byte for byte the same, and the Unicode
+watch fixtures run 4 % to 6 % fewer instructions in 6.5 % to 9.5 % less time
+(geometric mean of all fixtures -4.9 %): the library decoder's allocation and
+per-call setup cost more than the decoding.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
