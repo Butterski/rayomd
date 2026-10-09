@@ -1821,27 +1821,46 @@ bool CheckPageNumbers() {
 }
 
 // A document's title is the `title:` of its front matter, quoted or plain, else the text of its
-// first heading; a document with neither gets none instead of a made-up one. In both
-// renderers.
-bool CheckDocumentTitle() {
-    struct Case { std::string markdown; std::string title; };
+// first heading; a document with neither gets none instead of a made-up one. Author, subject
+// (else the description) and keywords come from the front matter too, as scalars, bracket
+// lists or "- " lists, whose map items (Pandoc's authors) give their name; several authors are
+// joined with "; ", keywords with ", ". A well-formed `lang:` is the catalog's /Lang. A front
+// matter without its closing line gives nothing. In both renderers.
+bool CheckDocumentMetadata() {
+    struct Case { std::string markdown; std::vector<std::string> expected; std::vector<std::string> absent; };
     const Case cases[] = {
-        { "---\ntitle: \"Q3 \\\"final\\\"\" # draft\nauthor: x\n---\n\n# Heading\n", "/Title (Q3 \"final\")" },
-        { "---\ntitle: it's (plain) # comment\n---\n\n# Heading\n", "/Title (it's \\(plain\\))" },
-        { "Intro.\n\n## First **bold** heading\n\n# Second\n", "/Title (First bold heading)" },
-        { "# Gr\xC3\xB6\xC3\x9F" "e\n", "/Title <FEFF0047007200F600DF0065>" },
-        { "## Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n", "/Title <FEFF005A0061017C00F301420107>" },
-        { "No heading.\n", "" },
+        { "---\ntitle: \"Q3 \\\"final\\\"\" # draft\nauthor: x\n---\n\n# Heading\n", { "/Title (Q3 \"final\")", "/Author (x)" }, {} },
+        { "---\ntitle: it's (plain) # comment\n---\n\n# Heading\n", { "/Title (it's \\(plain\\))" }, { "/Author" } },
+        { "Intro.\n\n## First **bold** heading\n\n# Second\n", { "/Title (First bold heading)" }, {} },
+        { "# Gr\xC3\xB6\xC3\x9F" "e\n", { "/Title <FEFF0047007200F600DF0065>" }, {} },
+        { "## Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n", { "/Title <FEFF005A0061017C00F301420107>" }, {} },
+        { "No heading.\n", {}, { "/Title" } },
+        { "---\ntitle: Report\nauthor: [Alice, \"Bob, Jr.\"]\nsubject: Quarterly figures\nkeywords: [report, 'q3, final']\n"
+          "lang: en-US\n---\n\n# Heading\n",
+          { "/Title (Report)", "/Author (Alice; Bob, Jr.)", "/Subject (Quarterly figures)", "/Keywords (report, q3, final)",
+            "/Lang (en-US)" }, {} },
+        { "---\nauthor:\n  - name: Alice\n    affiliation: Lab\n  - affiliation: Uni\n    name: Zo\xC3\xAB\n  - Carol\n"
+          "keywords:\n- one\n# a comment\n- two\ndescription: From the description\nlang: not a tag!\n---\n\n# Heading\n",
+          { "/Title (Heading)", "/Author <FEFF0041006C006900630065003B0020005A006F00EB003B0020004300610072006F006C>",
+            "/Subject (From the description)", "/Keywords (one, two)" }, { "/Lang" } },
+        { "---\nauthor: Nobody\nlang: en\n\n# Heading\n", {}, { "/Author", "/Lang" } },
     };
     for (const Case& c : cases) {
-        std::string pdf;
-        if (!Build(c.markdown, pdf)) return false;
-        const size_t info = pdf.find("<< /Producer (RayoMD");
-        const std::string dictionary = info == std::string::npos ? "" : pdf.substr(info, pdf.find(">>", info) - info);
-        if (dictionary.empty() || (c.title.empty() ? dictionary.find("/Title") != std::string::npos
-                                                   : dictionary.find(c.title) == std::string::npos)) {
-            std::cerr << "document title mismatch: " << dictionary << std::endl;
-            return false;
+        // The standard fonts, and a Unicode font for the same metadata.
+        for (const std::string& markdown : { c.markdown, c.markdown + "\nZa\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n" }) {
+            std::string pdf;
+            if (!Build(markdown, pdf)) return false;
+            const size_t info = pdf.find("<< /Producer (RayoMD");
+            const size_t catalog = pdf.find("<< /Type /Catalog");
+            const std::string dictionaries = info == std::string::npos || catalog == std::string::npos ? std::string()
+                : pdf.substr(info, pdf.find(">>", info) - info) + pdf.substr(catalog, pdf.find("\nendobj", catalog) - catalog);
+            bool ok = !dictionaries.empty();
+            for (const std::string& entry : c.expected) ok = ok && dictionaries.find(entry) != std::string::npos;
+            for (const std::string& entry : c.absent) ok = ok && dictionaries.find(entry) == std::string::npos;
+            if (!ok) {
+                std::cerr << "document metadata mismatch: " << dictionaries << std::endl;
+                return false;
+            }
         }
     }
     return true;
@@ -2112,7 +2131,7 @@ int main() {
     if (!CheckFallbackFont()) return 75;
     if (!CheckHeadingAnchors()) return 76;
     if (!CheckInvalidUtf8()) return 77;
-    if (!CheckDocumentTitle()) return 78;
+    if (!CheckDocumentMetadata()) return 78;
     if (!CheckPageNumbers()) return 79;
     if (!CheckHtmlInText()) return 80;
     if (!CheckTaskLists()) return 81;

@@ -773,6 +773,23 @@ fixtures run 0.19 % fewer instructions; time moved -0.61 % (A/A -0.31 %), and
 +0.49 % with pinned alignment (A/A -0.16 %): placement of 6 KB more engine code.
 The binary grew by 20 KB.
 
+## Front-matter metadata, October 2026
+
+The YAML front matter now gives the document information dictionary its
+`/Author`, `/Subject` (else the description) and `/Keywords`, and the catalog its
+`/Lang`, besides the title it gave before. `FrontMatterMetadata` reads the subset
+documents use: scalars on the key's line, bracket lists, and `- ` lists whose map
+items (Pandoc's structured authors) give their `name`. Several authors are joined
+with "; " and keywords with ", ", as Pandoc's PDF metadata has them; `lang` must
+be a well-formed language tag. The front matter is read once per export, after
+rendering, and only when the document starts with `---`.
+
+Measured on 2026-10-09 against the previous commit: of the 2,883 corpus PDFs,
+1,881 are byte-identical and 1,002 differ object by object only by the new
+entries (678 `/Author`, 558 `/Subject`, 528 `/Keywords`, 354 `/Lang`). The watch
+fixtures, which have no front matter, run the same instructions (+0.02 %); time
+moved +0.30 % (A/A -0.34 %), and -0.60 % with pinned alignment (A/A +0.19 %).
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

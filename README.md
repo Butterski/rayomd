@@ -163,8 +163,9 @@ bare, as on GitHub), standalone inline/reference images,
 natively typeset math for a TeX subset (`$...$`, `$$...$$`, fenced `math` blocks, in
 text, lists, quotes, headings and table cells), Unicode fonts (or the PDF standard
 fonts when no system font is found), HTML comments (hidden), `<br>` line breaks,
-character references such as `&copy;`, a PDF title from the front matter or the
-first heading, opt-in page numbers, and common status-symbol normalization.
+character references such as `&copy;`, PDF metadata from the front matter (title,
+else the first heading; author, subject, keywords and language), opt-in page numbers,
+and common status-symbol normalization.
 Images embedded in paragraph text use a consistent `image: alt` fallback;
 standalone images retain native image layout and missing-image fallback text.
 

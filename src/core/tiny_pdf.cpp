@@ -3130,78 +3130,235 @@ RAYOMD_COLD static void AddOutline(PdfObjects& pdf, std::string& catalog, const 
     catalog += " 0 R";
 }
 
-// The `title:` of the YAML front matter, which the parser skips: a plain or quoted scalar on
-// the key's line, unquoted, a plain one without its comment. Empty when there is none.
-RAYOMD_COLD static std::string FrontMatterTitle(std::string_view markdown) {
-    const auto trim = [](std::string_view text) {
-        const auto space = [](char ch) { return ch == ' ' || ch == '\t' || ch == '\r'; };
-        while (!text.empty() && space(text.front())) text.remove_prefix(1);
-        while (!text.empty() && space(text.back())) text.remove_suffix(1);
-        return text;
-    };
+// ---- Document metadata from the YAML front matter ---------------------------------------------
+
+// What the YAML front matter, which the parser skips, says about the document. Read are scalars
+// on the key's line, plain (without a comment) or quoted, and lists, in brackets or as "- " lines
+// under the key; block scalars ("|", ">") and maps are not. Several authors are joined with "; "
+// and keywords with ", ", as Pandoc's PDF metadata has them, and the subject falls back to the
+// description. All empty without a front matter.
+struct DocumentMetadata {
+    std::string title;
+    std::string author;
+    std::string subject;
+    std::string keywords;
+    std::string lang;   // a well-formed language tag, such as en-US
+};
+
+static std::string_view TrimYamlSpace(std::string_view text) {
+    const auto space = [](char ch) { return ch == ' ' || ch == '\t' || ch == '\r'; };
+    while (!text.empty() && space(text.front())) text.remove_prefix(1);
+    while (!text.empty() && space(text.back())) text.remove_suffix(1);
+    return text;
+}
+
+// A quoted scalar from its opening quote: "\x" in double quotes is x, '' in single quotes is ',
+// and it ends at its closing quote. `end` is set past that quote.
+static std::string YamlQuoted(std::string_view value, size_t& end) {
+    const char quote = value.front();
+    std::string text;
+    size_t index = 1;
+    for (; index < value.size(); index++) {
+        char ch = value[index];
+        if (quote == '"' && ch == '\\' && index + 1 < value.size()) {
+            ch = value[++index];
+        } else if (ch == quote) {
+            if (quote == '"' || index + 1 >= value.size() || value[index + 1] != '\'') break;
+            index++;
+        }
+        text += ch;
+    }
+    end = std::min(index + 1, value.size());
+    return text;
+}
+
+static std::string YamlScalar(std::string_view value) {
+    value = TrimYamlSpace(value);
+    if (value.empty() || value.front() == '|' || value.front() == '>') return std::string();
+    if (value.front() == '"' || value.front() == '\'') {
+        size_t end = 0;
+        return YamlQuoted(value, end);
+    }
+    return std::string(TrimYamlSpace(value.substr(0, value.find(" #"))));
+}
+
+// The items of a flow sequence, "[a, 'b, c']".
+static void YamlFlowItems(std::string_view value, std::vector<std::string>& items) {
+    size_t at = 1;
+    while (at < value.size()) {
+        while (at < value.size() && (value[at] == ' ' || value[at] == '\t')) at++;
+        if (at >= value.size() || value[at] == ']') return;
+        std::string item;
+        if (value[at] == '"' || value[at] == '\'') {
+            size_t end = 0;
+            item = YamlQuoted(value.substr(at), end);
+            at += end;
+        } else {
+            const size_t end = std::min(value.find_first_of(",]", at), value.size());
+            item = std::string(TrimYamlSpace(value.substr(at, end - at)));
+            at = end;
+        }
+        if (!item.empty()) items.push_back(std::move(item));
+        const size_t next = value.find_first_of(",]", at);
+        if (next == std::string_view::npos || value[next] == ']') return;
+        at = next + 1;
+    }
+}
+
+// `entry` as a map entry, "key: value", when it is not a quoted scalar or a flow sequence.
+static bool YamlMapEntry(std::string_view entry, std::string_view& key, std::string_view& value) {
+    if (entry.empty() || entry.front() == '"' || entry.front() == '\'' || entry.front() == '[') return false;
+    for (size_t colon = entry.find(':'); colon != std::string_view::npos; colon = entry.find(':', colon + 1)) {
+        if (colon + 1 == entry.size() || entry[colon + 1] == ' ' || entry[colon + 1] == '\t') {
+            key = entry.substr(0, colon);
+            value = entry.substr(colon + 1);
+            return colon != 0;
+        }
+    }
+    return false;
+}
+
+// A language tag in the form PDF's /Lang takes (BCP 47): letters, then subtags of one to eight
+// letters or digits after hyphens.
+static bool IsLanguageTag(std::string_view tag) {
+    if (tag.empty() || tag.size() > 35) return false;
+    size_t run = 0;
+    bool primary = true;
+    for (const char ch : tag) {
+        if (ch == '-') {
+            if (run == 0) return false;
+            run = 0;
+            primary = false;
+            continue;
+        }
+        const bool letter = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+        if ((!letter && (primary || ch < '0' || ch > '9')) || ++run > 8) return false;
+    }
+    return run != 0;
+}
+
+RAYOMD_COLD static DocumentMetadata FrontMatterMetadata(std::string_view markdown) {
+    DocumentMetadata metadata;
     size_t at = markdown.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
     const size_t dashes = markdown.find_first_not_of(" \t", at);
-    if (dashes == std::string_view::npos || markdown.compare(dashes, 3, "---") != 0) return std::string();
-    std::string_view value;
-    bool found = false;
+    if (dashes == std::string_view::npos || markdown.compare(dashes, 3, "---") != 0) return metadata;
+    constexpr std::string_view kKeys[] = { "title", "author", "subject", "keywords", "lang", "description" };
+    constexpr size_t kKeyCount = sizeof(kKeys) / sizeof(kKeys[0]);
+    std::vector<std::string> items[kKeyCount];
+    bool found[kKeyCount] = {};
+    size_t listKey = kKeyCount;   // the key whose "- " lines follow, if any
+    bool nameWanted = false;      // the list's last item is a map that has shown no name yet
     bool closed = false;
     for (bool first = true; at < markdown.size() && !closed; first = false) {
         size_t end = markdown.find('\n', at);
         if (end == std::string_view::npos) end = markdown.size();
         const std::string_view line = markdown.substr(at, end - at);
         at = end + 1;
-        const std::string_view trimmed = trim(line);
+        const std::string_view trimmed = TrimYamlSpace(line);
+        std::string_view entryKey;
+        std::string_view entryValue;
         if (first) {
-            if (trimmed != "---") return std::string();
+            if (trimmed != "---") return metadata;
         } else if (trimmed == "---" || trimmed == "...") {
             closed = true;
-        } else if (!found && line.compare(0, 6, "title:") == 0 && (line.size() == 6 || line[6] == ' ' || line[6] == '\t')) {
-            value = trim(line.substr(6));
-            found = true;
-        }
-    }
-    // Without its closing line it is no front matter; a block scalar ("|", ">") is not read.
-    if (!closed || value.empty() || value.front() == '|' || value.front() == '>') return std::string();
-    std::string title;
-    const char quote = value.front();
-    if (quote == '"' || quote == '\'') {
-        // A quoted scalar ends at its closing quote: "\x" in double quotes is x, '' in single
-        // quotes is '.
-        for (size_t index = 1; index < value.size(); index++) {
-            char ch = value[index];
-            if (quote == '"' && ch == '\\' && index + 1 < value.size()) {
-                ch = value[++index];
-            } else if (ch == quote) {
-                if (quote == '"' || index + 1 >= value.size() || value[index + 1] != '\'') break;
-                index++;
+        } else if (trimmed.empty() || trimmed.front() == '#') {
+            // A blank or comment line changes nothing, also within a list.
+        } else if (listKey < kKeyCount && (trimmed == "-" || trimmed.compare(0, 2, "- ") == 0)) {
+            // An item: a scalar, or a map, such as Pandoc's authors with a name and an
+            // affiliation, of which the name counts.
+            const std::string_view entry = TrimYamlSpace(trimmed.substr(1));
+            std::string item;
+            nameWanted = entry.empty();
+            if (!YamlMapEntry(entry, entryKey, entryValue)) {
+                item = YamlScalar(entry);
+            } else if (entryKey == "name") {
+                item = YamlScalar(entryValue);
+            } else {
+                nameWanted = true;
             }
-            title += ch;
+            if (!item.empty()) items[listKey].push_back(std::move(item));
+        } else if (listKey < kKeyCount && (line.front() == ' ' || line.front() == '\t')) {
+            // A further line of the item above: the name of a map that had none yet.
+            if (nameWanted && YamlMapEntry(trimmed, entryKey, entryValue) && entryKey == "name") {
+                if (std::string item = YamlScalar(entryValue); !item.empty()) items[listKey].push_back(std::move(item));
+                nameWanted = false;
+            }
+        } else {
+            listKey = kKeyCount;
+            for (size_t key = 0; key < kKeyCount; key++) {
+                const std::string_view name = kKeys[key];
+                if (found[key] || line.size() <= name.size() || line.compare(0, name.size(), name) != 0 ||
+                    line[name.size()] != ':') {
+                    continue;
+                }
+                const std::string_view rest = line.substr(name.size() + 1);
+                if (!rest.empty() && rest.front() != ' ' && rest.front() != '\t' && rest.front() != '\r') continue;
+                found[key] = true;
+                const std::string_view value = TrimYamlSpace(rest);
+                if (value.empty() || value.front() == '#') {
+                    listKey = key;
+                } else if (value.front() == '[') {
+                    YamlFlowItems(value, items[key]);
+                } else if (std::string item = YamlScalar(value); !item.empty()) {
+                    items[key].push_back(std::move(item));
+                }
+                break;
+            }
         }
-        return title;
     }
-    return std::string(trim(value.substr(0, value.find(" #"))));
+    // Without its closing line it is no front matter.
+    if (!closed) return metadata;
+    const auto join = [](const std::vector<std::string>& parts, std::string_view separator) {
+        std::string joined;
+        for (const std::string& part : parts) {
+            if (!joined.empty()) joined += separator;
+            joined += part;
+        }
+        return joined;
+    };
+    metadata.title = join(items[0], ", ");
+    metadata.author = join(items[1], "; ");
+    metadata.subject = join(items[2].empty() ? items[5] : items[2], ", ");
+    metadata.keywords = join(items[3], ", ");
+    if (items[4].size() == 1 && IsLanguageTag(items[4].front())) metadata.lang = items[4].front();
+    return metadata;
 }
 
-// The document information dictionary. Its title is the front matter's, else the text of the
-// first heading; a document with neither has none, and viewers show the file name instead.
-// `source` is the document as given, UTF-8; heading text is WinAnsi with `winAnsi`.
-RAYOMD_COLD static std::string InfoDictionary(const char* producer, std::string_view source,
+// The document information dictionary: its producer and what the front matter gives. The title
+// is the front matter's, else the text of the first heading; a document with neither has none,
+// and viewers show the file name instead. Heading text is WinAnsi with `winAnsi`.
+RAYOMD_COLD static std::string InfoDictionary(const char* producer, const DocumentMetadata& metadata,
     const std::vector<HeadingMark>& headings, bool winAnsi) {
     std::string info = "<< /Producer (";
     info += producer;
     info += ") /Creator (RayoMD)";
-    const std::string declared = FrontMatterTitle(source);
-    const std::string_view title = !declared.empty() ? std::string_view(declared)
-        : !headings.empty() ? headings.front().text : std::string_view();
-    if (!title.empty()) {
+    const auto field = [&info](std::string_view key, std::string_view value, bool valueWinAnsi) {
+        if (value.empty()) return;
         const size_t at = info.size();
-        info.resize(at + 8 + title.size() * 4 + 6);
-        memcpy(&info[at], " /Title ", 8);
-        const char* const end = WriteTextString(&info[at + 8], title, declared.empty() && winAnsi);
+        info.resize(at + key.size() + value.size() * 4 + 6);
+        memcpy(&info[at], key.data(), key.size());
+        const char* const end = WriteTextString(&info[at + key.size()], value, valueWinAnsi);
         info.resize((size_t)(end - info.data()));
+    };
+    if (!metadata.title.empty()) {
+        field(" /Title ", metadata.title, false);
+    } else if (!headings.empty()) {
+        field(" /Title ", headings.front().text, winAnsi);
     }
+    field(" /Author ", metadata.author, false);
+    field(" /Subject ", metadata.subject, false);
+    field(" /Keywords ", metadata.keywords, false);
     info += " >>";
     return info;
+}
+
+// The front matter's language as the catalog's /Lang, which screen readers and text extraction
+// use. A language tag needs no escaping.
+static void AppendLanguage(std::string& catalog, const DocumentMetadata& metadata) {
+    if (metadata.lang.empty()) return;
+    catalog += " /Lang (";
+    catalog += metadata.lang;
+    catalog += ")";
 }
 
 // A link to a heading of this document. AddLinkAnnotationObjects reserves its annotation in
@@ -7599,17 +7756,19 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     pdf.Set(pagesId, std::move(pages));
     AddInternalLinks(pdf, internalLinks, pageIds);
 
+    const DocumentMetadata metadata = FrontMatterMetadata(source);
     std::string catalog;
     catalog.reserve(options.embedSource ? 256 : 64);
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
     catalog += " 0 R";
+    AppendLanguage(catalog, metadata);
     std::string outline;
     AddOutline(pdf, catalog, renderer.Headings(), pageIds, winAnsi, outline);
     if (options.embedSource) AddReversibleSource(pdf, catalog, source);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));
-    int infoId = pdf.Add(InfoDictionary("RayoMD Native Standard PDF", source, renderer.Headings(), winAnsi));
+    int infoId = pdf.Add(InfoDictionary("RayoMD Native Standard PDF", metadata, renderer.Headings(), winAnsi));
 
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
     stats.pages = static_cast<uint32_t>(pageStarts.size());
@@ -7878,17 +8037,19 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     pdf.Set(pagesId, std::move(pages));
     AddInternalLinks(pdf, internalLinks, pageIds);
 
+    const DocumentMetadata metadata = FrontMatterMetadata(markdown);
     std::string catalog;
     catalog.reserve(options.embedSource ? 256 : 64);
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
     catalog += " 0 R";
+    AppendLanguage(catalog, metadata);
     std::string outline;
     AddOutline(pdf, catalog, renderer.Headings(), pageIds, false, outline);
     if (options.embedSource) AddReversibleSource(pdf, catalog, markdown);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));
-    int infoId = pdf.Add(InfoDictionary("RayoMD Native Tiny PDF", markdown, renderer.Headings(), false));
+    int infoId = pdf.Add(InfoDictionary("RayoMD Native Tiny PDF", metadata, renderer.Headings(), false));
 
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
     stats.pages = static_cast<uint32_t>(pageStarts.size());

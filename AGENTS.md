@@ -41,9 +41,11 @@ GitHub alerts, fenced code blocks, pipe tables (whose header row repeats on ever
 page), rule lines, natively typeset math for a TeX subset, inline emphasis
 cleanup, clickable Markdown links (also bare URLs, email addresses and shortcut
 references), bookmarks and `#anchor` links from headings, HTML comments, `<br>`
-and character references, a document title, opt-in page numbers, page sizes (A4 by
-default, presets, landscape and custom sizes; the renderers' `pageW`/`pageH`, never
-constants), standalone local images, and HTTP/HTTPS images on Windows or
+and character references, document metadata from the front matter (`/Info` title,
+author, subject and keywords, the catalog's `/Lang`; `FrontMatterMetadata` reads
+the YAML subset), opt-in page numbers, page sizes (A4 by default, presets,
+landscape and custom sizes; the renderers' `pageW`/`pageH`, never constants),
+standalone local images, and HTTP/HTTPS images on Windows or
 curl-enabled Linux builds with fallback text.
 Opt-in compression (`--compress`, `PdfOptions::compress`) writes page content, the
 font program and both CMaps as FlateDecode where that makes the file smaller, with
