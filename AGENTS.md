@@ -38,8 +38,9 @@ become a required dependency for the default lightweight package.
 Native PDF mode supports the core document features listed in `README.md`,
 including headings, paragraphs, lists, block quotes, fenced code blocks, pipe
 tables, rule lines, natively typeset math for a TeX subset, inline emphasis
-cleanup, clickable Markdown links, standalone local images, and HTTP/HTTPS images
-on Windows or curl-enabled Linux builds with fallback text.
+cleanup, clickable Markdown links, bookmarks and `#anchor` links from headings,
+standalone local images, and HTTP/HTTPS images on Windows or curl-enabled Linux
+builds with fallback text.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
@@ -77,6 +78,11 @@ Important image/link details:
   whole conversion.
 - Links are emitted as PDF annotations; keep visible text and annotation rects
   aligned when changing wrapping or text layout.
+- Headings make the PDF outline, and `#anchor` links go to them by GitHub's
+  anchor rules (`HeadingTargets`) with explicit destinations; a link to a missing
+  anchor is dropped. Renderers note a heading where its first line lands
+  (`MarkHeading`, next to that line's `Ensure`): keep them together when
+  changing heading layout.
 
 ## Architecture Map
 

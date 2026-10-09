@@ -972,6 +972,13 @@ public:
         }
     }
 
+    // A new object whose whole body is `body`.
+    int AddView(std::string_view body) {
+        objects.emplace_back();
+        objects.back().view = body;
+        return (int)objects.size();
+    }
+
     // A stream object whose dictionary text, up to and including "stream\n", is `head`.
     void SetStreamView(int id, std::string&& head, std::string_view data) {
         if (Object* object = At(id)) {
@@ -2825,8 +2832,340 @@ static void AppendUriLiteral(std::string& out, std::string_view url, bool winAns
     }
 }
 
+// ---- Headings: the outline (bookmarks) and the targets of internal links -----------------
+
+// A heading as drawn: its level, its text as the parser left it (WinAnsi bytes in a Latin
+// document of the standard renderer, else UTF-8), its page and the top of its first line.
+// The text lies in the document's blocks, which outlive the assembly of the file.
+struct HeadingMark {
+    int level = 1;
+    std::string_view text;
+    size_t page = 0;
+    double top = 0.0;
+};
+
+// Writes `text`, a heading as the parser left it, as a PDF text string: ASCII as a literal,
+// other text as UTF-16BE with its byte order mark. Control bytes, the formula markers among
+// them, are dropped. Needs room for text.size() * 4 + 6 bytes.
+static char* WriteTextString(char* out, std::string_view text, bool winAnsi) {
+    if (IsAllAscii(text)) {
+        *out++ = '(';
+        if (!RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteLiteralSpecial)) {
+            memcpy(out, text.data(), text.size());
+            out += text.size();
+        } else {
+            for (const char ch : text) {
+                if ((unsigned char)ch < 0x20 || ch == 0x7F) continue;
+                if (ch == '(' || ch == ')' || ch == '\\') *out++ = '\\';
+                *out++ = ch;
+            }
+        }
+        *out++ = ')';
+        return out;
+    }
+    std::string utf8;
+    if (winAnsi) utf8 = RayoMd::Text::WinAnsiToUtf8(text);
+    memcpy(out, "<FEFF", 5);
+    out += 5;
+    for (const wchar_t unit : Utf8ToWide(winAnsi ? std::string_view(utf8) : text)) {
+        if ((uint32_t)unit >= 0x20) out = WriteHex4(out, (uint16_t)unit);
+    }
+    *out++ = '>';
+    return out;
+}
+
+// Adds the outline of `headings`, nested by level with every entry open, and its entry to
+// `catalog`. The entries are written one after another into `storage`, which must outlive
+// BuildInto, with one growth instead of a string each.
+RAYOMD_COLD static void AddOutline(PdfObjects& pdf, std::string& catalog, const std::vector<HeadingMark>& headings,
+    const std::vector<int>& pageIds, bool winAnsi, std::string& storage) {
+    if (headings.empty() || pageIds.empty()) return;
+    constexpr size_t kNone = std::string::npos;
+    constexpr size_t kRootBytes = 128;      // the root's text
+    // An entry's text but its title: five object numbers of up to ten digits, a count and the top.
+    constexpr size_t kEntryBytes = 216;
+    struct Entry {
+        size_t parent = kNone, first = kNone, last = kNone, previous = kNone, next = kNone;
+        size_t descendants = 0;
+        size_t end = 0;                     // of its text in `storage`
+    };
+    const size_t count = headings.size();
+    std::vector<Entry> entries(count);
+    Entry root;
+    // The entries that enclose the next one, by rising level: levels 1 to 6 nest six deep.
+    size_t open[6];
+    size_t depth = 0;
+    size_t bytes = kRootBytes;              // about what the outline takes with ASCII titles
+    for (size_t index = 0; index < count; index++) {
+        while (depth > 0 && headings[open[depth - 1]].level >= headings[index].level) depth--;
+        Entry& entry = entries[index];
+        Entry& parent = depth > 0 ? entries[open[depth - 1]] : root;
+        entry.parent = depth > 0 ? open[depth - 1] : kNone;
+        if (parent.last != kNone) {
+            entries[parent.last].next = index;
+            entry.previous = parent.last;
+        } else {
+            parent.first = index;
+        }
+        parent.last = index;
+        for (size_t at = 0; at < depth; at++) entries[open[at]].descendants++;
+        open[depth++] = index;
+        bytes += headings[index].text.size() + 128;
+    }
+
+    // The root's object, then the entries' in order: entry `index` is object rootId + 1 + index.
+    // Each is written in a scratch buffer, which stays in the cache and grows only for a longer
+    // title, and then appended, so that `storage` gets only the bytes it keeps.
+    const int rootId = pdf.Reserve();
+    const auto id = [rootId](size_t index) { return (size_t)rootId + 1 + index; };
+    const auto lit = [](char* out, std::string_view text) {
+        memcpy(out, text.data(), text.size());
+        return out + text.size();
+    };
+    const auto number = [](char* out, size_t value) { return std::to_chars(out, out + 20, value).ptr; };
+    storage.reserve(storage.size() + bytes);
+    const size_t rootStart = storage.size();
+    std::string scratch(kRootBytes, '\0');
+    char* out = lit(&scratch[0], "<< /Type /Outlines /First ");
+    out = number(out, id(root.first));
+    out = lit(out, " 0 R /Last ");
+    out = number(out, id(root.last));
+    out = lit(out, " 0 R /Count ");
+    out = number(out, count);
+    out = lit(out, " >>");
+    storage.append(scratch.data(), (size_t)(out - scratch.data()));
+    root.end = storage.size();
+    for (size_t index = 0; index < count; index++) {
+        const HeadingMark& heading = headings[index];
+        Entry& entry = entries[index];
+        const size_t room = heading.text.size() * 4 + 6 + kEntryBytes;
+        if (scratch.size() < room) scratch.resize(room);
+        out = lit(&scratch[0], "<< /Title ");
+        out = WriteTextString(out, heading.text, winAnsi);
+        out = lit(out, " /Parent ");
+        out = number(out, entry.parent == kNone ? (size_t)rootId : id(entry.parent));
+        out = lit(out, " 0 R");
+        if (entry.previous != kNone) {
+            out = lit(out, " /Prev ");
+            out = number(out, id(entry.previous));
+            out = lit(out, " 0 R");
+        }
+        if (entry.next != kNone) {
+            out = lit(out, " /Next ");
+            out = number(out, id(entry.next));
+            out = lit(out, " 0 R");
+        }
+        if (entry.first != kNone) {
+            out = lit(out, " /First ");
+            out = number(out, id(entry.first));
+            out = lit(out, " 0 R /Last ");
+            out = number(out, id(entry.last));
+            out = lit(out, " 0 R /Count ");
+            out = number(out, entry.descendants);
+        }
+        out = lit(out, " /Dest [");
+        out = number(out, (size_t)pageIds[std::min(heading.page, pageIds.size() - 1)]);
+        out = lit(out, " 0 R /XYZ null ");
+        out = RayoMd::Text::WriteFixed2(out, heading.top + 4.0);
+        out = lit(out, " null] >>");
+        storage.append(scratch.data(), (size_t)(out - scratch.data()));
+        entry.end = storage.size();
+    }
+
+    // The text is complete and no longer moves.
+    const std::string_view text(storage);
+    pdf.SetView(rootId, text.substr(rootStart, root.end - rootStart));
+    size_t start = root.end;
+    for (const Entry& entry : entries) {
+        pdf.AddView(text.substr(start, entry.end - start));
+        start = entry.end;
+    }
+    catalog += " /Outlines ";
+    AppendInt(catalog, rootId);
+    catalog += " 0 R";
+}
+
+// A link to a heading of this document. AddLinkAnnotationObjects reserves its annotation in
+// its page's place; AddInternalLinks writes it once the pages exist, to point straight at the
+// heading.
+struct InternalLink {
+    int id = 0;
+    const LinkRect* link = nullptr;
+    size_t page = 0;
+    double top = 0.0;           // of the view
+};
+
+// The lower case JavaScript gives the capitals of Latin-1, Latin Extended-A, Greek, Cyrillic
+// and Vietnamese, as GitHub's anchors have them. It has as many UTF-8 bytes as the capital.
+RAYOMD_COLD static uint32_t LowerCodePoint(uint32_t cp) {
+    if ((cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) || (cp >= 0x391 && cp <= 0x3AB && cp != 0x3A2) ||
+        (cp >= 0x410 && cp <= 0x42F)) {
+        return cp + 32;
+    }
+    if (cp >= 0x400 && cp <= 0x40F) return cp + 80;
+    if (cp == 0x178) return 0xFF;
+    if (cp == 0x386) return 0x3AC;
+    if (cp >= 0x388 && cp <= 0x38A) return cp + 37;
+    if (cp == 0x38C) return 0x3CC;
+    if (cp == 0x38E || cp == 0x38F) return cp + 63;
+    if (cp >= 0x100 && cp <= 0x17E && cp != 0x130 && cp != 0x131 && cp != 0x138 && cp != 0x149) {
+        // Capitals and small letters alternate; from Ĺ to ň and from Ź to ž the capitals are odd.
+        const bool oddCapitals = (cp >= 0x139 && cp <= 0x148) || cp >= 0x179;
+        return (cp & 1u) == (oddCapitals ? 1u : 0u) ? cp + 1 : cp;
+    }
+    if ((cp >= 0x1E00 && cp <= 0x1E95) || (cp >= 0x1EA0 && cp <= 0x1EFF)) return cp | 1u;
+    return cp;
+}
+
+// Whether GitHub drops the character from an anchor: the punctuation and signs of Latin-1 (but
+// ª µ º), general punctuation, currency signs, arrows, mathematical and technical signs, box
+// drawing, shapes, dingbats, CJK and fullwidth punctuation, and emoji.
+RAYOMD_COLD static bool IsAnchorSign(uint32_t cp) {
+    static constexpr uint32_t kRanges[][2] = {
+        { 0x80, 0xA9 }, { 0xAB, 0xB4 }, { 0xB6, 0xB9 }, { 0xBB, 0xBF }, { 0xD7, 0xD7 }, { 0xF7, 0xF7 },
+        { 0x2000, 0x206F }, { 0x20A0, 0x20CF }, { 0x2190, 0x245F }, { 0x2500, 0x2BFF }, { 0x3000, 0x3004 },
+        { 0x3008, 0x3020 }, { 0xFF01, 0xFF0F }, { 0xFF1A, 0xFF20 }, { 0xFF3B, 0xFF40 }, { 0xFF5B, 0xFF65 },
+        { 0x1F000, 0x1FAFF },
+    };
+    for (const auto& range : kRanges) {
+        if (cp >= range[0] && cp <= range[1]) return true;
+    }
+    return false;
+}
+
+// The anchor GitHub gives a heading, so that "[see](#getting-started)" reaches "## Getting
+// Started": lower case, a space as '-', and no punctuation, signs or emoji. `text` is UTF-8;
+// bytes that are not are dropped.
+RAYOMD_COLD static std::string HeadingSlug(std::string_view text) {
+    std::string slug;
+    slug.reserve(text.size() + 2);
+    for (size_t at = 0; at < text.size();) {
+        const unsigned char ch = (unsigned char)text[at];
+        if (ch < 0x80) {
+            at++;
+            if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') slug += (char)ch;
+            else if (ch >= 'A' && ch <= 'Z') slug += (char)(ch + 32);
+            else if (ch == ' ') slug += '-';
+            continue;
+        }
+        uint32_t cp = 0;
+        size_t length = 1;
+        if (!RayoMd::Text::DecodeUtf8(text, at, cp, length)) {
+            at++;
+            continue;
+        }
+        at += length;
+        if (IsAnchorSign(cp)) continue;
+        if (cp == 0x130) {
+            slug += "i\xCC\x87";        // İ: an i and a combining dot above
+            continue;
+        }
+        cp = LowerCodePoint(cp);
+        char bytes[4];
+        for (size_t index = length; index-- > 1; cp >>= 6) bytes[index] = (char)(0x80 | (cp & 0x3F));
+        bytes[0] = (char)((length == 2 ? 0xC0 : length == 3 ? 0xE0 : 0xF0) | cp);
+        slug.append(bytes, length);
+    }
+    return slug;
+}
+
+// `text` with its %XX escapes decoded, as a browser reads the fragment of a link.
+RAYOMD_COLD static std::string PercentDecoded(std::string_view text) {
+    const auto digit = [](char ch) {
+        return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1;
+    };
+    std::string out;
+    out.reserve(text.size());
+    for (size_t at = 0; at < text.size(); at++) {
+        if (text[at] == '%' && at + 2 < text.size() && digit(text[at + 1]) >= 0 && digit(text[at + 2]) >= 0) {
+            out += (char)(digit(text[at + 1]) * 16 + digit(text[at + 2]));
+            at += 2;
+        } else {
+            out += text[at];
+        }
+    }
+    return out;
+}
+
+// The headings that links to "#anchor" name. The anchors are made at the first such link, so a
+// document without one does no work for them.
+class HeadingTargets {
+public:
+    HeadingTargets(const std::vector<HeadingMark>& headingMarks, bool winAnsiText)
+        : headings(headingMarks), winAnsi(winAnsiText) {}
+
+    // Reserves the annotation of `link`, to "#fragment", in `out`; false when no heading has that
+    // anchor. The fragment may be percent-encoded and differ from the anchor in case and
+    // punctuation. An empty fragment and "top" go to the top of the first page, as in a browser.
+    RAYOMD_COLD bool Reserve(PdfObjects& pdf, const LinkRect& link, std::vector<InternalLink>& out) {
+        if (!indexed) Index();
+        std::string fragment(std::string_view(link.url).substr(1));
+        if (winAnsi && !IsAllAscii(fragment)) fragment = RayoMd::Text::WinAnsiToUtf8(fragment);
+        fragment = PercentDecoded(fragment);
+        auto found = anchors.find(fragment);
+        if (found == anchors.end()) found = anchors.find(HeadingSlug(fragment));
+        if (found != anchors.end()) {
+            const HeadingMark& heading = headings[found->second.heading];
+            out.push_back({ pdf.Reserve(), &link, heading.page, heading.top + 4.0 });
+            return true;
+        }
+        const bool top = fragment.empty() || (fragment.size() == 3 && (fragment[0] | 0x20) == 't' &&
+            (fragment[1] | 0x20) == 'o' && (fragment[2] | 0x20) == 'p');
+        if (top) out.push_back({ pdf.Reserve(), &link, 0, PAGE_H });
+        return top;
+    }
+
+private:
+    struct Anchor {
+        size_t heading = 0;
+        int repeats = 0;        // of the anchor in later headings
+    };
+
+    // Every heading's anchor, a repeated one numbered "-1", "-2", ... as on GitHub, skipping a
+    // number that is already another heading's anchor.
+    RAYOMD_COLD void Index() {
+        indexed = true;
+        std::string utf8;
+        for (size_t index = 0; index < headings.size(); index++) {
+            std::string_view text = headings[index].text;
+            if (winAnsi && !IsAllAscii(text)) text = utf8 = RayoMd::Text::WinAnsiToUtf8(text);
+            std::string anchor = HeadingSlug(text);
+            const auto found = anchors.find(anchor);
+            if (found != anchors.end()) {
+                int& repeats = found->second.repeats;
+                const std::string base = std::move(anchor);
+                do {
+                    anchor = base + '-' + std::to_string(++repeats);
+                } while (anchors.count(anchor) != 0);
+            }
+            anchors.emplace(std::move(anchor), Anchor{ index, 0 });
+        }
+    }
+
+    const std::vector<HeadingMark>& headings;
+    bool winAnsi = false;
+    bool indexed = false;
+    std::unordered_map<std::string, Anchor> anchors;
+};
+
+// "<< /Type /Annot /Subtype /Link /Rect [...] /Border [0 0 0]": the start of a link annotation.
+static void AppendLinkAnnotationStart(std::string& annot, const LinkRect& link) {
+    annot += "<< /Type /Annot /Subtype /Link /Rect [";
+    AppendF(annot, link.x1);
+    annot += " ";
+    AppendF(annot, link.y1);
+    annot += " ";
+    AppendF(annot, link.x2);
+    annot += " ";
+    AppendF(annot, link.y2);
+    annot += "] /Border [0 0 0]";
+}
+
+// The link annotations of every page. Those of links to "#anchor" are left to `headings`, which
+// drops a link to an anchor the document does not have instead of leading nowhere.
 static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
-    const std::vector<std::vector<LinkRect>>& linksByPage, bool winAnsiTargets) {
+    const std::vector<std::vector<LinkRect>>& linksByPage, bool winAnsiTargets, HeadingTargets& headings,
+    std::vector<InternalLink>& internalLinks) {
     std::vector<std::vector<int>> idsByPage;
     idsByPage.reserve(linksByPage.size());
     for (const auto& pageLinks : linksByPage) {
@@ -2834,17 +3173,14 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
         ids.reserve(pageLinks.size());
         for (const LinkRect& link : pageLinks) {
             if (link.url.empty() || link.x2 <= link.x1 || link.y2 <= link.y1) continue;
+            if (link.url[0] == '#') {
+                if (headings.Reserve(pdf, link, internalLinks)) ids.push_back(internalLinks.back().id);
+                continue;
+            }
             std::string annot;
             annot.reserve(link.url.size() + 192);
-            annot += "<< /Type /Annot /Subtype /Link /Rect [";
-            AppendF(annot, link.x1);
-            annot += " ";
-            AppendF(annot, link.y1);
-            annot += " ";
-            AppendF(annot, link.x2);
-            annot += " ";
-            AppendF(annot, link.y2);
-            annot += "] /Border [0 0 0] /A << /S /URI /URI (";
+            AppendLinkAnnotationStart(annot, link);
+            annot += " /A << /S /URI /URI (";
             AppendUriLiteral(annot, link.url, winAnsiTargets);
             annot += ") >> >>";
             ids.push_back(pdf.Add(std::move(annot)));
@@ -2852,6 +3188,22 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
         idsByPage.push_back(std::move(ids));
     }
     return idsByPage;
+}
+
+// Writes the annotations of the links to headings, now that the pages they go to exist.
+RAYOMD_COLD static void AddInternalLinks(PdfObjects& pdf, const std::vector<InternalLink>& links,
+    const std::vector<int>& pageIds) {
+    for (const InternalLink& internal : links) {
+        std::string annot;
+        annot.reserve(176);
+        AppendLinkAnnotationStart(annot, *internal.link);
+        annot += " /Dest [";
+        AppendInt(annot, pageIds[std::min(internal.page, pageIds.size() - 1)]);
+        annot += " 0 R /XYZ null ";
+        AppendF(annot, internal.top);
+        annot += " null] >>";
+        pdf.Set(internal.id, std::move(annot));
+    }
 }
 
 static void AppendPageAnnotations(std::string& page, const std::vector<int>& annotationIds) {
@@ -3203,6 +3555,7 @@ public:
     const CidList& UsedCids() const { return usedCids.Values(); }
     uint32_t MissingCharacters() const { return usedCids.missing; }
     bool MathUsed() const { return math.Used(); }
+    const std::vector<HeadingMark>& Headings() const { return headings; }
 
 private:
     template <typename RendererType>
@@ -3222,6 +3575,16 @@ private:
     std::string& content;
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
+    std::vector<HeadingMark> headings;
+
+    // Notes where a heading's first line is drawn, for its outline entry and the links to it.
+    // A line `firstLine` high that does not fit moves to the next page first, as drawing it
+    // would; 0 notes the current place.
+    void MarkHeading(int level, const std::string& text, double firstLine) {
+        if (text.empty()) return;
+        if (firstLine > 0.0) Ensure(firstLine);
+        headings.push_back({ level, text, pageStarts.size() - 1, y });
+    }
     UsedCidSet usedCids;
     MathPool math;
     MathFallbackFont mathFallback{};
@@ -4175,10 +4538,11 @@ private:
         if (y < PAGE_H - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
 
         if (block.hasMath) {
-            RenderMathTextLines(block.text, margin, PAGE_W - margin * 2.0, size, "0.02 0.02 0.02", false, false);
+            RenderMathTextLines(block.text, level, margin, PAGE_W - margin * 2.0, size, "0.02 0.02 0.02", false, false);
             y -= level <= 2 ? 8.0 : 5.0;
             return;
         }
+        MarkHeading(level, block.text, size * 1.35);
         std::wstring text = Utf8ToWide(block.text);
         for (const auto& line : WrapText(font, text, PAGE_W - margin * 2.0, size)) {
             DrawTextLine(margin, size, line, "0.02 0.02 0.02");
@@ -4187,11 +4551,13 @@ private:
     }
 
     // Heading lines that contain formulas: plain text and formulas in one colour,
-    // each line as tall as its tallest formula needs. `quote` adds the quote strip.
-    RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, double x, double width, double size,
+    // each line as tall as its tallest formula needs. `quote` adds the quote strip. The
+    // heading, at `level`, is noted once its first line has found its page.
+    RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, int level, double x, double width, double size,
         const char* color, bool bold, bool quote) {
         math.Clear();
         double lh = size * 1.35;
+        bool marked = false;
         for (const auto& line : WrapMathText(text, width, size, bold)) {
             MathLineExtent extent = MeasureMathLine(math, line, size, lh);
             double extra = extent.above + extent.below;
@@ -4201,6 +4567,10 @@ private:
                 DrawRect(margin, y + 2.0, 3.0, lh + 3.0 + extra, "0.45 0.62 0.72");
             } else {
                 Ensure(lh + extra);
+            }
+            if (!marked) {
+                MarkHeading(level, text, 0.0);
+                marked = true;
             }
             y -= extent.above;
             PaintMathTextLine(line, x, y - size, size, color, bold);
@@ -4364,10 +4734,11 @@ private:
         double x = margin + 14.0;
         double width = PAGE_W - margin * 2.0 - 22.0;
         if (block.hasMath) {
-            RenderMathTextLines(block.text, x, width, size, "0.10 0.15 0.18", true, true);
+            RenderMathTextLines(block.text, level, x, width, size, "0.10 0.15 0.18", true, true);
             y -= 7.0;
             return;
         }
+        MarkHeading(level, block.text, height + 2.0);
         std::wstring text = Utf8ToWide(block.text);
         for (const std::wstring& line : WrapText(font, text, width, size)) {
             Ensure(height + 2.0);
@@ -5221,6 +5592,7 @@ public:
     const std::vector<size_t>& PageStarts() const { return pageStarts; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     bool MathUsed() const { return math.Used(); }
+    const std::vector<HeadingMark>& Headings() const { return headings; }
     // Whether text was shown in /F4 Helvetica-Oblique or /F5 Helvetica-BoldOblique.
     bool ObliqueUsed() const { return (facesUsed & (1u << kStyleItalic)) != 0; }
     bool BoldObliqueUsed() const { return (facesUsed & (1u << (kStyleBold | kStyleItalic))) != 0; }
@@ -5242,6 +5614,16 @@ private:
     std::string& content;
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
+    std::vector<HeadingMark> headings;
+
+    // Notes where a heading's first line is drawn, for its outline entry and the links to it.
+    // A line `firstLine` high that does not fit moves to the next page first, as drawing it
+    // would; 0 notes the current place.
+    void MarkHeading(int level, const std::string& text, double firstLine) {
+        if (text.empty()) return;
+        if (firstLine > 0.0) Ensure(firstLine);
+        headings.push_back({ level, text, pageStarts.size() - 1, y });
+    }
     MathPool math;
     MathFallbackFont latinMathFallback{};
 
@@ -6167,10 +6549,11 @@ private:
         double size = sizes[level];
         if (y < PAGE_H - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
         if (block.hasMath) {
-            RenderMathTextLines(block.text, margin, PAGE_W - margin * 2.0, size, "0.02 0.02 0.02", true, false);
+            RenderMathTextLines(block.text, level, margin, PAGE_W - margin * 2.0, size, "0.02 0.02 0.02", true, false);
             y -= level <= 2 ? 8.0 : 5.0;
             return;
         }
+        MarkHeading(level, block.text, size * 1.35);
         ForEachWrappedAsciiLine(block.text, PAGE_W - margin * 2.0, size, StandardTextFont::Bold, [&](std::string_view line, double) {
             DrawTextLine(margin, size, line, "F2", "0.02 0.02 0.02");
         });
@@ -6178,11 +6561,13 @@ private:
     }
 
     // Heading lines that contain formulas: plain text and formulas in one colour,
-    // each line as tall as its tallest formula needs. `quote` adds the quote strip.
-    RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, double x, double width, double size,
+    // each line as tall as its tallest formula needs. `quote` adds the quote strip. The
+    // heading, at `level`, is noted once its first line has found its page.
+    RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, int level, double x, double width, double size,
         const char* color, bool bold, bool quote) {
         math.Clear();
         double lh = size * 1.35;
+        bool marked = false;
         for (const auto& line : WrapMathText(text, width, size, bold)) {
             MathLineExtent extent = MeasureMathLine(math, line, size, lh);
             double extra = extent.above + extent.below;
@@ -6192,6 +6577,10 @@ private:
                 Rect(margin, y + 2.0, 3.0, lh + 3.0 + extra, "0.45 0.62 0.72");
             } else {
                 Ensure(lh + extra);
+            }
+            if (!marked) {
+                MarkHeading(level, text, 0.0);
+                marked = true;
             }
             y -= extent.above;
             PaintMathTextLine(line, x, y - size, size, color, bold);
@@ -6362,10 +6751,11 @@ private:
         double x = margin + 14.0;
         double width = PAGE_W - margin * 2.0 - 22.0;
         if (block.hasMath) {
-            RenderMathTextLines(block.text, x, width, size, "0.10 0.15 0.18", true, true);
+            RenderMathTextLines(block.text, level, x, width, size, "0.10 0.15 0.18", true, true);
             y -= 7.0;
             return;
         }
+        MarkHeading(level, block.text, height + 2.0);
         for (const WrappedAsciiLine& line : WrapAsciiText(block.text, width, size, StandardTextFont::Bold)) {
             Ensure(height + 2.0);
             Rect(margin, y + 2.0, PAGE_W - margin * 2.0, height + 3.0, "0.94 0.95 0.96");
@@ -6648,7 +7038,10 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     }
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
-    std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi);
+    HeadingTargets headingTargets(renderer.Headings(), winAnsi);
+    std::vector<InternalLink> internalLinks;
+    std::vector<std::vector<int>> annotationIds =
+        AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
     // The italic faces only when emphasis used them, so other documents keep their bytes.
@@ -6709,12 +7102,15 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     AppendSize(pages, pageIds.size());
     pages += " >>";
     pdf.Set(pagesId, std::move(pages));
+    AddInternalLinks(pdf, internalLinks, pageIds);
 
     std::string catalog;
-    catalog.reserve(options.embedSource ? 256 : 48);
+    catalog.reserve(options.embedSource ? 256 : 64);
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
     catalog += " 0 R";
+    std::string outline;
+    AddOutline(pdf, catalog, renderer.Headings(), pageIds, winAnsi, outline);
     if (options.embedSource) AddReversibleSource(pdf, catalog, source);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));
@@ -6865,7 +7261,10 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     }
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
-    std::vector<std::vector<int>> annotationIds = AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false);
+    HeadingTargets headingTargets(renderer.Headings(), false);
+    std::vector<InternalLink> internalLinks;
+    std::vector<std::vector<int>> annotationIds =
+        AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
@@ -6973,12 +7372,15 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     AppendSize(pages, pageIds.size());
     pages += " >>";
     pdf.Set(pagesId, std::move(pages));
+    AddInternalLinks(pdf, internalLinks, pageIds);
 
     std::string catalog;
-    catalog.reserve(options.embedSource ? 256 : 48);
+    catalog.reserve(options.embedSource ? 256 : 64);
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
     catalog += " 0 R";
+    std::string outline;
+    AddOutline(pdf, catalog, renderer.Headings(), pageIds, false, outline);
     if (options.embedSource) AddReversibleSource(pdf, catalog, markdown);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));

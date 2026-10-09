@@ -834,12 +834,13 @@ bool CheckMathPdf() {
 
     // A long word next to a formula still wraps: in a table cell and in a heading it is
     // split, and nothing starts to the right of the text area (page 595 pt, margin 54 pt).
+    // The outline holds the heading whole, so only shown text, "(...) Tj", is searched there.
     const std::string cellWord(56, 'w');
     const std::string headingWord(120, 'h');
     std::string longWordPdf;
     if (!Build("| a | b | c | d | e | f |\n|---|---|---|---|---|---|\n| $x$" + cellWord + " | 2 | 3 | 4 | 5 | 6 |\n\n"
             "# Heading $x$" + headingWord + "\n", longWordPdf) ||
-        longWordPdf.find(cellWord) != std::string::npos || longWordPdf.find(headingWord) != std::string::npos ||
+        longWordPdf.find(cellWord) != std::string::npos || longWordPdf.find(headingWord + ") Tj") != std::string::npos ||
         MaxTextStartX(longWordPdf) > 595.0 - 54.0) {
         std::cerr << "long word next to a formula is not wrapped" << std::endl;
         return false;
@@ -926,17 +927,17 @@ bool CheckMathPdf() {
 }
 
 // The hard regression rule of the math feature: a document without math syntax is
-// rendered byte-for-byte the same with and without it. The digests were recorded when code
-// backgrounds started at the first glyph of the code instead of the space before it, after
-// the standard-font renderer started to show bold, italic and strike-through, exact AFM
-// widths, WinAnsiEncoding, CommonMark list nesting and source-faithful word spacing. That
-// renderer does not depend on the platform or on installed fonts, so they hold on Windows
-// and Linux alike.
+// rendered byte-for-byte the same with and without it. The digests were recorded when
+// headings started to make the PDF outline, after code backgrounds started at the first
+// glyph of the code, the standard-font renderer started to show bold, italic and
+// strike-through, exact AFM widths, WinAnsiEncoding, CommonMark list nesting and
+// source-faithful word spacing. That renderer does not depend on the platform or on
+// installed fonts, so they hold on Windows and Linux alike.
 bool CheckNoMathGolden() {
     struct Golden { TinyPdf::PdfStyle style; size_t size; const char* sha256; };
     const Golden goldens[] = {
-        {TinyPdf::PdfStyle::Modern, 6790, "f95173c276e607e3c7bf3f48012b580f928a78fe195a489046a3f66e721b6c03"},
-        {TinyPdf::PdfStyle::Tech, 6844, "df7af9736e02ac93b4357880f7b4dc7da79a3f8092f51a87005cfc81499c6c0e"},
+        {TinyPdf::PdfStyle::Modern, 7334, "37f7d35459892732bf96e34f3ba21c1ba46d4483231e2108d846c422e2358044"},
+        {TinyPdf::PdfStyle::Tech, 7388, "57d73415b6b112cb6c5fc67c630bde61030ff24c610489470059f21ee7324517"},
     };
     for (const Golden& golden : goldens) {
         TinyPdf::PdfOptions options;
@@ -975,7 +976,8 @@ bool CheckOutputBufferReuse() {
             return false;
         }
     }
-    if (fresh[1].find("/Count 1 ") != std::string::npos || fresh[3].find("/Subtype /Image") == std::string::npos) {
+    // "] /Count 1 >>" ends a one-page /Pages object; outline entries have counts too.
+    if (fresh[1].find("] /Count 1 >>") != std::string::npos || fresh[3].find("/Subtype /Image") == std::string::npos) {
         std::cerr << "buffer reuse: the documents do not cover several pages and an image" << std::endl;
         return false;
     }
@@ -1385,6 +1387,43 @@ std::string MinimalTrueTypeCollection() {
     return collection + font + data;
 }
 
+// Headings get an outline entry, nested by level, and a link to "#anchor" goes where the entry
+// of its heading goes: anchors as GitHub makes them, "-1" for a repeated one, the fragment
+// percent-decoded and in any case. A link to an anchor the document lacks is dropped, and
+// "#top" goes to the top of the first page. In both renderers.
+bool CheckHeadingAnchors() {
+    const auto destAfter = [](const std::string& pdf, size_t from) {
+        const size_t start = from == std::string::npos ? from : pdf.find("/Dest [", from);
+        return start == std::string::npos ? std::string() : pdf.substr(start, pdf.find(']', start) + 1 - start);
+    };
+    const std::string document =
+        "# Intro\n\nSee [later](#Later-Part), [again](#again-1), [gone](#nope), [size](#gr%C3%B6%C3%9Fe) "
+        "and [top](#top).\n\n## Later Part\n\n## Again\n\n## Again\n\n### Gr\xC3\xB6\xC3\x9F" "e\n";
+    for (const std::string& text : { document, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + document }) {
+        std::string pdf;
+        if (!Build(text, pdf)) return false;
+        std::vector<std::string> links;
+        for (size_t at = pdf.find("/Subtype /Link"); at != std::string::npos; at = pdf.find("/Subtype /Link", at + 1)) {
+            links.push_back(destAfter(pdf, at));
+        }
+        const size_t firstAgain = pdf.find("/Title (Again)");
+        const std::string later = destAfter(pdf, pdf.find("/Title (Later Part)"));
+        const std::string again = destAfter(pdf, firstAgain == std::string::npos ? firstAgain : pdf.find("/Title (Again)", firstAgain + 1));
+        const std::string size = destAfter(pdf, pdf.find("/Title <FEFF0047007200F600DF0065>"));
+        const size_t root = pdf.find("<< /Type /Outlines ");
+        const size_t intro = pdf.find("/Title (Intro) ");
+        if (root == std::string::npos || pdf.find(" /Count 5 >>", root) != pdf.find(" >>", root) - 9 ||
+            intro == std::string::npos || pdf.find(" /Count 4 /Dest [", intro) > pdf.find("endobj", intro) ||
+            later.empty() || again.empty() || size.empty() || again == destAfter(pdf, firstAgain) ||
+            links != std::vector<std::string>{ later, again, size, links.size() == 4 ? links[3] : "" } ||
+            links[3].find(" 0 R /XYZ null 842 null]") == std::string::npos) {
+            std::cerr << "heading anchors mismatch (" << (text == document ? "standard" : "Unicode") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A document with characters the default font has no glyph for is drawn in a font that has
 // them: here a TrueType collection given in RAYOMD_FALLBACK_FONT. What no font can show, a
 // character beyond the BMP, is counted.
@@ -1595,6 +1634,7 @@ int main() {
     if (!CheckLinkText()) return 73;
     if (!CheckTableRows()) return 74;
     if (!CheckFallbackFont()) return 75;
+    if (!CheckHeadingAnchors()) return 76;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

@@ -43,7 +43,7 @@ native exporter through a small CLI.
 - Native PDF generation with no browser engine on the fast path.
 - A single Windows GUI executable and a compact Linux CLI.
 - Bounded parallel batch conversion, stdin, warm serve, and benchmark modes.
-- Unicode, clickable links, tables, lists, code, local images, and opt-in URL images.
+- Unicode, clickable links, bookmarks, tables, lists, code, local images, and opt-in URL images.
 - Natively typeset math for a TeX subset: no LaTeX, no browser, no embedded math fonts.
 - Optional exact Markdown recovery through reversible PDFs.
 - Optional Windows Pandoc mode when the native subset is not enough.
@@ -143,7 +143,8 @@ Version-specific engineering contracts remain beside the code:
 
 ## Native renderer scope
 
-Native mode supports ATX and Setext headings, paragraphs, structured nested
+Native mode supports ATX and Setext headings (as PDF bookmarks, and as targets of
+GitHub-style `#anchor` links), paragraphs, structured nested
 lists and block quotes, fenced and indented code, pipe tables, rules, page
 breaks, matching-run code spans, classic emphasis and escapes, inline and
 reference-style links, URL/email autolinks, standalone inline/reference images,
@@ -155,8 +156,9 @@ standalone images retain native image layout and missing-image fallback text.
 
 It deliberately does not promise full CommonMark/Pandoc compatibility, complete
 LaTeX math (packages, macros, automatic numbering), syntax highlighting, footnotes,
-citations, filters, templates, or HTML/CSS
-layout fidelity. The complete and current matrix is maintained in
+citations, filters, templates, right-to-left scripts (Arabic and Hebrew are drawn
+left to right, unshaped), or HTML/CSS layout fidelity. The complete and current
+matrix is maintained in
 [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support).
 
 ## Packaging and development

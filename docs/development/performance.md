@@ -438,6 +438,41 @@ bytes (22.6 MB to 14.9 MB); a short Unicode document shrinks from 176 KB to
 to 12.7 % faster; warm `--bench` builds, which reuse the cached font object,
 run 1.4 % fewer instructions in the same time.
 
+## Bookmarks and links to headings, October 2026
+
+Headings now make the PDF outline (bookmarks), nested by level, and a link to
+`#anchor` goes to the heading with that anchor as GitHub makes it: lower case,
+spaces as `-`, punctuation and emoji dropped, repeats numbered `-1`, `-2`. A
+percent-encoded fragment or one in other case still matches, and `#` and `#top`
+go to the first page. A link to an anchor no heading has is dropped instead of
+becoming a dead `/URI (#x)` annotation. The renderers note each heading's page
+and top where they draw its first line, with a view of its text in the blocks.
+Anchors are computed only at the first `#` link, in one hash map that also
+numbers the repeats. Such a link's annotation is reserved in its page's place
+and written with an explicit destination once the pages exist, so documents
+without internal links keep their object numbers.
+
+The outline entries go one after another into one buffer that the objects view
+(`PdfObjects::AddView`); each is written in a scratch buffer that stays in L1.
+A first version gave every entry a string of its own and named every heading in
+a `/Dests` name tree: +6.5 % instructions and +8 % time over the watch fixtures.
+Writing the whole outline through one `TailWriter` cut the instructions, but its
+zero-fill evicted L1: cachegrind counted 514,800 D1 misses over 41 builds of
+`baseline.md` before and 603,300 with it, 585,300 with the scratch buffer.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`a74d14b`): in all 2,700 corpus exports without `#` links the PDFs differ only
+by the outline objects and the catalog's `/Outlines`. The watch fixtures run
+0.6 % more instructions (geometric mean) in 1.8 % more time; `baseline.md`, 73
+headings in 18 KB, +4.1 % instructions and +10 % time. Half of that is glibc:
+the outline's temporaries lift the build's heap peak past the 128 KiB top pad,
+so every build trims the heap and faults a page back in (1.1 faults per build
+instead of 0.1). With the trim and mmap thresholds raised through
+`GLIBC_TUNABLES`, `baseline.md` costs +3.9 % and the fixtures +1.0 %. 20,000
+headings with 20,000 links to them export in 55 ms; a document of nothing but
+20,000 headings grows from 3.6 MB to 6.6 MB, as an outline entry is about as
+large as the heading it points to. The executable grows by 12 KB.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -495,7 +530,12 @@ maps its large temporaries afresh: 75 page faults per build and 10 % more time
 modes meet this for every document that fits its reservation. Fixing
 `M_MMAP_THRESHOLD` and `M_TRIM_THRESHOLD` with `mallopt` in the CLI, or keeping
 the large temporaries alive from one build to the next, would remove the faults;
-measure batch mode before choosing.
+measure batch mode before choosing. With `GLIBC_TUNABLES` setting
+`glibc.malloc.trim_threshold` and `glibc.malloc.mmap_threshold` to 64 MiB and
+`glibc.malloc.top_pad` to 16 MiB, the 96 KiB Unicode watch fixture runs 5.4 %
+faster (2026-10-09), and a document whose build lifts the heap past glibc's
+128 KiB top pad stops paying a trim and a page fault per build: 10 of the 23
+µs the bookmarks cost `baseline.md`.
 
 **CIDs in order of first use.** CIDs are Unicode code points, so the
 `CIDToGIDMap` stream runs up to the largest one a document shows, uncompressed:
@@ -509,6 +549,16 @@ glyph ids, and keep `/W` short. The ToUnicode CMap already maps CIDs back.
 a DejaVu Sans subset (33 KB). It carries the font's copyright and license
 notice, which the license asks to keep with copies, so it stays; a subset of its
 records that keeps those notices would save about 10 KB per Unicode PDF.
+
+**The object table.** `PdfObjects::Object` is 72 bytes, and the table grows by
+doubling: the 73 outline entries of `baseline.md` take it from 110 objects to
+184, past the 128 the table had room for, so it is copied into one for 256
+(about 6,000 more D1 write misses over 41 builds). Reserving it from the block
+count, or a smaller entry (the in-place offset and length could share the view's
+fields), would avoid both. Each outline entry also formats up to seven object
+numbers with `std::to_chars`, about 50 instructions each; the entries' own
+numbers are consecutive and could be formatted once and copied, some 250
+instructions per heading.
 
 ## Keeping the release light
 

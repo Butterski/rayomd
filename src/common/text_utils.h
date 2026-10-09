@@ -117,5 +117,8 @@ size_t TranscodeToWinAnsiLossy(std::string_view utf8, std::string& out);
 const char* RendererPathName(std::string_view text);
 // Transcoded text back to UTF-8, for link targets, image paths and formulas.
 std::string WinAnsiToUtf8(std::string_view winAnsi);
+// The scalar value of the UTF-8 sequence at text[at] and its length in bytes, or false when it
+// is not well formed.
+bool DecodeUtf8(std::string_view text, size_t at, uint32_t& codePoint, size_t& length);
 
 } // namespace RayoMd::Text
