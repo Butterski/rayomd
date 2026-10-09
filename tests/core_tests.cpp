@@ -1749,6 +1749,125 @@ bool CheckCompression() {
     return true;
 }
 
+// A theme file: comments and blank lines are skipped, a value may be quoted, "#RGB" doubles its
+// digits, relative paths are the theme folder's, and an unknown key or a bad value is an error
+// naming its line. Its colours reach headings, links, rules and the bar of plain quotes (not
+// alerts) in both renderers; its font shows even ASCII text, and one that cannot be read fails
+// the export. Its header and footer, logo and cover are checked below.
+bool CheckTheme() {
+    TinyPdf::PdfTheme theme;
+    std::string error;
+    const bool parsed = TinyPdf::Internal::ParseTheme(
+        "\xEF\xBB\xBF# ACME\n\nfont = fonts/acme.ttf\r\nheading-color = #0B3D91\nlink-color = \"#c39\"\n; done\n"
+        "accent-color=#F2A900\nlogo = img/logo.png\nheader-left = {logo}\nfooter-right = \" {page} \"\ncover = Yes\n",
+        "themes", theme, error);
+    TinyPdf::PdfTheme bad;
+    std::string unknown;
+    std::string color;
+    std::string flag;
+    if (!parsed || theme.fontPath != "themes/fonts/acme.ttf" || theme.headingColor != 0x0B3D91 ||
+        theme.linkColor != 0xCC3399 || theme.accentColor != 0xF2A900 || theme.logoPath != "themes/img/logo.png" ||
+        theme.headerLeft != "{logo}" || theme.footerRight != " {page} " || !theme.cover ||
+        TinyPdf::Internal::ParseTheme("font = /abs.ttf\ncolour = red\n", "x", bad, unknown) || bad.fontPath != "/abs.ttf" ||
+        unknown.find("line 2") == std::string::npos ||
+        TinyPdf::Internal::ParseTheme("heading-color = #12345\n", "", bad, color) || color.find("line 1") == std::string::npos ||
+        TinyPdf::Internal::ParseTheme("cover = maybe\n", "", bad, flag) || flag.find("line 1") == std::string::npos) {
+        std::cerr << "theme parsing mismatch: " << error << unknown << color << flag << std::endl;
+        return false;
+    }
+    theme = TinyPdf::PdfTheme();
+    theme.headingColor = 0x0B3D91;
+    theme.linkColor = 0xCC3399;
+    theme.accentColor = 0xF2A900;
+    const std::string document = "# Head\n\nA [link](https://example.com).\n\n---\n\n> Quoted.\n\n> [!NOTE]\n> Alert.\n";
+    for (const std::string& text : { document, document + "\nZa\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n" }) {
+        TinyPdf::PdfOptions options;
+        options.theme = theme;
+        std::string pdf;
+        if (!TinyPdf::BuildPdf(text, options, pdf).Ok() || pdf.find("0.04 0.24 0.57 rg") == std::string::npos ||
+            pdf.find("0.8 0.2 0.6 rg") == std::string::npos || pdf.find("q 0.95 0.66 0 RG 0.8 w") == std::string::npos ||
+            pdf.find("0.95 0.66 0 rg") == std::string::npos || pdf.find("0.04 0.41 0.85 rg") == std::string::npos ||
+            pdf.find("0.02 0.02 0.02 rg") != std::string::npos || pdf.find("0.05 0.30 0.68") != std::string::npos) {
+            std::cerr << "theme colours mismatch (" << (text == document ? "standard" : "Unicode") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    TinyPdf::PdfOptions options;
+    options.theme.fontPath = "no such font.ttf";
+    std::string pdf;
+    if (TinyPdf::BuildPdf(document, options, pdf).error != TinyPdf::BuildError::ThemeFontUnavailable) {
+        std::cerr << "an unreadable theme font did not fail the export" << std::endl;
+        return false;
+    }
+    std::string fontPath;
+#ifdef _WIN32
+    if (const char* windows = std::getenv("WINDIR")) fontPath = std::string(windows) + "\\Fonts\\arial.ttf";
+#else
+    fontPath = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+#endif
+    if (std::ifstream(fontPath, std::ios::binary)) {
+        options.theme.fontPath = fontPath;
+        if (!TinyPdf::BuildPdf(document, options, pdf).Ok() || pdf.find("/FontFile2") == std::string::npos ||
+            pdf.find("/Helvetica") != std::string::npos) {
+            std::cerr << "the theme font did not show the ASCII document" << std::endl;
+            return false;
+        }
+    }
+    const auto npos = std::string::npos;
+    // Header and footer: placeholders from the front matter and the page, an unknown one kept, a
+    // field cut short with an ellipsis, the page numbers in the footer's centre, and the logo.
+    const std::string fronted = "---\ntitle: Report\nauthor: Ann\ndate: 2026-10-09\n---\n\n# Head\n\nOne.\n\n\\pagebreak\n\nTwo.\n";
+    TinyPdf::PdfOptions banded;
+    banded.pageNumbers = true;
+    banded.theme.headerLeft = "{logo}";
+    banded.theme.headerRight = "{title} by {author} {unknown}";
+    banded.theme.footerLeft = std::string(300, 'x');
+    banded.theme.footerRight = "{date}";
+    banded.theme.logoPath = std::string(RAYOMD_TEST_SOURCE_DIR) + "/docs/assets/branding/rayomd.png";
+    TinyPdf::BuildResult result = TinyPdf::BuildPdf(fronted, banded, pdf);
+    if (!result.Ok() || result.failedImages != 0 || result.pages != 2 || pdf.find("(Report by Ann {unknown}) Tj") == npos ||
+        pdf.find("(2026-10-09) Tj") == npos || pdf.find("(1 / 2) Tj") == npos || pdf.find("(2 / 2) Tj") == npos ||
+        pdf.find("x\x85) Tj") == npos || pdf.find(std::string(260, 'x')) != npos || pdf.find(" cm /Im1 Do") == npos) {
+        std::cerr << "theme header and footer mismatch" << std::endl;
+        return false;
+    }
+    banded.theme.logoPath = "no such logo.png";
+    result = TinyPdf::BuildPdf(fronted, banded, pdf);
+    if (!result.Ok() || result.failedImages != 1 || pdf.find(" Do") != npos) {
+        std::cerr << "a theme logo that cannot be read was not a failed image" << std::endl;
+        return false;
+    }
+    // Header text the standard fonts cannot show takes the document to a Unicode font, whose
+    // subset gets its glyphs; the page numbers are then in that font, too.
+    TinyPdf::PdfOptions greek;
+    greek.pageNumbers = true;
+    greek.theme.headerCenter = "\xCE\xA9 Corp";
+    if (!TinyPdf::BuildPdf("# Plain\n", greek, pdf).Ok() || pdf.find("/Type0") == npos ||
+        pdf.find("<03A9> <03A9>") == npos || pdf.find("/Helvetica") != npos) {
+        std::cerr << "theme text outside WinAnsi did not take a Unicode font" << std::endl;
+        return false;
+    }
+    // A cover is the first page, labelled so; the footer and the outline count only the pages
+    // after it. In both renderers.
+    TinyPdf::PdfOptions covered;
+    covered.theme.cover = true;
+    covered.theme.footerCenter = "{page} / {pages}";
+    for (const std::string& text : { fronted, fronted + "\nZa\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n" }) {
+        result = TinyPdf::BuildPdf(text, covered, pdf);
+        const size_t kids = pdf.find("/Kids [");
+        const std::string coverId = kids == npos ? "" : pdf.substr(kids + 7, pdf.find(' ', kids + 7) - kids - 7);
+        if (!result.Ok() || result.pages != 3 || coverId.empty() ||
+            pdf.find(" /PageLabels << /Nums [0 << /P (Cover) >> 1 << /S /D >>] >>") == npos ||
+            pdf.find("/Dest [" + coverId + " 0 R") != npos || pdf.find("/Count 3") == npos ||
+            (text == fronted && (pdf.find("(Report) Tj") == npos || pdf.find("(Ann) Tj") == npos ||
+                                    pdf.find("(2 / 2) Tj") == npos || pdf.find("(3 / 3) Tj") != npos))) {
+            std::cerr << "theme cover mismatch (" << (text == fronted ? "standard" : "Unicode") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -2143,6 +2262,7 @@ int main() {
     if (!CheckPageSize()) return 87;
     if (!CheckReportJson()) return 88;
     if (!CheckCompression()) return 89;
+    if (!CheckTheme()) return 90;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

@@ -47,6 +47,7 @@ native exporter through a small CLI.
 - Natively typeset math for a TeX subset: no LaTeX, no browser, no embedded math fonts.
 - Optional exact Markdown recovery through reversible PDFs.
 - Optional compression (`--compress`) with a built-in DEFLATE encoder: text-heavy PDFs come out two to five times smaller.
+- Company themes (`--theme=FILE`): your TrueType font, colours, header and footer text with a logo, and a cover page.
 - Optional Windows Pandoc mode when the native subset is not enough.
 
 Use native RayoMD for simple reports and bulk conversion when startup time,
@@ -121,6 +122,7 @@ rayomd --batch input-folder output-folder --recursive --skip-unchanged --report=
 rayomd --export input.md reversible.pdf native elegant normal --embed-source
 rayomd --export input.md numbered.pdf --page-numbers --page-size=letter
 rayomd --export input.md small.pdf --compress
+rayomd --export input.md branded.pdf --theme=acme.theme
 rayomd --recover-source reversible.pdf recovered.md
 ```
 

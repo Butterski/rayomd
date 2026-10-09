@@ -52,6 +52,12 @@ font program and both CMaps as FlateDecode where that makes the file smaller, wi
 RayoMD's own DEFLATE encoder; never the XMP metadata or an embedded source, which
 the reversible profile reads uncompressed. Without it the PDF bytes stay as they
 are.
+Company themes (`--theme=FILE`, `PdfOptions::theme`): a TrueType font for all text
+(no fallback font then), heading, link and accent colours (the renderers'
+`headingColor`/`linkColor`/`ruleColor`/`plainQuoteBar`, from `ThemePalette`, never
+literals), header and footer fields with placeholders and a logo (one overlay stream
+per page, like the page numbers, whose glyphs join the subset before it is cut), and a
+cover page before the first page. Without a theme the PDF bytes stay as they are.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
@@ -135,7 +141,9 @@ Important image/link details:
   repository; pinned by SHA-256).
 
 - `src/core/export_options.cpp` and `src/common/text_utils.cpp`
-  Shared typed style/margin conversion, CLI option parsing primitives, and non-public text helpers.
+  Shared typed style/margin conversion, CLI option parsing primitives (also theme
+  files, `ParseTheme`), and non-public text helpers. `export_options.cpp` is built at
+  `-Os`: it runs once per run.
 
 - `src/core/flate.h` and `src/core/flate.cpp`
   The DEFLATE/zlib encoder behind `--compress`: greedy matching over two hash
@@ -143,6 +151,12 @@ Important image/link details:
   Output depends only on the input. Its tables live per thread in
   `tiny_pdf.cpp` (`ThreadFlateWork`) and are never cleared between streams. Built
   at `-O2`: within 1 % of `-O3` at half the code.
+
+- `src/core/theme.h` and `src/core/theme.cpp`
+  The layout of a theme's header, footer and cover page (placeholders, ellipses,
+  wrapping) on UTF-8 text, behind `ThemeTextFont`, which each renderer implements in
+  `tiny_pdf.cpp`. Built at `-Os`, and kept out of `tiny_pdf.cpp` on purpose (see the
+  inlining guardrail below).
 
 - `src/common/batch_report.cpp`
   What both command lines share for batch export: the JSON Lines report (one
@@ -325,7 +339,11 @@ GitHub CI entry points:
   hot helpers `RAYOMD_HOT_INLINE` and hot lambdas `RAYOMD_HOT_LAMBDA`, and keep rare
   paths in `RAYOMD_COLD` functions that do not call small hot helpers directly.
   `TailWriter::Lit` and `Bytes` are always inlined: left to GCC, a call for each
-  one-byte separator cost 1.6 % of a warm build.
+  one-byte separator cost 1.6 % of a warm build. A new cold feature goes into a
+  translation unit of its own behind a small interface, as `theme.cpp` does: inside
+  `tiny_pdf.cpp`, the theme layout moved `std::string::push_back` and appends of the
+  link annotations out of line (+2.6 % instructions on `baseline.md`). Write output
+  that grows by pieces through `TailWriter`, not per-byte `push_back`.
 - Keep image caches bounded. Image support can dominate memory on large or many
   remote images.
 - Do not turn optional experiments such as simdutf ON by default without fresh,

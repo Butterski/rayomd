@@ -790,6 +790,42 @@ entries (678 `/Author`, 558 `/Subject`, 528 `/Keywords`, 354 `/Lang`). The watch
 fixtures, which have no front matter, run the same instructions (+0.02 %); time
 moved +0.30 % (A/A -0.34 %), and -0.60 % with pinned alignment (A/A +0.19 %).
 
+## Company themes, October 2026
+
+`--theme=FILE` (`PdfOptions::theme`) lays a company look over a style: a TrueType
+font for all text, heading, link and accent colours, header and footer fields with
+placeholders and a logo, and a cover page. The file is `key = value` lines
+(`ParseTheme`, relative paths the theme folder's).
+
+- The renderers take their four themeable colours from a `ThemePalette` built per
+  export: pointers to operand strings, the style's literals by default, so a hot path
+  reads a member where it had a literal and nothing else changes.
+- A theme font is loaded once per path and kept, and takes the document to the
+  Unicode renderer without the fallback-font switch, which would undo the branding.
+- The header and footer are one overlay stream per page, as the page numbers are,
+  which they then also draw. Text that WinAnsi cannot hold takes the document to a
+  Unicode font; there the overlay glyphs join the subset before it is cut.
+- The cover is a page of its own, first in `/Kids`, with `/PageLabels` "Cover, 1, 2,
+  …" so that viewers count as the footer does; outline entries and links keep their
+  pages.
+- The layout (placeholders, ellipses, wrapping, the cover) lives in `theme.cpp`, built
+  at `-Os`, behind a small virtual font interface. Kept in `tiny_pdf.cpp`, this cold
+  code moved GCC's inlining of the hot paths: `std::string::push_back` and two
+  appends in the link annotations went out of line through the PLT, +0.85 %
+  instructions on the watch fixtures and +2.6 % on `baseline.md`. Moving the layout
+  out, and writing `AppendUriLiteral` and `AppendLinkAnnotationStart` through
+  pointers instead of a call per byte or piece, brought every watch fixture to within
+  0.1 % of the previous instruction count.
+- `ContainsByteClass` is now always inlined: the colours alone had pushed it out of
+  `WriteEscapedLiteral` (+0.74 % instructions on `baseline.md`).
+- `export_options.cpp` joined the `-Os` files: the theme parser had taken it from
+  3.8 KB of code to 12.1 KB at `-O3`; it is 6.5 KB at `-Os`.
+
+Measured on 2026-10-09 against the previous commit: all 2,883 corpus PDFs are
+byte-identical, also with `--page-numbers --compress`. The watch fixtures run 0.16 %
+fewer instructions and took 0.53 % less time (A/A -0.00 %). The binary grew by
+12 KB.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

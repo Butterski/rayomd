@@ -2,6 +2,7 @@
 
 #include "rayomd/tiny_pdf.h"
 
+#include <string>
 #include <string_view>
 
 namespace TinyPdf::Internal {
@@ -16,6 +17,15 @@ bool ParsePdfMargin(std::string_view value, PdfMargin& margin);
 // unit, mm, cm, in or pt ("210x297mm", "8.5x11in"), in any case. False for anything else or a
 // side outside [kMinPageSide, kMaxPageSide].
 bool ParsePageSize(std::string_view value, PdfPageSize& size);
+// "#RRGGBB" or "#RGB", as 0xRRGGBB.
+bool ParseColor(std::string_view value, int32_t& rgb);
+// A theme file: "key = value" lines (a value may be in double quotes), blank lines, and lines
+// starting with '#' or ';'. Keys: font, logo, heading-color, link-color, accent-color,
+// header-left, header-center, header-right, footer-left, footer-center, footer-right, cover
+// (yes or no). Relative font and logo paths are taken in `directory`, the theme file's folder
+// (UTF-8; empty for the current one). False, with `error` naming the line, for an unknown key or
+// a value that does not parse.
+bool ParseTheme(std::string_view text, std::string_view directory, PdfTheme& theme, std::string& error);
 
 const char* PdfStyleName(PdfStyle style);
 const char* PdfMarginName(const PdfMargin& margin);

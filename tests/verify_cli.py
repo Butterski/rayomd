@@ -101,6 +101,28 @@ def verify_batch(binary: Path, root: Path) -> None:
         raise AssertionError(f"unexpected stdin batch report: {records}")
 
 
+def verify_theme(binary: Path, root: Path) -> None:
+    """--theme reads a theme file whose relative paths are its folder's: a logo in the header and
+    on a cover page, page numbers in the footer; an unknown key fails with exit 2."""
+    theme_dir = root / "theme dir"
+    theme_dir.mkdir()
+    shutil.copyfile(Path(__file__).resolve().parents[1] / "docs" / "assets" / "branding" / "rayomd.png",
+                    theme_dir / "logo.png")
+    theme = theme_dir / "acme.theme"
+    theme.write_text("# ACME\nlogo = logo.png\nheader-left = {logo}\nheader-right = {title}\n"
+                     "footer-center = {page} / {pages}\nheading-color = #0B3D91\ncover = yes\n", encoding="utf-8")
+    source = root / "themed.md"
+    source.write_text("---\ntitle: Report\nauthor: Ann\n---\n\n# Results\n\nText.\n", encoding="utf-8")
+    themed_pdf = root / "themed.pdf"
+    run(binary, "--export", str(source), str(themed_pdf), f"--theme={theme}")
+    require_pdf(themed_pdf, b"/PageLabels", b"/Im1 Do Q", b"(Report) Tj", b"(1 / 1) Tj", b"0.04 0.24 0.57 rg")
+    bad = theme_dir / "bad.theme"
+    bad.write_text("colour = red\n", encoding="utf-8")
+    rejected = run(binary, "--export", str(source), str(root / "bad-theme.pdf"), f"--theme={bad}", expect=2)
+    if b"unknown key 'colour'" not in rejected.stdout:
+        raise AssertionError("an unknown theme key was not reported")
+
+
 def pdf_streams(data: bytes) -> list[tuple[bytes, bytes]]:
     """The dictionary and payload of every stream of a PDF, in file order."""
     streams = []
@@ -183,6 +205,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         if b"--page-size must be" not in bad_size.stdout or bad_size_pdf.exists():
             raise AssertionError("an invalid --page-size was not rejected")
         verify_compression(binary, root)
+        verify_theme(binary, root)
         verify_batch(binary, root)
 
         if os.name == "nt":

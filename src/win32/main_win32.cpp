@@ -159,6 +159,7 @@ struct WinExportOptions {
     bool embedSource = false;
     bool pageNumbers = false;
     bool compress = false;
+    TinyPdf::PdfTheme theme;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
     bool recursive = false;
@@ -515,6 +516,7 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
     options.embedSource = exportOptions.embedSource;
     options.pageNumbers = exportOptions.pageNumbers;
     options.compress = exportOptions.compress;
+    options.theme = exportOptions.theme;
     TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (details) *details = result;
     g_nativePdfLastError = static_cast<int>(result.error);
@@ -660,6 +662,20 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.pageNumbers = true;
         } else if (lstrcmpiW(argv[i], L"--compress") == 0) {
             options.compress = true;
+        } else if (_wcsnicmp(argv[i], L"--theme=", 8) == 0) {
+            const std::wstring themePath = argv[i] + 8;
+            const size_t slash = themePath.find_last_of(L"\\/");
+            const std::wstring directory = slash == std::wstring::npos ? std::wstring() : themePath.substr(0, slash);
+            std::string text;
+            std::string themeError;
+            if (themePath.empty() || !ReadUtf8File(themePath, text)) {
+                error = L"--theme: cannot read " + themePath;
+                return false;
+            }
+            if (!TinyPdf::Internal::ParseTheme(text, WideToUtf8(directory), options.theme, themeError)) {
+                error = L"--theme " + themePath + L": " + Utf8ToWide(themeError);
+                return false;
+            }
         } else if (_wcsnicmp(argv[i], L"--page-size=", 12) == 0) {
             if (!TinyPdf::Internal::ParsePageSize(WideToUtf8(argv[i] + 12), options.pageSize)) {
                 error = L"--page-size must be a4, a3, a5, letter or legal (each also with -landscape), or "

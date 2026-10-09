@@ -7,6 +7,7 @@
 #include "../common/text_utils.h"
 #include "markdown_parser.h"
 #include "math_layout.h"
+#include "theme.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -2737,6 +2738,39 @@ public:
     }
     uint32_t FailedImages() const { return failed; }
 
+    // An image a theme names, such as its logo: the caller's own configuration, as a font is, so
+    // outside the policy for images in documents. False, and one more failed image, when it cannot
+    // be read or decoded.
+    RAYOMD_COLD bool ResolveThemeFile(const std::string& pathUtf8, int& index) {
+        std::filesystem::path normalized;
+        if (!TryCanonicalForPolicy(PathFromUtf8(pathUtf8), normalized)) {
+            failed++;
+            return false;
+        }
+        const std::string key = "file:" + PathToUtf8(normalized);
+        auto known = indexByKey.find(key);
+        if (known != indexByKey.end()) {
+            index = known->second;
+            return true;
+        }
+        SharedPdfImage sharedImage = LoadDecodedImageFromCache(key);
+        if (!sharedImage) {
+            PdfImage image;
+            std::vector<uint8_t> bytes;
+            if (IsKnownFailure(key) || !ReadLocalImageFile(PathToUtf8(normalized), bytes) ||
+                bytes.size() > kMaxImageBytes || !DecodeImageBytes(bytes, image)) {
+                StoreFailure(key);
+                failed++;
+                return false;
+            }
+            sharedImage = StoreDecodedImageInCache(key, std::move(image));
+        }
+        index = (int)images.size();
+        indexByKey[key] = index;
+        images.push_back(std::move(sharedImage));
+        return true;
+    }
+
 private:
     bool ResolveSource(const std::string& src, const std::string& alt, int& index) {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Image);
@@ -2964,7 +2998,8 @@ static void AppendXObjectResources(std::string& page, const std::vector<int>& im
 
 // A link target as the body of a PDF literal string. /URI takes 7-bit ASCII, so the target's
 // UTF-8 bytes from 0x80 are percent-encoded (an IRI as a URI, RFC 3987); `winAnsi` targets
-// come from transcoded text and turn back into UTF-8 first.
+// come from transcoded text and turn back into UTF-8 first. Written through a pointer, at most
+// three bytes a byte: one push_back a byte cost a library call where GCC did not inline it.
 static void AppendUriLiteral(std::string& out, std::string_view url, bool winAnsi) {
     std::string utf8;
     if (winAnsi && !IsAllAscii(url)) {
@@ -2972,18 +3007,23 @@ static void AppendUriLiteral(std::string& out, std::string_view url, bool winAns
         url = utf8;
     }
     static const char kHex[] = "0123456789ABCDEF";
+    const size_t at = out.size();
+    out.resize(at + url.size() * 3);
+    char* cursor = &out[at];
     for (const char ch : url) {
         const unsigned char byte = static_cast<unsigned char>(ch);
         if (byte >= 0x80) {
-            out += '%';
-            out += kHex[byte >> 4];
-            out += kHex[byte & 0x0F];
+            cursor[0] = '%';
+            cursor[1] = kHex[byte >> 4];
+            cursor[2] = kHex[byte & 0x0F];
+            cursor += 3;
             continue;
         }
         if (byte < 32 || byte == 127) continue;
-        if (ch == '(' || ch == ')' || ch == '\\') out += '\\';
-        out += ch;
+        if (ch == '(' || ch == ')' || ch == '\\') *cursor++ = '\\';
+        *cursor++ = ch;
     }
+    out.resize((size_t)(cursor - out.data()));
 }
 
 // ---- Headings: the outline (bookmarks) and the targets of internal links -----------------
@@ -3143,6 +3183,7 @@ struct DocumentMetadata {
     std::string subject;
     std::string keywords;
     std::string lang;   // a well-formed language tag, such as en-US
+    std::string date;   // as written, for a theme's {date}
 };
 
 static std::string_view TrimYamlSpace(std::string_view text) {
@@ -3242,7 +3283,7 @@ RAYOMD_COLD static DocumentMetadata FrontMatterMetadata(std::string_view markdow
     size_t at = markdown.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
     const size_t dashes = markdown.find_first_not_of(" \t", at);
     if (dashes == std::string_view::npos || markdown.compare(dashes, 3, "---") != 0) return metadata;
-    constexpr std::string_view kKeys[] = { "title", "author", "subject", "keywords", "lang", "description" };
+    constexpr std::string_view kKeys[] = { "title", "author", "subject", "keywords", "lang", "description", "date" };
     constexpr size_t kKeyCount = sizeof(kKeys) / sizeof(kKeys[0]);
     std::vector<std::string> items[kKeyCount];
     bool found[kKeyCount] = {};
@@ -3321,6 +3362,7 @@ RAYOMD_COLD static DocumentMetadata FrontMatterMetadata(std::string_view markdow
     metadata.subject = join(items[2].empty() ? items[5] : items[2], ", ");
     metadata.keywords = join(items[3], ", ");
     if (items[4].size() == 1 && IsLanguageTag(items[4].front())) metadata.lang = items[4].front();
+    metadata.date = join(items[6], ", ");
     return metadata;
 }
 
@@ -3527,15 +3569,17 @@ private:
 
 // "<< /Type /Annot /Subtype /Link /Rect [...] /Border [0 0 0]": the start of a link annotation.
 static void AppendLinkAnnotationStart(std::string& annot, const LinkRect& link) {
-    annot += "<< /Type /Annot /Subtype /Link /Rect [";
-    AppendF(annot, link.x1);
-    annot += " ";
-    AppendF(annot, link.y1);
-    annot += " ";
-    AppendF(annot, link.x2);
-    annot += " ";
-    AppendF(annot, link.y2);
-    annot += "] /Border [0 0 0]";
+    // One growth and pointer writes, not a call per piece where GCC leaves the appends out of line.
+    TailWriter w(annot, 64 + kOperandBytes * 4);
+    w.Lit("<< /Type /Annot /Subtype /Link /Rect [");
+    w.Fixed(link.x1);
+    w.Lit(" ");
+    w.Fixed(link.y1);
+    w.Lit(" ");
+    w.Fixed(link.x2);
+    w.Lit(" ");
+    w.Fixed(link.y2);
+    w.Lit("] /Border [0 0 0]");
 }
 
 // The link annotations of every page. Those of links to "#anchor" are left to `headings`, which
@@ -3953,12 +3997,47 @@ constexpr char kQuoteBars[][15] = { "0.45 0.62 0.72", "0.04 0.41 0.85", "0.10 0.
     "0.60 0.40 0.00", "0.82 0.14 0.18" };
 constexpr char kAlertTitles[][10] = { "", "Note", "Tip", "Important", "Warning", "Caution" };
 
+// The colours a theme can change, as PDF colour operands: the style's own where the theme sets
+// none. Built for one export, which the renderer holding its strings must not outlive.
+class ThemePalette {
+public:
+    explicit ThemePalette(const PdfTheme& theme)
+        : heading(Pick(theme.headingColor, "0.02 0.02 0.02", storage[0])),
+          link(Pick(theme.linkColor, "0.05 0.30 0.68", storage[1])),
+          rule(Pick(theme.accentColor, "0.68 0.68 0.68", storage[2])),
+          quoteBar(Pick(theme.accentColor, kQuoteBars[0], storage[3])) {}
+    ThemePalette(const ThemePalette&) = delete;
+    ThemePalette& operator=(const ThemePalette&) = delete;
+
+private:
+    char storage[4][24] = {};   // first: the pointers below are made from it
+
+    static const char* Pick(int32_t rgb, const char* styleColor, char* buffer) {
+        if (rgb < 0) return styleColor;
+        char* out = buffer;
+        for (int shift = 16; shift >= 0; shift -= 8) {
+            if (out != buffer) *out++ = ' ';
+            out = RayoMd::Text::WriteFixed2(out, ((rgb >> shift) & 0xFF) / 255.0);
+        }
+        *out = '\0';
+        return buffer;
+    }
+
+public:
+    const char* const heading;
+    const char* const link;
+    const char* const rule;       // rules, in the accent colour
+    const char* const quoteBar;   // the bar beside a plain quote, in the accent colour
+};
+
 class Renderer {
 public:
     // The content streams of all pages are appended to `output`, one after another.
     Renderer(std::string& output, const TtfFont& f, int fontObject, PdfStyle styleValue, const PdfMargin& marginValue,
-        const PdfPageSize& pageSize, ImageRegistry* imageRegistry)
-        : font(f), fontId(fontObject), images(imageRegistry), style(styleValue), content(output) {
+        const PdfPageSize& pageSize, ImageRegistry* imageRegistry, const ThemePalette& palette)
+        : font(f), fontId(fontObject), images(imageRegistry), style(styleValue), content(output),
+          headingColor(palette.heading), linkColor(palette.link), ruleColor(palette.rule), plainQuoteBar(palette.quoteBar),
+          quoteBar(palette.quoteBar) {
         const PdfPageSize page = ResolvePageSize(pageSize);
         pageW = page.width;
         pageH = page.height;
@@ -3977,6 +4056,9 @@ public:
     std::vector<size_t>& PageStarts() { return pageStarts; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     const CidList& UsedCids() const { return usedCids.Values(); }
+    // For text drawn outside the pages' streams, such as a theme's header, whose glyphs the font
+    // subset needs too.
+    UsedCidSet& Cids() { return usedCids; }
     uint32_t MissingCharacters() const { return usedCids.missing; }
     bool MathUsed() const { return math.Used(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
@@ -4005,8 +4087,13 @@ private:
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     std::vector<HeadingMark> headings;
-    // The colour of the bar beside quoted text: a plain quote's, or that of the alert it is in.
-    const char* quoteBar = kQuoteBars[0];
+    // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
+    // the alert it is in.
+    const char* const headingColor;
+    const char* const linkColor;
+    const char* const ruleColor;
+    const char* const plainQuoteBar;
+    const char* quoteBar;
 
     // Notes where a heading's first line is drawn, for its outline entry and the links to it.
     // A line `firstLine` high that does not fit moves to the next page first, as drawing it
@@ -4452,7 +4539,7 @@ private:
             const bool measured = index + 1 < end || run.code || !run.url.empty();
             const double spanWidth = measured ? TextWidth(font, runText, size) : 0.0;
             if (run.code) CodeBackground(x, top, spanWidth, lh, runText, size, colors.codeFill);
-            const char* color = run.url.empty() ? (run.code ? colors.code : colors.text) : "0.05 0.30 0.68";
+            const char* color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
             PaintText(x, baseline, size, runText, color, run.bold || bold, run.italic, run.strike);
             AddLink(x, baseline, spanWidth, size, run.url);
             x += spanWidth;
@@ -4957,7 +5044,7 @@ private:
         const double lh = bodySize * 1.35;
         for (const std::wstring& line : WrapText(font, Utf8ToWide(fallback), pageW - margin * 2.0, bodySize)) {
             Ensure(lh);
-            PaintText(margin, y - bodySize, bodySize, line, "0.05 0.30 0.68");
+            PaintText(margin, y - bodySize, bodySize, line, linkColor);
             AddLink(margin, y - bodySize, TextWidth(font, line, bodySize), bodySize, image.link);
             y -= lh;
         }
@@ -5006,14 +5093,14 @@ private:
         Ensure(size * 1.35 + keep);
 
         if (block.hasMath) {
-            RenderMathTextLines(block.text, level, margin, pageW - margin * 2.0, size, "0.02 0.02 0.02", false, false);
+            RenderMathTextLines(block.text, level, margin, pageW - margin * 2.0, size, headingColor, false, false);
             y -= level <= 2 ? 8.0 : 5.0;
             return;
         }
         MarkHeading(level, block.text, size * 1.35);
         std::wstring text = Utf8ToWide(block.text);
         for (const auto& line : WrapText(font, text, pageW - margin * 2.0, size)) {
-            DrawTextLine(margin, size, line, "0.02 0.02 0.02");
+            DrawTextLine(margin, size, line, headingColor);
         }
         y -= level <= 2 ? 8.0 : 5.0;
     }
@@ -5074,7 +5161,7 @@ private:
                 }
                 double spanWidth = TextWidth(font, span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
-                const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : "0.05 0.30 0.68";
+                const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : linkColor;
                 PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
@@ -5114,7 +5201,7 @@ private:
             for (const auto& span : line) {
                 double spanWidth = TextWidth(font, span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.94 0.94 0.92");
-                const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
+                const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
                 PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
@@ -5153,7 +5240,7 @@ private:
         y -= lineHeight;
         if (block.children.empty()) RenderQuote(block.text);
         else RenderQuoteChildren(block.children);
-        quoteBar = kQuoteBars[0];
+        quoteBar = plainQuoteBar;
     }
 
     void RenderQuoteChildren(const std::vector<Block>& children) {
@@ -5189,7 +5276,7 @@ private:
                 double savedMargin = margin;
                 const char* savedBar = quoteBar;
                 margin += 10.0;
-                quoteBar = kQuoteBars[0];
+                quoteBar = plainQuoteBar;
                 RenderQuote(child);
                 margin = savedMargin;
                 quoteBar = savedBar;
@@ -5267,7 +5354,7 @@ private:
             for (const StyledSpan& span : line) {
                 double spanWidth = TextWidth(font, span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
-                const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
+                const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
                 PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
@@ -5465,7 +5552,9 @@ private:
         Ensure(18.0);
         y -= 5.0;
         std::string& c = content;
-        c += "q 0.68 0.68 0.68 RG 0.8 w ";
+        c += "q ";
+        c += ruleColor;
+        c += " RG 0.8 w ";
         AppendF(c, margin);
         c += " ";
         AppendF(c, y);
@@ -6094,8 +6183,9 @@ public:
     // The content streams of all pages are appended to `output`, one after another. With
     // `winAnsi`, the text is a document transcoded to WinAnsiEncoding (Latin text).
     StandardRenderer(std::string& output, PdfStyle styleValue, const PdfMargin& marginValue, const PdfPageSize& pageSize,
-        ImageRegistry* imageRegistry, bool winAnsi)
-        : images(imageRegistry), style(styleValue), winAnsiText(winAnsi), content(output) {
+        ImageRegistry* imageRegistry, bool winAnsi, const ThemePalette& palette)
+        : images(imageRegistry), style(styleValue), winAnsiText(winAnsi), content(output), headingColor(palette.heading),
+          linkColor(palette.link), ruleColor(palette.rule), plainQuoteBar(palette.quoteBar), quoteBar(palette.quoteBar) {
         const PdfPageSize page = ResolvePageSize(pageSize);
         pageW = page.width;
         pageH = page.height;
@@ -6142,8 +6232,13 @@ private:
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     std::vector<HeadingMark> headings;
-    // The colour of the bar beside quoted text: a plain quote's, or that of the alert it is in.
-    const char* quoteBar = kQuoteBars[0];
+    // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
+    // the alert it is in.
+    const char* const headingColor;
+    const char* const linkColor;
+    const char* const ruleColor;
+    const char* const plainQuoteBar;
+    const char* quoteBar;
 
     // Notes where a heading's first line is drawn, for its outline entry and the links to it.
     // A line `firstLine` high that does not fit moves to the next page first, as drawing it
@@ -6698,7 +6793,7 @@ private:
             const double spanWidth = runs.Width(run, size);
             const bool code = (run.style & kStyleCode) != 0;
             if (code) CodeBackground(x, top, spanWidth, lh, runs.Text(run), size, colors.codeFill);
-            const char* color = run.url.empty() ? (code ? colors.code : colors.text) : "0.05 0.30 0.68";
+            const char* color = run.url.empty() ? (code ? colors.code : colors.text) : linkColor;
             Text(x, baseline, size, runs.Text(run), StyleFontName(run.style), color);
             if (run.style & kStyleStrike) StrikeThrough(x, baseline, spanWidth, size, runs.Text(run), run.style, color);
             AddLink(x, baseline, spanWidth, size, run.url);
@@ -7044,7 +7139,7 @@ private:
         const double lh = bodySize * 1.35;
         for (const WrappedAsciiLine& line : WrapAsciiText(fallback, pageW - margin * 2.0, bodySize, StandardTextFont::Regular)) {
             Ensure(lh);
-            Text(margin, y - bodySize, bodySize, line.text, "F1", "0.05 0.30 0.68");
+            Text(margin, y - bodySize, bodySize, line.text, "F1", linkColor);
             AddLink(margin, y - bodySize, line.width, bodySize, image.link);
             y -= lh;
         }
@@ -7123,13 +7218,13 @@ private:
         if (y < pageH - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
         Ensure(size * 1.35 + keep);
         if (block.hasMath) {
-            RenderMathTextLines(block.text, level, margin, pageW - margin * 2.0, size, "0.02 0.02 0.02", true, false);
+            RenderMathTextLines(block.text, level, margin, pageW - margin * 2.0, size, headingColor, true, false);
             y -= level <= 2 ? 8.0 : 5.0;
             return;
         }
         MarkHeading(level, block.text, size * 1.35);
         ForEachWrappedAsciiLine(block.text, pageW - margin * 2.0, size, StandardTextFont::Bold, [&](std::string_view line, double) {
-            DrawTextLine(margin, size, line, "F2", "0.02 0.02 0.02");
+            DrawTextLine(margin, size, line, "F2", headingColor);
         });
         y -= level <= 2 ? 8.0 : 5.0;
     }
@@ -7191,7 +7286,7 @@ private:
                 const bool code = (span.style & kStyleCode) != 0;
                 double spanWidth = MathTextWidth(span.text, bodySize, code, (span.style & kStyleBold) != 0);
                 if (code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
-                const char* color = span.url.empty() ? (code ? codeColor : textColor) : "0.05 0.30 0.68";
+                const char* color = span.url.empty() ? (code ? codeColor : textColor) : linkColor;
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
@@ -7235,7 +7330,7 @@ private:
                     const bool code = (span.style & kStyleCode) != 0;
                     double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
                     if (code) CodeBackground(cursor, y, spanWidth, lh, span.text, bodySize, "0.94 0.94 0.92");
-                    const char* color = span.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : "0.05 0.30 0.68";
+                    const char* color = span.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
                     Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                     if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
                     AddLink(cursor, baseline, spanWidth, bodySize, span.url);
@@ -7275,7 +7370,7 @@ private:
         y -= lineHeight;
         if (block.children.empty()) RenderQuote(block.text);
         else RenderQuoteChildren(block.children);
-        quoteBar = kQuoteBars[0];
+        quoteBar = plainQuoteBar;
     }
 
     void RenderQuoteChildren(const std::vector<Block>& children) {
@@ -7311,7 +7406,7 @@ private:
                 double savedMargin = margin;
                 const char* savedBar = quoteBar;
                 margin += 10.0;
-                quoteBar = kQuoteBars[0];
+                quoteBar = plainQuoteBar;
                 RenderQuote(child);
                 margin = savedMargin;
                 quoteBar = savedBar;
@@ -7389,7 +7484,7 @@ private:
                 const bool code = (span.style & kStyleCode) != 0;
                 double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
                 if (code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
-                const char* color = span.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : "0.05 0.30 0.68";
+                const char* color = span.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
@@ -7598,7 +7693,9 @@ private:
         Ensure(18.0);
         y -= 5.0;
         std::string& c = content;
-        c += "q 0.68 0.68 0.68 RG 0.8 w ";
+        c += "q ";
+        c += ruleColor;
+        c += " RG 0.8 w ";
         AppendF(c, margin);
         c += " ";
         AppendF(c, y);
@@ -7634,7 +7731,148 @@ RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t pages,
     return pdf.AddStream("", stream);
 }
 
-// A page's /Contents: its own stream, and the page number's when there is one.
+// ---- A theme's header, footer and cover (laid out in theme.cpp) ------------------------------
+
+// A theme's text in the standard fonts: Helvetica, /F1, or Helvetica-Bold, /F2, in
+// WinAnsiEncoding; a character outside it is '?'.
+class StandardThemeText final : public Internal::ThemeTextFont {
+public:
+    double Width(std::string_view utf8, double size, bool bold) const override {
+        return Internal::StandardTextWidth(WinAnsi(utf8), size, bold ? StandardTextFont::Bold : StandardTextFont::Regular);
+    }
+    void Emit(std::string& out, std::string_view utf8, double x, double baseline, double size, bool bold) const override {
+        const std::string text = WinAnsi(utf8);
+        out += bold ? "BT /F2 " : "BT /F1 ";
+        AppendF(out, size);
+        out += " Tf 1 0 0 1 ";
+        AppendF(out, x);
+        out += " ";
+        AppendF(out, baseline);
+        out += " Tm (";
+        const size_t at = out.size();
+        out.resize(at + text.size() * 2);
+        out.resize((size_t)(WriteEscapedLiteral(&out[at], text) - out.data()));
+        out += ") Tj ET\n";
+    }
+    std::string_view Ellipsis() const override { return "\xE2\x80\xA6"; }
+
+private:
+    static std::string WinAnsi(std::string_view utf8) {
+        std::string winAnsi;
+        if (IsAllAscii(utf8)) return std::string(utf8);
+        RayoMd::Text::TranscodeToWinAnsiLossy(utf8, winAnsi);
+        return winAnsi;
+    }
+};
+
+// A theme's text in the document's TrueType font, /F1, whose subset gets its glyphs; bold is
+// drawn twice, a little apart, as the renderer does.
+class UnicodeThemeText final : public Internal::ThemeTextFont {
+public:
+    UnicodeThemeText(const TtfFont& documentFont, UsedCidSet& usedCids) : font(documentFont), cids(usedCids) {}
+    double Width(std::string_view utf8, double size, bool) const override { return TextWidth(font, Utf8ToWide(utf8), size); }
+    void Emit(std::string& out, std::string_view utf8, double x, double baseline, double size, bool bold) const override {
+        const std::wstring text = Utf8ToWide(utf8);
+        out += "BT /F1 ";
+        AppendF(out, size);
+        out += " Tf 1 0 0 1 ";
+        AppendF(out, x);
+        out += " ";
+        AppendF(out, baseline);
+        out += " Tm ";
+        const size_t at = out.size();
+        out.resize(at + HexTextBytes(text));
+        out.resize((size_t)(WriteHexText(&out[at], font, text, cids) - out.data()));
+        const size_t hexBytes = out.size() - at;
+        out += " Tj";
+        if (bold) {
+            out.reserve(out.size() + hexBytes + 64);   // the copy below reads `out` itself
+            out += " 1 0 0 1 ";
+            AppendF(out, x + size * 0.025);
+            out += " ";
+            AppendF(out, baseline);
+            out += " Tm ";
+            out.append(out.data() + at, hexBytes);
+            out += " Tj";
+        }
+        out += " ET\n";
+    }
+    std::string_view Ellipsis() const override { return font.HasGlyph(0x2026) ? "\xE2\x80\xA6" : "..."; }
+
+private:
+    const TtfFont& font;
+    UsedCidSet& cids;
+};
+
+// The theme's logo registered with the document's images, when the theme has one.
+RAYOMD_COLD static Internal::ThemeLogoImage ThemeLogo(const PdfTheme& theme, ImageRegistry& images) {
+    Internal::ThemeLogoImage logo;
+    if (theme.logoPath.empty() || !images.ResolveThemeFile(theme.logoPath, logo.index)) return logo;
+    const PdfImage& image = images.Get(logo.index);
+    if (image.width > 0 && image.height > 0) logo.aspect = (double)image.width / (double)image.height;
+    return logo;
+}
+
+// The theme's header and footer streams, one per page, and its cover page's stream. {title} is
+// the front matter's title, else the first heading's text (WinAnsi with `winAnsi`).
+RAYOMD_COLD static void LayOutTheme(const PdfOptions& options, const Internal::ThemeTextFont& font,
+    const DocumentMetadata& metadata, const std::vector<HeadingMark>& headings, bool winAnsi, size_t pages,
+    const Internal::ThemePage& page, const Internal::ThemeLogoImage& logo, const ThemePalette& palette,
+    std::vector<std::string>& bands, std::string& cover) {
+    const std::string title = !metadata.title.empty() || headings.empty() ? metadata.title
+        : winAnsi ? RayoMd::Text::WinAnsiToUtf8(headings.front().text) : std::string(headings.front().text);
+    const Internal::ThemeDocument document{ title, metadata.author, metadata.subject, metadata.date };
+    if (Internal::HasThemeBands(options.theme)) {
+        bands = Internal::ThemeBandStreams(options.theme, options.pageNumbers, document, pages, page, logo, font);
+    }
+    if (options.theme.cover) cover = Internal::ThemeCoverStream(document, page, logo, font, palette.heading, palette.rule);
+}
+
+// The cover as the first page: the fonts it names, `fonts`, and every image, as the other pages
+// have them.
+RAYOMD_COLD static int AddCoverPage(PdfObjects& pdf, int pagesId, double pageW, double pageH, const std::string& fonts,
+    const std::vector<int>& imageObjectIds, const std::string& stream) {
+    const int contentId = pdf.AddStream("", stream);
+    std::string page = "<< /Type /Page /Parent ";
+    AppendInt(page, pagesId);
+    page += " 0 R /MediaBox [0 0 ";
+    AppendF(page, pageW);
+    page += " ";
+    AppendF(page, pageH);
+    page += "] /Resources << /Font << ";
+    page += fonts;
+    page += " >>";
+    AppendXObjectResources(page, imageObjectIds);
+    page += " >> /Contents ";
+    AppendInt(page, contentId);
+    page += " 0 R >>";
+    return pdf.Add(std::move(page));
+}
+
+// With a cover, a viewer numbers the pages as the footer does: "Cover", then 1, 2 and on.
+constexpr const char* kCoverPageLabels = " /PageLabels << /Nums [0 << /P (Cover) >> 1 << /S /D >>] >>";
+
+// The page objects in /Kids, the cover first when there is one, and their /Count.
+static std::string PagesDictionary(const std::vector<int>& pageIds, int coverId) {
+    std::string pages;
+    pages.reserve(48 + pageIds.size() * 8);
+    pages += "<< /Type /Pages /Kids [";
+    if (coverId != 0) {
+        AppendInt(pages, coverId);
+        pages += " 0 R ";
+    }
+    for (int id : pageIds) {
+        AppendInt(pages, id);
+        pages += " 0 R ";
+    }
+    pages += "] /Count ";
+    AppendSize(pages, pageIds.size() + (coverId != 0));
+    pages += " >>";
+    return pages;
+}
+
+// A page's /Contents: its own stream, and that of the page number, or the theme's header and
+// footer, when there is one.
 static void AppendContents(std::string& page, int contentId, int numberId) {
     page += " /Contents ";
     if (numberId != 0) page += "[";
@@ -7679,12 +7917,14 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
 
     ImageRegistry imageRegistry(options);
     PrepareOutput(pdfBytes, text.size() * 4 + 32 * 1024);
-    StandardRenderer renderer(pdfBytes, options.style, options.margin, options.pageSize, &imageRegistry, winAnsi);
+    const ThemePalette palette(options.theme);
+    StandardRenderer renderer(pdfBytes, options.style, options.margin, options.pageSize, &imageRegistry, winAnsi, palette);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         renderer.Render(blocks);
     }
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
+    const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
     HeadingTargets headingTargets(renderer.Headings(), winAnsi, renderer.PageHeight());
     std::vector<InternalLink> internalLinks;
@@ -7698,6 +7938,13 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     const int fontBoldObliqueId = renderer.BoldObliqueUsed()
         ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-BoldOblique /Encoding /WinAnsiEncoding >>") : 0;
 
+    const DocumentMetadata metadata = FrontMatterMetadata(source);
+    std::vector<std::string> bands;   // a theme's header and footer, one stream per page
+    std::string cover;                // and its cover page
+    if (Internal::HasThemeBands(options.theme) || options.theme.cover) {
+        LayOutTheme(options, StandardThemeText(), metadata, renderer.Headings(), winAnsi, renderer.PageStarts().size(),
+            { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin() }, logo, palette, bands, cover);
+    }
     std::vector<bool> flatePages;   // --compress: the pages whose content stream is compressed
     if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
     std::vector<int> pageIds;
@@ -7706,8 +7953,9 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
-        const int numberId = options.pageNumbers
-            ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "F1") : 0;
+        const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
+            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "F1")
+            : 0;
         std::string page;
         page.reserve(192);
         page += "<< /Type /Page /Parent ";
@@ -7743,26 +7991,25 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         pageIds.push_back(pdf.Add(std::move(page)));
     }
 
-    std::string pages;
-    pages.reserve(48 + pageIds.size() * 8);
-    pages += "<< /Type /Pages /Kids [";
-    for (int id : pageIds) {
-        AppendInt(pages, id);
-        pages += " 0 R ";
+    int coverId = 0;
+    if (options.theme.cover) {
+        std::string fonts = "/F1 ";
+        AppendInt(fonts, fontRegularId);
+        fonts += " 0 R /F2 ";
+        AppendInt(fonts, fontBoldId);
+        fonts += " 0 R";
+        coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.PageHeight(), fonts, imageObjectIds, cover);
     }
-    pages += "] /Count ";
-    AppendSize(pages, pageIds.size());
-    pages += " >>";
-    pdf.Set(pagesId, std::move(pages));
+    pdf.Set(pagesId, PagesDictionary(pageIds, coverId));
     AddInternalLinks(pdf, internalLinks, pageIds);
 
-    const DocumentMetadata metadata = FrontMatterMetadata(source);
     std::string catalog;
     catalog.reserve(options.embedSource ? 256 : 64);
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
     catalog += " 0 R";
     AppendLanguage(catalog, metadata);
+    if (coverId != 0) catalog += kCoverPageLabels;
     std::string outline;
     AddOutline(pdf, catalog, renderer.Headings(), pageIds, winAnsi, outline);
     if (options.embedSource) AddReversibleSource(pdf, catalog, source);
@@ -7771,7 +8018,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     int infoId = pdf.Add(InfoDictionary("RayoMD Native Standard PDF", metadata, renderer.Headings(), winAnsi));
 
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
-    stats.pages = static_cast<uint32_t>(pageStarts.size());
+    stats.pages = static_cast<uint32_t>(pageStarts.size() + (coverId != 0));
     stats.failedImages = imageRegistry.FailedImages();
     return true;
 }
@@ -7783,6 +8030,34 @@ static const TtfFont* GetCachedFont() {
     };
     static const CachedFont cached;
     return cached.loaded ? &cached.font : nullptr;
+}
+
+// A theme's font, loaded once per path and kept, as the default font is: builds on other threads
+// may be using it. Null when it cannot be read or is no TrueType font.
+RAYOMD_COLD static const TtfFont* ThemeFont(const std::string& pathUtf8) {
+    static std::mutex mutex;
+    static std::map<std::string, std::unique_ptr<TtfFont>> fonts;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto found = fonts.find(pathUtf8);
+    if (found != fonts.end()) return found->second.get();
+    auto font = std::make_unique<TtfFont>();
+#ifdef _WIN32
+    if (!font->TryLoad(Utf8ToWide(pathUtf8))) font.reset();
+#else
+    if (!font->TryLoad(pathUtf8)) font.reset();
+#endif
+    return fonts.emplace(pathUtf8, std::move(font)).first->second.get();
+}
+
+// Whether the theme's own header and footer text has characters the standard fonts cannot show:
+// they have WinAnsi's only.
+RAYOMD_COLD static bool ThemeTextNeedsUnicode(const PdfTheme& theme) {
+    std::string winAnsi;
+    for (const std::string* field : { &theme.headerLeft, &theme.headerCenter, &theme.headerRight, &theme.footerLeft,
+             &theme.footerCenter, &theme.footerRight }) {
+        if (!IsAllAscii(*field) && !RayoMd::Text::TranscodeToWinAnsi(*field, &winAnsi)) return true;
+    }
+    return false;
 }
 
 // Fonts for documents with characters the default font has no glyph for: RAYOMD_FALLBACK_FONT,
@@ -7909,12 +8184,14 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
 
     ImageRegistry imageRegistry(options);
     PrepareOutput(pdfBytes, markdown.size() * 8 + 256 * 1024);
-    Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, options.pageSize, &imageRegistry);
+    const ThemePalette palette(options.theme);
+    Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, options.pageSize, &imageRegistry, palette);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         renderer.Render(blocks);
     }
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
+    const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
     HeadingTargets headingTargets(renderer.Headings(), false, renderer.PageHeight());
     std::vector<InternalLink> internalLinks;
@@ -7923,6 +8200,16 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
+    // A theme's header and footer, one stream per page, and its cover page, before the font
+    // subset is made, which then has their glyphs.
+    const DocumentMetadata metadata = FrontMatterMetadata(markdown);
+    std::vector<std::string> bands;
+    std::string cover;
+    if (Internal::HasThemeBands(options.theme) || options.theme.cover) {
+        LayOutTheme(options, UnicodeThemeText(font, renderer.Cids()), metadata, renderer.Headings(), false,
+            renderer.PageStarts().size(), { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin() }, logo, palette,
+            bands, cover);
+    }
     const CidList& used = renderer.UsedCids();
     if (betterFont && (*betterFont = BetterFontFor(font, used)) != nullptr) return true;
     missingCharacters = renderer.MissingCharacters();
@@ -7985,8 +8272,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     type0 += " 0 R >>";
     pdf.Set(type0FontId, std::move(type0));
 
-    // Helvetica for the page numbers.
-    const int numberFontId = options.pageNumbers
+    // Helvetica for the page numbers; a theme's header and footer use the document's font.
+    const int numberFontId = options.pageNumbers && bands.empty()
         ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>") : 0;
     std::vector<bool> flatePages;   // --compress: the pages whose content stream is compressed
     if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
@@ -7996,8 +8283,9 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
-        const int numberId = options.pageNumbers
-            ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "FN") : 0;
+        const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
+            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "FN")
+            : 0;
         std::string page;
         page.reserve(160);
         page += "<< /Type /Page /Parent ";
@@ -8024,26 +8312,23 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         pageIds.push_back(pdf.Add(std::move(page)));
     }
 
-    std::string pages;
-    pages.reserve(48 + pageIds.size() * 8);
-    pages += "<< /Type /Pages /Kids [";
-    for (int id : pageIds) {
-        AppendInt(pages, id);
-        pages += " 0 R ";
+    int coverId = 0;
+    if (options.theme.cover) {
+        std::string fonts = "/F1 ";
+        AppendInt(fonts, type0FontId);
+        fonts += " 0 R";
+        coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.PageHeight(), fonts, imageObjectIds, cover);
     }
-    pages += "] /Count ";
-    AppendSize(pages, pageIds.size());
-    pages += " >>";
-    pdf.Set(pagesId, std::move(pages));
+    pdf.Set(pagesId, PagesDictionary(pageIds, coverId));
     AddInternalLinks(pdf, internalLinks, pageIds);
 
-    const DocumentMetadata metadata = FrontMatterMetadata(markdown);
     std::string catalog;
     catalog.reserve(options.embedSource ? 256 : 64);
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
     catalog += " 0 R";
     AppendLanguage(catalog, metadata);
+    if (coverId != 0) catalog += kCoverPageLabels;
     std::string outline;
     AddOutline(pdf, catalog, renderer.Headings(), pageIds, false, outline);
     if (options.embedSource) AddReversibleSource(pdf, catalog, markdown);
@@ -8052,7 +8337,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     int infoId = pdf.Add(InfoDictionary("RayoMD Native Tiny PDF", metadata, renderer.Headings(), false));
 
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
-    stats.pages = static_cast<uint32_t>(pageStarts.size());
+    stats.pages = static_cast<uint32_t>(pageStarts.size() + (coverId != 0));
     stats.failedImages = imageRegistry.FailedImages();
     return true;
 }
@@ -8084,11 +8369,24 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
     const bool ascii = IsPlainAsciiDocument(markdown);
     Internal::ReferenceNeed references = Internal::ReferenceNeed::Ascii;
     std::string winAnsi;
-    if (ascii && (references = Internal::CharacterReferenceNeed(markdown)) == Internal::ReferenceNeed::Ascii) {
+    // A theme's header and footer text that is not WinAnsi needs a Unicode font too.
+    const bool themeUnicode = ThemeTextNeedsUnicode(options.theme);
+    if (!options.theme.fontPath.empty()) {
+        // The theme's font shows all text, without a fallback font: the company's look.
+        const TtfFont* font = ThemeFont(options.theme.fontPath);
+        if (!font) {
+            g_lastError = static_cast<int>(BuildError::ThemeFontUnavailable);
+            return { BuildError::ThemeFontUnavailable };
+        }
+        size_t missing = 0;
+        built = BuildUnicodePdfBytes(markdown, *font, options, pdfBytes, nullptr, missing, stats);
+        missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
+    } else if (!themeUnicode && ascii &&
+        (references = Internal::CharacterReferenceNeed(markdown)) == Internal::ReferenceNeed::Ascii) {
         built = BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes, stats);
     } else {
         // Latin text needs no font file: the standard fonts show it in WinAnsiEncoding.
-        if (references != Internal::ReferenceNeed::Unicode && RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi) &&
+        if (!themeUnicode && references != Internal::ReferenceNeed::Unicode && RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi) &&
             (ascii || Internal::CharacterReferenceNeed(markdown) != Internal::ReferenceNeed::Unicode)) {
             built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats);
         } else {

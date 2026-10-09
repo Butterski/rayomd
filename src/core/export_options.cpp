@@ -155,6 +155,88 @@ double ResolveMarginPoints(const PdfMargin& margin, const PdfPageSize& page) {
     return std::min(ResolveMarginPoints(margin), (std::min(page.width, page.height) - 72.0) * 0.5);
 }
 
+bool ParseColor(std::string_view value, int32_t& rgb) {
+    if ((value.size() != 4 && value.size() != 7) || value.front() != '#') return false;
+    uint32_t parsed = 0;
+    for (size_t index = 1; index < value.size(); index++) {
+        const char ch = value[index];
+        uint32_t digit = 0;
+        if (ch >= '0' && ch <= '9') digit = (uint32_t)(ch - '0');
+        else if (ch >= 'a' && ch <= 'f') digit = (uint32_t)(ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F') digit = (uint32_t)(ch - 'A' + 10);
+        else return false;
+        parsed = parsed << 4 | digit;
+        if (value.size() == 4) parsed = parsed << 4 | digit;   // "#RGB" doubles each digit
+    }
+    rgb = (int32_t)parsed;
+    return true;
+}
+
+bool ParseTheme(std::string_view text, std::string_view directory, PdfTheme& theme, std::string& error) {
+    const auto trim = [](std::string_view value) {
+        while (!value.empty() && std::isspace((unsigned char)value.front())) value.remove_prefix(1);
+        while (!value.empty() && std::isspace((unsigned char)value.back())) value.remove_suffix(1);
+        return value;
+    };
+    // A relative path is the theme file's: joined to its folder.
+    const auto path = [directory](std::string_view value) {
+        const bool absolute = !value.empty() && (value.front() == '/' || value.front() == '\\' ||
+            (value.size() > 1 && value[1] == ':'));
+        std::string joined;
+        if (!absolute && !directory.empty() && !value.empty()) {
+            joined = directory;
+            if (joined.back() != '/' && joined.back() != '\\') joined += '/';
+        }
+        joined += value;
+        return joined;
+    };
+    if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.remove_prefix(3);
+    size_t lineNumber = 0;
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find('\n', at);
+        if (end == std::string_view::npos) end = text.size();
+        const std::string_view line = trim(text.substr(at, end - at));
+        at = end + 1;
+        lineNumber++;
+        if (line.empty() || line.front() == '#' || line.front() == ';') continue;
+        const std::string where = "line " + std::to_string(lineNumber) + ": ";
+        const size_t equals = line.find('=');
+        if (equals == std::string_view::npos) {
+            error = where + "expected key = value";
+            return false;
+        }
+        const std::string key = Lower(trim(line.substr(0, equals)));
+        std::string_view value = trim(line.substr(equals + 1));
+        if (value.size() >= 2 && value.front() == '"' && value.back() == '"') value = value.substr(1, value.size() - 2);
+        int32_t* color = key == "heading-color" ? &theme.headingColor : key == "link-color" ? &theme.linkColor
+            : key == "accent-color" ? &theme.accentColor : nullptr;
+        std::string* field = key == "header-left" ? &theme.headerLeft : key == "header-center" ? &theme.headerCenter
+            : key == "header-right" ? &theme.headerRight : key == "footer-left" ? &theme.footerLeft
+            : key == "footer-center" ? &theme.footerCenter : key == "footer-right" ? &theme.footerRight : nullptr;
+        if (color) {
+            if (!ParseColor(value, *color)) {
+                error = where + key + " must be a colour such as #0B3D91";
+                return false;
+            }
+        } else if (field) {
+            *field = value;
+        } else if (key == "font" || key == "logo") {
+            (key == "font" ? theme.fontPath : theme.logoPath) = path(value);
+        } else if (key == "cover") {
+            const std::string flag = Lower(value);
+            if (flag != "yes" && flag != "no" && flag != "true" && flag != "false") {
+                error = where + "cover must be yes or no";
+                return false;
+            }
+            theme.cover = flag == "yes" || flag == "true";
+        } else {
+            error = where + "unknown key '" + key + "'";
+            return false;
+        }
+    }
+    return true;
+}
+
 PdfStyle PdfStyleFromLegacyIndex(int index) {
     return StyleFromIndex(index);
 }

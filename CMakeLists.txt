@@ -98,14 +98,17 @@ function(rayomd_experiments target)
     endif()
 endfunction()
 
-# Recovery is cold, opt-in code, and the math parser and layout run only for documents
-# with formulas. Optimize these translation units for package size while leaving the
-# performance-critical renderer on the normal release flags.
+# Recovery is cold, opt-in code, the math parser and layout run only for documents with
+# formulas, options and themes are parsed once per run, and a theme's header, footer and cover
+# are laid out once per document. Optimize these translation units for package size while
+# leaving the performance-critical renderer on the normal release flags.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
         src/core/rayomd_pdf_source.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp
+        src/core/export_options.cpp
+        src/core/theme.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
     # The opt-in DEFLATE encoder: -O2 is within 1 % of -O3 on RayoMD's streams at half the code.
     set_source_files_properties(src/core/flate.cpp PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
@@ -115,6 +118,7 @@ if(WIN32)
     enable_language(RC)
     add_executable(rayomd WIN32
         src/core/tiny_pdf.cpp
+        src/core/theme.cpp
         src/core/flate.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp
@@ -178,6 +182,7 @@ else()
 
     add_executable(rayomd
         src/core/tiny_pdf.cpp
+        src/core/theme.cpp
         src/core/flate.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
@@ -211,6 +216,7 @@ if(BUILD_TESTING)
     add_executable(rayomd-core-tests
         tests/core_tests.cpp
         src/core/tiny_pdf.cpp
+        src/core/theme.cpp
         src/core/flate.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp

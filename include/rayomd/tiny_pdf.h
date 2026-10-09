@@ -42,6 +42,35 @@ struct PdfPageSize {
     static PdfPageSize Legal() { return { 612.0, 1008.0 }; }
 };
 
+// A company look over the style. Empty or unset fields leave the style as it is.
+struct PdfTheme {
+    static constexpr int32_t kStyleColor = -1;
+
+    // A TrueType font (.ttf, or .ttc for its first face) for all text, embedded as a subset; the
+    // standard fonts are then not used. Bold and italic are drawn from it.
+    std::string fontPath;
+    // Colours as 0xRRGGBB, or kStyleColor.
+    int32_t headingColor = kStyleColor;
+    int32_t linkColor = kStyleColor;
+    int32_t accentColor = kStyleColor;   // rules and the bar beside block quotes
+    // Text in the top and bottom margin of every page, at its left, centre and right, cut short
+    // with an ellipsis when it does not fit. {title}, {author}, {subject}, {date}, {page} and
+    // {pages} are replaced from the front matter and the page; a field that is just {logo}
+    // shows the logo. With pageNumbers and no footerCenter, the footer centre is "{page} / {pages}".
+    std::string headerLeft;
+    std::string headerCenter;
+    std::string headerRight;
+    std::string footerLeft;
+    std::string footerCenter;
+    std::string footerRight;
+    // A PNG or JPEG image for {logo} and the cover. One that cannot be read counts as a failed
+    // image.
+    std::string logoPath;
+    // A first page with the logo, the title, the subject, the author and the date of the front
+    // matter; {page} and {pages} count the pages after it.
+    bool cover = false;
+};
+
 enum class BuildError : uint8_t {
     None,
     // No longer returned: a document whose characters need a TrueType font that cannot be
@@ -51,6 +80,8 @@ enum class BuildError : uint8_t {
     SourceTooLarge = 4,
     InvalidSourceUtf8 = 5,
     ReversiblePdfTooLarge = 6,
+    // PdfTheme::fontPath cannot be read or is no TrueType font.
+    ThemeFontUnavailable = 7,
 };
 
 struct BuildResult {
@@ -79,6 +110,7 @@ struct PdfOptions {
     // FlateDecode page content, font program and CMaps where that makes the file smaller:
     // text-heavy PDFs two to five times smaller, at the cost of compressing them.
     bool compress = false;
+    PdfTheme theme;
 };
 
 // Legacy error reporting is retained for the bool-returning compatibility
