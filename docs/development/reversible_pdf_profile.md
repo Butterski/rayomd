@@ -9,7 +9,9 @@ Profile identifier: `rayomd-source/1`
 RayoMD can optionally preserve the exact UTF-8 Markdown input inside a PDF. The
 ordinary export path remains unchanged and emits PDF 1.7. An export requested
 with `--embed-source` emits PDF 2.0 and uses the standard Associated Files
-relationship to identify the attachment as the document source.
+relationship to identify the attachment as the document source. With `--pdfa`
+too it stays PDF 1.7, as PDF/A-3 (ISO 19005-3), which allows the attachment, is
+based on PDF 1.7.
 
 The profile is deliberately narrow. RayoMD recovers only the classic-xref
 structure written by its own native exporter. It does not repair PDFs, parse
@@ -25,13 +27,16 @@ The source profile adds three indirect objects:
 2. A `/Filespec` named `source.md`, referenced through both `/F` and `/UF`, with
    `/AFRelationship /Source`.
 3. A small XMP `/Metadata` stream using the
-   `https://rayomd.dev/ns/source/1.0/` namespace.
+   `https://rayomd.dev/ns/source/1.0/` namespace. A PDF/A-3b export has one
+   packet for all its metadata: the PDF/A identification and the document's
+   title, author, subject and keywords, then the profile's properties, declared
+   to PDF/A by an extension schema (`pdfaExtension:schemas`).
 
 The catalog references the file specification through both `/AF` and
-`/Names << /EmbeddedFiles ... >>`. The XMP record contains only the profile,
-RayoMD version, UTF-8 encoding, exact byte length, SHA-256 digest, and neutral
-attachment name. Original paths, credentials, environment values, and fetched
-resources are never embedded.
+`/Names << /EmbeddedFiles ... >>`. The profile's XMP properties are only the
+profile, RayoMD version, UTF-8 encoding, exact byte length, SHA-256 digest, and
+neutral attachment name. Original paths, credentials, environment values, and
+fetched resources are never embedded.
 
 ## Storage, interoperability, and performance decision
 
@@ -107,8 +112,11 @@ in the dated
   310 MB plain PDF, exceeded the reversible PDF ceiling, and peaked near
   1.5 GiB RSS, so larger inputs are rejected before rendering.
 - Maximum classic xref entries: 1,000,001 including object zero.
-- Maximum XMP profile stream: 16 KiB.
-- Exactly one classic xref section and generation zero are accepted.
+- Maximum XMP profile stream: 16 KiB. A PDF/A-3b export cuts each metadata value
+  to 2 KiB of XML (`PdfaText`), in the Info dictionary too, so its packet fits.
+- Exactly one classic xref section and generation zero are accepted. A PDF 1.7
+  header only with a packet that declares `pdfaid:part="3"`, and a trailer `/ID`
+  of hex strings, as PDF/A-3b exports have them.
 - Source streams with filters are rejected by profile version 1.
 - `/Prev`, `/XRefStm`, `/Encrypt`, xref streams, object streams, duplicate
   `source.md` entries, duplicate profile attributes, malformed offsets,
@@ -130,7 +138,6 @@ pages. The CLI flag and Windows GUI both make this distinction explicit.
 
 - Best-effort arbitrary PDF-to-Markdown conversion.
 - OCR or page-geometry reconstruction.
-- PDF/A conformance.
 - General PDF parsing or repair.
 - Embedding local or remote image bytes.
 - Silent fallback from exact recovery to heuristic conversion.

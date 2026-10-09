@@ -58,6 +58,15 @@ Company themes (`--theme=FILE`, `PdfOptions::theme`): a TrueType font for all te
 literals), header and footer fields with placeholders and a logo (one overlay stream
 per page, like the page numbers, whose glyphs join the subset before it is cut), and a
 cover page before the first page. Without a theme the PDF bytes stay as they are.
+PDF/A-3b (`--pdfa`, `PdfOptions::pdfa`) takes the Unicode renderer for all text, as
+every font must be embedded: page numbers become a footer band in the document's
+font, formulas show their TeX source (`MathPool::Disable`; the math fonts Times and
+Symbol are not embedded), and without a TrueType font the export fails
+(`PdfaFontUnavailable`) instead of falling back to the standard fonts. It adds an
+sRGB output intent, XMP metadata that tells what the Info dictionary does
+(`PdfaText` makes both hold the same text), a trailer `/ID` and `/F 4` on links,
+and stays PDF 1.7 with an embedded source. Check changes with veraPDF
+(`verapdf -f 3b`). Without it the PDF bytes stay as they are.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
@@ -157,6 +166,12 @@ Important image/link details:
   wrapping) on UTF-8 text, behind `ThemeTextFont`, which each renderer implements in
   `tiny_pdf.cpp`. Built at `-Os`, and kept out of `tiny_pdf.cpp` on purpose (see the
   inlining guardrail below).
+
+- `src/core/pdfa.h` and `src/core/pdfa.cpp`
+  What PDF/A-3b adds: the 480-byte sRGB ICC profile (a v4.2 display profile written
+  as data, SHA-256 in the source), the XMP packet with the PDF/A identification and,
+  with an embedded source, the reversible profile's properties and their extension
+  schema, and the file identifier, a 128-bit hash of the body. Built at `-Os`.
 
 - `src/common/batch_report.cpp`
   What both command lines share for batch export: the JSON Lines report (one

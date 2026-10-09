@@ -93,6 +93,8 @@ Deliberate deviations and degradations:
   with `/Flags 4` for Symbol, then the five font dictionaries; Symbol also carries
   `/FirstChar /LastChar /Widths`) and lists the fonts in every page's `/Font` resources.
   A document without a painted formula adds nothing.
+- PDF/A (`--pdfa`) needs every font embedded, and these are not: there every formula
+  shows its complete TeX source, as over a limit (`MathPool::Disable`).
 - Symbol glyphs are shown one per text operator, so a viewer that substitutes a font with
   different advances still places every glyph correctly.
 - `MathFormula::Emit` is graphics-state neutral (one `q … Q`), writes 7-bit ASCII, and

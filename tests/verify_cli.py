@@ -123,6 +123,30 @@ def verify_theme(binary: Path, root: Path) -> None:
         raise AssertionError("an unknown theme key was not reported")
 
 
+def verify_pdfa(binary: Path, root: Path) -> None:
+    """--pdfa: PDF 1.7 with every font embedded (formulas as their source), printable links, an
+    sRGB output intent, PDF/A-3b XMP and a file identifier; with --embed-source too, still PDF 1.7,
+    and the source recovers byte for byte."""
+    source = root / "archive.md"
+    source.write_text("---\ntitle: Archive & <Co>\n---\n\n# Archive\n\nSee [site](https://example.com) and $x^2$.\n",
+                      encoding="utf-8")
+    archive_pdf = root / "archive.pdf"
+    run(binary, "--export", str(source), str(archive_pdf), "--pdfa", "--page-numbers")
+    archive = require_pdf(archive_pdf, b"/S /GTS_PDFA1", b'pdfaid:part="3"', b"/FontFile2", b"/Subtype /Link /F 4 ",
+                          b"Archive &amp; &lt;Co&gt;")
+    if (not archive.startswith(b"%PDF-1.7\n") or b"/Subtype /Type1" in archive or
+            not re.search(rb"/ID \[<([0-9A-F]{32})> <\1>\]", archive)):
+        raise AssertionError("--pdfa did not write a PDF/A-3b file")
+    reversible_pdf = root / "archive-source.pdf"
+    run(binary, "--export", str(source), str(reversible_pdf), "--pdfa", "--embed-source")
+    if not require_pdf(reversible_pdf, b"rayomd-source/1", b"<pdfaExtension:schemas>").startswith(b"%PDF-1.7\n"):
+        raise AssertionError("--pdfa --embed-source did not stay PDF 1.7")
+    recovered = root / "archive-recovered.md"
+    run(binary, "--recover-source", str(reversible_pdf), str(recovered))
+    if recovered.read_bytes() != source.read_bytes():
+        raise AssertionError("--pdfa --embed-source did not recover the source")
+
+
 def pdf_streams(data: bytes) -> list[tuple[bytes, bytes]]:
     """The dictionary and payload of every stream of a PDF, in file order."""
     streams = []
@@ -206,6 +230,7 @@ def verify(binary: Path, keep: Path | None) -> None:
             raise AssertionError("an invalid --page-size was not rejected")
         verify_compression(binary, root)
         verify_theme(binary, root)
+        verify_pdfa(binary, root)
         verify_batch(binary, root)
 
         if os.name == "nt":

@@ -82,6 +82,8 @@ enum class BuildError : uint8_t {
     ReversiblePdfTooLarge = 6,
     // PdfTheme::fontPath cannot be read or is no TrueType font.
     ThemeFontUnavailable = 7,
+    // PdfOptions::pdfa, but no TrueType font to embed: neither RAYOMD_FONT nor a system font.
+    PdfaFontUnavailable = 8,
 };
 
 struct BuildResult {
@@ -110,6 +112,9 @@ struct PdfOptions {
     // FlateDecode page content, font program and CMaps where that makes the file smaller:
     // text-heavy PDFs two to five times smaller, at the cost of compressing them.
     bool compress = false;
+    // PDF/A-3b (ISO 19005-3): every font embedded, so all text takes a TrueType font and
+    // formulas show their TeX source; an sRGB output intent, XMP metadata and a file identifier.
+    bool pdfa = false;
     PdfTheme theme;
 };
 

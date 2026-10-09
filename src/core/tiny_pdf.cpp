@@ -7,6 +7,7 @@
 #include "../common/text_utils.h"
 #include "markdown_parser.h"
 #include "math_layout.h"
+#include "pdfa.h"
 #include "theme.h"
 
 #ifdef _WIN32
@@ -1090,7 +1091,8 @@ public:
     // the last to the first therefore moves each payload once, towards the end of the
     // buffer, without ever overwriting one that has not been moved yet. A buffer the
     // caller reuses for the next export is assembled without any allocation.
-    void BuildInto(int rootId, int infoId, std::string& pdf, bool pdf20 = false) const {
+    // With `fileId` the trailer gets an /ID of the file's body, which PDF/A requires.
+    void BuildInto(int rootId, int infoId, std::string& pdf, bool pdf20 = false, bool fileId = false) const {
         constexpr size_t kHeaderBytes = 15;
         constexpr size_t kObjectOpenBytes = 7;      // " 0 obj\n"
         constexpr size_t kStreamCloseBytes = 10;    // "\nendstream"
@@ -1115,7 +1117,9 @@ public:
             position = payloadAt + PayloadBytes(object) + (object.stream ? kStreamCloseBytes : 0) + kObjectCloseBytes;
         }
         const size_t xref = position;
-        const size_t total = xref + WriteTail(nullptr, offsets, xref, rootId, infoId);
+        char id[32];
+        memset(id, '0', sizeof(id));
+        const size_t total = xref + WriteTail(nullptr, offsets, xref, rootId, infoId, fileId ? id : nullptr);
 
         // A buffer far larger than this file needs is given back, and payloads that do not
         // lie in rendering order cannot be moved in place: both cases assemble the file in
@@ -1133,7 +1137,7 @@ public:
         const char* const payloads = relocate ? rendered.data() : base;
         const size_t payloadLimit = relocate ? rendered.size() : total;
 
-        WriteTail(base + xref, offsets, xref, rootId, infoId);
+        WriteTail(base + xref, offsets, xref, rootId, infoId, fileId ? id : nullptr);
         for (size_t i = count; i-- > 0;) {
             const Object& object = objects[i];
             char* const at = base + offsets[i + 1];
@@ -1161,6 +1165,11 @@ public:
             memcpy(cursor, "\nendobj\n", kObjectCloseBytes);
         }
         memcpy(base, pdf20 ? "%PDF-2.0\n%\xE2\xE3\xCF\xD3\n" : "%PDF-1.7\n%\xE2\xE3\xCF\xD3\n", kHeaderBytes);
+        if (fileId) {
+            // The identifier is that of everything before the cross-reference table.
+            Internal::FileIdentifier(std::string_view(base, xref), id);
+            WriteTail(base + xref, offsets, xref, rootId, infoId, id);
+        }
     }
 
 private:
@@ -1194,7 +1203,8 @@ private:
 
     // The cross-reference table and the trailer. Returns their size; with `out` null
     // nothing is written, so one function both measures and writes them.
-    size_t WriteTail(char* out, const std::vector<size_t>& offsets, size_t xref, int rootId, int infoId) const {
+    size_t WriteTail(char* out, const std::vector<size_t>& offsets, size_t xref, int rootId, int infoId,
+        const char* fileId = nullptr) const {
         size_t size = 0;
         auto text = [&](std::string_view value) {
             if (out) memcpy(out + size, value.data(), value.size());
@@ -1228,7 +1238,15 @@ private:
         number((size_t)rootId);
         text(" 0 R /Info ");
         number((size_t)infoId);
-        text(" 0 R >>\nstartxref\n");
+        text(" 0 R");
+        if (fileId) {
+            text(" /ID [<");
+            text(std::string_view(fileId, 32));
+            text("> <");
+            text(std::string_view(fileId, 32));
+            text(">]");
+        }
+        text(" >>\nstartxref\n");
         number(xref);
         text("\n%%EOF\n");
         return size;
@@ -1320,7 +1338,9 @@ static void SetPayloadStream(PdfObjects& pdf, int id, std::string_view data, boo
 
 constexpr size_t kMaxImageBytes = 32u * 1024u * 1024u;
 constexpr size_t kMaxDecodedImageBytes = 96u * 1024u * 1024u;
-static void AddReversibleSource(PdfObjects& pdf, std::string& catalog, const std::string& markdown) {
+// With `metadata` false the caller writes the XMP metadata, with the reversible profile's
+// properties: a PDF/A file has one packet for both.
+static void AddReversibleSource(PdfObjects& pdf, std::string& catalog, const std::string& markdown, bool metadata = true) {
     std::string sourceDictionary = "/Type /EmbeddedFile /Subtype /text#2Fmarkdown /Params << /Size ";
     AppendSize(sourceDictionary, markdown.size());
     sourceDictionary += " >>";
@@ -1335,12 +1355,13 @@ static void AddReversibleSource(PdfObjects& pdf, std::string& catalog, const std
     fileSpec += " 0 R >> /AFRelationship /Source >>";
     int fileSpecId = pdf.Add(std::move(fileSpec));
 
-    std::string metadata = RayoMd::PdfSource::BuildXmpMetadata(markdown, RAYOMD_VERSION);
-    int metadataId = pdf.AddStream("/Type /Metadata /Subtype /XML", metadata);
-
-    catalog += " /Metadata ";
-    AppendInt(catalog, metadataId);
-    catalog += " 0 R /Names << /EmbeddedFiles << /Names [(source.md) ";
+    if (metadata) {
+        const std::string xmp = RayoMd::PdfSource::BuildXmpMetadata(markdown, RAYOMD_VERSION);
+        catalog += " /Metadata ";
+        AppendInt(catalog, pdf.AddStream("/Type /Metadata /Subtype /XML", xmp));
+        catalog += " 0 R";
+    }
+    catalog += " /Names << /EmbeddedFiles << /Names [(source.md) ";
     AppendInt(catalog, fileSpecId);
     catalog += " 0 R] >> >> /AF [";
     AppendInt(catalog, fileSpecId);
@@ -3403,6 +3424,27 @@ static void AppendLanguage(std::string& catalog, const DocumentMetadata& metadat
     catalog += ")";
 }
 
+// PDF/A-3b: the sRGB output intent and the XMP metadata, which holds the reversible profile's
+// properties when `source` is embedded. The Info dictionary has to tell what the packet does:
+// `metadata` takes the title, else the first heading's text, and every value as both hold it,
+// and the Info dictionary is then made from it without the headings.
+RAYOMD_COLD static void AddPdfaCatalogEntries(PdfObjects& pdf, std::string& catalog, DocumentMetadata& metadata,
+    const std::vector<HeadingMark>& headings, const char* producer, std::string_view source) {
+    metadata.title = Internal::PdfaText(!metadata.title.empty() || headings.empty() ? std::string_view(metadata.title)
+        : headings.front().text);
+    metadata.author = Internal::PdfaText(metadata.author);
+    metadata.subject = Internal::PdfaText(metadata.subject);
+    metadata.keywords = Internal::PdfaText(metadata.keywords);
+    catalog += " /OutputIntents [<< /Type /OutputIntent /S /GTS_PDFA1 /OutputConditionIdentifier (sRGB IEC61966-2.1)"
+        " /RegistryName (http://www.color.org) /Info (sRGB IEC61966-2.1) /DestOutputProfile ";
+    AppendInt(catalog, pdf.AddStreamView("/N 3", Internal::SrgbIccProfile()));
+    catalog += " 0 R >>] /Metadata ";
+    const Internal::PdfaMetadata xmp{ producer, metadata.title, metadata.author, metadata.subject, metadata.keywords,
+        source, RAYOMD_VERSION };
+    AppendInt(catalog, pdf.AddStream("/Type /Metadata /Subtype /XML", Internal::PdfaXmpMetadata(xmp)));
+    catalog += " 0 R";
+}
+
 // A link to a heading of this document. AddLinkAnnotationObjects reserves its annotation in
 // its page's place; AddInternalLinks writes it once the pages exist, to point straight at the
 // heading.
@@ -3567,11 +3609,14 @@ private:
     std::unordered_map<std::string, Anchor> anchors;
 };
 
-// "<< /Type /Annot /Subtype /Link /Rect [...] /Border [0 0 0]": the start of a link annotation.
-static void AppendLinkAnnotationStart(std::string& annot, const LinkRect& link) {
+// "<< /Type /Annot /Subtype /Link /Rect [...] /Border [0 0 0]": the start of a link annotation;
+// `print` adds /F 4, the Print flag PDF/A requires of every annotation.
+static void AppendLinkAnnotationStart(std::string& annot, const LinkRect& link, bool print) {
     // One growth and pointer writes, not a call per piece where GCC leaves the appends out of line.
-    TailWriter w(annot, 64 + kOperandBytes * 4);
-    w.Lit("<< /Type /Annot /Subtype /Link /Rect [");
+    TailWriter w(annot, 72 + kOperandBytes * 4);
+    w.Lit("<< /Type /Annot /Subtype /Link");
+    if (print) w.Lit(" /F 4");
+    w.Lit(" /Rect [");
     w.Fixed(link.x1);
     w.Lit(" ");
     w.Fixed(link.y1);
@@ -3586,7 +3631,7 @@ static void AppendLinkAnnotationStart(std::string& annot, const LinkRect& link) 
 // drops a link to an anchor the document does not have instead of leading nowhere.
 static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
     const std::vector<std::vector<LinkRect>>& linksByPage, bool winAnsiTargets, HeadingTargets& headings,
-    std::vector<InternalLink>& internalLinks) {
+    std::vector<InternalLink>& internalLinks, bool print) {
     std::vector<std::vector<int>> idsByPage;
     idsByPage.reserve(linksByPage.size());
     for (const auto& pageLinks : linksByPage) {
@@ -3600,7 +3645,7 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
             }
             std::string annot;
             annot.reserve(link.url.size() + 192);
-            AppendLinkAnnotationStart(annot, link);
+            AppendLinkAnnotationStart(annot, link, print);
             annot += " /A << /S /URI /URI (";
             AppendUriLiteral(annot, link.url, winAnsiTargets);
             annot += ") >> >>";
@@ -3613,11 +3658,11 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
 
 // Writes the annotations of the links to headings, now that the pages they go to exist.
 RAYOMD_COLD static void AddInternalLinks(PdfObjects& pdf, const std::vector<InternalLink>& links,
-    const std::vector<int>& pageIds) {
+    const std::vector<int>& pageIds, bool print) {
     for (const InternalLink& internal : links) {
         std::string annot;
         annot.reserve(176);
-        AppendLinkAnnotationStart(annot, *internal.link);
+        AppendLinkAnnotationStart(annot, *internal.link, print);
         annot += " /Dest [";
         AppendInt(annot, pageIds[std::min(internal.page, pageIds.size() - 1)]);
         annot += " 0 R /XYZ null ";
@@ -3695,12 +3740,15 @@ public:
     void Clear() { items.clear(); sourceShown = false; }
     bool Used() const { return used; }
     void MarkSourceShown() { sourceShown = true; }
+    // PDF/A: every formula is shown as its source, as the math fonts are not embedded.
+    void Disable() { disabled = true; }
+    bool Disabled() const { return disabled; }
 
     int Add(std::string_view tex, double size, bool display, bool bold, double maxWidth, double maxHeight,
         const MathFallbackFont* fallback) {
         Item item;
         item.display = display;
-        if (!LayoutMathToFit(tex, size, display, bold, maxWidth, maxHeight, fallback, item.formula)) return -1;
+        if (disabled || !LayoutMathToFit(tex, size, display, bold, maxWidth, maxHeight, fallback, item.formula)) return -1;
         items.push_back(std::move(item));
         return (int)items.size() - 1;
     }
@@ -3724,6 +3772,7 @@ private:
     std::vector<Item> items;
     bool used = false;
     bool sourceShown = false;
+    bool disabled = false;
 };
 
 template <typename SpanType>
@@ -4061,6 +4110,8 @@ public:
     UsedCidSet& Cids() { return usedCids; }
     uint32_t MissingCharacters() const { return usedCids.missing; }
     bool MathUsed() const { return math.Used(); }
+    // PDF/A: formulas show their TeX source, as the math fonts are not embedded.
+    void DisableMath() { math.Disable(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
     double Margin() const { return margin; }
     double PageWidth() const { return pageW; }
@@ -5395,7 +5446,7 @@ private:
         double padBottom = quoted ? kQuoteMathPad : 0.0;
         double maxHeight = pageH - margin * 2.0 - padTop - padBottom - 3.0;
         MathFormula formula;
-        if (!LayoutMathToFit(tex, bodySize, true, false, available, maxHeight, &mathFallback, formula)) {
+        if (math.Disabled() || !LayoutMathToFit(tex, bodySize, true, false, available, maxHeight, &mathFallback, formula)) {
             double savedMargin = margin;
             if (quoted) margin += 14.0;
             RenderMathSource(tex);
@@ -7822,7 +7873,8 @@ RAYOMD_COLD static void LayOutTheme(const PdfOptions& options, const Internal::T
     const std::string title = !metadata.title.empty() || headings.empty() ? metadata.title
         : winAnsi ? RayoMd::Text::WinAnsiToUtf8(headings.front().text) : std::string(headings.front().text);
     const Internal::ThemeDocument document{ title, metadata.author, metadata.subject, metadata.date };
-    if (Internal::HasThemeBands(options.theme)) {
+    // PDF/A's page numbers too: a footer in the document's font, as Helvetica is not embedded.
+    if (Internal::HasThemeBands(options.theme) || (options.pdfa && options.pageNumbers)) {
         bands = Internal::ThemeBandStreams(options.theme, options.pageNumbers, document, pages, page, logo, font);
     }
     if (options.theme.cover) cover = Internal::ThemeCoverStream(document, page, logo, font, palette.heading, palette.rule);
@@ -7929,7 +7981,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     HeadingTargets headingTargets(renderer.Headings(), winAnsi, renderer.PageHeight());
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds =
-        AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks);
+        AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks, false);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
     // The italic faces only when emphasis used them, so other documents keep their bytes.
@@ -8001,7 +8053,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.PageHeight(), fonts, imageObjectIds, cover);
     }
     pdf.Set(pagesId, PagesDictionary(pageIds, coverId));
-    AddInternalLinks(pdf, internalLinks, pageIds);
+    AddInternalLinks(pdf, internalLinks, pageIds, false);
 
     std::string catalog;
     catalog.reserve(options.embedSource ? 256 : 64);
@@ -8186,6 +8238,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     PrepareOutput(pdfBytes, markdown.size() * 8 + 256 * 1024);
     const ThemePalette palette(options.theme);
     Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, options.pageSize, &imageRegistry, palette);
+    if (options.pdfa) renderer.DisableMath();
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         renderer.Render(blocks);
@@ -8196,16 +8249,16 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     HeadingTargets headingTargets(renderer.Headings(), false, renderer.PageHeight());
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds =
-        AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks);
+        AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
-    // A theme's header and footer, one stream per page, and its cover page, before the font
-    // subset is made, which then has their glyphs.
-    const DocumentMetadata metadata = FrontMatterMetadata(markdown);
+    // A theme's header and footer, one stream per page, PDF/A's page numbers, and a theme's cover
+    // page, before the font subset is made, which then has their glyphs.
+    DocumentMetadata metadata = FrontMatterMetadata(markdown);
     std::vector<std::string> bands;
     std::string cover;
-    if (Internal::HasThemeBands(options.theme) || options.theme.cover) {
+    if (Internal::HasThemeBands(options.theme) || options.theme.cover || (options.pdfa && options.pageNumbers)) {
         LayOutTheme(options, UnicodeThemeText(font, renderer.Cids()), metadata, renderer.Headings(), false,
             renderer.PageStarts().size(), { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin() }, logo, palette,
             bands, cover);
@@ -8272,7 +8325,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     type0 += " 0 R >>";
     pdf.Set(type0FontId, std::move(type0));
 
-    // Helvetica for the page numbers; a theme's header and footer use the document's font.
+    // Helvetica for the page numbers; a theme's header and footer, and PDF/A's numbers, use the document's font.
     const int numberFontId = options.pageNumbers && bands.empty()
         ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>") : 0;
     std::vector<bool> flatePages;   // --compress: the pages whose content stream is compressed
@@ -8320,10 +8373,10 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.PageHeight(), fonts, imageObjectIds, cover);
     }
     pdf.Set(pagesId, PagesDictionary(pageIds, coverId));
-    AddInternalLinks(pdf, internalLinks, pageIds);
+    AddInternalLinks(pdf, internalLinks, pageIds, options.pdfa);
 
     std::string catalog;
-    catalog.reserve(options.embedSource ? 256 : 64);
+    catalog.reserve(options.embedSource || options.pdfa ? 512 : 64);
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
     catalog += " 0 R";
@@ -8331,12 +8384,19 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (coverId != 0) catalog += kCoverPageLabels;
     std::string outline;
     AddOutline(pdf, catalog, renderer.Headings(), pageIds, false, outline);
-    if (options.embedSource) AddReversibleSource(pdf, catalog, markdown);
+    const char* const producer = "RayoMD Native Tiny PDF";
+    if (options.pdfa) {
+        AddPdfaCatalogEntries(pdf, catalog, metadata, renderer.Headings(), producer,
+            options.embedSource ? std::string_view(markdown) : std::string_view());
+    }
+    if (options.embedSource) AddReversibleSource(pdf, catalog, markdown, !options.pdfa);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));
-    int infoId = pdf.Add(InfoDictionary("RayoMD Native Tiny PDF", metadata, renderer.Headings(), false));
+    const std::vector<HeadingMark> noHeadings;      // PDF/A: `metadata` has the title
+    int infoId = pdf.Add(InfoDictionary(producer, metadata, options.pdfa ? noHeadings : renderer.Headings(), false));
 
-    pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
+    // PDF/A-3 is PDF 1.7, also with the source embedded, and has a file identifier.
+    pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource && !options.pdfa, options.pdfa);
     stats.pages = static_cast<uint32_t>(pageStarts.size() + (coverId != 0));
     stats.failedImages = imageRegistry.FailedImages();
     return true;
@@ -8369,8 +8429,9 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
     const bool ascii = IsPlainAsciiDocument(markdown);
     Internal::ReferenceNeed references = Internal::ReferenceNeed::Ascii;
     std::string winAnsi;
-    // A theme's header and footer text that is not WinAnsi needs a Unicode font too.
-    const bool themeUnicode = ThemeTextNeedsUnicode(options.theme);
+    // A theme's header and footer text that is not WinAnsi needs a TrueType font too, and PDF/A,
+    // which embeds every font, one for all text.
+    const bool trueTypeOnly = options.pdfa || ThemeTextNeedsUnicode(options.theme);
     if (!options.theme.fontPath.empty()) {
         // The theme's font shows all text, without a fallback font: the company's look.
         const TtfFont* font = ThemeFont(options.theme.fontPath);
@@ -8381,12 +8442,12 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
         size_t missing = 0;
         built = BuildUnicodePdfBytes(markdown, *font, options, pdfBytes, nullptr, missing, stats);
         missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
-    } else if (!themeUnicode && ascii &&
+    } else if (!trueTypeOnly && ascii &&
         (references = Internal::CharacterReferenceNeed(markdown)) == Internal::ReferenceNeed::Ascii) {
         built = BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes, stats);
     } else {
         // Latin text needs no font file: the standard fonts show it in WinAnsiEncoding.
-        if (!themeUnicode && references != Internal::ReferenceNeed::Unicode && RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi) &&
+        if (!trueTypeOnly && references != Internal::ReferenceNeed::Unicode && RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi) &&
             (ascii || Internal::CharacterReferenceNeed(markdown) != Internal::ReferenceNeed::Unicode)) {
             built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats);
         } else {
@@ -8401,6 +8462,9 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
                 built = BuildUnicodePdfBytes(markdown, *font, options, pdfBytes, &better, missing, stats);
                 if (built && better) built = BuildUnicodePdfBytes(markdown, *better, options, pdfBytes, nullptr, missing, stats);
                 missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
+            } else if (options.pdfa) {
+                g_lastError = static_cast<int>(BuildError::PdfaFontUnavailable);
+                return { BuildError::PdfaFontUnavailable };
             } else {
                 // No TrueType font on this system: the standard fonts show what they can, and
                 // the caller learns how many characters they could not.

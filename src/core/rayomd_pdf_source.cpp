@@ -112,6 +112,24 @@ public:
         return depth == 0;
     }
 
+    // A hex string, such as the file identifiers of a PDF/A trailer: hex digits and white
+    // space between '<' and '>'.
+    bool ReadHexString() {
+        SkipSpace();
+        if (offset_ + 1 >= input_.size() || input_[offset_] != '<' || input_[offset_ + 1] == '<') return false;
+        size_t at = offset_ + 1;
+        size_t digits = 0;
+        for (; at < input_.size() && input_[at] != '>'; at++) {
+            const char ch = input_[at];
+            if (IsWhite(ch)) continue;
+            const bool hex = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F') || (ch >= 'a' && ch <= 'f');
+            if (!hex || ++digits > 1024) return false;
+        }
+        if (at >= input_.size()) return false;
+        offset_ = at + 1;
+        return true;
+    }
+
     bool SkipToken() {
         SkipSpace();
         if (offset_ >= input_.size()) return false;
@@ -213,6 +231,11 @@ bool SkipPdfValue(std::string_view input, Scanner& scanner, unsigned depth, size
     std::string literal;
     compound = scanner;
     if (compound.ReadLiteral(literal)) {
+        scanner = compound;
+        return true;
+    }
+    compound = scanner;
+    if (compound.ReadHexString()) {
         scanner = compound;
         return true;
     }
@@ -574,7 +597,10 @@ Result Inspect(std::string_view pdf, bool recoverSource) {
     if (result.info.profile != "rayomd-source/1") {
         result.status = Status::UnsupportedProfile; return result;
     }
-    if (pdf.substr(0, 8) != "%PDF-2.0" ||
+    // PDF 2.0, or PDF 1.7 in a PDF/A-3 export, which cannot be a PDF 2.0 file.
+    const std::string_view header = pdf.substr(0, 8);
+    const bool pdfa = header == "%PDF-1.7" && xml.find(" pdfaid:part=\"3\"") != std::string_view::npos;
+    if ((header != "%PDF-2.0" && !pdfa) ||
         !ExtractAttribute(xml, "producer", result.info.producerVersion) ||
         !ExtractAttribute(xml, "encoding", result.info.encoding) ||
         !ExtractAttribute(xml, "length", lengthText) ||

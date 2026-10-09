@@ -826,6 +826,50 @@ byte-identical, also with `--page-numbers --compress`. The watch fixtures run 0.
 fewer instructions and took 0.53 % less time (A/A -0.00 %). The binary grew by
 12 KB.
 
+## PDF/A-3b, October 2026
+
+`--pdfa` (`PdfOptions::pdfa`) writes PDF/A-3b (ISO 19005-3, level B), validated
+with veraPDF 1.30.3 (`verapdf -f 3b`): plain, Unicode, fallback-font, image, math,
+themed (cover, logo, header) and reversible exports pass, as do the Windows build's
+under Wine.
+
+- PDF/A embeds every font, so all text takes the Unicode renderer. Page numbers,
+  Helvetica elsewhere, become the footer band that themes draw in the document's
+  font (same grey, size and place). Formulas show their TeX source: the math fonts,
+  Times and Symbol, are not embedded and RayoMD has no outlines of them. Without a
+  TrueType font the export fails (`PdfaFontUnavailable`, exit 18) rather than fall
+  back to the standard fonts.
+- The sRGB output intent carries a 480-byte ICC v4.2 profile written as data in
+  `pdfa.cpp`; common sRGB profiles are 3 KB or more.
+- One XMP packet holds the PDF/A identification, the document's metadata and, with
+  `--embed-source`, the reversible profile's properties with their extension
+  schema; the file then stays PDF 1.7. `PdfaText` gives the Info dictionary and
+  the packet the same text: well-formed UTF-8 without controls, at most 2 KiB of
+  XML each, which keeps the packet within the 16 KiB `Inspect` reads.
+- The trailer's `/ID` hashes the file's body with three independent lanes of
+  128-bit multiplies: 30 GB/s, 31 µs for a 930 KB PDF. A first version, whose two
+  lanes waited on each other, took 110 µs (8 GB/s): `--pdfa` then added 7.6 % to a
+  96 KiB Unicode export, and adds 4.3 % now.
+- Link annotations get `/F 4` (print), and the trailer and `Inspect` accept hex
+  strings.
+
+Cost of `--pdfa` per warm export (`--bench`, cpu 3, median of five):
+
+| Fixture | Default | `--pdfa` | Size | With `--compress` |
+|---|---:|---:|---:|---:|
+| baseline.md (ASCII) | 0.25 ms | 0.43 ms (+72 %) | 109 → 202 KB | 71 KB |
+| ascii_96kb.md | 1.56 ms | 2.06 ms (+32 %) | 589 → 905 KB | 197 KB |
+| unicode_96kb.md | 1.84 ms | 1.92 ms (+4.3 %) | 928 → 930 KB | |
+| tester.md | 0.32 ms | 0.26 ms (-19 %, no typesetting) | 392 → 391 KB | |
+
+Measured on 2026-10-09 against the previous commit: all 2,883 corpus PDFs are
+byte-identical, also with `--page-numbers --compress` and with `--embed-source`.
+The watch fixtures run 0.10 % fewer instructions (time -0.66 %, A/A -0.75 %). The
+binary grew by 20 KB: 3 KB of PDF/A code and data; the rest is GCC inlining more
+in `tiny_pdf.cpp` (`RenderTable` +2.1 KB, `RenderCode` +1.1 KB) and splitting both
+builders into hot and cold parts. Keeping `ThemePalette` and `TtfFont::Load` out
+of line saved only 288 bytes.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -839,6 +883,14 @@ ab`, seven rounds, watch fixtures) is 5.8 % slower at `-O2` (geometric mean;
 translation units only (`tiny_pdf.cpp`, `inline_markdown.cpp`,
 `markdown_parser.cpp`) with MinGW g++ on Windows hardware, and weigh it
 against the executable size.
+
+**PDF/A text in single-byte codes.** Under `--pdfa` an ASCII or Latin document
+leaves the standard fonts for the Unicode renderer, whose CID text takes four hex
+digits a glyph: 2026-10-09, `baseline.md` +72 % time and +85 % size, a 96 KiB
+ASCII document +32 % and +54 %. A TrueType font embedded as a simple font in
+WinAnsiEncoding would keep the standard renderer's one-byte literal strings and
+its word cache; the price is a second embedding path (simple-font widths, a
+`cmap` subtable PDF/A accepts) next to the CID one.
 
 **A larger inlining budget for `tiny_pdf.cpp`.** The file sits at GCC's
 `inline-unit-growth` limit, so edits move which hot calls stay inlined.

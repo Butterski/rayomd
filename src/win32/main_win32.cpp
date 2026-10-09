@@ -159,6 +159,7 @@ struct WinExportOptions {
     bool embedSource = false;
     bool pageNumbers = false;
     bool compress = false;
+    bool pdfa = false;
     TinyPdf::PdfTheme theme;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
@@ -516,6 +517,7 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
     options.embedSource = exportOptions.embedSource;
     options.pageNumbers = exportOptions.pageNumbers;
     options.compress = exportOptions.compress;
+    options.pdfa = exportOptions.pdfa;
     options.theme = exportOptions.theme;
     TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (details) *details = result;
@@ -662,6 +664,8 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.pageNumbers = true;
         } else if (lstrcmpiW(argv[i], L"--compress") == 0) {
             options.compress = true;
+        } else if (lstrcmpiW(argv[i], L"--pdfa") == 0) {
+            options.pdfa = true;
         } else if (_wcsnicmp(argv[i], L"--theme=", 8) == 0) {
             const std::wstring themePath = argv[i] + 8;
             const size_t slash = themePath.find_last_of(L"\\/");

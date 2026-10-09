@@ -281,6 +281,7 @@ struct CliExportOptions {
     bool embedSource = false;
     bool pageNumbers = false;
     bool compress = false;
+    bool pdfa = false;
     TinyPdf::PdfTheme theme;
     unsigned workers = 0;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
@@ -301,6 +302,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--embed-source") options.embedSource = true;
         else if (value == "--page-numbers") options.pageNumbers = true;
         else if (value == "--compress") options.compress = true;
+        else if (value == "--pdfa") options.pdfa = true;
         else if (value.rfind("--theme=", 0) == 0) {
             const fs::path themePath(argv[i] + 8);
             std::string text;
@@ -393,6 +395,7 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     pdfOptions.embedSource = options.embedSource;
     pdfOptions.pageNumbers = options.pageNumbers;
     pdfOptions.compress = options.compress;
+    pdfOptions.pdfa = options.pdfa;
     pdfOptions.theme = options.theme;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, pdfOptions, pdfBuffer);
     if (!buildResult) {
@@ -403,6 +406,9 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
         message << " (code " << code << ").";
         if (buildResult.error == TinyPdf::BuildError::ThemeFontUnavailable) {
             message << " The theme's font cannot be read or is no TrueType font: " << options.theme.fontPath;
+        }
+        if (buildResult.error == TinyPdf::BuildError::PdfaFontUnavailable) {
+            message << " PDF/A embeds every font, but no TrueType font was found; set RAYOMD_FONT to one.";
         }
         ReportExportError(deferredError, message.str());
         return code;
@@ -707,6 +713,7 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     options.embedSource = cliOptions.embedSource;
     options.pageNumbers = cliOptions.pageNumbers;
     options.compress = cliOptions.compress;
+    options.pdfa = cliOptions.pdfa;
     options.theme = cliOptions.theme;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (!buildResult) {
@@ -834,9 +841,10 @@ void PrintUsage() {
         << "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
         << "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
         << "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source.\n"
-        << "Output flags: --compress (FlateDecode streams: smaller files, slower export), --theme=FILE (key =\n"
-        << "  value lines: font, logo, heading-color, link-color, accent-color, header-left/center/right,\n"
-        << "  footer-left/center/right with {title} {author} {subject} {date} {page} {pages} {logo}, cover).\n"
+        << "Output flags: --compress (FlateDecode streams: smaller files, slower export), --pdfa (PDF/A-3b:\n"
+        << "  every font embedded, formulas as TeX source), --theme=FILE (key = value lines: font, logo,\n"
+        << "  heading-color, link-color, accent-color, header-left/center/right, footer-left/center/right\n"
+        << "  with {title} {author} {subject} {date} {page} {pages} {logo}, cover).\n"
         << "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         << "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4).\n"
         << "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"

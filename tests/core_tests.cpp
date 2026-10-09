@@ -8,6 +8,7 @@
 #include "../src/core/math_layout.h"
 #include "../src/core/math_parser.h"
 #include "../src/core/rayomd_pdf_source.h"
+#include "../src/core/pdfa.h"
 
 #include <algorithm>
 #include <array>
@@ -1868,6 +1869,119 @@ bool CheckTheme() {
     return true;
 }
 
+// The UTF-8 of the Info dictionary's text string `key`, "(ASCII)" or "<FEFF...>" (UTF-16BE). The
+// outline's entries have titles too; the Info dictionary is the file's last object.
+std::string InfoText(const std::string& pdf, const std::string& key) {
+    const size_t info = pdf.rfind("<< /Producer (");
+    const size_t at = info == std::string::npos ? info : pdf.find(key + " ", info);
+    if (at == std::string::npos) return {};
+    const size_t start = at + key.size() + 1;
+    if (pdf[start] == '(') return pdf.substr(start + 1, pdf.find(')', start) - start - 1);
+    std::u16string units;
+    for (size_t digit = start + 5; pdf[digit] != '>'; digit += 4) units += (char16_t)std::stoul(pdf.substr(digit, 4), nullptr, 16);
+    std::string utf8;
+    for (size_t i = 0; i < units.size(); i++) {
+        uint32_t cp = units[i];
+        if (cp >= 0xD800 && cp < 0xDC00 && i + 1 < units.size()) cp = 0x10000 + ((cp - 0xD800) << 10) + (units[++i] - 0xDC00);
+        if (cp < 0x80) utf8 += (char)cp;
+        else if (cp < 0x800) utf8 += {(char)(0xC0 | cp >> 6), (char)(0x80 | (cp & 0x3F))};
+        else if (cp < 0x10000) utf8 += {(char)(0xE0 | cp >> 12), (char)(0x80 | (cp >> 6 & 0x3F)), (char)(0x80 | (cp & 0x3F))};
+        else utf8 += {(char)(0xF0 | cp >> 18), (char)(0x80 | (cp >> 12 & 0x3F)), (char)(0x80 | (cp >> 6 & 0x3F)), (char)(0x80 | (cp & 0x3F))};
+    }
+    return utf8;
+}
+
+// The text of an XMP element or attribute that ends at `end`, after `start`, its references resolved.
+std::string XmpText(const std::string& pdf, const std::string& start, char end) {
+    const size_t at = pdf.find(start);
+    if (at == std::string::npos) return {};
+    const std::string raw = pdf.substr(at + start.size(), pdf.find(end, at + start.size()) - at - start.size());
+    std::string text;
+    for (size_t i = 0; i < raw.size(); i++) {
+        bool replaced = false;
+        for (const auto& [entity, ch] : { std::pair<std::string_view, char>{"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'},
+                 {"&quot;", '"'}, {"&apos;", '\''} }) {
+            if (raw.compare(i, entity.size(), entity) == 0) {
+                text += ch;
+                i += entity.size() - 1;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) text += raw[i];
+    }
+    return text;
+}
+
+// PDF/A-3b: every font embedded, the page numbers' too, as formulas show their source; links
+// printable; an sRGB output intent; an XMP packet that tells what the Info dictionary does, also
+// of the title a heading gives; and a trailer /ID, the same for the same document. With the
+// source embedded the file stays PDF 1.7 and recovers it, even with metadata that XMP would hold
+// past what recovery reads; a PDF 1.7 file whose packet claims no PDF/A-3 does not.
+bool CheckPdfA() {
+    using TinyPdf::Internal::PdfaText;
+    const auto npos = std::string::npos;
+    const std::string ampersands(600, '&');
+    if (PdfaText("a\x01\tb\xFF\xC3(c\x7F\xEF\xBF\xBE" "d\xF0\x9F\x98\x80") != "ab(cd\xF0\x9F\x98\x80" ||
+        PdfaText(ampersands).size() != 409 || PdfaText(std::string(2047, 'x') + "\xC5\xBC").size() != 2047) {
+        std::cerr << "PDF/A text mismatch" << std::endl;
+        return false;
+    }
+    std::string document = "---\ntitle: \"Q3 <A&B> \\\"x\\\" \xF0\x9F\x98\x80\"\nauthor: [Ann, Bob]\nkeywords: [a, b]\n---\n\n"
+        "# Report $x^2$\n\nSee [site](https://example.com), [below](#end) and $a+b$:\n\n$$\\sum_i i$$\n\n";
+    for (int line = 0; line < 80; line++) document += "Line " + std::to_string(line) + " of text.\n\n";
+    document += "## End\n";
+    TinyPdf::PdfOptions options;
+    options.pdfa = true;
+    options.pageNumbers = true;
+    std::string pdf;
+    std::string again;
+    std::string other;
+    const TinyPdf::BuildResult result = TinyPdf::BuildPdf(document, options, pdf);
+    TinyPdf::BuildPdf(document, options, again);
+    TinyPdf::BuildPdf("# Other\n", options, other);
+    const auto fileId = [](const std::string& file) {
+        const size_t at = file.rfind("/ID [<");
+        if (at == std::string::npos || file.compare(at + 38, 3, "> <") != 0 || file.compare(at + 73, 2, ">]") != 0) return std::string();
+        const std::string first = file.substr(at + 6, 32);
+        return first == file.substr(at + 41, 32) && first.find_first_not_of("0123456789ABCDEF") == std::string::npos ? first
+            : std::string();
+    };
+    const size_t links = CountOccurrences(pdf, "/Subtype /Link");
+    if (!result.Ok() || result.pages < 2 || pdf.rfind("%PDF-1.7\n", 0) != 0 || pdf.find("/Subtype /Type1") != npos ||
+        pdf.find("/FontFile2 ") == npos || links != 2 || CountOccurrences(pdf, "/Subtype /Link /F 4 ") != links ||
+        CountOccurrences(pdf, "q 0.45 0.45 0.45 rg\nBT /F1 9 Tf") != result.pages ||
+        pdf.find("/OutputIntents [<< /Type /OutputIntent /S /GTS_PDFA1 ") == npos ||
+        pdf.find("<< /N 3 /Length 480 >>\nstream\n") == npos || pdf.find("mntrRGB XYZ ") == npos ||
+        pdf.find("pdfaid:part=\"3\" pdfaid:conformance=\"B\"") == npos ||
+        InfoText(pdf, "/Title") != "Q3 <A&B> \"x\" \xF0\x9F\x98\x80" ||
+        XmpText(pdf, "<dc:title><rdf:Alt><rdf:li xml:lang=\"x-default\">", '<') != InfoText(pdf, "/Title") ||
+        XmpText(pdf, "<dc:creator><rdf:Seq><rdf:li>", '<') != "Ann; Bob" || InfoText(pdf, "/Author") != "Ann; Bob" ||
+        XmpText(pdf, "pdf:Keywords=\"", '"') != "a, b" || InfoText(pdf, "/Keywords") != "a, b" ||
+        XmpText(pdf, "pdf:Producer=\"", '"') != InfoText(pdf, "/Producer") || fileId(pdf).empty() || again != pdf ||
+        fileId(other).empty() || fileId(other) == fileId(pdf) ||
+        InfoText(other, "/Title") != "Other" || XmpText(other, "xml:lang=\"x-default\">", '<') != "Other") {
+        std::cerr << "PDF/A structure mismatch" << std::endl;
+        return false;
+    }
+    std::string reversible;
+    options.embedSource = true;
+    const std::string fronted = "---\ntitle: " + std::string(3000, 'x') + "\nkeywords: k" + std::string(3000, '<') +
+        "\nsubject: s" + std::string(3000, '"') + "\nauthor: a" + std::string(3000, '&') + "\n---\n\n" + document;
+    if (!TinyPdf::BuildPdf(fronted, options, reversible).Ok() || reversible.rfind("%PDF-1.7\n", 0) != 0 ||
+        RayoMd::PdfSource::Inspect(reversible, true).source != fronted) {
+        std::cerr << "PDF/A reversible profile mismatch" << std::endl;
+        return false;
+    }
+    const size_t part = reversible.find("pdfaid:part=\"3\"");
+    reversible[part + 13] = '2';
+    if (RayoMd::PdfSource::Inspect(reversible, false).status != RayoMd::PdfSource::Status::CorruptPdf) {
+        std::cerr << "a PDF 1.7 source profile without PDF/A-3 was accepted" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -2263,6 +2377,7 @@ int main() {
     if (!CheckReportJson()) return 88;
     if (!CheckCompression()) return 89;
     if (!CheckTheme()) return 90;
+    if (!CheckPdfA()) return 91;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
