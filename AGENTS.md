@@ -36,11 +36,14 @@ become a required dependency for the default lightweight package.
 ## Current Feature Surface
 
 Native PDF mode supports the core document features listed in `README.md`,
-including headings, paragraphs, lists, block quotes, fenced code blocks, pipe
-tables, rule lines, natively typeset math for a TeX subset, inline emphasis
-cleanup, clickable Markdown links, bookmarks and `#anchor` links from headings,
-standalone local images, and HTTP/HTTPS images on Windows or curl-enabled Linux
-builds with fallback text.
+including headings, paragraphs, lists (with GitHub task lists), block quotes and
+GitHub alerts, fenced code blocks, pipe tables (whose header row repeats on every
+page), rule lines, natively typeset math for a TeX subset, inline emphasis
+cleanup, clickable Markdown links (also bare URLs, email addresses and shortcut
+references), bookmarks and `#anchor` links from headings, HTML comments, `<br>`
+and character references, a document title, opt-in page numbers, standalone local
+images, and HTTP/HTTPS images on Windows or curl-enabled Linux builds with
+fallback text.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
@@ -82,7 +85,9 @@ Important image/link details:
   anchor rules (`HeadingTargets`) with explicit destinations; a link to a missing
   anchor is dropped. Renderers note a heading where its first line lands
   (`MarkHeading`, next to that line's `Ensure`): keep them together when
-  changing heading layout.
+  changing heading layout. A heading keeps room for what follows it on its page
+  (`HeadingKeep`), and a table's header row repeats after a page break (the row
+  loop goes back to row 0): keep link rectangles on the page they are drawn on.
 
 ## Architecture Map
 
@@ -289,12 +294,16 @@ GitHub CI entry points:
 - Every look-ahead of the inline parser goes through `InlineScanner`, which
   answers from tables once a paragraph has spent its byte budget. A new scan
   that runs "to the end for every opener" must go there too, or text with
-  thousands of unterminated openers becomes quadratic again.
+  thousands of unterminated openers becomes quadratic again. Matchers outside it
+  (bare URLs, shortcut references) must fail in constant time or never rescan
+  text: `CheckInlineLookahead` holds a megabyte of `http://(` and 120,000 `[`.
 - Prefer measured changes over plausible micro-optimizations.
 - `src/core/tiny_pdf.cpp` sits at GCC's `-O3` inline-unit-growth limit, so any edit
   can move which hot calls get inlined. Profile the hot paths after a change; mark
   hot helpers `RAYOMD_HOT_INLINE` and hot lambdas `RAYOMD_HOT_LAMBDA`, and keep rare
   paths in `RAYOMD_COLD` functions that do not call small hot helpers directly.
+  `TailWriter::Lit` and `Bytes` are always inlined: left to GCC, a call for each
+  one-byte separator cost 1.6 % of a warm build.
 - Keep image caches bounded. Image support can dominate memory on large or many
   remote images.
 - Do not turn optional experiments such as simdutf ON by default without fresh,

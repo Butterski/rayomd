@@ -43,7 +43,7 @@ native exporter through a small CLI.
 - Native PDF generation with no browser engine on the fast path.
 - A single Windows GUI executable and a compact Linux CLI.
 - Bounded parallel batch conversion, stdin, warm serve, and benchmark modes.
-- Unicode, clickable links, bookmarks, tables, lists, code, local images, and opt-in URL images.
+- Unicode, clickable links (also bare URLs), bookmarks, tables, task lists, GitHub alerts, code, local images, and opt-in URL images.
 - Natively typeset math for a TeX subset: no LaTeX, no browser, no embedded math fonts.
 - Optional exact Markdown recovery through reversible PDFs.
 - Optional Windows Pandoc mode when the native subset is not enough.
@@ -111,6 +111,7 @@ Common CLI workflows:
 rayomd --export input.md output.pdf
 rayomd --batch input-folder output-folder native modern normal --workers=4
 rayomd --export input.md reversible.pdf native elegant normal --embed-source
+rayomd --export input.md numbered.pdf --page-numbers
 rayomd --recover-source reversible.pdf recovered.md
 ```
 
