@@ -646,6 +646,24 @@ with a page more, and show the same text in the same order (`mutool draw -F txt`
 in one, the order in which it reads table cells next to a moved break); the watch
 fixtures run the same instructions (+0.01 %) in the same time.
 
+## Table headers on every page, October 2026
+
+A table that goes on to a new page repeats its header row there, unless it and the
+row that moved do not fit a page together, and the header row keeps a line of the
+next row with it. The three table loops (`RenderTable` in both renderers and
+`RenderMathTable`) do it the same way: the row loop goes back to row 0, then draws
+the row that moved, so the drawing code stays in one place and both rows are
+wrapped anew once per break. Keeping the header's wrapped cells for later would
+need a second set of cell buffers in the hot loop.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`93e5743`): of the 919 corpus documents (Modern style), 134 show repeated header
+rows and 17 only paginate differently; their own text is unchanged, compared as
+lines (`mutool draw -F txt`) or, where mutool reads table cells next to a moved
+break in another order, as words. Fixtures whose tables fit a page run the same
+instructions; the table fixture draws 20 more header rows on its 61 pages with
+1.7 % more instructions, about 0.3 % of them for wrapping again.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

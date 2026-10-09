@@ -3555,6 +3555,10 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
     };
 
     renderer.y -= 3.0;
+    // A table that goes on to a new page repeats its header row there, unless it and the row
+    // that moved do not fit a page together: the loop draws row 0 again, then that row.
+    double headerHeight = 0.0;  // the header row's height; 0 when it was cut into slices
+    size_t resumeRow = 0;       // the row to draw after a repeated header row, or 0
     for (size_t r = 0; r < rows.size(); r++) {
         renderer.math.Clear();
         std::vector<decltype(renderer.WrapMathCell(emptyCell, 0.0, 0.0, false))> wrapped(columns);
@@ -3619,7 +3623,18 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
             }
             continue;
         }
-        renderer.Ensure(rowHeight + 5.0);
+        if (r == 0) {
+            // The header row keeps a line of the next row with it.
+            headerHeight = rowHeight;
+            renderer.Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
+        } else if (renderer.y - rowHeight - 5.0 < renderer.margin) {
+            renderer.NewPage();
+            if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= PAGE_H - renderer.margin * 2.0) {
+                resumeRow = r;
+                r = static_cast<size_t>(-1);
+                continue;
+            }
+        }
         double top = renderer.y;
         if (r == 0) renderer.TableFill(renderer.margin, top, tableWidth, rowHeight);
         for (size_t c = 0; c < columns; c++) {
@@ -3629,6 +3644,10 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
             paintLines(wrapped[c], 0, wrapped[c].size(), cellX, top, align, r == 0);
         }
         renderer.y -= rowHeight;
+        if (resumeRow != 0) {
+            r = resumeRow - 1;
+            resumeRow = 0;
+        }
     }
     renderer.y -= 9.0;
 }
@@ -5095,6 +5114,10 @@ private:
         static const std::string emptyCell;
 
         y -= 3.0;
+        // A table that goes on to a new page repeats its header row there, unless it and the row
+        // that moved do not fit a page together: the loop draws row 0 again, then that row.
+        double headerHeight = 0.0;  // the header row's height; 0 when it was cut into slices
+        size_t resumeRow = 0;       // the row to draw after a repeated header row, or 0
         for (size_t r = 0; r < rows.size(); r++) {
             size_t maxLines = 1;
             for (size_t c = 0; c < columns; c++) {
@@ -5106,8 +5129,20 @@ private:
             size_t first = 0;
             size_t count = maxLines;
             double rowHeight = maxLines * lh + pad * 2.0;
-            if (rowHeight + 5.0 > PAGE_H - margin * 2.0) count = TallTableRowSlice(first, maxLines, lh, pad);
-            else Ensure(rowHeight + 5.0);
+            if (rowHeight + 5.0 > PAGE_H - margin * 2.0) {
+                count = TallTableRowSlice(first, maxLines, lh, pad);
+            } else if (r == 0) {
+                // The header row keeps a line of the next row with it.
+                headerHeight = rowHeight;
+                Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
+            } else if (y - rowHeight - 5.0 < margin) {
+                NewPage();
+                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= PAGE_H - margin * 2.0) {
+                    resumeRow = r;
+                    r = static_cast<size_t>(-1);
+                    continue;
+                }
+            }
             for (;;) {
                 rowHeight = count * lh + pad * 2.0;
                 double top = y;
@@ -5143,6 +5178,10 @@ private:
                 first += count;
                 if (first == maxLines) break;
                 count = TallTableRowSlice(first, maxLines, lh, pad);
+            }
+            if (resumeRow != 0) {
+                r = resumeRow - 1;
+                resumeRow = 0;
             }
         }
         y -= 9.0;
@@ -7168,6 +7207,10 @@ private:
         if (tableCells.size() < columns) tableCells = std::vector<AsciiRuns>(columns);
         const double cellWidth = std::max(16.0, colWidth - pad * 2.0);
         static const std::string emptyCell;
+        // A table that goes on to a new page repeats its header row there, unless it and the row
+        // that moved do not fit a page together: the loop draws row 0 again, then that row.
+        double headerHeight = 0.0;  // the header row's height; 0 when it was cut into slices
+        size_t resumeRow = 0;       // the row to draw after a repeated header row, or 0
         for (size_t r = 0; r < rows.size(); r++) {
             size_t maxLines = 1;
             for (size_t c = 0; c < columns; c++) {
@@ -7185,8 +7228,20 @@ private:
             size_t first = 0;
             size_t count = maxLines;
             double rowHeight = maxLines * lh + pad * 2.0;
-            if (rowHeight + 5.0 > PAGE_H - margin * 2.0) count = TallTableRowSlice(first, maxLines, lh, pad);
-            else Ensure(rowHeight + 5.0);
+            if (rowHeight + 5.0 > PAGE_H - margin * 2.0) {
+                count = TallTableRowSlice(first, maxLines, lh, pad);
+            } else if (r == 0) {
+                // The header row keeps a line of the next row with it.
+                headerHeight = rowHeight;
+                Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
+            } else if (y - rowHeight - 5.0 < margin) {
+                NewPage();
+                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= PAGE_H - margin * 2.0) {
+                    resumeRow = r;
+                    r = static_cast<size_t>(-1);
+                    continue;
+                }
+            }
             for (;;) {
                 rowHeight = count * lh + pad * 2.0;
                 double top = y;
@@ -7227,6 +7282,10 @@ private:
                 first += count;
                 if (first == maxLines) break;
                 count = TallTableRowSlice(first, maxLines, lh, pad);
+            }
+            if (resumeRow != 0) {
+                r = resumeRow - 1;
+                resumeRow = 0;
             }
         }
         y -= 9.0;

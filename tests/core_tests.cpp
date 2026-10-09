@@ -1502,6 +1502,30 @@ bool CheckHeadingKeep() {
     return true;
 }
 
+// A table that goes on over page breaks repeats its header row, tinted and bold, at the top of
+// every page it reaches; a table on one page shows it once. In both renderers, and for a table
+// with a formula, which another loop draws.
+bool CheckTableHeaderRepeat() {
+    std::string table = "| Name | Value |\n|---|---|\n";
+    for (int row = 0; row < 120; row++) table += "| item " + std::to_string(row) + " | " + std::to_string(row * 7) + " |\n";
+    for (const std::string& prefix : { std::string(), std::string("Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n") }) {
+        for (const std::string& body : { table, table + "| $x^2$ | y |\n", std::string("| Name | Value |\n|---|---|\n| a | 1 |\n") }) {
+            std::string pdf;
+            if (!Build(prefix + body, pdf)) return false;
+            const size_t pages = CountOccurrences(pdf, "/Type /Page ");
+            const size_t headers = CountOccurrences(pdf, "0.91 0.93 0.95 rg");
+            const bool single = body.size() < 100;
+            if ((single ? pages != 1 : pages < 3) || headers != pages ||
+                (prefix.empty() && CountOccurrences(pdf, "(Name) Tj") != pages)) {
+                std::cerr << "table header repeat: " << headers << " headers on " << pages << " pages ("
+                          << (prefix.empty() ? "standard" : "Unicode") << " renderer)" << std::endl;
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -1873,6 +1897,7 @@ int main() {
     if (!CheckShortcutReferences()) return 83;
     if (!CheckAlerts()) return 84;
     if (!CheckHeadingKeep()) return 85;
+    if (!CheckTableHeaderRepeat()) return 86;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
