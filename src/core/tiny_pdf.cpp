@@ -3059,6 +3059,37 @@ struct HeadingMark {
     double top = 0.0;
 };
 
+// Heading text without its footnote references (kMathTextOpen, kNoteMark ... kMathTextClose).
+RAYOMD_COLD static std::string WithoutFootnotes(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (size_t at = 0; at < text.size();) {
+        if (text[at] == Internal::kMathTextOpen && at + 1 < text.size() && text[at + 1] == Internal::kNoteMark) {
+            const size_t close = text.find(Internal::kMathTextClose, at);
+            if (close != std::string_view::npos) {
+                at = close + 1;
+                continue;
+            }
+        }
+        out += text[at++];
+    }
+    return out;
+}
+
+// The headings of a document with footnotes, without their references, for anchors, bookmarks
+// and titles; `titles` holds the text of those that had one.
+RAYOMD_COLD static const std::vector<HeadingMark>& TitledHeadings(const std::vector<HeadingMark>& headings,
+    std::vector<HeadingMark>& out, std::vector<std::string>& titles) {
+    titles.reserve(headings.size());     // no growth: the marks see into it
+    out = headings;
+    for (HeadingMark& heading : out) {
+        if (heading.text.find(Internal::kNoteMark) == std::string_view::npos) continue;
+        titles.push_back(WithoutFootnotes(heading.text));
+        heading.text = titles.back();
+    }
+    return out;
+}
+
 // Writes `text`, a heading as the parser left it, as a PDF text string: ASCII as a literal,
 // other text as UTF-16BE with its byte order mark. Control bytes, the formula markers among
 // them, are dropped. Needs room for text.size() * 4 + 6 bytes.
@@ -3547,21 +3578,82 @@ RAYOMD_COLD static std::string PercentDecoded(std::string_view text) {
     return out;
 }
 
+// A footnote reference is its number at 0.7 times the size of the text around it, raised by
+// 0.36 of that size; the notes after the text are 0.85 times the body size, a note's blocks
+// after its first paragraph indented by 16 points.
+constexpr double kNoteSizeFactor = 0.7;
+constexpr double kNoteRiseFactor = 0.36;
+constexpr double kNoteTextFactor = 0.85;
+constexpr double kNoteIndent = 16.0;
+
+// Where the footnotes are drawn: note N's text and its first reference, at [N - 1]; a negative
+// top where it is not drawn.
+struct NoteMarks {
+    struct Point {
+        size_t page = 0;
+        double top = -1.0;
+    };
+    std::vector<Point> notes;
+    std::vector<Point> references;
+
+    void MarkReference(int note, size_t page, double top) {
+        if (references.size() < (size_t)note) references.resize((size_t)note);
+        Point& point = references[(size_t)note - 1];
+        if (point.top < 0.0) point = { page, top };
+    }
+};
+
+// The number of the footnote a span stands for: an InlineMath::Note span, whose text is the
+// label, or in heading and cell text a formula that is kNoteMark and the number. 0 for any
+// other span and for a note the document does not have.
+RAYOMD_COLD static int FootnoteNumber(const Internal::Footnotes* footnotes, const Internal::InlineSpan& span) {
+    if (footnotes == nullptr) return 0;
+    if (span.math == Internal::InlineMath::Note) {
+        const auto found = footnotes->numbers.find(Internal::NormalizeReferenceLabel(span.text));
+        return found == footnotes->numbers.end() ? 0 : found->second;
+    }
+    if (span.text.size() < 2 || span.text.size() > 10 || span.text[0] != Internal::kNoteMark) return 0;
+    size_t number = 0;
+    for (size_t at = 1; at < span.text.size(); at++) {
+        if (span.text[at] < '0' || span.text[at] > '9') return 0;
+        number = number * 10 + (size_t)(span.text[at] - '0');
+    }
+    return number >= 1 && number <= footnotes->notes.size() ? (int)number : 0;
+}
+
+// The short rule above the footnotes, from (x, y) `length` to the right.
+RAYOMD_COLD static void AppendFootnoteRule(std::string& c, const char* color, double x, double y, double length) {
+    c += "q ";
+    c += color;
+    c += " RG 0.5 w ";
+    AppendF(c, x);
+    c += " ";
+    AppendF(c, y);
+    c += " m ";
+    AppendF(c, x + length);
+    c += " ";
+    AppendF(c, y);
+    c += " l S Q\n";
+}
+
 // The headings that links to "#anchor" name. The anchors are made at the first such link, so a
 // document without one does no work for them.
 class HeadingTargets {
 public:
-    HeadingTargets(const std::vector<HeadingMark>& headingMarks, bool winAnsiText, double pageHeight)
-        : headings(headingMarks), winAnsi(winAnsiText), pageTop(pageHeight) {}
+    HeadingTargets(const std::vector<HeadingMark>& headingMarks, bool winAnsiText, double pageHeight,
+        const NoteMarks& noteMarks)
+        : headings(headingMarks), winAnsi(winAnsiText), pageTop(pageHeight), notes(noteMarks) {}
 
     // Reserves the annotation of `link`, to "#fragment", in `out`; false when no heading has that
     // anchor. The fragment may be percent-encoded and differ from the anchor in case and
-    // punctuation. An empty fragment and "top" go to the top of the first page, as in a browser.
+    // punctuation. An empty fragment and "top" go to the top of the first page, as in a browser,
+    // and in a document with footnotes "^N" to note N and "^rN" to its first reference.
     RAYOMD_COLD bool Reserve(PdfObjects& pdf, const LinkRect& link, std::vector<InternalLink>& out) {
         if (!indexed) Index();
         std::string fragment(std::string_view(link.url).substr(1));
         if (winAnsi && !IsAllAscii(fragment)) fragment = RayoMd::Text::WinAnsiToUtf8(fragment);
         fragment = PercentDecoded(fragment);
+        if (!notes.notes.empty() && !fragment.empty() && fragment[0] == '^') return ReserveNote(pdf, link, fragment, out);
         auto found = anchors.find(fragment);
         if (found == anchors.end()) found = anchors.find(HeadingSlug(fragment));
         if (found != anchors.end()) {
@@ -3602,11 +3694,28 @@ private:
         }
     }
 
+    // A link to a footnote or back to its first reference; false when it names neither.
+    RAYOMD_COLD bool ReserveNote(PdfObjects& pdf, const LinkRect& link, std::string_view fragment,
+        std::vector<InternalLink>& out) {
+        const bool back = fragment.size() > 1 && fragment[1] == 'r';
+        const std::string_view digits = fragment.substr(back ? 2 : 1);
+        size_t number = 0;
+        for (const char ch : digits) {
+            if (ch < '0' || ch > '9' || number > 1000000) return false;
+            number = number * 10 + (size_t)(ch - '0');
+        }
+        const std::vector<NoteMarks::Point>& points = back ? notes.references : notes.notes;
+        if (digits.empty() || number == 0 || number > points.size() || points[number - 1].top < 0.0) return false;
+        out.push_back({ pdf.Reserve(), &link, points[number - 1].page, points[number - 1].top + 4.0 });
+        return true;
+    }
+
     const std::vector<HeadingMark>& headings;
     bool winAnsi = false;
     double pageTop = 0.0;   // the top of a page, where "#top" goes
     bool indexed = false;
     std::unordered_map<std::string, Anchor> anchors;
+    const NoteMarks& notes;
 };
 
 // "<< /Type /Annot /Subtype /Link /Rect [...] /Border [0 0 0]": the start of a link annotation;
@@ -3753,7 +3862,31 @@ public:
         return (int)items.size() - 1;
     }
 
-    const MathFormula& At(int index) const { return items[(size_t)index].formula; }
+    // A footnote reference, note `note` in text of `size`: a box `width` wide that the renderer
+    // paints (PaintNote) and no formula.
+    int AddNote(int note, double width, double size) {
+        Item item;
+        item.note = note;
+        item.noteWidth = width;
+        item.noteSize = size;
+        items.push_back(std::move(item));
+        return (int)items.size() - 1;
+    }
+    int Note(int index) const { return items[(size_t)index].note; }
+    double NoteSize(int index) const { return items[(size_t)index].noteSize; }
+
+    double Width(int index) const {
+        const Item& item = items[(size_t)index];
+        return item.note != 0 ? item.noteWidth : item.formula.Width();
+    }
+    double Ascent(int index) const {
+        const Item& item = items[(size_t)index];
+        return item.note != 0 ? item.noteSize * (kNoteRiseFactor + kNoteSizeFactor * 0.75) : item.formula.Ascent();
+    }
+    double Descent(int index) const {
+        const Item& item = items[(size_t)index];
+        return item.note != 0 ? 0.0 : item.formula.Descent();
+    }
     bool IsDisplay(int index) const { return items[(size_t)index].display; }
 
     double Emit(int index, std::string& content, double x, double baseline, const char* rgb) {
@@ -3768,6 +3901,9 @@ private:
     struct Item {
         MathFormula formula;
         bool display = false;
+        int note = 0;               // a footnote reference's number; 0 for a formula
+        double noteWidth = 0.0;
+        double noteSize = 0.0;      // the size of the text around the reference
     };
     std::vector<Item> items;
     bool used = false;
@@ -3781,9 +3917,8 @@ static MathLineExtent MeasureMathLine(const MathPool& math, const std::vector<Sp
     MathLineExtent extent;
     for (const SpanType& span : line) {
         if (span.math < 0) continue;
-        const MathFormula& formula = math.At(span.math);
-        const double over = formula.Ascent() - size;
-        const double under = formula.Descent() - (lineHeight - size);
+        const double over = math.Ascent(span.math) - size;
+        const double under = math.Descent(span.math) - (lineHeight - size);
         if (math.IsDisplay(span.math)) {
             extent.above = std::max(extent.above, over + kDisplayMathLinePad);
             extent.below = std::max(extent.below, under + kDisplayMathLinePad);
@@ -4040,6 +4175,47 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
     }
 }
 
+// The footnotes after the text, as GitHub shows them: a short rule, then each note at
+// kNoteTextFactor of the body size, its number in front and its other blocks indented
+// (Footnotes). Notes where each starts.
+template <typename RendererType>
+RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Internal::Footnotes& footnotes) {
+    renderer.Ensure(renderer.lineHeight * 2.0 + 18.0);
+    renderer.y -= 8.0;
+    AppendFootnoteRule(renderer.content, renderer.ruleColor, renderer.margin, renderer.y,
+        (renderer.pageW - renderer.margin * 2.0) / 3.0);
+    renderer.y -= 10.0;
+    const double bodySize = renderer.bodySize;
+    const double lineHeight = renderer.lineHeight;
+    renderer.bodySize = bodySize * kNoteTextFactor;
+    renderer.lineHeight = renderer.bodySize * 1.35;
+    renderer.noteMarks.notes.assign(footnotes.notes.size(), NoteMarks::Point{});
+    for (size_t index = 0; index < footnotes.notes.size(); index++) {
+        renderer.Ensure(renderer.lineHeight);
+        renderer.noteMarks.notes[index] = { renderer.pageStarts.size() - 1, renderer.y };
+        const Block& note = footnotes.notes[index];
+        renderer.RenderParagraph(note.text);
+        if (!note.children.empty()) {
+            const double margin = renderer.margin;
+            renderer.margin = margin + kNoteIndent;
+            RenderBlocks(renderer, note.children);
+            renderer.margin = margin;
+        }
+    }
+    renderer.bodySize = bodySize;
+    renderer.lineHeight = lineHeight;
+}
+
+// The blocks, then their footnotes, with the inline parser reading references to them.
+template <typename RendererType>
+RAYOMD_COLD static void RenderWithFootnotes(RendererType& renderer, const std::vector<Block>& blocks,
+    const Internal::Footnotes& footnotes) {
+    const Internal::FootnoteLabels labels(footnotes.numbers);
+    renderer.SetFootnotes(&footnotes);
+    renderer.Render(blocks);
+    renderer.RenderFootnotes();
+}
+
 // The bar beside quoted text, by Block::alert: a plain quote's, then those of the GitHub alerts
 // in GitHub's colours, whose titles follow. Arrays, not pointers: no relocations.
 constexpr char kQuoteBars[][15] = { "0.45 0.62 0.72", "0.04 0.41 0.85", "0.10 0.50 0.22", "0.51 0.31 0.87",
@@ -4099,6 +4275,11 @@ public:
     }
 
     void Render(const std::vector<Block>& blocks) { RenderBlocks(*this, blocks); }
+    // The footnotes the text refers to (ParseMarkdown), which RenderFootnotes draws after it.
+    void SetFootnotes(const Internal::Footnotes* notes) { footnotes = notes; }
+    void RenderFootnotes() {
+        if (footnotes != nullptr && !footnotes->notes.empty()) RenderFootnoteSection(*this, *footnotes);
+    }
 
     // Offset in the output buffer at which the content stream of each page starts; with
     // --compress, CompressPageContents moves the streams and these with them.
@@ -4113,6 +4294,7 @@ public:
     // PDF/A: formulas show their TeX source, as the math fonts are not embedded.
     void DisableMath() { math.Disable(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
+    const NoteMarks& Notes() const { return noteMarks; }
     double Margin() const { return margin; }
     double PageWidth() const { return pageW; }
     double PageHeight() const { return pageH; }
@@ -4122,6 +4304,8 @@ private:
     friend void RenderBlocks(RendererType&, const std::vector<Block>&);
     template <typename RendererType>
     friend void RenderMathTable(RendererType&, const Block&);
+    template <typename RendererType>
+    friend void RenderFootnoteSection(RendererType&, const Internal::Footnotes&);
 
     const TtfFont& font;
     int fontId = 0;
@@ -4156,6 +4340,8 @@ private:
     }
     UsedCidSet usedCids;
     MathPool math;
+    const Internal::Footnotes* footnotes = nullptr;
+    NoteMarks noteMarks;
     MathFallbackFont mathFallback{};
 
     // Text the standard math fonts cannot show (\text{...} in another script) is
@@ -4272,6 +4458,11 @@ private:
     // or cannot fit the line is shown as its TeX source in code style instead.
     RAYOMD_MATH_COLD void PushMathSpan(std::vector<StyledSpan>& spans, const Internal::InlineSpan& span, double size,
         double width, bool bold) {
+        const int note = FootnoteNumber(footnotes, span);
+        if (note != 0 || span.math == Internal::InlineMath::Note) {
+            PushNoteSpan(spans, note, span.text, size);
+            return;
+        }
         int index = math.Add(span.text, size, span.math == Internal::InlineMath::Display, bold, width,
             MaxMathHeight(), &mathFallback);
         StyledSpan& added = MathAppend(spans);
@@ -4282,6 +4473,31 @@ private:
             return;
         }
         added.math = index;
+    }
+
+    // A footnote reference as one box in the pool; one to a note the document lost, as written.
+    RAYOMD_MATH_COLD void PushNoteSpan(std::vector<StyledSpan>& spans, int note, const std::string& label, double size) {
+        if (note == 0) {
+            MathAppend(spans).text = Utf8ToWide("[^" + label + "]");
+            return;
+        }
+        const std::string number = std::to_string(note);
+        const double width = TextWidth(font, std::wstring(number.begin(), number.end()), size * kNoteSizeFactor);
+        MathAppend(spans).math = math.AddNote(note, width, size);
+    }
+
+    // A footnote reference: its number raised, in the link colour, linking to the note ("#^N").
+    // The first reference of a note is where the note's number links back to ("#^rN").
+    RAYOMD_MATH_COLD double PaintNote(int index, double x, double baseline) {
+        const int note = math.Note(index);
+        const double size = math.NoteSize(index);
+        const double raised = baseline + size * kNoteRiseFactor;
+        const double width = math.Width(index);
+        const std::string number = std::to_string(note);
+        PaintText(x, raised, size * kNoteSizeFactor, std::wstring(number.begin(), number.end()), linkColor);
+        AddLink(x, raised, width, size * kNoteSizeFactor, "#^" + number);
+        noteMarks.MarkReference(note, pageStarts.size() - 1, baseline + size);
+        return width;
     }
 
     std::vector<StyledSpan> ParseInlineStyled(const std::string& input, double size, double width) {
@@ -4381,7 +4597,7 @@ private:
         std::vector<double> widths(words.size());
         for (size_t index = 0; index < words.size(); index++) {
             const StyledWord& word = words[index];
-            widths[index] = word.math >= 0 ? math.At(word.math).Width() : TextWidth(font, word.text, size);
+            widths[index] = word.math >= 0 ? math.Width(word.math) : TextWidth(font, word.text, size);
         }
         const std::string noUrl;
         // Appends text to the line: merged into the previous span when the style is the
@@ -4510,7 +4726,7 @@ private:
     double MathLineWidth(const std::vector<StyledSpan>& line, double size, bool) const {
         double width = 0.0;
         for (const StyledSpan& span : line) {
-            width += span.math >= 0 ? math.At(span.math).Width() : TextWidth(font, span.text, size);
+            width += span.math >= 0 ? math.Width(span.math) : TextWidth(font, span.text, size);
         }
         return width;
     }
@@ -4521,7 +4737,8 @@ private:
         double cursor = x;
         for (const StyledSpan& span : line) {
             if (span.math >= 0) {
-                cursor += math.Emit(span.math, content, cursor, baseline, color);
+                cursor += math.Note(span.math) != 0 ? PaintNote(span.math, cursor, baseline)
+                    : math.Emit(span.math, content, cursor, baseline, color);
                 continue;
             }
             PaintText(cursor, baseline, size, span.text, color, bold);
@@ -4665,7 +4882,7 @@ private:
     // explicit line breaks or possible formulas, which take the general path.
     bool WrapStyledRuns(const std::string& text, double width, double size, StyledRuns& out) {
         if (text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
-            text.find("\\(") != std::string::npos) {
+            text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
             return false;
         }
         return WrapStyledInline(text, width, size, out);
@@ -5202,12 +5419,13 @@ private:
             y -= extent.above;
             double cursor = x;
             if (IsDisplayMathLine(math, line)) {
-                cursor = x + std::max(0.0, (width - math.At(line[0].math).Width()) * 0.5);
+                cursor = x + std::max(0.0, (width - math.Width(line[0].math)) * 0.5);
             }
             double baseline = y - bodySize;
             for (const StyledSpan& span : line) {
                 if (span.math >= 0) {
-                    cursor += math.Emit(span.math, content, cursor, baseline, textColor);
+                    cursor += math.Note(span.math) != 0 ? PaintNote(span.math, cursor, baseline)
+                        : math.Emit(span.math, content, cursor, baseline, textColor);
                     continue;
                 }
                 double spanWidth = TextWidth(font, span.text, bodySize);
@@ -6249,6 +6467,11 @@ public:
     }
 
     void Render(const std::vector<Block>& blocks) { RenderBlocks(*this, blocks); }
+    // The footnotes the text refers to (ParseMarkdown), which RenderFootnotes draws after it.
+    void SetFootnotes(const Internal::Footnotes* notes) { footnotes = notes; }
+    void RenderFootnotes() {
+        if (footnotes != nullptr && !footnotes->notes.empty()) RenderFootnoteSection(*this, *footnotes);
+    }
 
     // Offset in the output buffer at which the content stream of each page starts; with
     // --compress, CompressPageContents moves the streams and these with them.
@@ -6256,6 +6479,7 @@ public:
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     bool MathUsed() const { return math.Used(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
+    const NoteMarks& Notes() const { return noteMarks; }
     double Margin() const { return margin; }
     double PageWidth() const { return pageW; }
     double PageHeight() const { return pageH; }
@@ -6268,6 +6492,8 @@ private:
     friend void RenderBlocks(RendererType&, const std::vector<Block>&);
     template <typename RendererType>
     friend void RenderMathTable(RendererType&, const Block&);
+    template <typename RendererType>
+    friend void RenderFootnoteSection(RendererType&, const Internal::Footnotes&);
 
     ImageRegistry* images = nullptr;
     PdfStyle style = PdfStyle::Elegant;
@@ -6300,6 +6526,8 @@ private:
         headings.push_back({ level, text, pageStarts.size() - 1, y });
     }
     MathPool math;
+    const Internal::Footnotes* footnotes = nullptr;
+    NoteMarks noteMarks;
     MathFallbackFont latinMathFallback{};
 
     double MaxMathHeight() const {
@@ -6538,6 +6766,11 @@ private:
     // or cannot fit the line is shown as its TeX source in code style instead.
     RAYOMD_MATH_COLD void PushAsciiMathSpan(std::vector<AsciiSpan>& spans, const Internal::InlineSpan& span, double size,
         double width, bool bold) {
+        const int note = FootnoteNumber(footnotes, span);
+        if (note != 0 || span.math == Internal::InlineMath::Note) {
+            PushAsciiNoteSpan(spans, note, span.text, size);
+            return;
+        }
         std::string utf8;
         int index = math.Add(MathSource(span.text, utf8), size, span.math == Internal::InlineMath::Display, bold,
             width, MaxMathHeight(), MathFallback());
@@ -6549,6 +6782,31 @@ private:
             return;
         }
         added.math = index;
+    }
+
+    // A footnote reference as one box in the pool; one to a note the document lost, as written.
+    RAYOMD_MATH_COLD void PushAsciiNoteSpan(std::vector<AsciiSpan>& spans, int note, const std::string& label, double size) {
+        if (note == 0) {
+            MathAppend(spans).text = "[^" + label + "]";
+            return;
+        }
+        const std::string number = std::to_string(note);
+        const double width = AsciiTextWidth(number, size * kNoteSizeFactor, StandardTextFont::Regular);
+        MathAppend(spans).math = math.AddNote(note, width, size);
+    }
+
+    // A footnote reference: its number raised, in the link colour, linking to the note ("#^N").
+    // The first reference of a note is where the note's number links back to ("#^rN").
+    RAYOMD_MATH_COLD double PaintNote(int index, double x, double baseline) {
+        const int note = math.Note(index);
+        const double size = math.NoteSize(index);
+        const double raised = baseline + size * kNoteRiseFactor;
+        const double width = math.Width(index);
+        const std::string number = std::to_string(note);
+        Text(x, raised, size * kNoteSizeFactor, number, "F1", linkColor);
+        AddLink(x, raised, width, size * kNoteSizeFactor, "#^" + number);
+        noteMarks.MarkReference(note, pageStarts.size() - 1, baseline + size);
+        return width;
     }
 
     std::vector<AsciiSpan> ParseAsciiLinkSpans(const std::string& text, double size, double width) {
@@ -6653,7 +6911,7 @@ private:
         std::vector<double> widths(words.size());
         for (size_t index = 0; index < words.size(); index++) {
             const AsciiWord& word = words[index];
-            widths[index] = word.math >= 0 ? math.At(word.math).Width() : AsciiTextWidth(word.text, size, wordFont(word));
+            widths[index] = word.math >= 0 ? math.Width(word.math) : AsciiTextWidth(word.text, size, wordFont(word));
         }
         // Appends text to the line: merged into the previous span when the style is the
         // same (never into a formula), as AppendAsciiWord does for plain text.
@@ -6768,7 +7026,7 @@ private:
     double MathLineWidth(const std::vector<AsciiSpan>& line, double size, bool bold) const {
         double width = 0.0;
         for (const AsciiSpan& span : line) {
-            width += span.math >= 0 ? math.At(span.math).Width() : MathTextWidth(span.text, size, false, bold);
+            width += span.math >= 0 ? math.Width(span.math) : MathTextWidth(span.text, size, false, bold);
         }
         return width;
     }
@@ -6779,7 +7037,8 @@ private:
         double cursor = x;
         for (const AsciiSpan& span : line) {
             if (span.math >= 0) {
-                cursor += math.Emit(span.math, content, cursor, baseline, color);
+                cursor += math.Note(span.math) != 0 ? PaintNote(span.math, cursor, baseline)
+                    : math.Emit(span.math, content, cursor, baseline, color);
                 continue;
             }
             Text(cursor, baseline, size, span.text, bold ? "F2" : "F1", color);
@@ -6924,7 +7183,7 @@ private:
     // with explicit line breaks or possible formulas, which take the general path.
     bool WrapAsciiRuns(const std::string& text, double width, double size, AsciiRuns& out) {
         if (text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
-            text.find("\\(") != std::string::npos) {
+            text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
             return false;
         }
         return WrapAsciiInline(text, width, size, 0, out);
@@ -7326,12 +7585,13 @@ private:
             y -= extent.above;
             double cursor = x;
             if (IsDisplayMathLine(math, line)) {
-                cursor = x + std::max(0.0, (width - math.At(line[0].math).Width()) * 0.5);
+                cursor = x + std::max(0.0, (width - math.Width(line[0].math)) * 0.5);
             }
             double baseline = y - bodySize;
             for (const AsciiSpan& span : line) {
                 if (span.math >= 0) {
-                    cursor += math.Emit(span.math, content, cursor, baseline, textColor);
+                    cursor += math.Note(span.math) != 0 ? PaintNote(span.math, cursor, baseline)
+                        : math.Emit(span.math, content, cursor, baseline, textColor);
                     continue;
                 }
                 const bool code = (span.style & kStyleCode) != 0;
@@ -7954,9 +8214,10 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     // Character references come out as the WinAnsi codes the standard fonts show.
     const Internal::WinAnsiReferences references;
     std::vector<Block> blocks;
+    Internal::Footnotes footnotes;
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
-        blocks = ParseMarkdown(text);
+        blocks = ParseMarkdown(text, &footnotes);
     }
     PdfObjects pdf;
     int pagesId = pdf.Reserve();
@@ -7973,12 +8234,18 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     StandardRenderer renderer(pdfBytes, options.style, options.margin, options.pageSize, &imageRegistry, winAnsi, palette);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
-        renderer.Render(blocks);
+        if (footnotes.notes.empty()) renderer.Render(blocks);
+        else RenderWithFootnotes(renderer, blocks, footnotes);
     }
+    // The headings without their footnote references, for anchors, bookmarks and titles.
+    std::vector<HeadingMark> titledHeadings;
+    std::vector<std::string> headingTitles;
+    const std::vector<HeadingMark>& headings = footnotes.notes.empty() ? renderer.Headings()
+        : TitledHeadings(renderer.Headings(), titledHeadings, headingTitles);
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
-    HeadingTargets headingTargets(renderer.Headings(), winAnsi, renderer.PageHeight());
+    HeadingTargets headingTargets(headings, winAnsi, renderer.PageHeight(), renderer.Notes());
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds =
         AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks, false);
@@ -7994,7 +8261,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     std::vector<std::string> bands;   // a theme's header and footer, one stream per page
     std::string cover;                // and its cover page
     if (Internal::HasThemeBands(options.theme) || options.theme.cover) {
-        LayOutTheme(options, StandardThemeText(), metadata, renderer.Headings(), winAnsi, renderer.PageStarts().size(),
+        LayOutTheme(options, StandardThemeText(), metadata, headings, winAnsi, renderer.PageStarts().size(),
             { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin() }, logo, palette, bands, cover);
     }
     std::vector<bool> flatePages;   // --compress: the pages whose content stream is compressed
@@ -8063,11 +8330,11 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     AppendLanguage(catalog, metadata);
     if (coverId != 0) catalog += kCoverPageLabels;
     std::string outline;
-    AddOutline(pdf, catalog, renderer.Headings(), pageIds, winAnsi, outline);
+    AddOutline(pdf, catalog, headings, pageIds, winAnsi, outline);
     if (options.embedSource) AddReversibleSource(pdf, catalog, source);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));
-    int infoId = pdf.Add(InfoDictionary("RayoMD Native Standard PDF", metadata, renderer.Headings(), winAnsi));
+    int infoId = pdf.Add(InfoDictionary("RayoMD Native Standard PDF", metadata, headings, winAnsi));
 
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
     stats.pages = static_cast<uint32_t>(pageStarts.size() + (coverId != 0));
@@ -8219,9 +8486,10 @@ RAYOMD_COLD static const TtfFont* BetterFontFor(const TtfFont& font, const CidLi
 static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& font, const PdfOptions& options,
     std::string& pdfBytes, const TtfFont** betterFont, size_t& missingCharacters, BuildResult& stats) {
     std::vector<Block> blocks;
+    Internal::Footnotes footnotes;
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
-        blocks = ParseMarkdown(markdown);
+        blocks = ParseMarkdown(markdown, &footnotes);
     }
 
     PdfObjects pdf;
@@ -8241,12 +8509,18 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (options.pdfa) renderer.DisableMath();
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
-        renderer.Render(blocks);
+        if (footnotes.notes.empty()) renderer.Render(blocks);
+        else RenderWithFootnotes(renderer, blocks, footnotes);
     }
+    // The headings without their footnote references, for anchors, bookmarks and titles.
+    std::vector<HeadingMark> titledHeadings;
+    std::vector<std::string> headingTitles;
+    const std::vector<HeadingMark>& headings = footnotes.notes.empty() ? renderer.Headings()
+        : TitledHeadings(renderer.Headings(), titledHeadings, headingTitles);
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
-    HeadingTargets headingTargets(renderer.Headings(), false, renderer.PageHeight());
+    HeadingTargets headingTargets(headings, false, renderer.PageHeight(), renderer.Notes());
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds =
         AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa);
@@ -8259,7 +8533,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     std::vector<std::string> bands;
     std::string cover;
     if (Internal::HasThemeBands(options.theme) || options.theme.cover || (options.pdfa && options.pageNumbers)) {
-        LayOutTheme(options, UnicodeThemeText(font, renderer.Cids()), metadata, renderer.Headings(), false,
+        LayOutTheme(options, UnicodeThemeText(font, renderer.Cids()), metadata, headings, false,
             renderer.PageStarts().size(), { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin() }, logo, palette,
             bands, cover);
     }
@@ -8383,17 +8657,17 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     AppendLanguage(catalog, metadata);
     if (coverId != 0) catalog += kCoverPageLabels;
     std::string outline;
-    AddOutline(pdf, catalog, renderer.Headings(), pageIds, false, outline);
+    AddOutline(pdf, catalog, headings, pageIds, false, outline);
     const char* const producer = "RayoMD Native Tiny PDF";
     if (options.pdfa) {
-        AddPdfaCatalogEntries(pdf, catalog, metadata, renderer.Headings(), producer,
+        AddPdfaCatalogEntries(pdf, catalog, metadata, headings, producer,
             options.embedSource ? std::string_view(markdown) : std::string_view());
     }
     if (options.embedSource) AddReversibleSource(pdf, catalog, markdown, !options.pdfa);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));
     const std::vector<HeadingMark> noHeadings;      // PDF/A: `metadata` has the title
-    int infoId = pdf.Add(InfoDictionary(producer, metadata, options.pdfa ? noHeadings : renderer.Headings(), false));
+    int infoId = pdf.Add(InfoDictionary(producer, metadata, options.pdfa ? noHeadings : headings, false));
 
     // PDF/A-3 is PDF 1.7, also with the source embedded, and has a file identifier.
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource && !options.pdfa, options.pdfa);

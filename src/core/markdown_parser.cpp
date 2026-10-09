@@ -1,4 +1,5 @@
 #include "markdown_parser.h"
+#include "footnotes.h"
 #include "inline_markdown.h"
 #include "../common/text_utils.h"
 
@@ -784,8 +785,8 @@ static bool ParseReferenceDefinition(const std::vector<std::string_view>& lines,
     if (LeadingColumns(line, &indentBytes) > 3) return false;
     std::string_view value = line.substr(indentBytes);
     if (value.empty() || value.front() != '[') return false;
-    // "[^label]:" starts a footnote definition (GitHub Flavored Markdown). Footnotes are not
-    // rendered, so the line must stay visible text instead of vanishing as a link definition.
+    // "[^label]:" starts a footnote definition (GitHub Flavored Markdown), never a link
+    // definition: without footnotes (ParseMarkdown's) the line stays visible text.
     if (value.size() > 1 && value[1] == '^') return false;
     size_t close = value.find(']');
     if (close == std::string_view::npos || close == 1 || close + 1 >= value.size() || value[close + 1] != ':') {
@@ -1131,7 +1132,25 @@ static void FindTableMath(std::string_view line, size_t rowIndex, std::vector<st
     }
 }
 
-static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth) {
+// Whether line `line` of a level is paragraph text, for ReadFootnoteDefinition's lazy lines.
+static bool IsTextLine(const void* infos, size_t line) {
+    return (*static_cast<const std::vector<LineInfo>*>(infos))[line].kind == LineKind::Plain;
+}
+
+// Whether the table at lines[start] (its header, separator and rows) has a "[^" in a line,
+// so that a cell may refer to a footnote.
+static RAYOMD_NOINLINE bool TableMayReferToNote(const std::vector<std::string_view>& lines,
+    const std::vector<LineInfo>& infos, const std::vector<unsigned char>& suppressed, size_t start) {
+    for (size_t line = start; line < lines.size(); line++) {
+        if (line >= start + 2 && (infos[line].kind != LineKind::Plain || (!suppressed.empty() && suppressed[line] != 0))) {
+            break;
+        }
+        if (lines[line].find("[^") != std::string_view::npos) return true;
+    }
+    return false;
+}
+
+static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth, FootnoteParse* notes) {
     std::vector<std::string_view> lines = SplitLineViews(markdown);
     std::vector<LineInfo> infos;
     infos.reserve(lines.size());
@@ -1143,8 +1162,15 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
     if (hasMathOpeners) ResolveMathOpeners(lines, infos);
 
     ReferenceDefinitions definitions;
+    // Lines that are a link definition (1) or a footnote definition (2), which leave the text.
     std::vector<unsigned char> suppressed;
-    if (markdown.find("]:") != std::string::npos) {
+    // Every link or footnote definition has "]:", and a document without it can refer to no note.
+    const bool definitionSyntax = markdown.find("]:") != std::string::npos;
+    if (notes != nullptr && depth == 0) notes->possible = definitionSyntax;
+    // Text that may refer to a footnote waits in headings and tables until all are known.
+    const bool notesPossible = notes != nullptr && notes->possible;
+    const size_t firstNote = notes != nullptr ? notes->found.size() : 0;
+    if (definitionSyntax) {
         suppressed.assign(lines.size(), 0);
         std::string_view activeFence;
         for (size_t index = 0; index < lines.size();) {
@@ -1163,6 +1189,15 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 index++;
                 continue;
             }
+            const std::string_view head = infos[index].trimmed;
+            if (notes != nullptr && head.size() > 4 && head[0] == '[' && head[1] == '^') {
+                const size_t noteLines = ReadFootnoteDefinition(lines, index, IsTextLine, &infos, *notes);
+                if (noteLines != 0) {
+                    for (size_t offset = 0; offset < noteLines; offset++) suppressed[index + offset] = 2;
+                    index += noteLines;
+                    continue;
+                }
+            }
             std::string label;
             ReferenceDefinition definition;
             size_t consumed = 0;
@@ -1175,6 +1210,8 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             index++;
         }
     }
+    // The footnotes defined at this level, parsed once its link definitions are known.
+    if (notes != nullptr && notes->found.size() > firstNote) DefineFootnotes(firstNote, definitions, depth, *notes);
     auto isSuppressed = [&](size_t index) {
         return !suppressed.empty() && suppressed[index] != 0;
     };
@@ -1209,6 +1246,11 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         int setextLevel = 0;
         if (info.kind == LineKind::Plain && i + 1 < lines.size() && !isSuppressed(i + 1) &&
             ParseSetextUnderline(lines[i + 1], setextLevel)) {
+            if (notesPossible && trimmed.find("[^") != std::string_view::npos) {
+                AppendPendingHeading(blocks, setextLevel, trimmed, definitions, *notes);
+                i += 2;
+                continue;
+            }
             bool headingHasMath = false;
             std::string heading = definitions.empty() || trimmed.find('[') == std::string_view::npos ?
                 StripInlineMarkdownKeepMath(trimmed, headingHasMath) :
@@ -1320,6 +1362,9 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             std::vector<std::vector<std::string>> rows;
             std::vector<TableMathCell> mathCells;
             rows.reserve(8);
+            // A table that may refer to a footnote keeps its cells as Markdown, formulas
+            // included, until all footnotes are known.
+            const bool notesPending = notesPossible && TableMayReferToNote(lines, infos, suppressed, i);
             // Reference links resolve cell by cell, so a link target cannot split a row.
             auto addRow = [&](std::string_view line, std::vector<std::string> row) {
                 if (!definitions.empty()) {
@@ -1327,7 +1372,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                         if (cell.find('[') != std::string::npos) cell = ResolveReferenceLinks(cell, definitions);
                     }
                 }
-                FindTableMath(line, rows.size(), row, mathCells);
+                if (!notesPending) FindTableMath(line, rows.size(), row, mathCells);
                 rows.push_back(std::move(row));
             };
             addRow(lines[i], SplitTableCells(lines[i]));
@@ -1347,7 +1392,10 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             table.type = BlockType::Table;
             table.rows = std::move(rows);
             table.aligns = std::move(aligns);
-            if (!mathCells.empty()) {
+            if (notesPending) {
+                table.notesPending = 1;
+                notes->pending = true;
+            } else if (!mathCells.empty()) {
                 // A table with formulas shows its other cells as plain text. Literal control
                 // bytes leave every cell first, so the only kMathText* bytes in this table
                 // are the ones written below.
@@ -1366,6 +1414,11 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         }
 
         if (info.kind == LineKind::Heading) {
+            if (notesPossible && info.text.find("[^") != std::string_view::npos) {
+                AppendPendingHeading(blocks, info.level, info.text, definitions, *notes);
+                i++;
+                continue;
+            }
             bool headingHasMath = false;
             std::string heading = definitions.empty() || info.text.find('[') == std::string_view::npos ?
                 StripInlineMarkdownKeepMath(info.text, headingHasMath) :
@@ -1467,7 +1520,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                     itemMarkdown.resize(single.size());
                     item.text = std::move(itemMarkdown);
                 } else {
-                    item.children = ParseMarkdownImpl(itemMarkdown, depth + 1);
+                    item.children = ParseMarkdownImpl(itemMarkdown, depth + 1, notes);
                 }
             } else {
                 item.text = StripInlineMarkdown(itemMarkdown);
@@ -1491,7 +1544,8 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                     i++;
                     continue;
                 }
-                if (allowLazyContinuation && infos[i].kind == LineKind::Plain) {
+                // A footnote definition starts a block of its own, which no lazy line can go into.
+                if (allowLazyContinuation && infos[i].kind == LineKind::Plain && (suppressed.empty() || suppressed[i] != 2)) {
                     quoteMarkdown.push_back('\n');
                     quoteMarkdown.append(lines[i]);
                     i++;
@@ -1508,7 +1562,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 if (IsSingleParagraphLine(quoteMarkdown)) {
                     AppendBlock(quote.children, BlockType::Paragraph).text = std::move(quoteMarkdown);
                 } else {
-                    quote.children = ParseMarkdownImpl(quoteMarkdown, depth + 1);
+                    quote.children = ParseMarkdownImpl(quoteMarkdown, depth + 1, notes);
                 }
             } else {
                 quote.text = StripInlineMarkdown(quoteMarkdown);
@@ -1539,8 +1593,13 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
 
     return blocks;
 }
-std::vector<Block> ParseMarkdown(const std::string& markdown) {
-    return ParseMarkdownImpl(markdown, 0);
+
+std::vector<Block> ParseMarkdownLevel(const std::string& markdown, int depth, FootnoteParse* notes) {
+    return ParseMarkdownImpl(markdown, depth, notes);
+}
+
+std::vector<Block> ParseMarkdown(const std::string& markdown, Footnotes* footnotes) {
+    return footnotes == nullptr ? ParseMarkdownImpl(markdown, 0, nullptr) : ParseWithFootnotes(markdown, *footnotes);
 }
 
 

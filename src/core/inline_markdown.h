@@ -14,6 +14,7 @@ enum class InlineMath : unsigned char {
     None,
     Inline,   // $...$ or \( ... \)
     Display,  // $$...$$ inside paragraph text
+    Note,     // a footnote reference, "[^label]", whose text is the label: one box, like a formula
 };
 
 // Source-size caps for math recognised inside inline text, so one stray '$' can
@@ -128,6 +129,21 @@ public:
 
 private:
     bool previous;
+};
+
+// While one lives, the inline parser on this thread reads "[^label]" as a footnote reference
+// (InlineMath::Note) when `numbers` has the label, normalized as a link label is. "[^1](url)"
+// stays a link.
+class FootnoteLabels {
+public:
+    explicit FootnoteLabels(const std::unordered_map<std::string, int>& numbers);
+    ~FootnoteLabels();
+    FootnoteLabels(const FootnoteLabels&) = delete;
+    FootnoteLabels& operator=(const FootnoteLabels&) = delete;
+
+private:
+    const std::unordered_map<std::string, int>* previous;
+    size_t previousBytes;
 };
 
 } // namespace TinyPdf::Internal

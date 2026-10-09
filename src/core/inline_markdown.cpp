@@ -48,6 +48,12 @@ std::string NormalizeSymbols(std::string value) {
 // Whether the inline parser on this thread writes character references as WinAnsi codes.
 thread_local bool tWinAnsiReferences = false;
 
+// The footnote labels the inline parser on this thread reads "[^label]" with, or null, and the
+// most bytes a reference to one of them can take between "[^" and "]": a label of the table
+// can grow or shrink when it is normalized, but not to less than a third of its bytes.
+thread_local const std::unordered_map<std::string, int>* tFootnoteLabels = nullptr;
+thread_local size_t tFootnoteLabelBytes = 0;
+
 // The longest name is "thetasym": names in place, without a pointer to relocate each.
 struct NamedReference {
     char name[9];
@@ -402,6 +408,11 @@ public:
         Add(out.text.size()).math = display ? InlineMath::Display : InlineMath::Inline;
     }
 
+    // A footnote reference: its label as the text of a run of its own, like a formula.
+    void Note() {
+        Add(out.text.size()).math = InlineMath::Note;
+    }
+
     // A <br>: one space in a run of its own, at which the wrappers end the line and which
     // other readers take as the space it is. Text after it never joins it.
     void Break() {
@@ -714,6 +725,23 @@ RAYOMD_NOINLINE bool ParseLinkedImageAt(InlineScanner& scan, size_t start, Inlin
     link.target = source.substr(close + 2, end - (close + 2));
     link.end = end + 1;
     return true;
+}
+
+// The end of the footnote reference at source[at], "[^label]" with a label of 1 to 999 bytes
+// without white space or ']' (as cmark-gfm reads it), when tFootnoteLabels has the label;
+// npos otherwise. Only as far as the longest label reaches: text full of "[^" costs no more
+// than that much per opener.
+RAYOMD_NOINLINE size_t FootnoteReferenceEnd(std::string_view source, size_t at) {
+    const size_t begin = at + 2;
+    const size_t limit = std::min(source.size(), begin + tFootnoteLabelBytes);
+    size_t end = begin;
+    for (; end < limit && source[end] != ']'; end++) {
+        const char ch = source[end];
+        if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\0') return std::string_view::npos;
+    }
+    if (end >= source.size() || source[end] != ']' || end == begin) return std::string_view::npos;
+    const bool known = tFootnoteLabels->count(NormalizeReferenceLabel(source.substr(begin, end - begin))) != 0;
+    return known ? end + 1 : std::string_view::npos;
 }
 
 // Returns the index of the first closing delimiter of a math body that starts at
@@ -1092,6 +1120,19 @@ WinAnsiReferences::~WinAnsiReferences() {
     tWinAnsiReferences = previous;
 }
 
+FootnoteLabels::FootnoteLabels(const std::unordered_map<std::string, int>& numbers)
+    : previous(tFootnoteLabels), previousBytes(tFootnoteLabelBytes) {
+    size_t longest = 0;
+    for (const auto& entry : numbers) longest = std::max(longest, entry.first.size());
+    tFootnoteLabels = &numbers;
+    tFootnoteLabelBytes = std::min<size_t>(999, longest * 3 + 4);
+}
+
+FootnoteLabels::~FootnoteLabels() {
+    tFootnoteLabels = previous;
+    tFootnoteLabelBytes = previousBytes;
+}
+
 std::string NormalizeReferenceLabel(std::string_view label) {
     label = TrimView(label);
     std::string normalized;
@@ -1294,6 +1335,16 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
                 }
                 i = link.end;
                 continue;
+            }
+            if (tFootnoteLabels != nullptr && i + 1 < source.size() && source[i + 1] == '^') {
+                const size_t end = FootnoteReferenceEnd(source, i);
+                if (end != std::string_view::npos) {
+                    flush();
+                    text.append(source.data() + i + 2, end - i - 3);
+                    writer.Note();
+                    i = end;
+                    continue;
+                }
             }
         }
         if (source[i] == '`') {

@@ -1113,8 +1113,8 @@ bool CheckTallTableRows() {
     return true;
 }
 
-// "[^1]: text" is a footnote definition and stays visible text; only "[label]: target" is
-// a link reference definition, which disappears.
+// Without footnotes "[^1]: text" stays visible text, never a link reference definition, which
+// disappears ("[label]: target"); CheckFootnotes covers footnotes.
 bool CheckFootnoteDefinitions() {
     using TinyPdf::Internal::Block;
     using TinyPdf::Internal::BlockType;
@@ -1982,6 +1982,69 @@ bool CheckPdfA() {
     return true;
 }
 
+// Footnotes as GitHub reads them: numbered by first reference in reading order, the notes'
+// own references after all those of the text; a repeated reference keeps its number, a label
+// is matched without case and its first definition counts; undefined references, links, code
+// and escapes stay text, and an unused definition (with what it refers to) is left out. A
+// definition interrupts a paragraph, goes on in lazy lines and in lines indented four columns
+// (eight make code), and may stand in a quote or a list item. Headings and table cells get
+// references as markers. Both renderers draw each reference as a link to its note and each
+// note's number as a link back.
+bool CheckFootnotes() {
+    using TinyPdf::Internal::Block;
+    using TinyPdf::Internal::BlockType;
+    using TinyPdf::Internal::Footnotes;
+    using TinyPdf::Internal::ParseMarkdown;
+    const std::string order = "Text[^a] and[^b] again[^a] and [^missing].\n\n[^b]: Bee.\n[^a]: Ay with [^c].\n"
+        "[^c]: Cee.\n[^unused]: Unused[^x].\n[^x]: Ex.\n";
+    Footnotes notes;
+    std::vector<Block> blocks = ParseMarkdown(order, &notes);
+    const std::unordered_map<std::string, int> orderNumbers = {{"a", 1}, {"b", 2}, {"c", 3}};
+    if (blocks.size() != 1 || blocks[0].text != "Text[^a] and[^b] again[^a] and [^missing]." || notes.notes.size() != 3 ||
+        notes.numbers != orderNumbers || notes.notes[0].text != "[1.](#^r1) Ay with [^c]." ||
+        notes.notes[1].text != "[2.](#^r2) Bee." || notes.notes[2].text != "[3.](#^r3) Cee.") {
+        std::cerr << "footnote numbering mismatch" << std::endl;
+        return false;
+    }
+    const std::string syntax = "Interrupt[^1]\n[^1]: def\nlazy line\n\nafter[^Code]\n\n[^code]: Para one.\n\n"
+        "        indented code\n\n    Para two.\n\nNot in note.\n\n> quoted[^q]\n> [^q]: in quote\n\n- item[^l]\n\n"
+        "  [^l]: in list\n\n[^z](https://e.com) `[^z]` \\[^z] [^two words]\n\n[^z]: zed\n[^Code]: duplicate\n";
+    blocks = ParseMarkdown(syntax, &notes);
+    const std::unordered_map<std::string, int> syntaxNumbers = {{"1", 1}, {"code", 2}, {"q", 3}, {"l", 4}};
+    if (blocks.size() != 6 || blocks[0].text != "Interrupt[^1]" || blocks[1].text != "after[^Code]" ||
+        blocks[2].text != "Not in note." || blocks[3].type != BlockType::Quote || blocks[3].children.size() != 1 ||
+        blocks[4].type != BlockType::Bullet || blocks[4].text != "item[^l]" || notes.numbers != syntaxNumbers ||
+        notes.notes.size() != 4 || notes.notes[0].text != "[1.](#^r1) def lazy line" ||
+        notes.notes[1].text != "[2.](#^r2) Para one." || notes.notes[1].children.size() != 2 ||
+        notes.notes[1].children[0].type != BlockType::Code || notes.notes[1].children[0].text != "indented code" ||
+        notes.notes[1].children[1].text != "Para two." || notes.notes[2].text != "[3.](#^r3) in quote" ||
+        notes.notes[3].text != "[4.](#^r4) in list") {
+        std::cerr << "footnote definition syntax mismatch" << std::endl;
+        return false;
+    }
+    blocks = ParseMarkdown("Case[^Note] and[^NOTE].\n\n[^note]: first\n[^NOTE]: second\n", &notes);
+    if (notes.notes.size() != 1 || notes.notes[0].text != "[1.](#^r1) first" || notes.numbers.size() != 1) {
+        std::cerr << "footnote label matching mismatch" << std::endl;
+        return false;
+    }
+    blocks = ParseMarkdown("# Head[^h] `[^h]`\n\n| a | b[^t] |\n|---|---|\n| $x$ | **2** |\n\n[^h]: H.\n[^t]: T.\n", &notes);
+    if (blocks.size() != 2 || !blocks[0].hasMath || blocks[0].text != "Head\x01\x03" "1\x02 [^h]" || !blocks[1].hasMath ||
+        blocks[1].rows[0][1] != "b\x01\x03" "2\x02" || blocks[1].rows[1][0] != "\x01x\x02" || blocks[1].rows[1][1] != "2" ||
+        notes.notes.size() != 2) {
+        std::cerr << "footnote heading and table mismatch" << std::endl;
+        return false;
+    }
+    for (const std::string& text : { order, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + order }) {
+        std::string pdf;
+        // References a, b, a and c in note 1, and three notes' numbers back.
+        if (!Build(text, pdf) || CountOccurrences(pdf, "/Dest [") != 7 || pdf.find(" 8.05 Tf") == std::string::npos) {
+            std::cerr << "footnote rendering mismatch" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -2378,6 +2441,7 @@ int main() {
     if (!CheckCompression()) return 89;
     if (!CheckTheme()) return 90;
     if (!CheckPdfA()) return 91;
+    if (!CheckFootnotes()) return 92;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

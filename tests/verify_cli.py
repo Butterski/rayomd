@@ -147,6 +147,17 @@ def verify_pdfa(binary: Path, root: Path) -> None:
         raise AssertionError("--pdfa --embed-source did not recover the source")
 
 
+def verify_footnotes(binary: Path, root: Path) -> None:
+    """Footnotes: a reference links to its note after the text and the note's number back to it;
+    a reference to no note and the definition's own line are not links."""
+    source = root / "notes.md"
+    source.write_text("Claim[^a] and [^none].\n\n[^a]: The note.\n", encoding="utf-8")
+    notes_pdf = root / "notes.pdf"
+    run(binary, "--export", str(source), str(notes_pdf))
+    if require_pdf(notes_pdf, b"/Dest [").count(b"/Dest [") != 2:
+        raise AssertionError("footnotes: expected a link to the note and one back")
+
+
 def pdf_streams(data: bytes) -> list[tuple[bytes, bytes]]:
     """The dictionary and payload of every stream of a PDF, in file order."""
     streams = []
@@ -231,6 +242,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_compression(binary, root)
         verify_theme(binary, root)
         verify_pdfa(binary, root)
+        verify_footnotes(binary, root)
         verify_batch(binary, root)
 
         if os.name == "nt":

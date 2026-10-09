@@ -43,7 +43,7 @@ native exporter through a small CLI.
 - Native PDF generation with no browser engine on the fast path.
 - A single Windows GUI executable and a compact Linux CLI.
 - Bounded parallel batch conversion, stdin, warm serve, and benchmark modes.
-- Unicode, clickable links (also bare URLs), bookmarks, tables, task lists, GitHub alerts, code, local images, and opt-in URL images.
+- Unicode, clickable links (also bare URLs), bookmarks, tables, task lists, GitHub alerts, footnotes (as on GitHub, at the end of the text), code, local images, and opt-in URL images.
 - Natively typeset math for a TeX subset: no LaTeX, no browser, no embedded math fonts.
 - Optional exact Markdown recovery through reversible PDFs.
 - Optional compression (`--compress`) with a built-in DEFLATE encoder: text-heavy PDFs come out two to five times smaller.

@@ -99,9 +99,10 @@ function(rayomd_experiments target)
 endfunction()
 
 # Recovery is cold, opt-in code, the math parser and layout run only for documents with
-# formulas, options and themes are parsed once per run, and a theme's header, footer and cover
-# and PDF/A's metadata are made once per document. Optimize these translation units for
-# package size while leaving the performance-critical renderer on the normal release flags.
+# formulas, options and themes are parsed once per run, and a theme's header, footer and cover,
+# PDF/A's metadata and the footnotes' numbering are made once per document. Optimize these
+# translation units for package size while leaving the performance-critical renderer and
+# parser on the normal release flags.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
         src/core/rayomd_pdf_source.cpp
@@ -110,6 +111,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/export_options.cpp
         src/core/theme.cpp
         src/core/pdfa.cpp
+        src/core/footnotes.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
     # The opt-in DEFLATE encoder: -O2 is within 1 % of -O3 on RayoMD's streams at half the code.
     set_source_files_properties(src/core/flate.cpp PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
@@ -126,6 +128,7 @@ if(WIN32)
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
+        src/core/footnotes.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp
         src/common/text_utils.cpp
@@ -190,6 +193,7 @@ else()
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
+        src/core/footnotes.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp
         src/common/text_utils.cpp
@@ -226,6 +230,7 @@ if(BUILD_TESTING)
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
+        src/core/footnotes.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp
         src/common/text_utils.cpp

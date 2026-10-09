@@ -47,6 +47,15 @@ the YAML subset), opt-in page numbers, page sizes (A4 by default, presets,
 landscape and custom sizes; the renderers' `pageW`/`pageH`, never constants),
 standalone local images, and HTTP/HTTPS images on Windows or
 curl-enabled Linux builds with fallback text.
+Footnotes as on GitHub (`[^label]` and `[^label]:` definitions, also in quotes and
+list items): numbered by first reference in reading order, drawn as raised link
+numbers (one `MathPool` box each, so they take the cold formula paths and the fast
+paragraph path stays as it was), and set after the text at 0.85 of the body size,
+each note's number linking back. Only `ParseMarkdown(markdown, &footnotes)` reads
+them; `footnotes.cpp` holds their numbering, kept out of the parser's translation
+unit, where it moved GCC's inlining of the line classifier. A table with a reference
+shows its cells as plain text, as one with a formula does. Without definitions the
+PDF bytes stay as they are.
 Opt-in compression (`--compress`, `PdfOptions::compress`) writes page content, the
 font program and both CMaps as FlateDecode where that makes the file smaller, with
 RayoMD's own DEFLATE encoder; never the XMP metadata or an embedded source, which
@@ -123,6 +132,11 @@ Important image/link details:
 
 - `src/core/markdown_parser.cpp`
   Internal Markdown block model and parser; keep renderer-independent document cleanup here.
+
+- `src/core/footnotes.h` and `src/core/footnotes.cpp`
+  Footnotes in the parser: reading a definition's lines, the numbering by first
+  reference once the document is read, and the plain text with reference markers of
+  headings and tables that waited for it (`Block::notesPending`). Built at `-Os`.
 
 - `src/core/rayomd_pdf_source.h` and `src/core/rayomd_pdf_source.cpp`
   Bounded reversible-profile metadata, SHA-256 integrity, hostile-input

@@ -870,6 +870,47 @@ in `tiny_pdf.cpp` (`RenderTable` +2.1 KB, `RenderCode` +1.1 KB) and splitting bo
 builders into hot and cold parts. Keeping `ThemePalette` and `TtfFont::Load` out
 of line saved only 288 bytes.
 
+## Footnotes, October 2026
+
+Footnotes as GitHub reads them (cmark-gfm's rules): `[^label]` refers to a
+`[^label]:` definition anywhere in the document, quotes and list items included; a
+definition interrupts a paragraph and goes on in lazy lines and in lines indented
+four columns. Notes are numbered by first reference in reading order, the text then
+each note in turn (unlike GitHub, references in an unused definition take no
+number), and set after the text below a short rule, at 0.85 times the body size,
+each note's number linking back to its first reference. A reference is a raised
+link number at 0.7 times the text size.
+
+- A reference is one box in the `MathPool`, as a formula is. Its paragraph takes the
+  cold formula wrap and paint; the fast paragraph path gains a test for "[^" in
+  documents with footnotes only.
+- Headings and table cells that refer to a note wait as Markdown until all notes are
+  known (`Block::notesPending`), then become plain text with markers, as those with
+  formulas are. A table with a reference therefore shows its cells without emphasis
+  and links, as a table with a formula does.
+- Bookmarks, anchors and titles leave the references out (`TitledHeadings`).
+- The parsing of definitions and the numbering live in `footnotes.cpp`, built at
+  `-Os`. Inside `markdown_parser.cpp` the same code took 20 KB and moved GCC's
+  inlining in the line classifier and block parser: +1.17 % instructions over the
+  watch fixtures, which have no footnotes, and +2.9 % on `baseline.md`, with
+  `LTrimView`, `RTrimView`, `Block`'s destructor and vector growth out of line.
+  Forcing the trim helpers inline only moved the cost (`TrimView` went out of line
+  instead). The parser now keeps a callback for its line kinds, the hooks for
+  headings and tables (a table waits only when a line has "[^"), and nothing else.
+- A reference's label is looked for no further than the longest defined label can
+  reach (`tFootnoteLabelBytes`): a document of 200,000 "[^" took 0.32 s to export
+  with a look of up to 1,000 bytes per opener, and takes 0.02 s.
+
+Measured on 2026-10-09 against the previous commit: of the 2,883 corpus PDFs, the
+1,824 of documents without a footnote definition are byte-identical, also with
+`--page-numbers --compress`, and the 1,059 that differ all come from documents with
+one. The watch fixtures, which have no footnotes, run 0.14 % more instructions (0.09
+to 0.23 %); pinned, time -0.34 % against A/A -0.58 %. The binary grew by 32 KB, 27 KB
+of it code: 8.5 KB in `footnotes.cpp`, 7 KB in the renderers, 2.8 KB in the parser's
+hooks and the rest GCC's inlining. Notes go after the text, as on GitHub; notes at the
+foot of their page would need a reserve in `Ensure` and notes measured before their
+line, in both renderers.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -888,9 +929,9 @@ against the executable size.
 leaves the standard fonts for the Unicode renderer, whose CID text takes four hex
 digits a glyph: 2026-10-09, `baseline.md` +72 % time and +85 % size, a 96 KiB
 ASCII document +32 % and +54 %. A TrueType font embedded as a simple font in
-WinAnsiEncoding would keep the standard renderer's one-byte literal strings and
-its word cache; the price is a second embedding path (simple-font widths, a
-`cmap` subtable PDF/A accepts) next to the CID one.
+WinAnsiEncoding would keep the standard renderer's one-byte literal strings; the
+price is a second embedding path (simple-font widths, a `cmap` subtable PDF/A
+accepts) next to the CID one.
 
 **A larger inlining budget for `tiny_pdf.cpp`.** The file sits at GCC's
 `inline-unit-growth` limit, so edits move which hot calls stay inlined.

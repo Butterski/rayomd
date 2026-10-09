@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace TinyPdf::Internal {
@@ -39,6 +40,9 @@ struct Block {
     // Quote only: the GitHub alert it is, 1 to 5 for [!NOTE], [!TIP], [!IMPORTANT], [!WARNING]
     // and [!CAUTION], or 0 for a plain quote. In the same padding.
     uint8_t alert = 0;
+    // Heading and Table only, while ParseMarkdown runs: the text or cells are still Markdown
+    // that may refer to a footnote, made plain once all footnotes are known. In the same padding.
+    uint8_t notesPending = 0;
     std::string text;
     // Set for every Image block and for no other: the other blocks carry a null pointer
     // instead of two empty strings.
@@ -57,6 +61,19 @@ struct Block {
 
 constexpr char kMathTextOpen = '\x01';
 constexpr char kMathTextClose = '\x02';
+// A footnote reference in text with formulas (Block::hasMath) is kMathTextOpen, kNoteMark, the
+// note's number in decimal and kMathTextClose.
+constexpr char kNoteMark = '\x03';
+
+// The notes of a document that its text refers to, numbered by first reference in reading order:
+// the text, then each note in turn. Note N is a paragraph, "[N.](#^rN) " and the note's first
+// paragraph, its number linking back to the first reference, which links to "#^N"; the note's
+// other blocks are its children. `numbers` has the number of every label referred to,
+// normalized as link labels are.
+struct Footnotes {
+    std::vector<Block> notes;      // note N is notes[N - 1]
+    std::unordered_map<std::string, int> numbers;
+};
 
 std::vector<std::string> SplitLines(const std::string& text);
 std::string NormalizeSymbols(std::string text);
@@ -65,7 +82,9 @@ std::string StripInlineMarkdown(std::string_view input, bool recognizeMath = tru
 // When the input has no formula the result is byte-identical to StripInlineMarkdown
 // and hasMath is false; otherwise literal kMathText* bytes are removed from the input.
 std::string StripInlineMarkdownKeepMath(std::string_view input, bool& hasMath);
-std::vector<Block> ParseMarkdown(const std::string& markdown);
+// With `footnotes`, "[^label]: text" starts a footnote definition, which leaves the text, and
+// "[^label]" refers to it; see Footnotes. Without, both are text.
+std::vector<Block> ParseMarkdown(const std::string& markdown, Footnotes* footnotes = nullptr);
 
 // Walks text produced by StripInlineMarkdownKeepMath for a block whose hasMath is
 // set: fn(segment, isMath) is called for every non-empty text or TeX segment.
