@@ -500,6 +500,37 @@ without it the PDFs are byte for byte the same (2,757 corpus PDFs, against
 measured +1.1 % time with those same instructions, and +0.1 % with alignment
 pinned: code placement again.
 
+## HTML comments, line breaks and character references, October 2026
+
+HTML comments are no longer shown. A line that starts with `<!--` hides
+everything up to the `-->` that closes it (to the end of the document when none
+does, as in CommonMark; text after `-->` on its line stays), and the inline
+parser drops a comment inside text with the spaces after it when a space comes
+before. Its `-->` lookups go through `InlineScanner::NextCommentClose`, which
+keeps its last answer: 20,000 unterminated `<!--` in one paragraph take 3 ms.
+`<br>` (`<br/>`, `<br />`, any case) ends the line: the inline parser writes it as
+a run of one space with `InlineRun::lineBreak`, which the paragraph and table
+cell wrappers act on once per run or segment, never per byte; every other
+reader takes it as a space. Character references (`&amp;`, `&#169;`, `&#xA9;`,
+the named ones of HTML 4 and `&apos;`, `&check;`, `&cross;`) show their character
+except in code. The inline parser writes them in the build's encoding, UTF-8 or
+the WinAnsi codes of the standard fonts (`WinAnsiReferences`), and `BuildPdf`
+sends a document whose references need more than ASCII to the WinAnsi path and
+one with a character WinAnsi lacks (`&rarr;`) to the Unicode renderer, after a
+`memchr` for `&`.
+
+A first version ran 1.1 % more instructions on `baseline.md`, which holds none of
+this: `string_view::compare` called `memcmp` for every `<`, and the grown
+`ParseInlineRuns` no longer inlined `RunWriter::Close` and
+`InlineScanner::BacktickClose`. Byte compares and `always_inline` left the `memchr`
+(+0.16 %). The names of the 255 references as pointers cost a relocation each in
+the position-independent executable, 12 KB in all; held in place they cost 4 KB.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`ae4459c`): all 2,520 corpus PDFs that changed come from documents with a
+reference, a comment or `<br>`; the watch fixtures write the same bytes with
+0.09 % more instructions (geometric mean, at most 0.18 %) in the same time.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

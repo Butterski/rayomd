@@ -18,6 +18,8 @@ constexpr uint16_t kWinAnsiHighCodePoints[32] = {
     0, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0, 0x017E, 0x0178,
 };
 
+} // namespace
+
 int WinAnsiCode(uint32_t codePoint) {
     if (codePoint >= 0xA0 && codePoint <= 0xFF) return static_cast<int>(codePoint);
     for (int index = 0; index < 32; index++) {
@@ -25,6 +27,8 @@ int WinAnsiCode(uint32_t codePoint) {
     }
     return -1;
 }
+
+namespace {
 
 // Bytes from text[at] that are ASCII, eight at a time.
 size_t AsciiRunLength(std::string_view text, size_t at) {

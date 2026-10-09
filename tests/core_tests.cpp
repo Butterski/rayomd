@@ -1387,6 +1387,33 @@ std::string MinimalTrueTypeCollection() {
     return collection + font + data;
 }
 
+// HTML comments are not shown, <br> ends a line, also in a table cell, and character references
+// show the characters they stand for, except in code. "&copy;" keeps a document on the
+// standard fonts in WinAnsiEncoding; "&rarr;" needs the Unicode renderer.
+bool CheckHtmlInText() {
+    std::string pdf;
+    if (!Build("Before <!-- hidden --> after.\n\n<!-- block\nhidden too -->\n\nOne<br>Two<BR/>Three\n\n"
+            "| x<br />y | &lt;1&gt; |\n|---|---|\n| &amp; | &#65;&#x42; |\n\n`&amp; <br>`\n", pdf) ||
+        pdf.find("hidden") != std::string::npos || pdf.find("(Before after.) Tj") == std::string::npos ||
+        pdf.find("(One) Tj") == std::string::npos || pdf.find("(Two) Tj") == std::string::npos ||
+        pdf.find("(Three) Tj") == std::string::npos || pdf.find("(x) Tj") == std::string::npos ||
+        pdf.find("(y) Tj") == std::string::npos || pdf.find("(<1>) Tj") == std::string::npos ||
+        pdf.find("(&) Tj") == std::string::npos || pdf.find("(AB) Tj") == std::string::npos ||
+        pdf.find("(&amp; <br>) Tj") == std::string::npos) {
+        std::cerr << "HTML in text mismatch" << std::endl;
+        return false;
+    }
+    std::string latin;
+    std::string unicode;
+    if (!Build("Year &copy; 2026.\n", latin) || latin.find("(Year \xA9 2026.) Tj") == std::string::npos ||
+        latin.find("/Type0") != std::string::npos || !Build("A &rarr; B.\n", unicode) ||
+        unicode.find("/Type0") == std::string::npos || unicode.find("2192") == std::string::npos) {
+        std::cerr << "character reference routing mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // With pageNumbers every page gets "N / M" in a content stream of its own, in Helvetica (/FN
 // on Unicode pages); without it a page has one stream. In both renderers.
 bool CheckPageNumbers() {
@@ -1707,6 +1734,7 @@ int main() {
     if (!CheckInvalidUtf8()) return 77;
     if (!CheckDocumentTitle()) return 78;
     if (!CheckPageNumbers()) return 79;
+    if (!CheckHtmlInText()) return 80;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

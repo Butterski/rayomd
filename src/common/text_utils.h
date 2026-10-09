@@ -61,7 +61,7 @@ inline void AppendFixed2(std::string& out, double value) {
 // Byte classes for one-pass scans of Markdown text. std::string::find_first_of with a
 // set of characters is several times slower on paragraph-sized input.
 enum ByteClass : unsigned char {
-    kByteInlineSyntax = 1,   // ! * _ ~ ` $ [ < and the backslash: may start inline Markdown
+    kByteInlineSyntax = 1,   // ! * _ ~ ` $ [ < & and the backslash: may start inline Markdown or a character reference
     kByteLineFeed = 2,       // '\n'
     kByteSymbolLead = 4,     // 0xE2, the first byte of the status symbols NormalizeSymbols rewrites
     kByteLiteralSpecial = 8, // ( ) \ and the control bytes 0..31 and 127: not copied as is into a PDF literal string
@@ -74,7 +74,7 @@ constexpr std::array<unsigned char, 256> MakeByteClasses() {
         if (value < 32 || value == 127) classes[value] = kByteLiteralSpecial;
     }
     for (char ch : { '(', ')', '\\' }) classes[static_cast<unsigned char>(ch)] = kByteLiteralSpecial;
-    for (char ch : { '!', '*', '_', '~', '`', '$', '[', '<', '\\' }) {
+    for (char ch : { '!', '*', '_', '~', '`', '$', '[', '<', '&', '\\' }) {
         classes[static_cast<unsigned char>(ch)] |= kByteInlineSyntax;
     }
     classes[static_cast<unsigned char>('\n')] |= kByteLineFeed;
@@ -117,6 +117,8 @@ size_t TranscodeToWinAnsiLossy(std::string_view utf8, std::string& out);
 const char* RendererPathName(std::string_view text);
 // Transcoded text back to UTF-8, for link targets, image paths and formulas.
 std::string WinAnsiToUtf8(std::string_view winAnsi);
+// The WinAnsiEncoding code of a code point from U+0080 on, or -1 when it has none.
+int WinAnsiCode(uint32_t codePoint);
 
 // The scalar value of the UTF-8 sequence at text[at] and its length in bytes, or false when it
 // is not well formed: overlong, a surrogate, beyond U+10FFFF or cut short.

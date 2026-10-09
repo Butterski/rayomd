@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -42,6 +43,7 @@ struct InlineRun {
     bool italic = false;
     bool strike = false;
     bool code = false;
+    bool lineBreak = false; // <br>: one space, at which the wrappers end the line
     InlineMath math = InlineMath::None;
 };
 
@@ -81,5 +83,28 @@ std::vector<InlineSpan> ParseInlineSpans(std::string_view input, bool recognizeM
 // read in order, cover out.text without a gap.
 void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath = true,
     size_t lookaheadBudget = kDefaultLookaheadBudget);
+
+// The character reference ("&amp;", "&#169;", "&#xA9;") at text[at]: its length in bytes, with
+// its code point, or 0 when none starts there. The named references are those of HTML 4 and
+// "&apos;", "&check;" and "&cross;"; a number that names no character gives U+FFFD.
+size_t MatchCharacterReference(std::string_view text, size_t at, uint32_t& codePoint);
+
+// What the character references of a document need of the renderer: none or only ASCII, the
+// standard fonts' WinAnsiEncoding, or Unicode text.
+enum class ReferenceNeed : unsigned char { Ascii, WinAnsi, Unicode };
+ReferenceNeed CharacterReferenceNeed(std::string_view text);
+
+// While one lives, the inline parser on this thread writes character references as WinAnsi
+// codes, the bytes of the standard renderer's text, instead of UTF-8.
+class WinAnsiReferences {
+public:
+    WinAnsiReferences();
+    ~WinAnsiReferences();
+    WinAnsiReferences(const WinAnsiReferences&) = delete;
+    WinAnsiReferences& operator=(const WinAnsiReferences&) = delete;
+
+private:
+    bool previous;
+};
 
 } // namespace TinyPdf::Internal

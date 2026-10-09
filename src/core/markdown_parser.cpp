@@ -806,7 +806,8 @@ enum class LineKind {
     Numbered,
     Quote,
     PageBreak,
-    Image
+    Image,
+    HtmlComment     // starts with "<!--": not shown, up to the line with "-->"
 };
 
 struct LineInfo {
@@ -823,7 +824,7 @@ static bool MayStartBlock(char first) {
     switch (first) {
     case '`': case '~':             // code fence
     case '$': case '\\':            // display math, \pagebreak
-    case '<':                       // page-break comment
+    case '<':                       // page-break comment, HTML comment
     case '!':                       // standalone image
     case '-': case '*': case '_':   // rule, bullet
     case '+':                       // bullet
@@ -942,6 +943,11 @@ static LineInfo ClassifyLine(std::string_view line) {
     }
     if (IsPageBreakLine(info.trimmed)) {
         info.kind = LineKind::PageBreak;
+        return info;
+    }
+    if (info.trimmed.size() >= 4 && info.trimmed[0] == '<' && info.trimmed[1] == '!' && info.trimmed[2] == '-' &&
+        info.trimmed[3] == '-') {
+        info.kind = LineKind::HtmlComment;
         return info;
     }
     if (ParseStandaloneImage(info.trimmed, nullptr)) {
@@ -1352,6 +1358,24 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         if (info.kind == LineKind::PageBreak) {
             AppendBlock(blocks, BlockType::PageBreak);
             i++;
+            continue;
+        }
+
+        if (info.kind == LineKind::HtmlComment) {
+            // Not shown: everything up to the "-->" that closes it, or to the end of the
+            // document when none does, as in CommonMark. Text after "-->" on that line is.
+            size_t end = i;
+            size_t close = std::string_view::npos;
+            for (; end < lines.size(); end++) {
+                const std::string_view text = lines[end];
+                close = text.find("-->", end == i ? text.find("<!--") + 2 : 0);
+                if (close != std::string_view::npos) break;
+            }
+            if (end < lines.size()) {
+                const std::string_view rest = TrimView(lines[end].substr(close + 3));
+                if (!rest.empty()) AppendBlock(blocks, BlockType::Paragraph).text = ToString(rest);
+            }
+            i = end + 1;
             continue;
         }
 

@@ -4224,8 +4224,18 @@ private:
         size_t at = 0;
         for (size_t index = 0; index < runCount; index++) {
             const Internal::InlineRun& span = parsed[index];
-            const std::string_view url = out.parsed.Url(span);
             const size_t runEnd = out.wideEnds[index];
+            if (span.lineBreak) {
+                // <br>: the line ends here, and one more after it leaves an empty line.
+                if (out.runs.size() != lineStart || !out.lineEnds.empty()) {
+                    out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+                    lineStart = out.runs.size();
+                    lineWidth = 0.0;
+                }
+                at = runEnd;
+                continue;
+            }
+            const std::string_view url = out.parsed.Url(span);
             // Set while the last run of the line holds the previous word of this parsed run, so
             // it has this style and the next word goes into it without comparing styles.
             bool joinLast = false;
@@ -5820,11 +5830,18 @@ private:
     // and italic in faces of their own and strike-through as a line; code keeps Courier
     // whatever its emphasis.
     enum : uint8_t { kStyleBold = 1, kStyleItalic = 2, kStyleCode = 4, kStyleStrike = 8 };
+    // A <br> in a run of its own (Internal::InlineRun::lineBreak); never part of a face.
+    static constexpr uint8_t kStyleBreak = 16;
     // The state of an Internal::InlineSpan or Internal::InlineRun.
     template <typename Span>
     static uint8_t SpanStyle(const Span& span) {
         return static_cast<uint8_t>((span.bold ? kStyleBold : 0) | (span.italic ? kStyleItalic : 0) |
             (span.code ? kStyleCode : 0) | (span.strike ? kStyleStrike : 0));
+    }
+    // The same for an Internal::InlineRun, whose <br> (lineBreak) gives a segment of its own.
+    static uint8_t SpanStyle(const Internal::InlineRun& run) {
+        return static_cast<uint8_t>((run.bold ? kStyleBold : 0) | (run.italic ? kStyleItalic : 0) |
+            (run.code ? kStyleCode : 0) | (run.strike ? kStyleStrike : 0) | (run.lineBreak ? kStyleBreak : 0));
     }
     // The font whose advances measure text in `style`: Helvetica-Oblique has those of Helvetica.
     static StandardTextFont StyleFont(uint8_t style) {
@@ -6351,6 +6368,17 @@ private:
             const uint8_t style = out.segments[segment].style;
             const std::string_view url = out.segments[segment].url;
             const size_t segmentEnd = out.segments[segment].end;
+            if (style & kStyleBreak) {
+                // A <br> is one space: the line ends there, and each one more after it leaves an
+                // empty line.
+                for (; at < segmentEnd; at++) {
+                    if (out.runs.size() == lineStart && out.lineEnds.empty()) continue;
+                    out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+                    lineStart = out.runs.size();
+                    lineUnits = 0;
+                }
+                continue;
+            }
             const StandardWordAdvances& font = StyleAdvances(style);
             const uint16_t* const advances = font.byte;
             const uint32_t segmentSpace = font.space;
@@ -7140,6 +7168,8 @@ static void PrepareOutput(std::string& pdfBytes, size_t expectedBytes) {
 // the document as given, which a reversible PDF embeds.
 static bool BuildStandardPdfBytes(const std::string& text, const std::string& source, bool winAnsi,
     const PdfOptions& options, std::string& pdfBytes) {
+    // Character references come out as the WinAnsi codes the standard fonts show.
+    const Internal::WinAnsiReferences references;
     std::vector<Block> blocks;
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
@@ -7544,12 +7574,18 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
     g_lastError = 0;
     bool built = false;
     uint32_t missingCharacters = 0;
-    if (IsPlainAsciiDocument(markdown)) {
+    // A character reference counts as the character it stands for: "&copy;" needs the WinAnsi
+    // text of the standard fonts, "&rarr;" a Unicode font. A document is searched for them only
+    // where it would otherwise go to the standard fonts.
+    const bool ascii = IsPlainAsciiDocument(markdown);
+    Internal::ReferenceNeed references = Internal::ReferenceNeed::Ascii;
+    std::string winAnsi;
+    if (ascii && (references = Internal::CharacterReferenceNeed(markdown)) == Internal::ReferenceNeed::Ascii) {
         built = BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes);
     } else {
         // Latin text needs no font file: the standard fonts show it in WinAnsiEncoding.
-        std::string winAnsi;
-        if (RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi)) {
+        if (references != Internal::ReferenceNeed::Unicode && RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi) &&
+            (ascii || Internal::CharacterReferenceNeed(markdown) != Internal::ReferenceNeed::Unicode)) {
             built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes);
         } else {
             const TtfFont* font = nullptr;
