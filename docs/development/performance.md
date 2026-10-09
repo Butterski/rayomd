@@ -1081,6 +1081,64 @@ sites: -0.02 % instructions, time +0.25 % against A/A -0.52 %, pinned +0.58 % ag
 other instruction-cache sets, which pinned alignment does not undo (see Measured
 opportunities).
 
+## SVG images, October 2026
+
+An image whose file or URL holds SVG (sniffed: `<svg` after an XML declaration, comments and
+a document type) is drawn as vectors instead of its alt text. `src/core/svg.cpp` converts it
+into a form XObject whose `/Matrix` maps it onto the unit square, so a page draws it with the
+`cm … /ImN Do` of a raster image, sized from its width and height as 96 dpi pixels, and
+layout, theme logos and books need no change.
+
+- Drawn: paths (all commands, arcs as at most four cubics), the six shapes, transforms,
+  `viewBox` and `preserveAspectRatio`, nested `svg`, `symbol` and `use` (a viewport clips
+  when its content overflows it), clip paths (children united, even-odd, `objectBoundingBox`),
+  linear gradients as axial shadings, opacity as `/ca` and `/CA` graphics states (a group's
+  folded into its leaves, exact where they do not overlap), dashes, caps and joins, text
+  (`text`, `tspan`, anchors, bold) in the document's font, and `data:` PNG and JPEG images
+  as image XObjects of the document. Styles cascade in SVG 2's order: presentation
+  attributes, `<style>` rules of type, class, id and `*` selectors by specificity (what
+  Illustrator writes), the `style` attribute, `!important`.
+- Approximated: a radial gradient paints its average colour and a pattern the fill of its
+  first rectangle; markers, filters and masks are not drawn; `font-family` gives way to the
+  document's font, and italic stands upright.
+- Alt text, and one more failed image: a script, HTML in a `foreignObject`, a rule whose
+  selector it does not match that sets a drawn property (Mermaid's `#id .class` sheets), a
+  document type with entities, malformed XML, nothing painted, and every limit: 16 MiB of
+  markup, 64 levels, 500,000 elements, 8 million path numbers, `use` 8 deep, 64 MiB of
+  content, and a budget of 12 times the input plus 16 MiB for the work that `use`, style
+  rules and viewport measuring multiply. ASan and UBSan found nothing in 112 real and hostile
+  SVGs, each exported as an ASCII, Unicode, PDF/A and theme-logo document.
+- Text takes the standard documents' Helvetica in WinAnsiEncoding, where a character without
+  a code shows as its base letter or `?`, and the minus sign that matplotlib writes, other
+  dashes and spaces as `-` and a space (also elsewhere the transcoder replaces); in a Unicode
+  document the TrueType font, whose subset gains the glyphs. A form names its document's
+  fonts and images, so it is converted for each document and never enters the cache that
+  PNG and JPEG images share between documents.
+- No dependency: nanosvg flattens shapes for its own rasterizer and has no text; lunasvg
+  (about 300 KB) and resvg (Rust, megabytes) render to pixels. SVG maps onto PDF operators
+  almost one to one, and 87 KB of code draws the matplotlib, Vega-Lite, Plotly and Graphviz
+  samples (Mermaid falls back).
+
+Nine charts of those four tools (138 KB of SVG) take 1.82 ms a build (`--bench`), 76 MB/s;
+a 33 KB matplotlib chart 0.53 ms, an 8 KB Graphviz graph 0.11 ms, a 2.1 MB scatter plot of
+20,000 markers 69 ms. The first version took 3.12 ms: at `-Os` GCC called
+`string_view::substr`, `operator==` and the byte tests out of line, and names were looked up
+through `strlen`. Name tables tagged with their lengths (offsets instead of pointers, which
+also took 206 relocations out of the position-independent executable), byte helpers forced
+inline, an attribute scan that returns the markup itself when nothing needs decoding, a
+one-pass scanner for plain decimals, and path segments appended whole took 42 % off.
+
+Measured on 2026-10-09 against the previous commit: all 2,883 corpus PDFs are byte-identical
+with no flags, `--page-numbers --compress`, `--toc`, `--pdfa` and a theme (96 of them name a
+missing `charts/sales.svg` and keep its alt text). The watch fixtures run -0.01 %
+instructions; time -1.50 % against A/A -1.62 %, pinned +0.31 % against A/A -0.31 %; the eight
+documentation sites pinned +0.11 % against A/A -0.13 %. The executable grows by 92 KB: 87 KB
+in `svg.cpp` and 6 KB in `tiny_pdf.cpp` (the two hosts, the forms, the registry). Linux and
+Wine write identical bytes, and veraPDF passes PDF/A-3b files with forms, shadings,
+transparency and an SVG logo. Under Wine the Windows build overflows the stack in Wine's WIC
+decoding an RGBA PNG, before this change too; Windows CI decodes them, so Wine smoke tests
+leave them out.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1219,6 +1277,13 @@ unpinned -1.0 % to +0.25 % from build to build. Marking the renderers' hot funct
 `__attribute__((hot))` would put them together in `.text.hot`, where edits to cold code
 no longer move them; measure whether grouping them changes their speed, and whether the
 measurements of later changes become steadier.
+
+**SVG conversion at `-O2`, and forms kept between documents.** `svg.cpp` at `-O2` converts
+the nine charts of SVG images in 1.40 ms a build instead of 1.82 ms, and the 2.1 MB scatter
+plot in 57 ms instead of 69 ms, for 53 KB more executable (2026-10-09). A batch whose every
+document shows the same SVG, a theme logo for one, converts it once per document, as a form
+names the document's fonts and images; a form without text and images could be kept like a
+PNG, keyed by its path. Measure how often batches repeat an SVG before taking either.
 
 ## Keeping the release light
 

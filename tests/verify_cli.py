@@ -213,6 +213,20 @@ def verify_book(binary: Path, root: Path) -> None:
     run(binary, "--book", str(book / "one.md"), str(root / "book-embed.pdf"), "--embed-source", expect=2)
 
 
+def verify_svg(binary: Path, root: Path) -> None:
+    """An SVG image is drawn as a form XObject, its text in the document's font."""
+    (root / "chart.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60">'
+        '<rect width="120" height="60" fill="#36c"/><text x="10" y="40">Chart</text></svg>', encoding="utf-8")
+    source = root / "figure.md"
+    source.write_text("# Figure\n\n![chart](chart.svg)\n", encoding="utf-8")
+    pdf = root / "figure.pdf"
+    run(binary, "--export", str(source), str(pdf))
+    data = require_pdf(pdf, b"/Subtype /Form", b"(Chart) Tj")
+    if b"/Subtype /Image" in data:
+        raise AssertionError("SVG image: drawn as a raster image")
+
+
 def pdf_streams(data: bytes) -> list[tuple[bytes, bytes]]:
     """The dictionary and payload of every stream of a PDF, in file order."""
     streams = []
@@ -301,6 +315,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_highlight(binary, root)
         verify_contents(binary, root)
         verify_book(binary, root)
+        verify_svg(binary, root)
         verify_batch(binary, root)
 
         if os.name == "nt":

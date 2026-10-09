@@ -43,7 +43,7 @@ native exporter through a small CLI.
 - Native PDF generation with no browser engine on the fast path.
 - A single Windows GUI executable and a compact Linux CLI.
 - Bounded parallel batch conversion, stdin, warm serve, and benchmark modes.
-- Unicode, clickable links (also bare URLs), bookmarks, tables, task lists, GitHub alerts, footnotes (as on GitHub, at the end of the text), code highlighted as on GitHub in 29 languages and formats, local images, and opt-in URL images.
+- Unicode, clickable links (also bare URLs), bookmarks, tables, task lists, GitHub alerts, footnotes (as on GitHub, at the end of the text), code highlighted as on GitHub in 29 languages and formats, local images (also SVG, drawn as vectors), and opt-in URL images.
 - Natively typeset math for a TeX subset: no LaTeX, no browser, no embedded math fonts.
 - Optional exact Markdown recovery through reversible PDFs.
 - Tables of contents (`[TOC]` or `--toc`) with dot leaders, page numbers and links to the headings.
@@ -167,7 +167,8 @@ and the other four), fenced and indented code (fenced code in a language GitHub 
 its colours, `--no-highlight` to keep it one colour), footnotes, pipe tables (whose header row repeats
 on every page), rules, page breaks, matching-run code spans, classic emphasis and
 escapes, inline and reference-style links, URL/email autolinks (in angle brackets or
-bare, as on GitHub), standalone inline/reference images,
+bare, as on GitHub), standalone inline/reference images (PNG, JPEG, and SVG drawn as
+vectors with their text in the document's font),
 natively typeset math for a TeX subset (`$...$`, `$$...$$`, fenced `math` blocks, in
 text, lists, quotes, headings and table cells), Unicode fonts (or the PDF standard
 fonts when no system font is found), HTML comments (hidden), `<br>` line breaks,
@@ -181,7 +182,10 @@ standalone images retain native image layout and missing-image fallback text.
 It deliberately does not promise full CommonMark/Pandoc compatibility, complete
 LaTeX math (packages, macros, automatic numbering), highlighting for every language,
 citations, filters, templates, right-to-left scripts (Arabic and Hebrew are drawn
-left to right, unshaped), or HTML/CSS layout fidelity. The complete and current
+left to right, unshaped), complete SVG (filters, masks, radial gradients, patterns,
+markers, and HTML or scripts in SVG are not drawn as a browser draws them; an SVG that
+needs HTML, scripts or style sheets it cannot match shows its alt text), or HTML/CSS
+layout fidelity. The complete and current
 matrix is maintained in
 [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support).
 

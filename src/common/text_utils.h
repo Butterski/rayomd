@@ -117,7 +117,8 @@ std::string FormatDouble(double value);
 // not UTF-8 or holds a character WinAnsiEncoding has no code for.
 bool TranscodeToWinAnsi(std::string_view utf8, std::string* out);
 // The same for text that no font on the system can show: a character without a WinAnsi
-// code becomes its base letter (Latin Extended-A) or '?'. Returns how many did.
+// code becomes its base letter (Latin Extended-A), the dash or space it looks like, or '?'.
+// Returns how many did.
 size_t TranscodeToWinAnsiLossy(std::string_view utf8, std::string& out);
 // The renderer and fonts a document gets, as --bench reports it: "standard-font-ascii",
 // "standard-font-winansi" (Latin text in the standard fonts), or "unicode-embedded-font".

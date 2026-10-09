@@ -48,9 +48,17 @@ constexpr char kLatinExtendedABase[] =
     "AaAaAaCcCcCcCcDdDdEeEeEeEeEeGgGgGgGgHhHhIiIiIiIiIi??JjKkkLlLlLlL"
     "lLlNnNnNnnNnOoOoOo??RrRrRrSsSsSsSsTtTtTtUuUuUuUuUuUuWwYyYZzZzZzs";
 
+// A dash, the minus sign or a space without a WinAnsi code as the ASCII character it looks like
+// (matplotlib writes negative numbers with U+2212); '?' for any other character.
+constexpr char LookalikeOrQuestionMark(uint32_t codePoint) {
+    if (codePoint == 0x2212 || (codePoint >= 0x2010 && codePoint <= 0x2012)) return '-';
+    if ((codePoint >= 0x2000 && codePoint <= 0x200A) || codePoint == 0x202F || codePoint == 0x205F) return ' ';
+    return '?';
+}
+
 // The WinAnsi bytes of `utf8` into `out` (nullptr only checks). Without `replaced`, false at
 // the first character WinAnsiEncoding has no code for; with it, such a character becomes its
-// base letter or '?', counted in *replaced.
+// base letter, the dash or space it looks like, or '?', counted in *replaced.
 bool ToWinAnsi(std::string_view utf8, std::string* out, size_t* replaced) {
     if (out) {
         out->clear();
@@ -92,7 +100,7 @@ bool ToWinAnsi(std::string_view utf8, std::string* out, size_t* replaced) {
         if (code < 0) {
             if (!replaced) return false;
             ++*replaced;
-            code = codePoint >= 0x100 && codePoint < 0x180 ? kLatinExtendedABase[codePoint - 0x100] : '?';
+            code = codePoint >= 0x100 && codePoint < 0x180 ? kLatinExtendedABase[codePoint - 0x100] : LookalikeOrQuestionMark(codePoint);
         }
         last = ((last << 8) | static_cast<uint32_t>(code)) & 0xFFFFFFu;
         if (out) out->push_back(static_cast<char>(code));

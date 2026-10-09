@@ -45,8 +45,8 @@ and character references, document metadata from the front matter (`/Info` title
 author, subject and keywords, the catalog's `/Lang`; `FrontMatterMetadata` reads
 the YAML subset), opt-in page numbers, page sizes (A4 by default, presets,
 landscape and custom sizes; the renderers' `pageW`/`pageH`, never constants),
-standalone local images, and HTTP/HTTPS images on Windows or
-curl-enabled Linux builds with fallback text.
+standalone local images (PNG, JPEG, and SVG drawn as vectors), and HTTP/HTTPS
+images on Windows or curl-enabled Linux builds with fallback text.
 Footnotes as on GitHub (`[^label]` and `[^label]:` definitions, also in quotes and
 list items): numbered by first reference in reading order, drawn as raised link
 numbers (one `MathPool` box each, so they take the cold formula paths and the fast
@@ -134,6 +134,12 @@ Important image/link details:
 - PNG alpha support can use zlib when `RAYOMD_USE_ZLIB` is defined.
 - Failed images should degrade to useful fallback text instead of failing the
   whole conversion.
+- An SVG image (a file or URL) is converted by `src/core/svg.cpp`, without a
+  dependency, into a form XObject for each document, as its text uses the
+  document's fonts; such forms never enter the cross-document image cache. One
+  that needs what the converter does not draw (HTML, scripts, style sheets it
+  cannot match) or hits a limit shows its alt text. Keep every limit failing
+  closed: SVG input is untrusted.
 - Links are emitted as PDF annotations; keep visible text and annotation rects
   aligned when changing wrapping or text layout.
 - Headings make the PDF outline, and `#anchor` links go to them by GitHub's
@@ -177,6 +183,13 @@ Important image/link details:
   Books: reading `--book`'s inputs for both command lines (SUMMARY.md as mdBook and
   GitBook read it, a folder, files) and parsing a book's files for `BuildBookPdf`. Built at
   `-Os`, outside `tiny_pdf.cpp` and its inlining budget.
+
+- `src/core/svg.h` and `src/core/svg.cpp`
+  SVG to a PDF form XObject: a non-recursive XML reader, the CSS cascade for
+  presentation attributes, `style` and simple selectors, paths, shapes, clips,
+  linear gradients, `use`, text in the host's font and `data:` images through the
+  host (`SvgHost`, implemented by `tiny_pdf.cpp` for each renderer). Built at `-Os`;
+  every input-size, depth, work and output limit makes `ConvertSvg` return false.
 
 - `src/core/rayomd_pdf_source.h` and `src/core/rayomd_pdf_source.cpp`
   Bounded reversible-profile metadata, SHA-256 integrity, hostile-input

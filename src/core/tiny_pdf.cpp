@@ -11,6 +11,7 @@
 #include "highlight.h"
 #include "math_layout.h"
 #include "pdfa.h"
+#include "svg.h"
 #include "theme.h"
 
 #ifdef _WIN32
@@ -1384,6 +1385,8 @@ struct PdfImage {
     int width = 0;
     int height = 0;
     int bitsPerComponent = 8;
+    // An SVG drawn as a form XObject (svg.h) instead of pixels; its size above in pixels at 96 dpi.
+    std::shared_ptr<const Internal::SvgForm> svg;
 };
 
 using SharedPdfImage = std::shared_ptr<const PdfImage>;
@@ -2779,6 +2782,24 @@ public:
     // The book's file whose images follow (BuildBookPdf).
     void SetChapter(const std::string& pathUtf8) { localPolicy.SetChapter(pathUtf8); }
 
+    // The document's TrueType font and the glyphs it shows, which show the text of its SVG images
+    // (svg.h); without, that text takes the standard fonts.
+    void SetFont(const TtfFont* textFont, UsedCidSet* cids) {
+        svgFont = textFont;
+        svgCids = cids;
+    }
+
+    // A raster image of an SVG (a data: URI) for this document only: its index, with its size in
+    // pixels; -1 when it cannot be decoded.
+    RAYOMD_COLD int AddDecoded(std::string_view bytes, int& width, int& height) {
+        PdfImage image;
+        if (bytes.size() > kMaxImageBytes || !DecodeImageBytes(std::vector<uint8_t>(bytes.begin(), bytes.end()), image)) return -1;
+        width = image.width;
+        height = image.height;
+        images.push_back(std::make_shared<PdfImage>(std::move(image)));
+        return (int)images.size() - 1;
+    }
+
     // An image the document shows, by its source: false, and one more failed image, when the
     // policy rejects it or it cannot be loaded or decoded; RenderImage then shows its alt text.
     bool Resolve(const std::string& src, const std::string& alt, int& index) {
@@ -2805,15 +2826,13 @@ public:
         }
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(key);
         if (!sharedImage) {
-            PdfImage image;
             std::vector<uint8_t> bytes;
             if (IsKnownFailure(key) || !ReadLocalImageFile(PathToUtf8(normalized), bytes) ||
-                bytes.size() > kMaxImageBytes || !DecodeImageBytes(bytes, image)) {
+                bytes.size() > kMaxImageBytes || !Decode(key, bytes, sharedImage)) {
                 StoreFailure(key);
                 failed++;
                 return false;
             }
-            sharedImage = StoreDecodedImageInCache(key, std::move(image));
         }
         index = (int)images.size();
         indexByKey[key] = index;
@@ -2865,7 +2884,6 @@ private:
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(key);
         if (!sharedImage && IsKnownFailure(key)) return false;
         if (!sharedImage) {
-            PdfImage image;
             std::vector<uint8_t> bytes;
             bool loaded = false;
             if (isUrl) {
@@ -2879,11 +2897,10 @@ private:
             else {
                 loaded = ReadLocalImageFile(localPathUtf8, bytes) && bytes.size() <= kMaxImageBytes;
             }
-            if (!loaded || !DecodeImageBytes(bytes, image)) {
+            if (!loaded || !Decode(key, bytes, sharedImage)) {
                 StoreFailure(key);
                 return false;
             }
-            sharedImage = StoreDecodedImageInCache(key, std::move(image));
         }
 
         index = (int)images.size();
@@ -2902,11 +2919,31 @@ public:
     const std::vector<SharedPdfImage>& Images() const { return images; }
 
 private:
+    // `bytes` as an image: an SVG converted for this document, as its forms name the document's
+    // fonts, else a PNG or JPEG decoded and kept for later documents.
+    bool Decode(const std::string& key, const std::vector<uint8_t>& bytes, SharedPdfImage& shared) {
+        PdfImage image;
+        const std::string_view view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        if (Internal::LooksLikeSvg(view)) {
+            if (!ConvertSvgImage(view, image)) return false;
+            shared = std::make_shared<PdfImage>(std::move(image));
+            return true;
+        }
+        if (!DecodeImageBytes(bytes, image)) return false;
+        shared = StoreDecodedImageInCache(key, std::move(image));
+        return true;
+    }
+
+    // An SVG as a form XObject (svg.h), its text in the document's font; defined after the hosts.
+    RAYOMD_COLD bool ConvertSvgImage(std::string_view svg, PdfImage& image);
+
     const PdfOptions& options;
     LocalImagePolicy localPolicy;
     std::vector<SharedPdfImage> images;
     std::unordered_map<std::string, int> indexByKey;
     uint32_t failed = 0;
+    const TtfFont* svgFont = nullptr;   // the document's TrueType font (SetFont), or none
+    UsedCidSet* svgCids = nullptr;
     static std::unordered_map<std::string, SharedPdfImage>& Cache() {
         static std::unordered_map<std::string, SharedPdfImage> cache;
         return cache;
@@ -2973,6 +3010,87 @@ private:
     }
 };
 
+// The text of an SVG in the standard fonts (BuildStandardPdfBytes): Helvetica, and Helvetica-Bold
+// for bold, in WinAnsiEncoding; a character without a code shows as its base letter or '?'.
+class StandardSvgHost : public Internal::SvgHost {
+public:
+    explicit StandardSvgHost(ImageRegistry& registry) : images(registry) {}
+
+    double TextWidth(std::string_view text, double size, bool bold) override {
+        std::string latin;
+        RayoMd::Text::TranscodeToWinAnsiLossy(text, latin);
+        return Internal::StandardTextWidth(latin, size, bold ? Internal::StandardTextFont::Bold : Internal::StandardTextFont::Regular);
+    }
+
+    void AppendText(std::string& out, std::string_view text, bool) override {
+        std::string latin;
+        RayoMd::Text::TranscodeToWinAnsiLossy(text, latin);
+        const size_t start = out.size();
+        out.resize(start + latin.size() * 4 + 2);
+        char* end = &out[start];
+        *end++ = '(';
+        end = WriteEscapedLiteral(end, latin);
+        *end++ = ')';
+        out.resize((size_t)(end - out.data()));
+    }
+
+    bool HasBoldFace() const override { return true; }
+    int AddImage(std::string_view bytes, int& width, int& height) override { return images.AddDecoded(bytes, width, height); }
+
+private:
+    ImageRegistry& images;
+};
+
+// The text of an SVG in the document's TrueType font (BuildUnicodePdfBytes), whose subset then has
+// its glyphs; the form draws bold itself, the font having no bold face.
+class UnicodeSvgHost : public Internal::SvgHost {
+public:
+    UnicodeSvgHost(const TtfFont& textFont, UsedCidSet& usedCids, ImageRegistry& registry)
+        : font(textFont), cids(usedCids), images(registry) {}
+
+    double TextWidth(std::string_view text, double size, bool) override {
+        return TinyPdf::TextWidth(font, Utf8ToWide(text), size);
+    }
+
+    void AppendText(std::string& out, std::string_view text, bool) override {
+        const std::wstring wide = Utf8ToWide(text);
+        const size_t start = out.size();
+        out.resize(start + HexTextBytes(wide));
+        out.resize((size_t)(WriteHexText(&out[start], font, wide, cids) - out.data()));
+    }
+
+    bool HasBoldFace() const override { return false; }
+    int AddImage(std::string_view bytes, int& width, int& height) override { return images.AddDecoded(bytes, width, height); }
+
+private:
+    const TtfFont& font;
+    UsedCidSet& cids;
+    ImageRegistry& images;
+};
+
+bool ImageRegistry::ConvertSvgImage(std::string_view svg, PdfImage& image) {
+    auto form = std::make_shared<Internal::SvgForm>();
+    const size_t rasters = images.size();   // its data: images go after them (AddDecoded)
+    bool converted = false;
+    if (svgFont != nullptr) {
+        UnicodeSvgHost host(*svgFont, *svgCids, *this);
+        converted = Internal::ConvertSvg(svg, host, *form);
+    } else {
+        StandardSvgHost host(*this);
+        converted = Internal::ConvertSvg(svg, host, *form);
+    }
+    if (!converted || !(form->width > 0.0) || !(form->height > 0.0)) {
+        images.resize(rasters);   // a form not drawn keeps none of its images in the file
+        return false;
+    }
+    // Its size in pixels at 96 dpi, as RenderImage sizes raster images.
+    const auto pixels = [](double points) { return (int)std::lround(std::clamp(points * 96.0 / 72.0, 1.0, 100000.0)); };
+    image.width = pixels(form->width);
+    image.height = pixels(form->height);
+    image.svg = std::move(form);
+    return true;
+}
+
 static std::string BuildImageStreamDict(const PdfImage& image, int smaskId) {
     std::string dict;
     dict.reserve(256 + image.colorSpace.size() + image.filter.size() + image.decodeParms.size());
@@ -3019,17 +3137,99 @@ static std::string BuildMaskStreamDict(const PdfImage& image) {
     return dict;
 }
 
-static std::vector<int> AddImageObjects(PdfObjects& pdf, const std::vector<SharedPdfImage>& images) {
-    std::vector<int> ids;
-    ids.reserve(images.size());
-    for (const SharedPdfImage& shared : images) {
-        const PdfImage& image = *shared;
+// `value`, 0 or more, with eight decimals: the scale of a form's /Matrix, as small as 1/1000.
+RAYOMD_COLD static void AppendFraction8(std::string& out, double value) {
+    const uint64_t scaled = (uint64_t)std::llround(std::min(value, 1e9) * 1e8);
+    AppendSize(out, (size_t)(scaled / 100000000u));
+    char fraction[9];
+    uint64_t rest = scaled % 100000000u;
+    for (int digit = 7; digit >= 0; digit--) {
+        fraction[digit] = (char)('0' + rest % 10u);
+        rest /= 10u;
+    }
+    out += '.';
+    out.append(fraction, 8);
+}
+
+// The form XObjects of SVG images (AddImageObjects), each over the unit square as an image is, so
+// that pages draw both alike. A form's text names the document's fonts, /F1 `regularFont` and /F2
+// `boldFont` (0 for none), and its images those of the document by their ids.
+RAYOMD_COLD static void AddSvgForms(PdfObjects& pdf, const std::vector<SharedPdfImage>& images, int regularFont,
+    int boldFont, bool compress, std::vector<int>& ids) {
+    for (size_t index = 0; index < images.size(); index++) {
+        const Internal::SvgForm* form = images[index]->svg.get();
+        if (form == nullptr) continue;
+        std::string dict = "/Type /XObject /Subtype /Form /BBox [0 0 ";
+        AppendF(dict, form->width);
+        dict += " ";
+        AppendF(dict, form->height);
+        dict += "] /Matrix [";
+        AppendFraction8(dict, 1.0 / form->width);
+        dict += " 0 0 ";
+        AppendFraction8(dict, 1.0 / form->height);
+        dict += " 0 0] /Resources <<";
+        if (form->text) {
+            dict += " /Font << /F1 ";
+            AppendInt(dict, regularFont);
+            dict += " 0 R";
+            if (boldFont != 0) {
+                dict += " /F2 ";
+                AppendInt(dict, boldFont);
+                dict += " 0 R";
+            }
+            dict += " >>";
+        }
+        if (!form->extGStates.empty()) {
+            dict += " /ExtGState << ";
+            dict += form->extGStates;
+            dict += " >>";
+        }
+        if (!form->shadings.empty()) {
+            dict += " /Shading << ";
+            dict += form->shadings;
+            dict += " >>";
+        }
+        if (!form->images.empty()) {
+            dict += " /XObject <<";
+            for (const int image : form->images) {
+                dict += " /Im";
+                AppendInt(dict, image + 1);
+                dict += " ";
+                AppendInt(dict, ids[(size_t)image]);
+                dict += " 0 R";
+            }
+            dict += " >>";
+        }
+        dict += " >>";
+        std::string packed;
+        if (compress && CompressPayload(form->content, packed)) {
+            dict += " /Filter /FlateDecode";
+            ids[index] = pdf.AddStream(dict, packed);
+        } else {
+            ids[index] = pdf.AddStreamView(dict, form->content);
+        }
+    }
+}
+
+// The images' XObjects, by their index in the registry: raster images, then the forms of SVG
+// images, which draw rasters of their own (AddSvgForms).
+static std::vector<int> AddImageObjects(PdfObjects& pdf, const std::vector<SharedPdfImage>& images, int regularFont,
+    int boldFont, bool compress) {
+    std::vector<int> ids(images.size(), 0);
+    bool forms = false;
+    for (size_t index = 0; index < images.size(); index++) {
+        const PdfImage& image = *images[index];
+        if (image.svg) {
+            forms = true;
+            continue;
+        }
         int smaskId = 0;
         if (!image.maskStream.empty()) {
             smaskId = pdf.AddStreamView(BuildMaskStreamDict(image), image.maskStream);
         }
-        ids.push_back(pdf.AddStreamView(BuildImageStreamDict(image, smaskId), image.stream));
+        ids[index] = pdf.AddStreamView(BuildImageStreamDict(image, smaskId), image.stream);
     }
+    if (forms) AddSvgForms(pdf, images, regularFont, boldFont, compress, ids);
     return ids;
 }
 
@@ -9029,7 +9229,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         : TitledHeadings(renderer.Headings(), titledHeadings, headingTitles);
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
-    std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
+    std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images(), fontRegularId, fontBoldId, options.compress);
     std::vector<size_t> contentsTargets;   // the heading of each entry of the table of contents
     const std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);
     HeadingTargets headingTargets(headings, winAnsi, renderer.PageHeight(), renderer.Notes());
@@ -9309,6 +9509,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     const ThemePalette palette(options.theme);
     Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, options.pageSize, &imageRegistry, palette);
     if (options.pdfa) renderer.DisableMath();
+    imageRegistry.SetFont(&font, &renderer.Cids());
     if (!options.highlightCode) renderer.DisableHighlighting();
     if (!contents.empty()) renderer.SetContents(&contents);
     {
@@ -9325,7 +9526,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         : TitledHeadings(renderer.Headings(), titledHeadings, headingTitles);
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
-    std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images());
+    std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images(), type0FontId, 0, options.compress);
     // The table of contents' page numbers, before the font subset is made, which then has their glyphs.
     std::vector<size_t> contentsTargets;   // the heading of each entry of the table of contents
     const std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);

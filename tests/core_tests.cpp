@@ -2317,6 +2317,62 @@ bool CheckBook() {
     return true;
 }
 
+// An SVG image is drawn as a form XObject over the unit square, as images are drawn: its
+// gradient as a shading, its opacity as a graphics state, its text in the document's font (the
+// standard fonts' literal strings, the minus sign as a hyphen, the Unicode renderer's glyph ids).
+// Style sheets of type, class and id selectors apply by specificity, as Illustrator writes them.
+// One that needs content RayoMD does not draw (HTML in a foreignObject, a descendant selector
+// that sets a fill) shows its alt text, and counts as failed.
+bool CheckSvg() {
+    const std::filesystem::path directory = std::filesystem::temp_directory_path() / "rayomd-test-svg";
+    std::filesystem::create_directories(directory);
+    std::ofstream(directory / "chart.svg", std::ios::binary) <<
+        "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"100\" viewBox=\"0 0 200 100\">"
+        "<defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#1f77b4\"/><stop offset=\"1\" stop-color=\"red\"/>"
+        "</linearGradient><clipPath id=\"c\"><rect width=\"150\" height=\"100\"/></clipPath></defs>"
+        "<g clip-path=\"url(#c)\"><rect x=\"10\" y=\"10\" width=\"80\" height=\"60\" fill=\"url(#g)\"/>"
+        "<path d=\"M100 80 A30 30 0 0 1 160 80\" fill=\"none\" stroke=\"#333\" stroke-width=\"2\"/></g>"
+        "<circle cx=\"170\" cy=\"30\" r=\"15\" fill=\"green\" fill-opacity=\"0.5\"/>"
+        "<text x=\"100\" y=\"95\" text-anchor=\"middle\" font-size=\"12\">Sales</text>"
+        "<text x=\"5\" y=\"20\">\xE2\x88\x92" "1</text></svg>";
+    std::ofstream(directory / "html.svg", std::ios::binary) <<
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><foreignObject width=\"10\" height=\"10\">"
+        "<div xmlns=\"http://www.w3.org/1999/xhtml\">label</div></foreignObject></svg>";
+    const std::string sheet = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\"><style>";
+    const std::string boxes = "<rect class=\"st0\" width=\"10\" height=\"10\"/><rect class=\"st1\" x=\"12\" width=\"10\" "
+        "height=\"10\"/><rect id=\"b\" class=\"st0\" x=\"24\" width=\"10\" height=\"10\"/></svg>";
+    std::ofstream(directory / "classes.svg", std::ios::binary) <<
+        sheet << ".st0{fill:#E30613}rect.st1{fill:#1D71B8}.st1{fill:black}#b{fill:#FFED00}</style>" << boxes;
+    std::ofstream(directory / "descendant.svg", std::ios::binary) << sheet << "svg .st0{fill:#E30613}</style>" << boxes;
+    TinyPdf::PdfOptions options;
+    options.sourcePath = (directory / "doc.md").u8string();
+    const std::string document = "# Chart\n\n![chart](chart.svg)\n";
+    for (const std::string& text : { document, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + document }) {
+        const bool standard = text == document;
+        std::string pdf;
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf(text, options, pdf);
+        if (!result.Ok() || result.failedImages != 0 || CountOccurrences(pdf, "/Subtype /Form") != 1 ||
+            pdf.find("/Subtype /Image") != std::string::npos || pdf.find("/Matrix [0.00666667 0 0 0.01333333 0 0]") == std::string::npos ||
+            pdf.find("/Shading << /Sh1") == std::string::npos || pdf.find("/ExtGState << /GS1") == std::string::npos ||
+            pdf.find(standard ? "(Sales) Tj" : "<00530061006C00650073> Tj") == std::string::npos ||
+            pdf.find(standard ? "(-1) Tj" : "<22120031> Tj") == std::string::npos) {
+            std::cerr << "SVG image mismatch (" << (standard ? "standard" : "Unicode") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    std::string pdf;
+    const TinyPdf::BuildResult result = TinyPdf::BuildPdf(
+        "![classes](classes.svg)\n\n![labels](html.svg)\n\n![descendant](descendant.svg)\n", options, pdf);
+    std::filesystem::remove_all(directory);
+    if (!result.Ok() || result.failedImages != 2 || CountOccurrences(pdf, "/Subtype /Form") != 1 ||
+        pdf.find("0.89 0.024 0.075 rg\n0 15 7.5 -7.5 re") == std::string::npos ||
+        pdf.find("0.114 0.443 0.722 rg\n9 15") == std::string::npos || pdf.find("1 0.929 0 rg\n18 15") == std::string::npos) {
+        std::cerr << "SVG style sheet or fallback mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -2718,6 +2774,7 @@ int main() {
     if (!CheckHighlighting()) return 94;
     if (!CheckContents()) return 95;
     if (!CheckBook()) return 96;
+    if (!CheckSvg()) return 97;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
