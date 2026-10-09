@@ -1477,6 +1477,31 @@ bool CheckAlerts() {
     return true;
 }
 
+// A heading never ends a page: its page keeps room under its first line for the space after it
+// and two lines of the text that follows, or the heading starts the next page. Swept across
+// the foot of a page, in both renderers (Modern style, normal margin: body lines 15.525 high).
+bool CheckHeadingKeep() {
+    const double lowest = 54.0 + 22.0 * 1.35 + 8.0 + 2.0 * 11.5 * 1.35;
+    for (const bool unicode : { false, true }) {
+        for (int lines = 25; lines < 60; lines++) {
+            std::string document = unicode ? "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" : "";
+            for (int k = 0; k < lines; k++) document += "Filler " + std::to_string(k) + ".\n\n";
+            document += "## Keep\n\nText after the heading.\n";
+            std::string pdf;
+            if (!Build(document, pdf)) return false;
+            const size_t title = pdf.find("/Title (Keep)");
+            const size_t dest = title == std::string::npos ? title : pdf.find(" /XYZ null ", title);
+            const double top = dest == std::string::npos ? 0.0 : std::strtod(pdf.c_str() + dest + 11, nullptr);
+            if (top < lowest - 0.01) {
+                std::cerr << "heading keep: \"## Keep\" at y " << top << " after " << lines << " paragraphs ("
+                          << (unicode ? "Unicode" : "standard") << " renderer)" << std::endl;
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -1847,6 +1872,7 @@ int main() {
     if (!CheckAutolinks()) return 82;
     if (!CheckShortcutReferences()) return 83;
     if (!CheckAlerts()) return 84;
+    if (!CheckHeadingKeep()) return 85;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

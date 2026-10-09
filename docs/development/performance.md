@@ -632,6 +632,20 @@ Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
 `81b1f4e`): the 1,197 corpus PDFs that changed hold an alert; the watch fixtures
 write the same bytes with the same instructions (+0.01 %) in the same time.
 
+## Headings kept with what follows, October 2026
+
+A heading no longer ends a page. Its page must keep room under its first line for
+the space after it, the headings right after it (each with its spaces and first
+line) and two lines of what follows them; otherwise the heading starts the next
+page. `RenderBlocks` works that room out (`HeadingKeep`) and hands it to
+`RenderHeading`, a few additions per heading.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`7cf79ee`): 23 of the 919 corpus documents (Modern style) paginate differently, 4
+with a page more, and show the same text in the same order (`mutool draw -F txt`;
+in one, the order in which it reads table cells next to a moved break); the watch
+fixtures run the same instructions (+0.01 %) in the same time.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

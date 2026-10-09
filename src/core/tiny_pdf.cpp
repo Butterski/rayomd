@@ -3633,6 +3633,22 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
     renderer.y -= 9.0;
 }
 
+// The point sizes of the heading levels 1 to 6.
+constexpr double kHeadingSizes[] = { 0, 26, 22, 18, 15, 13, 12 };
+
+// The room a heading keeps under its first line, so that it never ends a page: the space after
+// it, the headings right after it (each with its space before and after and its first line)
+// and two lines of what follows them, unless nothing or a page break does.
+static double HeadingKeep(const Block& heading, const Block* next, const Block* end, double lineHeight) {
+    double keep = std::max(1, std::min(6, heading.level)) <= 2 ? 8.0 : 5.0;
+    for (; next != end && next->type == BlockType::Heading; next++) {
+        const int level = std::max(1, std::min(6, next->level));
+        keep += (level <= 2 ? 20.0 : 13.0) + kHeadingSizes[level] * 1.35;
+    }
+    if (next != end && next->type != BlockType::PageBreak) keep += lineHeight * 2.0;
+    return keep;
+}
+
 template <typename RendererType>
 static void RenderBlocks(RendererType& renderer, const std::vector<Block>& blocks) {
     if (blocks.empty()) {
@@ -3644,7 +3660,9 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         if (block.type == BlockType::PageBreak) { pageBreakPending = true; continue; }
         if (pageBreakPending) { renderer.RenderPageBreak(); pageBreakPending = false; }
         switch (block.type) {
-        case BlockType::Heading: renderer.RenderHeading(block); break;
+        case BlockType::Heading:
+            renderer.RenderHeading(block, HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight));
+            break;
         case BlockType::Paragraph: renderer.RenderParagraph(block.text); break;
         case BlockType::Bullet: renderer.RenderBullet(block); break;
         case BlockType::Numbered: renderer.RenderNumbered(block); break;
@@ -4705,11 +4723,12 @@ private:
         y -= h + 10.0;
     }
 
-    void RenderHeading(const Block& block) {
-        static const double sizes[] = { 0, 26, 22, 18, 15, 13, 12 };
+    // `keep` is the room under its first line that the heading needs on its page (HeadingKeep).
+    void RenderHeading(const Block& block, double keep) {
         int level = std::max(1, std::min(6, block.level));
-        double size = sizes[level];
+        double size = kHeadingSizes[level];
         if (y < PAGE_H - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
+        Ensure(size * 1.35 + keep);
 
         if (block.hasMath) {
             RenderMathTextLines(block.text, level, margin, PAGE_W - margin * 2.0, size, "0.02 0.02 0.02", false, false);
@@ -6773,11 +6792,12 @@ private:
         y -= lh;
     }
 
-    void RenderHeading(const Block& block) {
-        static const double sizes[] = { 0, 26, 22, 18, 15, 13, 12 };
+    // `keep` is the room under its first line that the heading needs on its page (HeadingKeep).
+    void RenderHeading(const Block& block, double keep) {
         int level = std::max(1, std::min(6, block.level));
-        double size = sizes[level];
+        double size = kHeadingSizes[level];
         if (y < PAGE_H - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
+        Ensure(size * 1.35 + keep);
         if (block.hasMath) {
             RenderMathTextLines(block.text, level, margin, PAGE_W - margin * 2.0, size, "0.02 0.02 0.02", true, false);
             y -= level <= 2 ? 8.0 : 5.0;
