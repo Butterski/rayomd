@@ -282,6 +282,7 @@ struct CliExportOptions {
     bool pageNumbers = false;
     bool compress = false;
     bool pdfa = false;
+    bool highlightCode = true;
     TinyPdf::PdfTheme theme;
     unsigned workers = 0;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
@@ -303,6 +304,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--page-numbers") options.pageNumbers = true;
         else if (value == "--compress") options.compress = true;
         else if (value == "--pdfa") options.pdfa = true;
+        else if (value == "--no-highlight") options.highlightCode = false;
         else if (value.rfind("--theme=", 0) == 0) {
             const fs::path themePath(argv[i] + 8);
             std::string text;
@@ -396,6 +398,7 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     pdfOptions.pageNumbers = options.pageNumbers;
     pdfOptions.compress = options.compress;
     pdfOptions.pdfa = options.pdfa;
+    pdfOptions.highlightCode = options.highlightCode;
     pdfOptions.theme = options.theme;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, pdfOptions, pdfBuffer);
     if (!buildResult) {
@@ -714,6 +717,7 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     options.pageNumbers = cliOptions.pageNumbers;
     options.compress = cliOptions.compress;
     options.pdfa = cliOptions.pdfa;
+    options.highlightCode = cliOptions.highlightCode;
     options.theme = cliOptions.theme;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (!buildResult) {
@@ -844,7 +848,8 @@ void PrintUsage() {
         << "Output flags: --compress (FlateDecode streams: smaller files, slower export), --pdfa (PDF/A-3b:\n"
         << "  every font embedded, formulas as TeX source), --theme=FILE (key = value lines: font, logo,\n"
         << "  heading-color, link-color, accent-color, header-left/center/right, footer-left/center/right\n"
-        << "  with {title} {author} {subject} {date} {page} {pages} {logo}, cover).\n"
+        << "  with {title} {author} {subject} {date} {page} {pages} {logo}, cover), --no-highlight (code\n"
+        << "  blocks in one colour; by default fenced code in a language GitHub knows is coloured).\n"
         << "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         << "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4).\n"
         << "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"

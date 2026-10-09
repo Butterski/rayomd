@@ -43,7 +43,7 @@ native exporter through a small CLI.
 - Native PDF generation with no browser engine on the fast path.
 - A single Windows GUI executable and a compact Linux CLI.
 - Bounded parallel batch conversion, stdin, warm serve, and benchmark modes.
-- Unicode, clickable links (also bare URLs), bookmarks, tables, task lists, GitHub alerts, footnotes (as on GitHub, at the end of the text), code, local images, and opt-in URL images.
+- Unicode, clickable links (also bare URLs), bookmarks, tables, task lists, GitHub alerts, footnotes (as on GitHub, at the end of the text), code highlighted as on GitHub in 29 languages and formats, local images, and opt-in URL images.
 - Natively typeset math for a TeX subset: no LaTeX, no browser, no embedded math fonts.
 - Optional exact Markdown recovery through reversible PDFs.
 - Optional compression (`--compress`) with a built-in DEFLATE encoder: text-heavy PDFs come out two to five times smaller.
@@ -160,7 +160,8 @@ Version-specific engineering contracts remain beside the code:
 Native mode supports ATX and Setext headings (as PDF bookmarks and as targets of
 GitHub-style `#anchor` links; a heading never ends a page), paragraphs, structured
 nested lists (with GitHub task lists), block quotes and GitHub alerts (`> [!NOTE]`
-and the other four), fenced and indented code, pipe tables (whose header row repeats
+and the other four), fenced and indented code (fenced code in a language GitHub knows in
+its colours, `--no-highlight` to keep it one colour), footnotes, pipe tables (whose header row repeats
 on every page), rules, page breaks, matching-run code spans, classic emphasis and
 escapes, inline and reference-style links, URL/email autolinks (in angle brackets or
 bare, as on GitHub), standalone inline/reference images,
@@ -174,7 +175,7 @@ Images embedded in paragraph text use a consistent `image: alt` fallback;
 standalone images retain native image layout and missing-image fallback text.
 
 It deliberately does not promise full CommonMark/Pandoc compatibility, complete
-LaTeX math (packages, macros, automatic numbering), syntax highlighting, footnotes,
+LaTeX math (packages, macros, automatic numbering), highlighting for every language,
 citations, filters, templates, right-to-left scripts (Arabic and Hebrew are drawn
 left to right, unshaped), or HTML/CSS layout fidelity. The complete and current
 matrix is maintained in

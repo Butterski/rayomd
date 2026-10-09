@@ -1,5 +1,6 @@
 #include "markdown_parser.h"
 #include "footnotes.h"
+#include "highlight.h"
 #include "inline_markdown.h"
 #include "../common/text_utils.h"
 
@@ -1302,7 +1303,8 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
 
         if (info.kind == LineKind::Fence) {
             std::string_view fence = info.text;
-            const bool mathFence = IsMathFenceInfo(trimmed.substr(fence.size()));
+            const std::string_view infoString = trimmed.substr(fence.size());
+            const bool mathFence = IsMathFenceInfo(infoString);
             const size_t firstContent = i + 1;
             std::string text;
             i++;
@@ -1323,7 +1325,9 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                     continue;
                 }
             }
-            AppendBlock(blocks, BlockType::Code).text = std::move(text);
+            Block& code = AppendBlock(blocks, BlockType::Code);
+            code.text = std::move(text);
+            if (!infoString.empty()) code.codeLanguage = CodeLanguage(infoString);
             continue;
         }
 

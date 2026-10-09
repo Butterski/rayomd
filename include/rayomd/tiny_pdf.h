@@ -115,6 +115,9 @@ struct PdfOptions {
     // PDF/A-3b (ISO 19005-3): every font embedded, so all text takes a TrueType font and
     // formulas show their TeX source; an sRGB output intent, XMP metadata and a file identifier.
     bool pdfa = false;
+    // Fenced code whose info string names a language GitHub knows (python, js, bash, ...) in
+    // the colours of GitHub's light theme; false shows every code block in one colour.
+    bool highlightCode = true;
     PdfTheme theme;
 };
 

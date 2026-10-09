@@ -56,6 +56,14 @@ them; `footnotes.cpp` holds their numbering, kept out of the parser's translatio
 unit, where it moved GCC's inlining of the line classifier. A table with a reference
 shows its cells as plain text, as one with a formula does. Without definitions the
 PDF bytes stay as they are.
+Fenced code whose info string names a language GitHub knows (29 lexers: shell and
+console, PowerShell, batch, JavaScript and TypeScript, Python, C, C++, C#, Java, Kotlin,
+Go, Rust, Swift, PHP, Ruby, SQL, HTML and XML, CSS and SCSS, JSON, YAML, TOML, INI,
+Dockerfile, diff) is drawn in the colours of GitHub's light theme; `--no-highlight`
+(`PdfOptions::highlightCode`) and blocks in no known language keep the one-colour path
+and its bytes. The lexers in `highlight.cpp` read every byte once in one forward pass;
+every rule is bounded, so time stays linear for any input. Keep it that way: a new rule
+that scans ahead must stop at the end of its line or mark what it scanned, never rescan.
 Opt-in compression (`--compress`, `PdfOptions::compress`) writes page content, the
 font program and both CMaps as FlateDecode where that makes the file smaller, with
 RayoMD's own DEFLATE encoder; never the XMP metadata or an embedded source, which
@@ -137,6 +145,12 @@ Important image/link details:
   Footnotes in the parser: reading a definition's lines, the numbering by first
   reference once the document is read, and the plain text with reference markers of
   headings and tables that waited for it (`Block::notesPending`). Built at `-Os`.
+
+- `src/core/highlight.h` and `src/core/highlight.cpp`
+  Syntax highlighting: the language an info string names (a table made at compile
+  time), the lexers that give each byte of a code block a token class, and the colours.
+  Built at `-O2`: per-byte code, 1.5 times as fast as at `-Os`. The renderers split a
+  line into runs of one colour (`SplitCodeRuns`) and draw them in one text object.
 
 - `src/core/rayomd_pdf_source.h` and `src/core/rayomd_pdf_source.cpp`
   Bounded reversible-profile metadata, SHA-256 integrity, hostile-input

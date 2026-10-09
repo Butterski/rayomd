@@ -6,6 +6,7 @@
 #include "../common/profiling.h"
 #include "../common/text_utils.h"
 #include "markdown_parser.h"
+#include "highlight.h"
 #include "math_layout.h"
 #include "pdfa.h"
 #include "theme.h"
@@ -4144,6 +4145,30 @@ static double HeadingKeep(const Block& heading, const Block* next, const Block* 
     return keep;
 }
 
+// A run of a line of highlighted code: where it ends, and the colour index of its characters
+// (Internal::kCodeColorOfClass).
+struct CodeRun {
+    uint32_t end;
+    uint8_t color;
+};
+
+// Splits a line of highlighted code into runs of one colour, into `runs`, which keeps its room
+// from line to line. Spaces take the colour of the run they are in, leading ones that of the first
+// run, so they never start one.
+template <typename Char>
+static void SplitCodeRuns(const Char* text, size_t length, const uint8_t* classes, std::vector<CodeRun>& runs) {
+    runs.clear();
+    uint8_t color = 0xFF;   // none yet
+    for (size_t at = 0; at < length; at++) {
+        if (text[at] == ' ') continue;
+        const uint8_t next = Internal::kCodeColorOfClass[classes[at]];
+        if (next == color) continue;
+        if (color != 0xFF) runs.push_back({ (uint32_t)at, color });
+        color = next;
+    }
+    runs.push_back({ (uint32_t)length, color == 0xFF ? (uint8_t)0 : color });
+}
+
 template <typename RendererType>
 static void RenderBlocks(RendererType& renderer, const std::vector<Block>& blocks) {
     if (blocks.empty()) {
@@ -4162,7 +4187,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         case BlockType::Bullet: renderer.RenderBullet(block); break;
         case BlockType::Numbered: renderer.RenderNumbered(block); break;
         case BlockType::Quote: renderer.RenderQuote(block); break;
-        case BlockType::Code: renderer.RenderCode(block.text); break;
+        case BlockType::Code: renderer.RenderCode(block); break;
         case BlockType::MathBlock: renderer.RenderMath(block.text); break;
         case BlockType::Table:
             if (block.hasMath) RenderMathTable(renderer, block);
@@ -4293,6 +4318,8 @@ public:
     bool MathUsed() const { return math.Used(); }
     // PDF/A: formulas show their TeX source, as the math fonts are not embedded.
     void DisableMath() { math.Disable(); }
+    // PdfOptions::highlightCode off: every code block in one colour.
+    void DisableHighlighting() { highlightCode = false; }
     const std::vector<HeadingMark>& Headings() const { return headings; }
     const NoteMarks& Notes() const { return noteMarks; }
     double Margin() const { return margin; }
@@ -4343,6 +4370,12 @@ private:
     const Internal::Footnotes* footnotes = nullptr;
     NoteMarks noteMarks;
     MathFallbackFont mathFallback{};
+    // Highlighted code: whether to highlight it, a block's text as the lexer reads it, the
+    // classes of that text, and the runs of one colour of a line, kept from block to block.
+    bool highlightCode = true;
+    std::string codeText;
+    std::vector<uint8_t> codeClasses;
+    std::vector<CodeRun> codeRuns;
 
     // Text the standard math fonts cannot show (\text{...} in another script) is
     // measured and painted with the embedded document font, at the text size the
@@ -5558,7 +5591,7 @@ private:
             case BlockType::Image: {
                 double savedMargin = margin;
                 margin += 14.0;
-                if (child.type == BlockType::Code) RenderCode(child.text);
+                if (child.type == BlockType::Code) RenderCode(child);
                 else if (child.type == BlockType::Table && child.hasMath) RenderMathTable(*this, child);
                 else if (child.type == BlockType::Table) RenderTable(child.rows, child.aligns);
                 else if (child.type == BlockType::Rule) RenderRule();
@@ -5633,8 +5666,12 @@ private:
         y -= 7.0;
     }
 
-    void RenderCode(const std::string& text) {
-        std::vector<std::string> raw = SplitLines(text);
+    void RenderCode(const Block& block) {
+        if (block.codeLanguage != 0 && highlightCode) {
+            RenderHighlightedCode(block.text, block.codeLanguage);
+            return;
+        }
+        std::vector<std::string> raw = SplitLines(block.text);
         double size = 9.5;
         double lh = size * 1.35;
         double x = margin + 8.0;
@@ -5662,6 +5699,93 @@ private:
         const double pad = first ? 3.0 : 0.0;
         DrawRect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color);
         first = false;
+    }
+
+    // A fenced block in a language the lexer knows (Block::codeLanguage): RenderCode's lines and
+    // tiles, each run of characters in the colour of its token class; a diff's added and removed
+    // lines on tinted tiles. RenderCode decodes each line; here the lexer reads the whole block at
+    // once, with each UTF-16 unit above ASCII as one byte from 0x80, which it takes for a letter,
+    // so that the classes are those of the units drawn. Out of line, but not cold: it runs for
+    // every character of the code, and a cold function is optimized for size.
+    RAYOMD_SHARED void RenderHighlightedCode(const std::string& text, uint8_t language) {
+        std::string_view body(text);
+        if (body.size() >= 3 && memcmp(body.data(), "\xEF\xBB\xBF", 3) == 0) body.remove_prefix(3);   // as SplitLines
+        std::wstring wide = Utf8ToWide(body);
+        codeText.resize(wide.size());
+        for (size_t at = 0; at < wide.size(); at++) {
+            codeText[at] = wide[at] < 0x80 ? (char)wide[at] : '\x80';
+            if (wide[at] == L'\t') wide[at] = L' ';   // as WrapCodeLine draws a tab
+        }
+        codeClasses.resize(wide.size());
+        Internal::ClassifyCode(language, codeText, codeClasses.data());
+        const double size = 9.5;
+        const double lh = size * 1.35;
+        const double x = margin + 8.0;
+        const double width = pageW - margin * 2.0 - 16.0;
+        const double scale = size * 0.001;
+        bool first = true;
+        for (size_t start = 0;;) {
+            size_t end = wide.find(L'\n', start);
+            const bool last = end == std::wstring::npos;
+            if (last) end = wide.size();
+            const size_t lineEnd = end > start && wide[end - 1] == L'\r' ? end - 1 : end;   // as SplitLines
+            const char* tile = Internal::CodeLineTile(lineEnd > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
+            auto draw = [&](size_t from, size_t to) {
+                CodeTile(lh, first, tile != nullptr ? tile : "0.95 0.95 0.93");
+                PaintCodeRuns(x, y - size, size, std::wstring_view(wide.data() + from, to - from), codeClasses.data() + from);
+                y -= lh;
+            };
+            // WrapCodeLine's pieces, read where they are: one ends before the character that would
+            // make it wider than the line, and holds at least one. The same sums, so the same breaks.
+            size_t piece = start;
+            double pieceWidth = 0.0;
+            for (size_t at = start; at < lineEnd; at++) {
+                const double charWidth = CodepointWidth(font, (uint16_t)wide[at], scale);
+                if (at > piece && pieceWidth + charWidth > width) {
+                    draw(piece, at);
+                    piece = at;
+                    pieceWidth = 0.0;
+                }
+                pieceWidth += charWidth;
+            }
+            draw(piece, lineEnd);
+            if (last) break;
+            start = end + 1;
+        }
+        y -= 8.0;
+    }
+
+    // A line of highlighted code at (x, baseline): as PaintText when it is one colour, otherwise
+    // one text object with each run after its colour.
+    RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::wstring_view text, const uint8_t* classes) {
+        SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
+        if (codeRuns.size() == 1) {
+            PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color));
+            return;
+        }
+        TailWriter w(content, 64 + kOperandBytes * 3 + text.size() * 4 + codeRuns.size() * 32);
+        size_t begin = 0;
+        for (const CodeRun& run : codeRuns) {
+            const char* color = Internal::CodeColor(run.color);
+            if (begin == 0) {
+                w.Lit("q ");
+                w.Bytes(color, strlen(color));
+                w.Lit(" rg BT /F1 ");
+                w.Fixed(size);
+                w.Lit(" Tf 1 0 0 1 ");
+                w.Fixed(x);
+                w.Lit(" ");
+                w.Fixed(baseline);
+                w.Lit(" Tm ");
+            } else {
+                w.Bytes(color, strlen(color));
+                w.Lit(" rg ");
+            }
+            w.cursor = WriteHexText(w.cursor, font, text.substr(begin, run.end - begin), usedCids);
+            w.Lit(" Tj ");
+            begin = run.end;
+        }
+        w.Lit("ET Q\n");
     }
 
     void RenderMath(const std::string& text) {
@@ -6500,6 +6624,8 @@ public:
     // Whether text was shown in /F4 Helvetica-Oblique or /F5 Helvetica-BoldOblique.
     bool ObliqueUsed() const { return (facesUsed & (1u << kStyleItalic)) != 0; }
     bool BoldObliqueUsed() const { return (facesUsed & (1u << (kStyleBold | kStyleItalic))) != 0; }
+    // PdfOptions::highlightCode off: every code block in one colour.
+    void DisableHighlighting() { highlightCode = false; }
 
 private:
     template <typename RendererType>
@@ -6543,6 +6669,14 @@ private:
     const Internal::Footnotes* footnotes = nullptr;
     NoteMarks noteMarks;
     MathFallbackFont latinMathFallback{};
+    // Highlighted code: whether to highlight it, the classes of a block's bytes, one of its lines
+    // as WrapAsciiLiteral keeps it when that is not the line as it is, with the classes of its
+    // bytes, and the runs of one colour of a line, kept from block to block.
+    bool highlightCode = true;
+    std::vector<uint8_t> codeClasses;
+    std::string codeLine;
+    std::vector<uint8_t> codeLineClasses;
+    std::vector<CodeRun> codeRuns;
 
     double MaxMathHeight() const {
         return (pageH - margin * 2.0) * 0.5;
@@ -7744,7 +7878,7 @@ private:
             case BlockType::Image: {
                 double savedMargin = margin;
                 margin += 14.0;
-                if (child.type == BlockType::Code) RenderCode(child.text);
+                if (child.type == BlockType::Code) RenderCode(child);
                 else if (child.type == BlockType::Table && child.hasMath) RenderMathTable(*this, child);
                 else if (child.type == BlockType::Table) RenderTable(child.rows, child.aligns);
                 else if (child.type == BlockType::Rule) RenderRule();
@@ -7820,8 +7954,12 @@ private:
         y -= 7.0;
     }
 
-    void RenderCode(const std::string& text) {
-        std::vector<std::string> raw = SplitLines(text);
+    void RenderCode(const Block& block) {
+        if (block.codeLanguage != 0 && highlightCode) {
+            RenderHighlightedCode(block.text, block.codeLanguage);
+            return;
+        }
+        std::vector<std::string> raw = SplitLines(block.text);
         double size = 9.5;
         double lh = size * 1.35;
         double x = margin + 8.0;
@@ -7848,6 +7986,92 @@ private:
         const double pad = first ? 3.0 : 0.0;
         Rect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color);
         first = false;
+    }
+
+    // A fenced block in a language the lexer knows (Block::codeLanguage): RenderCode's lines and
+    // tiles, each run of characters in the colour of its token class; a diff's added and removed
+    // lines on tinted tiles. Out of line, but not cold: it runs for every character of the code,
+    // and a cold function is optimized for size.
+    RAYOMD_SHARED void RenderHighlightedCode(const std::string& text, uint8_t language) {
+        codeClasses.resize(text.size());
+        Internal::ClassifyCode(language, text, codeClasses.data());
+        const double size = 9.5;
+        const double lh = size * 1.35;
+        const double x = margin + 8.0;
+        const double width = pageW - margin * 2.0 - 16.0;
+        // WrapAsciiLiteral's lines: as many Courier characters as fit, and at least one.
+        const size_t perLine = (size_t)std::max<uint64_t>(1, MaxUnits(width, size) / WordAdvances(StandardTextFont::Mono).space);
+        bool first = true;
+        for (size_t start = 0;;) {
+            size_t end = text.find('\n', start);
+            const bool last = end == std::string::npos;
+            if (last) end = text.size();
+            // The bytes WrapAsciiLiteral keeps: tabs as spaces, and no control or non-ASCII bytes.
+            // A line of printable ASCII, the usual one, is read where it is.
+            std::string_view line(text.data() + start, end - start);
+            const uint8_t* lineClasses = codeClasses.data() + start;
+            size_t printable = 0;
+            while (printable < line.size() && (unsigned char)line[printable] - 32u < 95u) printable++;
+            if (printable < line.size()) {
+                codeLine.resize(line.size());
+                codeLineClasses.resize(line.size());
+                size_t kept = 0;
+                for (size_t at = 0; at < line.size(); at++) {
+                    const unsigned char ch = (unsigned char)line[at];
+                    if (ch != '\t' && (ch < 32 || ch >= 127)) continue;
+                    codeLine[kept] = ch == '\t' ? ' ' : (char)ch;
+                    codeLineClasses[kept++] = lineClasses[at];
+                }
+                line = std::string_view(codeLine.data(), kept);
+                lineClasses = codeLineClasses.data();
+            }
+            const char* tile = Internal::CodeLineTile(end > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
+            size_t piece = 0;
+            do {
+                const size_t count = std::min(perLine, line.size() - piece);
+                CodeTile(lh, first, tile != nullptr ? tile : "0.95 0.95 0.93");
+                PaintCodeRuns(x, y - size, size, line.substr(piece, count), lineClasses + piece);
+                y -= lh;
+                piece += count;
+            } while (piece < line.size());
+            if (last) break;
+            start = end + 1;
+        }
+        y -= 8.0;
+    }
+
+    // A line of highlighted code at (x, baseline) in Courier: as Text when it is one colour,
+    // otherwise one text object with each run after its colour.
+    RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::string_view text, const uint8_t* classes) {
+        if (text.empty()) return;
+        SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
+        if (codeRuns.size() == 1) {
+            Text(x, baseline, size, text, "F3", Internal::CodeColor(codeRuns[0].color));
+            return;
+        }
+        TailWriter out(content, 48 + kOperandBytes * 3 + text.size() * 2 + codeRuns.size() * 32);
+        size_t begin = 0;
+        for (const CodeRun& run : codeRuns) {
+            const char* color = Internal::CodeColor(run.color);
+            if (begin == 0) {
+                out.Lit("q ");
+                out.Bytes(color, strlen(color));
+                out.Lit(" rg BT /F3 ");
+                out.Fixed(size);
+                out.Lit(" Tf 1 0 0 1 ");
+                out.Fixed(x);
+                out.Lit(" ");
+                out.Fixed(baseline);
+                out.Lit(" Tm (");
+            } else {
+                out.Bytes(color, strlen(color));
+                out.Lit(" rg (");
+            }
+            out.cursor = WriteEscapedLiteral(out.cursor, text.substr(begin, run.end - begin));
+            out.Lit(") Tj ");
+            begin = run.end;
+        }
+        out.Lit("ET Q\n");
     }
 
     void RenderMath(const std::string& text) {
@@ -8260,6 +8484,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     PrepareOutput(pdfBytes, text.size() * 4 + 32 * 1024);
     const ThemePalette palette(options.theme);
     StandardRenderer renderer(pdfBytes, options.style, options.margin, options.pageSize, &imageRegistry, winAnsi, palette);
+    if (!options.highlightCode) renderer.DisableHighlighting();
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         if (footnotes.notes.empty()) renderer.Render(blocks);
@@ -8535,6 +8760,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     const ThemePalette palette(options.theme);
     Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, options.pageSize, &imageRegistry, palette);
     if (options.pdfa) renderer.DisableMath();
+    if (!options.highlightCode) renderer.DisableHighlighting();
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         if (footnotes.notes.empty()) renderer.Render(blocks);

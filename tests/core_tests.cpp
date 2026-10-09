@@ -9,6 +9,7 @@
 #include "../src/core/math_parser.h"
 #include "../src/core/rayomd_pdf_source.h"
 #include "../src/core/pdfa.h"
+#include "../src/core/highlight.h"
 
 #include <algorithm>
 #include <array>
@@ -2093,6 +2094,96 @@ bool CheckCodeTiles() {
     return true;
 }
 
+// The text of the run strings of the first line drawn in `color`: the literal strings "(...)"
+// (standard renderer) or hex strings "<...>" of CIDs, which are code points (Unicode renderer), up
+// to the end of its text object.
+std::string CodeLineText(const std::string& pdf, std::string_view color) {
+    std::string text;
+    const size_t start = pdf.find(std::string(color) + " rg BT");
+    const size_t end = start == std::string::npos ? start : pdf.find(" ET", start);
+    for (size_t at = start; end != std::string::npos && at < end; at++) {
+        if (pdf[at] == '(') {
+            for (at++; pdf[at] != ')'; at++) text.push_back(pdf[at] == '\\' ? pdf[++at] : pdf[at]);
+        } else if (pdf[at] == '<') {
+            for (at++; pdf[at] != '>'; at += 4) text.push_back((char)std::stoi(pdf.substr(at, 4), nullptr, 16));
+        }
+    }
+    return text;
+}
+
+// Fenced code in a language GitHub knows takes the classes of its tokens. The first word of the info
+// string names the language, in any case, as GitHub's aliases and Pandoc's {.lang} do; strings,
+// comments and interpolations start and end where each language has them. The PDF draws each run of
+// one colour after its colour, and the line's text as it is; PdfOptions::highlightCode off draws the
+// block in one colour. In both renderers.
+bool CheckHighlighting() {
+    using TinyPdf::Internal::ClassifyCode;
+    using TinyPdf::Internal::CodeLanguage;
+    const std::pair<const char*, const char*> sameLanguage[] = {
+        {"Python", "py"}, {"{.python .numberLines}", "python"}, {"rust,ignore", "rs"}, {"js title=\"a.js\"", "javascript"},
+        {"C#", "csharp"}, {"c++", "cpp"}, {"YML", "yaml"}, {"shell-session", "console"}, {"Dockerfile", "docker"},
+    };
+    for (const auto& [info, same] : sameLanguage) {
+        if (CodeLanguage(info) == 0 || CodeLanguage(info) != CodeLanguage(same)) {
+            std::cerr << "highlight language mismatch: " << info << std::endl;
+            return false;
+        }
+    }
+    for (const char* none : { "", "  ", "math", "text", "plaintext", "unknownlang", "mermaid" }) {
+        if (CodeLanguage(none) != 0) {
+            std::cerr << "highlight language for '" << none << "'" << std::endl;
+            return false;
+        }
+    }
+    // The class of each byte, as a letter: plain ' ', comment 'c', string 's', number 'n', keyword
+    // 'K', constant 'C', entity 'E', tag 'T', variable 'V', diff '+', '-' and '@'; '?' any.
+    struct Case { const char* info; const char* code; const char* classes; };
+    const Case cases[] = {
+        {"python", "x = \"# no\" # yes", "    ssssss ccccc"},
+        {"js", "`a${f(1)}b`", "ssssE n sss"},
+        {"js", "x = a / b; y = /c\\/d/g;", "               sssssss "},
+        {"rust", "/* a /* b */ c */ x", "ccccccccccccccccc  "},
+        {"rust", "'a 'b'", "KK sss"},
+        {"sh", "cat <<EOF\n$x # no\nEOF\necho # yes", "    sssss?sssssss?sss?CCCC ccccc"},
+        {"c", "#include <a.h> // c", "KKKKKKKK sssss cccc"},
+        {"yaml", "key: \"v\" # c", "TTT  sss ccc"},
+        {"json", "{\"k\": \"v\", \"n\": 1}", " CCC  sss  CCC  n "},
+        {"html", "<a href=\"x\">t</a>", " T EEEE sss    T "},
+        {"css", "a { color: #fff; }", "T   CCCCC  CCCC   "},
+        {"sql", "SELECT 'it''s' -- c", "KKKKKK sssssss cccc"},
+        {"diff", "-a\n+b\n@@ x", "--?++?@@@@"},
+    };
+    static const char letters[] = " csnKCETV+-@";
+    for (const Case& item : cases) {
+        const std::string code = item.code;
+        std::vector<uint8_t> classes(code.size());
+        ClassifyCode(CodeLanguage(item.info), code, classes.data());
+        std::string actual;
+        for (size_t at = 0; at < code.size(); at++) actual.push_back(item.classes[at] == '?' ? '?' : letters[classes[at]]);
+        if (actual != item.classes) {
+            std::cerr << "highlight classes mismatch (" << item.info << "): '" << actual << "' for '" << code << "'" << std::endl;
+            return false;
+        }
+    }
+    const std::string block = "```python\ndef f(x): return 'a'  # note\n```\n";
+    for (const std::string& text : { block, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + block }) {
+        TinyPdf::PdfOptions options;
+        std::string colored;
+        std::string plain;
+        const bool built = TinyPdf::BuildPdf(text, options, colored).Ok();
+        options.highlightCode = false;
+        if (!built || !TinyPdf::BuildPdf(text, options, plain).Ok() || CountOccurrences(colored, ".812 .133 .18 rg") != 2 ||
+            colored.find(".349 .388 .431 rg") == std::string::npos ||
+            CodeLineText(colored, ".812 .133 .18") != "def f(x): return 'a'  # note" ||
+            plain.find(".812 .133 .18 rg") != std::string::npos ||
+            CodeLineText(plain, "0.12 0.12 0.12") != "def f(x): return 'a'  # note") {
+            std::cerr << "highlighted code mismatch (" << (text == block ? "standard" : "Unicode") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -2491,6 +2582,7 @@ int main() {
     if (!CheckPdfA()) return 91;
     if (!CheckFootnotes()) return 92;
     if (!CheckCodeTiles()) return 93;
+    if (!CheckHighlighting()) return 94;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

@@ -935,10 +935,65 @@ Measured on 2026-10-09 against the previous commit: of the 2,883 corpus PDFs, th
 all have one. The watch fixtures run 0.15 % more instructions; pinned, time +0.13 %
 against A/A -0.15 %. The binary is the same size.
 
+## Syntax highlighting, October 2026
+
+Fenced code whose info string names a language GitHub knows is drawn in the colours of
+GitHub's light theme (Primer's prettylights): keywords, strings, comments, numbers and
+constants, names of functions and types, tags and keys, variables, and a diff's lines on
+tinted tiles. `highlight.cpp` has 29 lexers: shell and terminal sessions, PowerShell,
+batch files, JavaScript, TypeScript, Python and its console, C, C++, C#, Java (also
+Groovy), Kotlin, Go, Rust, Swift, PHP, Ruby, SQL, HTML, XML, CSS, SCSS, JSON, YAML,
+TOML, INI, Dockerfile and diff. In 1,000 READMEs and 8 documentation sites (83,109
+fenced blocks) they cover about 96 % of the blocks that name a language.
+
+- One forward pass per block writes a class per byte, driven by a table of byte kinds.
+  Words are looked up in an open-addressed table per language, built on its first use
+  and hashed from the length and four bytes: a hash of every byte took an eighth of the
+  lexer's time. Tokens up to 16 bytes are marked with two overlapping stores and plain
+  ones not at all; a call to `memset` per token cost more than the token. The lexers
+  run at 2.4 to 3.6 ns per byte (C++, Python and JavaScript sources of 240 to 820 KB) at
+  `-O2`, 1.5 times as fast as at `-Os`, which would save 12 KB of the binary.
+- Every rule is bounded: an unclosed string or comment ends with its line or the block,
+  a regular expression is looked for once per line, the code of an interpolation is
+  lexed once, at most 8 deep. 84 hostile inputs (unclosed openers of every kind) stay
+  linear from 1 to 4 MB, at most 8.6 ns per byte.
+- The renderers split a line into runs of one colour (`SplitCodeRuns`; spaces never
+  start one) and draw them in one text object, with a fill colour before each run; a
+  line of one colour is drawn as before. The standard renderer reads a line of
+  printable ASCII where it is, the Unicode renderer the block decoded once, through
+  views. The plain path's `WrapAsciiLiteral` and `WrapCodeLine` allocate a vector and a
+  string per line, so a highlighted block costs fewer instructions than a plain one.
+- `CodeLanguage` finds a name in a table made at compile time. It first scanned every
+  alias, 2,000 instructions per fence, in the parser and so also with `--no-highlight`.
+- The functions that draw highlighted code are out of line but not cold (`RAYOMD_SHARED`).
+  As `RAYOMD_COLD`, optimized for size, and with `WrapCodeLine`, drawing took 2.8 million
+  instructions besides the wrapping on the vercel documentation, more than the lexer.
+
+Measured on 2026-10-09 against the previous commit: with `--no-highlight` all 2,883
+corpus PDFs are byte-identical; with highlighting so are the 1,170 of documents without
+a fence that names a language, also with `--page-numbers --compress`, and the 1,713 that
+differ all have one. On the watch fixtures, documents without highlighted code run
+-0.08 % and -0.01 % instructions; `ascii_96kb.md` (129 C++ blocks) +1.88 % and
+`table_96kb.md` (142 Python blocks) -1.02 %. All nine: +0.25 % instructions, time
+-0.04 % against A/A -0.22 %, pinned +0.47 % against A/A -0.05 %. Eight documentation
+sites of 400 KB each (2 to 23 % code, the Unicode renderer): -0.13 % instructions, time
+-0.43 % against A/A -0.74 %. The binary grew by 44 KB: the lexers' 28 KB of code and
+11 KB of word lists, alias table and colours, and 7 KB in the renderers.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
 they were not taken yet. Add to this list when a change turns one up.
+
+**Plain code blocks without a vector per line.** `RenderCode` wraps each line with
+`WrapAsciiLiteral` or `WrapCodeLine`, which return a vector of strings: two
+allocations a line, and a `push_back` a character in the Unicode renderer. The
+highlighted path reads the same pieces through views and draws a block in fewer
+instructions than the plain path, lexer included (2026-10-09: the vercel
+documentation -0.74 %, `table_96kb.md` -0.98 %). Plain blocks could take the same
+line handling with no byte changed; not taken with highlighting because `RenderCode`
+shifts GCC's inlining in `tiny_pdf.cpp` with any change (see Code tiles), which needs
+its own measurement.
 
 **`-O2` on Windows.** Windows release builds use `-O2`, Linux `-O3`. The same
 source built both ways with g++ 13.3 on Linux (2026-10-08, `tools/benchmark.py

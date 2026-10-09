@@ -158,6 +158,25 @@ def verify_footnotes(binary: Path, root: Path) -> None:
         raise AssertionError("footnotes: expected a link to the note and one back")
 
 
+def verify_highlight(binary: Path, root: Path) -> None:
+    """Fenced code in a language GitHub knows takes its token colours, each run after its colour in
+    one text object; --no-highlight shows it in one colour, as is a block in no known language."""
+    source = root / "code.md"
+    source.write_text("```python\ndef f(x): return 'a'  # note\n```\n\n```text\ndef plain(): pass\n```\n",
+                      encoding="utf-8")
+    colored_pdf = root / "code.pdf"
+    run(binary, "--export", str(source), str(colored_pdf))
+    colored = require_pdf(colored_pdf, b"Tm (def ) Tj .4 .224 .729 rg (f) Tj ", b".349 .388 .431 rg (# note) Tj",
+                          b"0.12 0.12 0.12 rg BT /F3 9.5 Tf 1 0 0 1 ")
+    if colored.count(b".812 .133 .18 rg") != 2:   # def and return; the text block has none
+        raise AssertionError("highlighting: expected two keyword runs")
+    plain_pdf = root / "code-plain.pdf"
+    run(binary, "--export", str(source), str(plain_pdf), "--no-highlight")
+    plain = require_pdf(plain_pdf, b"(def f\\(x\\): return 'a'  # note) Tj")
+    if b".812 .133 .18 rg" in plain:
+        raise AssertionError("--no-highlight still coloured the code")
+
+
 def pdf_streams(data: bytes) -> list[tuple[bytes, bytes]]:
     """The dictionary and payload of every stream of a PDF, in file order."""
     streams = []
@@ -243,6 +262,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_theme(binary, root)
         verify_pdfa(binary, root)
         verify_footnotes(binary, root)
+        verify_highlight(binary, root)
         verify_batch(binary, root)
 
         if os.name == "nt":
