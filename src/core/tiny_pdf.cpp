@@ -1280,7 +1280,7 @@ static bool IsHttpUrl(std::string_view src) {
     return StartsWith(src, "http://") || StartsWith(src, "https://");
 }
 
-static std::string EscapeLiteral(const std::string& s);
+static char* WriteEscapedLiteral(char* out, std::string_view text);
 
 static std::filesystem::path PathFromUtf8(std::string_view s) {
     return std::filesystem::u8path(s.begin(), s.end());
@@ -2881,16 +2881,7 @@ struct HeadingMark {
 static char* WriteTextString(char* out, std::string_view text, bool winAnsi) {
     if (IsAllAscii(text)) {
         *out++ = '(';
-        if (!RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteLiteralSpecial)) {
-            memcpy(out, text.data(), text.size());
-            out += text.size();
-        } else {
-            for (const char ch : text) {
-                if ((unsigned char)ch < 0x20 || ch == 0x7F) continue;
-                if (ch == '(' || ch == ')' || ch == '\\') *out++ = '\\';
-                *out++ = ch;
-            }
-        }
+        out = WriteEscapedLiteral(out, text);
         *out++ = ')';
         return out;
     }
@@ -3014,6 +3005,80 @@ RAYOMD_COLD static void AddOutline(PdfObjects& pdf, std::string& catalog, const 
     catalog += " /Outlines ";
     AppendInt(catalog, rootId);
     catalog += " 0 R";
+}
+
+// The `title:` of the YAML front matter, which the parser skips: a plain or quoted scalar on
+// the key's line, unquoted, a plain one without its comment. Empty when there is none.
+RAYOMD_COLD static std::string FrontMatterTitle(std::string_view markdown) {
+    const auto trim = [](std::string_view text) {
+        const auto space = [](char ch) { return ch == ' ' || ch == '\t' || ch == '\r'; };
+        while (!text.empty() && space(text.front())) text.remove_prefix(1);
+        while (!text.empty() && space(text.back())) text.remove_suffix(1);
+        return text;
+    };
+    size_t at = markdown.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+    const size_t dashes = markdown.find_first_not_of(" \t", at);
+    if (dashes == std::string_view::npos || markdown.compare(dashes, 3, "---") != 0) return std::string();
+    std::string_view value;
+    bool found = false;
+    bool closed = false;
+    for (bool first = true; at < markdown.size() && !closed; first = false) {
+        size_t end = markdown.find('\n', at);
+        if (end == std::string_view::npos) end = markdown.size();
+        const std::string_view line = markdown.substr(at, end - at);
+        at = end + 1;
+        const std::string_view trimmed = trim(line);
+        if (first) {
+            if (trimmed != "---") return std::string();
+        } else if (trimmed == "---" || trimmed == "...") {
+            closed = true;
+        } else if (!found && line.compare(0, 6, "title:") == 0 && (line.size() == 6 || line[6] == ' ' || line[6] == '\t')) {
+            value = trim(line.substr(6));
+            found = true;
+        }
+    }
+    // Without its closing line it is no front matter; a block scalar ("|", ">") is not read.
+    if (!closed || value.empty() || value.front() == '|' || value.front() == '>') return std::string();
+    std::string title;
+    const char quote = value.front();
+    if (quote == '"' || quote == '\'') {
+        // A quoted scalar ends at its closing quote: "\x" in double quotes is x, '' in single
+        // quotes is '.
+        for (size_t index = 1; index < value.size(); index++) {
+            char ch = value[index];
+            if (quote == '"' && ch == '\\' && index + 1 < value.size()) {
+                ch = value[++index];
+            } else if (ch == quote) {
+                if (quote == '"' || index + 1 >= value.size() || value[index + 1] != '\'') break;
+                index++;
+            }
+            title += ch;
+        }
+        return title;
+    }
+    return std::string(trim(value.substr(0, value.find(" #"))));
+}
+
+// The document information dictionary. Its title is the front matter's, else the text of the
+// first heading; a document with neither has none, and viewers show the file name instead.
+// `source` is the document as given, UTF-8; heading text is WinAnsi with `winAnsi`.
+RAYOMD_COLD static std::string InfoDictionary(const char* producer, std::string_view source,
+    const std::vector<HeadingMark>& headings, bool winAnsi) {
+    std::string info = "<< /Producer (";
+    info += producer;
+    info += ") /Creator (RayoMD)";
+    const std::string declared = FrontMatterTitle(source);
+    const std::string_view title = !declared.empty() ? std::string_view(declared)
+        : !headings.empty() ? headings.front().text : std::string_view();
+    if (!title.empty()) {
+        const size_t at = info.size();
+        info.resize(at + 8 + title.size() * 4 + 6);
+        memcpy(&info[at], " /Title ", 8);
+        const char* const end = WriteTextString(&info[at + 8], title, declared.empty() && winAnsi);
+        info.resize((size_t)(end - info.data()));
+    }
+    info += " >>";
+    return info;
 }
 
 // A link to a heading of this document. AddLinkAnnotationObjects reserves its annotation in
@@ -5365,16 +5430,8 @@ static std::shared_ptr<const std::string> MakeWidths(
     return cache.Insert(key, std::move(out));
 }
 
-static std::string EscapeLiteral(const std::string& s) {
-    std::string out;
-    for (char c : s) {
-        if (c == '(' || c == ')' || c == '\\') out.push_back('\\');
-        if ((unsigned char)c >= 32 && (unsigned char)c < 127) out.push_back(c);
-    }
-    return out;
-}
-
-// EscapeLiteral written straight into a buffer with room for two bytes per input byte.
+// `text` as the bytes of a PDF literal string, ( ) and the backslash escaped and control bytes
+// dropped, written straight into a buffer with room for two bytes per input byte.
 // Returns the end of what was written.
 static char* WriteEscapedLiteral(char* out, std::string_view text) {
     // Most lines hold no parenthesis, backslash or control byte and are copied in one piece.
@@ -7145,8 +7202,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     if (options.embedSource) AddReversibleSource(pdf, catalog, source);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));
-    int infoId = pdf.Add("<< /Producer (RayoMD Native Standard PDF) /Creator (RayoMD) /Title (" +
-        EscapeLiteral("Markdown Export") + ") >>");
+    int infoId = pdf.Add(InfoDictionary("RayoMD Native Standard PDF", source, renderer.Headings(), winAnsi));
 
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
     return true;
@@ -7415,8 +7471,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (options.embedSource) AddReversibleSource(pdf, catalog, markdown);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));
-    int infoId = pdf.Add("<< /Producer (RayoMD Native Tiny PDF) /Creator (RayoMD) /Title (" +
-        EscapeLiteral("Markdown Export") + ") >>");
+    int infoId = pdf.Add(InfoDictionary("RayoMD Native Tiny PDF", markdown, renderer.Headings(), false));
 
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
     return true;

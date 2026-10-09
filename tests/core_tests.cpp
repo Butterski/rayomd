@@ -927,17 +927,17 @@ bool CheckMathPdf() {
 }
 
 // The hard regression rule of the math feature: a document without math syntax is
-// rendered byte-for-byte the same with and without it. The digests were recorded when
-// headings started to make the PDF outline, after code backgrounds started at the first
-// glyph of the code, the standard-font renderer started to show bold, italic and
-// strike-through, exact AFM widths, WinAnsiEncoding, CommonMark list nesting and
-// source-faithful word spacing. That renderer does not depend on the platform or on
-// installed fonts, so they hold on Windows and Linux alike.
+// rendered byte-for-byte the same with and without it. The digests were recorded when the
+// document title started to come from the first heading, after headings started to make the
+// PDF outline, code backgrounds started at the first glyph of the code, the standard-font
+// renderer started to show bold, italic and strike-through, exact AFM widths,
+// WinAnsiEncoding, CommonMark list nesting and source-faithful word spacing. That renderer
+// does not depend on the platform or on installed fonts, so they hold on Windows and Linux.
 bool CheckNoMathGolden() {
     struct Golden { TinyPdf::PdfStyle style; size_t size; const char* sha256; };
     const Golden goldens[] = {
-        {TinyPdf::PdfStyle::Modern, 7334, "37f7d35459892732bf96e34f3ba21c1ba46d4483231e2108d846c422e2358044"},
-        {TinyPdf::PdfStyle::Tech, 7388, "57d73415b6b112cb6c5fc67c630bde61030ff24c610489470059f21ee7324517"},
+        {TinyPdf::PdfStyle::Modern, 7355, "54f7e99421f7adca87246bfa344f19d4f3fd46debeab17d98b4e2f9160aaea49"},
+        {TinyPdf::PdfStyle::Tech, 7409, "caa033773f397d371808990aba469e9bd442078af5e8b38567aa380bd8e4c8be"},
     };
     for (const Golden& golden : goldens) {
         TinyPdf::PdfOptions options;
@@ -1387,6 +1387,33 @@ std::string MinimalTrueTypeCollection() {
     return collection + font + data;
 }
 
+// A document's title is the `title:` of its front matter, quoted or plain, else the text of its
+// first heading; a document with neither gets none instead of a made-up one. In both
+// renderers.
+bool CheckDocumentTitle() {
+    struct Case { std::string markdown; std::string title; };
+    const Case cases[] = {
+        { "---\ntitle: \"Q3 \\\"final\\\"\" # draft\nauthor: x\n---\n\n# Heading\n", "/Title (Q3 \"final\")" },
+        { "---\ntitle: it's (plain) # comment\n---\n\n# Heading\n", "/Title (it's \\(plain\\))" },
+        { "Intro.\n\n## First **bold** heading\n\n# Second\n", "/Title (First bold heading)" },
+        { "# Gr\xC3\xB6\xC3\x9F" "e\n", "/Title <FEFF0047007200F600DF0065>" },
+        { "## Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n", "/Title <FEFF005A0061017C00F301420107>" },
+        { "No heading.\n", "" },
+    };
+    for (const Case& c : cases) {
+        std::string pdf;
+        if (!Build(c.markdown, pdf)) return false;
+        const size_t info = pdf.find("<< /Producer (RayoMD");
+        const std::string dictionary = info == std::string::npos ? "" : pdf.substr(info, pdf.find(">>", info) - info);
+        if (dictionary.empty() || (c.title.empty() ? dictionary.find("/Title") != std::string::npos
+                                                   : dictionary.find(c.title) == std::string::npos)) {
+            std::cerr << "document title mismatch: " << dictionary << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // Text that is not UTF-8 is drawn with U+FFFD for the bytes that break it and the rest as it
 // is: the Unicode renderer's decoder threw on such bytes and ended the process. In the front
 // matter, a heading, a paragraph, link text and table cells.
@@ -1652,6 +1679,7 @@ int main() {
     if (!CheckFallbackFont()) return 75;
     if (!CheckHeadingAnchors()) return 76;
     if (!CheckInvalidUtf8()) return 77;
+    if (!CheckDocumentTitle()) return 78;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
