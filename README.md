@@ -83,6 +83,13 @@ for p95 values, ranges, hashes, fixture details, and reproduction commands. The
 [benchmark index](https://github.com/Butterski/rayomd/wiki/Benchmarks) keeps
 cross-tool, warm-path, reversible-PDF, and older release reports organized.
 
+On 2026-10-09, warm `--bench` builds of the 3.1.0 Linux release against 3.0.0 (the
+same DejaVu Sans font, 11 CPU-pinned rounds of the nine watch-suite documents) ran
+about 1 % faster overall: Unicode documents up to 9 % faster, ASCII documents 7 % to
+17 % slower because they now draw bold and italic faces, formatted table cells with
+links, and a bookmark for each heading. [`performance.md`](docs/development/performance.md)
+records what each change cost.
+
 ## Quick start
 
 Download a package from [Releases](https://github.com/Butterski/rayomd/releases),
@@ -144,17 +151,18 @@ Version-specific engineering contracts remain beside the code:
 
 ## Native renderer scope
 
-Native mode supports ATX and Setext headings (as PDF bookmarks, and as targets of
-GitHub-style `#anchor` links), paragraphs, structured nested
-lists (with GitHub task lists), block quotes and GitHub alerts (`> [!NOTE]` and
-the other four), fenced and indented code, pipe tables, rules, page
-breaks, matching-run code spans, classic emphasis and escapes, inline and
-reference-style links, URL/email autolinks (in angle brackets or bare, as on
-GitHub), standalone inline/reference images,
+Native mode supports ATX and Setext headings (as PDF bookmarks and as targets of
+GitHub-style `#anchor` links; a heading never ends a page), paragraphs, structured
+nested lists (with GitHub task lists), block quotes and GitHub alerts (`> [!NOTE]`
+and the other four), fenced and indented code, pipe tables (whose header row repeats
+on every page), rules, page breaks, matching-run code spans, classic emphasis and
+escapes, inline and reference-style links, URL/email autolinks (in angle brackets or
+bare, as on GitHub), standalone inline/reference images,
 natively typeset math for a TeX subset (`$...$`, `$$...$$`, fenced `math` blocks, in
-text, lists, quotes, headings and table cells), Unicode fonts, HTML comments
-(hidden), `<br>` line breaks, character references such as `&copy;`, and common
-status-symbol normalization.
+text, lists, quotes, headings and table cells), Unicode fonts (or the PDF standard
+fonts when no system font is found), HTML comments (hidden), `<br>` line breaks,
+character references such as `&copy;`, a PDF title from the front matter or the
+first heading, opt-in page numbers, and common status-symbol normalization.
 Images embedded in paragraph text use a consistent `image: alt` fallback;
 standalone images retain native image layout and missing-image fallback text.
 
