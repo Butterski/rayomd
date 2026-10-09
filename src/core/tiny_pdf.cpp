@@ -3662,6 +3662,12 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
     }
 }
 
+// The bar beside quoted text, by Block::alert: a plain quote's, then those of the GitHub alerts
+// in GitHub's colours, whose titles follow. Arrays, not pointers: no relocations.
+constexpr char kQuoteBars[][15] = { "0.45 0.62 0.72", "0.04 0.41 0.85", "0.10 0.50 0.22", "0.51 0.31 0.87",
+    "0.60 0.40 0.00", "0.82 0.14 0.18" };
+constexpr char kAlertTitles[][10] = { "", "Note", "Tip", "Important", "Warning", "Caution" };
+
 class Renderer {
 public:
     // The content streams of all pages are appended to `output`, one after another.
@@ -3706,6 +3712,8 @@ private:
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     std::vector<HeadingMark> headings;
+    // The colour of the bar beside quoted text: a plain quote's, or that of the alert it is in.
+    const char* quoteBar = kQuoteBars[0];
 
     // Notes where a heading's first line is drawn, for its outline entry and the links to it.
     // A line `firstLine` high that does not fit moves to the next page first, as drawing it
@@ -4597,6 +4605,13 @@ private:
         out.Lit(" re f Q\n");
     }
 
+    // The strip behind one line of quoted content, `height` tall: the tint, and the bar at its
+    // left in the colour of the quote.
+    void QuoteStrip(double height) {
+        DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, height, "0.94 0.95 0.96");
+        DrawRect(margin, y + 2.0, 3.0, height, quoteBar);
+    }
+
     void DrawStrokeRect(double x, double top, double w, double h, const char* color = "0.72 0.72 0.72", double lineWidth = 0.45) {
         const size_t colorSize = strlen(color);
         TailWriter out(content, 24 + colorSize + kOperandBytes * 5);
@@ -4722,8 +4737,7 @@ private:
             double extra = extent.above + extent.below;
             if (quote) {
                 Ensure(lh + 2.0 + extra);
-                DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, lh + 3.0 + extra, "0.94 0.95 0.96");
-                DrawRect(margin, y + 2.0, 3.0, lh + 3.0 + extra, "0.45 0.62 0.72");
+                QuoteStrip(lh + 3.0 + extra);
             } else {
                 Ensure(lh + extra);
             }
@@ -4749,8 +4763,7 @@ private:
             double extra = extent.above + extent.below;
             if (quote) {
                 Ensure(lineHeight + 2.0 + extra);
-                DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0 + extra, "0.94 0.95 0.96");
-                DrawRect(margin, y + 2.0, 3.0, lineHeight + 3.0 + extra, "0.45 0.62 0.72");
+                QuoteStrip(lineHeight + 3.0 + extra);
             } else {
                 Ensure(lineHeight + extra);
             }
@@ -4824,11 +4837,29 @@ private:
     }
 
     void RenderQuote(const Block& block) {
+        if (block.alert != 0) {
+            RenderAlert(block);
+            return;
+        }
         if (block.children.empty()) {
             RenderQuote(block.text);
             return;
         }
         RenderQuoteChildren(block.children);
+    }
+
+    // A GitHub alert: a quote whose bar takes the alert's colour, under the alert's bold title
+    // in that colour, which keeps the first line after it on its page.
+    RAYOMD_COLD void RenderAlert(const Block& block) {
+        quoteBar = kQuoteBars[block.alert];
+        Ensure(lineHeight * 2.0 + 2.0);
+        QuoteStrip(lineHeight + 3.0);
+        const std::string_view title = kAlertTitles[block.alert];
+        PaintText(margin + 14.0, y - bodySize, bodySize, std::wstring(title.begin(), title.end()), quoteBar, true);
+        y -= lineHeight;
+        if (block.children.empty()) RenderQuote(block.text);
+        else RenderQuoteChildren(block.children);
+        quoteBar = kQuoteBars[0];
     }
 
     void RenderQuoteChildren(const std::vector<Block>& children) {
@@ -4860,10 +4891,14 @@ private:
                 break;
             }
             case BlockType::Quote: {
+                // A quote in an alert has a plain quote's bar, as on GitHub.
                 double savedMargin = margin;
+                const char* savedBar = quoteBar;
                 margin += 10.0;
+                quoteBar = kQuoteBars[0];
                 RenderQuote(child);
                 margin = savedMargin;
+                quoteBar = savedBar;
                 break;
             }
             case BlockType::MathBlock: RenderDisplayMath(child.text, true); break;
@@ -4902,8 +4937,7 @@ private:
         std::wstring text = Utf8ToWide(block.text);
         for (const std::wstring& line : WrapText(font, text, width, size)) {
             Ensure(height + 2.0);
-            DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, height + 3.0, "0.94 0.95 0.96");
-            DrawRect(margin, y + 2.0, 3.0, height + 3.0, "0.45 0.62 0.72");
+            QuoteStrip(height + 3.0);
             PaintText(x, y - size, size, line, "0.10 0.15 0.18", true);
             y -= height;
         }
@@ -4917,8 +4951,7 @@ private:
             size_t index = 0;
             for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
                 Ensure(lineHeight + 2.0);
-                DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
-                DrawRect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
+                QuoteStrip(lineHeight + 3.0);
                 PaintStyledRuns(paragraphRuns, index, lineEnd, x, y, y - bodySize, bodySize, lineHeight, kQuoteRunColors);
                 index = lineEnd;
                 y -= lineHeight;
@@ -4934,8 +4967,7 @@ private:
         }
         for (const auto& line : lines) {
             Ensure(lineHeight + 2.0);
-            DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
-            DrawRect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
+            QuoteStrip(lineHeight + 3.0);
             double cursor = x;
             double baseline = y - bodySize;
             for (const StyledSpan& span : line) {
@@ -4992,8 +5024,7 @@ private:
         double total = padTop + formula.Ascent() + formula.Descent() + padBottom;
         Ensure(total + 2.0);
         if (quoted) {
-            DrawRect(margin, y + 2.0, PAGE_W - margin * 2.0, total + 3.0, "0.94 0.95 0.96");
-            DrawRect(margin, y + 2.0, 3.0, total + 3.0, "0.45 0.62 0.72");
+            QuoteStrip(total + 3.0);
         }
         formula.Emit(content, left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
             quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08");
@@ -5768,6 +5799,8 @@ private:
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     std::vector<HeadingMark> headings;
+    // The colour of the bar beside quoted text: a plain quote's, or that of the alert it is in.
+    const char* quoteBar = kQuoteBars[0];
 
     // Notes where a heading's first line is drawn, for its outline entry and the links to it.
     // A line `firstLine` high that does not fit moves to the next page first, as drawing it
@@ -5896,6 +5929,13 @@ private:
         out.Lit(" re ");
         if (stroke) out.Lit("S Q\n");
         else out.Lit("f Q\n");
+    }
+
+    // The strip behind one line of quoted content, `height` tall: the tint, and the bar at its
+    // left in the colour of the quote.
+    void QuoteStrip(double height) {
+        Rect(margin, y + 2.0, PAGE_W - margin * 2.0, height, "0.94 0.95 0.96");
+        Rect(margin, y + 2.0, 3.0, height, quoteBar);
     }
 
     // Emphasis and code state of a piece of text, one bit each. The standard fonts show bold
@@ -6763,8 +6803,7 @@ private:
             double extra = extent.above + extent.below;
             if (quote) {
                 Ensure(lh + 2.0 + extra);
-                Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lh + 3.0 + extra, "0.94 0.95 0.96");
-                Rect(margin, y + 2.0, 3.0, lh + 3.0 + extra, "0.45 0.62 0.72");
+                QuoteStrip(lh + 3.0 + extra);
             } else {
                 Ensure(lh + extra);
             }
@@ -6790,8 +6829,7 @@ private:
             double extra = extent.above + extent.below;
             if (quote) {
                 Ensure(lineHeight + 2.0 + extra);
-                Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0 + extra, "0.94 0.95 0.96");
-                Rect(margin, y + 2.0, 3.0, lineHeight + 3.0 + extra, "0.45 0.62 0.72");
+                QuoteStrip(lineHeight + 3.0 + extra);
             } else {
                 Ensure(lineHeight + extra);
             }
@@ -6872,11 +6910,28 @@ private:
     }
 
     void RenderQuote(const Block& block) {
+        if (block.alert != 0) {
+            RenderAlert(block);
+            return;
+        }
         if (block.children.empty()) {
             RenderQuote(block.text);
             return;
         }
         RenderQuoteChildren(block.children);
+    }
+
+    // A GitHub alert: a quote whose bar takes the alert's colour, under the alert's bold title
+    // in that colour, which keeps the first line after it on its page.
+    RAYOMD_COLD void RenderAlert(const Block& block) {
+        quoteBar = kQuoteBars[block.alert];
+        Ensure(lineHeight * 2.0 + 2.0);
+        QuoteStrip(lineHeight + 3.0);
+        Text(margin + 14.0, y - bodySize, bodySize, kAlertTitles[block.alert], "F2", quoteBar);
+        y -= lineHeight;
+        if (block.children.empty()) RenderQuote(block.text);
+        else RenderQuoteChildren(block.children);
+        quoteBar = kQuoteBars[0];
     }
 
     void RenderQuoteChildren(const std::vector<Block>& children) {
@@ -6908,10 +6963,14 @@ private:
                 break;
             }
             case BlockType::Quote: {
+                // A quote in an alert has a plain quote's bar, as on GitHub.
                 double savedMargin = margin;
+                const char* savedBar = quoteBar;
                 margin += 10.0;
+                quoteBar = kQuoteBars[0];
                 RenderQuote(child);
                 margin = savedMargin;
+                quoteBar = savedBar;
                 break;
             }
             case BlockType::MathBlock: RenderDisplayMath(child.text, true); break;
@@ -6949,8 +7008,7 @@ private:
         MarkHeading(level, block.text, height + 2.0);
         for (const WrappedAsciiLine& line : WrapAsciiText(block.text, width, size, StandardTextFont::Bold)) {
             Ensure(height + 2.0);
-            Rect(margin, y + 2.0, PAGE_W - margin * 2.0, height + 3.0, "0.94 0.95 0.96");
-            Rect(margin, y + 2.0, 3.0, height + 3.0, "0.45 0.62 0.72");
+            QuoteStrip(height + 3.0);
             Text(x, y - size, size, line.text, "F2", "0.10 0.15 0.18");
             y -= height;
         }
@@ -6964,8 +7022,7 @@ private:
             size_t index = 0;
             for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
                 Ensure(lineHeight + 2.0);
-                Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
-                Rect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
+                QuoteStrip(lineHeight + 3.0);
                 PaintAsciiRuns(paragraphRuns, index, lineEnd, x, y, y - bodySize, bodySize, lineHeight, kQuoteRunColors);
                 index = lineEnd;
                 y -= lineHeight;
@@ -6981,8 +7038,7 @@ private:
         }
         for (const auto& line : lines) {
             Ensure(lineHeight + 2.0);
-            Rect(margin, y + 2.0, PAGE_W - margin * 2.0, lineHeight + 3.0, "0.94 0.95 0.96");
-            Rect(margin, y + 2.0, 3.0, lineHeight + 3.0, "0.45 0.62 0.72");
+            QuoteStrip(lineHeight + 3.0);
             double cursor = x;
             double baseline = y - bodySize;
             for (const AsciiSpan& span : line) {
@@ -7042,8 +7098,7 @@ private:
         double total = padTop + formula.Ascent() + formula.Descent() + padBottom;
         Ensure(total + 2.0);
         if (quoted) {
-            Rect(margin, y + 2.0, PAGE_W - margin * 2.0, total + 3.0, "0.94 0.95 0.96");
-            Rect(margin, y + 2.0, 3.0, total + 3.0, "0.45 0.62 0.72");
+            QuoteStrip(total + 3.0);
         }
         formula.Emit(content, left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
             quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08");

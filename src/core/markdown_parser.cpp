@@ -14,6 +14,12 @@
 #define FAST_MD_SSE2 1
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define RAYOMD_NOINLINE __attribute__((noinline))
+#else
+#define RAYOMD_NOINLINE
+#endif
+
 namespace TinyPdf::Internal {
 static bool IsSpace(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
@@ -717,6 +723,29 @@ static std::string_view StripQuoteMarker(std::string_view line) {
     value.remove_prefix(1);
     if (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
     return value;
+}
+
+// The GitHub alert that the first line of a top-level quote names alone: 1 to 5 for "[!NOTE]",
+// "[!TIP]", "[!IMPORTANT]", "[!WARNING]" and "[!CAUTION]", in any case, with the line taken
+// out of `quote`. 0 for any other quote, and for a marker with no text after it, which stays a
+// plain quote as on GitHub. Out of line: inlined, it grew ParseMarkdownImpl past what GCC
+// inlines into it, and a string constructor there became a call.
+static RAYOMD_NOINLINE uint8_t TakeAlertMarker(std::string& quote) {
+    const std::string_view text = quote;
+    const std::string_view head = LTrimView(text);
+    if (head.size() < 5 || head[0] != '[' || head[1] != '!') return 0;
+    const size_t lineEnd = text.find('\n');
+    if (lineEnd == std::string_view::npos) return 0;
+    const std::string_view line = TrimView(text.substr(0, lineEnd));
+    if (line.size() < 5 || line.back() != ']' || TrimView(text.substr(lineEnd + 1)).empty()) return 0;
+    static constexpr std::string_view kAlerts[] = { "NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION" };
+    const std::string_view name = line.substr(2, line.size() - 3);
+    for (size_t kind = 0; kind < 5; kind++) {
+        if (!EqualsAsciiInsensitive(name, kAlerts[kind])) continue;
+        quote.erase(0, lineEnd + 1);
+        return (uint8_t)(kind + 1);
+    }
+    return 0;
 }
 
 static std::string_view StripLeadingColumns(std::string_view line, int columnsToRemove) {
@@ -1470,8 +1499,11 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 }
                 break;
             }
+            // A GitHub alert names itself before references resolve: its marker looks like one.
+            const uint8_t alert = depth == 0 ? TakeAlertMarker(quoteMarkdown) : 0;
             if (!definitions.empty() && quoteMarkdown.find('[') != std::string::npos) quoteMarkdown = ResolveReferenceLinks(quoteMarkdown, definitions);
             Block& quote = AppendBlock(blocks, BlockType::Quote);
+            quote.alert = alert;
             if (depth < 8) {
                 if (IsSingleParagraphLine(quoteMarkdown)) {
                     AppendBlock(quote.children, BlockType::Paragraph).text = std::move(quoteMarkdown);

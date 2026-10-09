@@ -611,6 +611,27 @@ Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
 1.6 % faster (geometric mean; the 96 KiB table fixture 3.3 %, `baseline.md` 2.7 %)
 with 0.39 % fewer instructions. The executable grows by 4 KB, to 678,448 bytes.
 
+## GitHub alerts, October 2026
+
+A top-level quote whose first line is `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`,
+`[!WARNING]` or `[!CAUTION]` (any case) with text after it is an alert, as on
+GitHub: its bar takes the alert's colour, and a bold title in that colour takes
+the marker's place and keeps the first line of the text on its page. A quote in
+an alert keeps a plain quote's bar; a marker alone, an unknown one, and one in a
+list or a nested quote stay text. The parser keeps the kind in `Block::alert`, in
+the padding next to `task`, and both renderers draw every quote strip through
+`QuoteStrip` in the colour `quoteBar`.
+
+Before the content-stream writes were inlined, the new cold `RenderAlert` made
+GCC call `TailWriter::Lit<5>` out of line in `Renderer::PaintText` (+0.28 %
+instructions on the 96 KiB Unicode fixture). `TakeAlertMarker`, inlined into
+`ParseMarkdownImpl`, turned a string constructor there into a call (+0.24 % on
+`baseline.md`), so it stays out of line.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`81b1f4e`): the 1,197 corpus PDFs that changed hold an alert; the watch fixtures
+write the same bytes with the same instructions (+0.01 %) in the same time.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

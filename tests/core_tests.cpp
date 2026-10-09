@@ -1446,6 +1446,37 @@ bool CheckShortcutReferences() {
     return true;
 }
 
+// A top-level quote whose first line is "[!NOTE]", "[!TIP]", "[!IMPORTANT]", "[!WARNING]" or
+// "[!CAUTION]" (any case) with text after it is an alert: a bar in its colour and its title,
+// without the marker. A marker alone, an unknown one and one in a list stay quoted text.
+bool CheckAlerts() {
+    const std::string document =
+        "> [!NOTE]\n> Useful information.\n\n> [!tip]\n> A helpful hint.\n\n> [!IMPORTANT]\n> Key information.\n"
+        "> > A nested quote.\n\n> [!WARNING]\n> Urgent.\n\n> [!CAUTION]\n> Risks.\n\n> [!NOTE]\n\n"
+        "> [!FOO]\n> Not an alert.\n\n- > [!NOTE]\n  > In a list.\n";
+    for (const std::string& text : { document, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + document }) {
+        std::string pdf;
+        const bool unicode = text != document;
+        bool ok = Build(text, pdf);
+        for (const char* color : { "0.04 0.41 0.85 rg", "0.10 0.50 0.22 rg", "0.51 0.31 0.87 rg", "0.60 0.40 0.00 rg",
+                 "0.82 0.14 0.18 rg" }) {
+            ok = ok && pdf.find(color) != std::string::npos;
+        }
+        if (!unicode) {
+            for (const char* title : { "(Note) Tj", "(Tip) Tj", "(Important) Tj", "(Warning) Tj", "(Caution) Tj" }) {
+                ok = ok && CountOccurrences(pdf, title) == 1;
+            }
+            ok = ok && CountOccurrences(pdf, "[!NOTE]") == 2 && CountOccurrences(pdf, "[!FOO]") == 1 &&
+                pdf.find("[!tip]") == std::string::npos;
+        }
+        if (!ok) {
+            std::cerr << "alerts mismatch (" << (unicode ? "Unicode" : "standard") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -1815,6 +1846,7 @@ int main() {
     if (!CheckTaskLists()) return 81;
     if (!CheckAutolinks()) return 82;
     if (!CheckShortcutReferences()) return 83;
+    if (!CheckAlerts()) return 84;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

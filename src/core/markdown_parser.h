@@ -36,6 +36,9 @@ struct Block {
     // Bullet and Numbered only: 1 for a task list item "[ ]", 2 for a done one "[x]". In the
     // padding after `number`, which keeps the moves of a block as they were.
     uint8_t task = 0;
+    // Quote only: the GitHub alert it is, 1 to 5 for [!NOTE], [!TIP], [!IMPORTANT], [!WARNING]
+    // and [!CAUTION], or 0 for a plain quote. In the same padding.
+    uint8_t alert = 0;
     std::string text;
     // Set for every Image block and for no other: the other blocks carry a null pointer
     // instead of two empty strings.
