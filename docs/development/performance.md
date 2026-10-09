@@ -695,9 +695,15 @@ budget only moves the cliff. Splitting the two renderers into their own
 translation units would give each its own budget and stop edits in one from
 moving inlining in the other; that is the option to try before raising it.
 
-**`ContainsByteClass` is scalar.** Every paragraph is classified with an
-8-byte unrolled table scan, about 0.6 % of a Unicode build. A vector
-classification would cut it, but the gain is small.
+**Byte classes are scanned one byte at a time.** The fast-path checks
+(`ContainsByteClass`, `NeedsInlineParse`) and the parser's runs of ordinary bytes
+look up a table entry per byte, about 28 instructions per 8 bytes: about 0.6 % of
+a Unicode build, but the out-of-line copy of the check alone runs 3.2 % of the
+instructions of the 96 KiB ASCII fixture and 3.3 % of the table fixture
+(callgrind, 2026-10-09). Comparing 16 bytes at a time with the ten syntax bytes in
+SSE2, which every x86-64 CPU has, takes about 22 instructions per 16 bytes; a
+`pshufb` nibble table (SSSE3, behind a CPU check) about 8. Measure on short table
+cells, where the byte loop dominates, before choosing.
 
 **One text object per line.** Every run of a line is a text object of its own
 (`q … rg BT /F1 … Tf 1 0 0 1 x y Tm (…) Tj ET Q`, about 70 bytes besides the
@@ -750,15 +756,6 @@ fields), would avoid both. Each outline entry also formats up to seven object
 numbers with `std::to_chars`, about 50 instructions each; the entries' own
 numbers are consecutive and could be formatted once and copied, some 250
 instructions per heading.
-
-**SIMD byte classes.** The fast-path checks (`ContainsByteClass`,
-`NeedsInlineParse`) and the parser's runs of ordinary bytes look up a table entry
-per byte, about 28 instructions per 8 bytes. The out-of-line copy of the check
-alone runs 3.2 % of the instructions of the 96 KiB ASCII fixture and 3.3 % of the
-table fixture (callgrind, 2026-10-09). Comparing 16 bytes at a time with the ten
-syntax bytes in SSE2, which every x86-64 CPU has, takes about 22 instructions per
-16 bytes; a `pshufb` nibble table (SSSE3, behind a CPU check) about 8. Measure on
-short table cells, where the byte loop dominates, before choosing.
 
 ## Keeping the release light
 
