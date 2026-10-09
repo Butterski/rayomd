@@ -3652,6 +3652,7 @@ public:
     uint32_t MissingCharacters() const { return usedCids.missing; }
     bool MathUsed() const { return math.Used(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
+    double Margin() const { return margin; }
 
 private:
     template <typename RendererType>
@@ -5681,6 +5682,7 @@ public:
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     bool MathUsed() const { return math.Used(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
+    double Margin() const { return margin; }
     // Whether text was shown in /F4 Helvetica-Oblique or /F5 Helvetica-BoldOblique.
     bool ObliqueUsed() const { return (facesUsed & (1u << kStyleItalic)) != 0; }
     bool BoldObliqueUsed() const { return (facesUsed & (1u << (kStyleBold | kStyleItalic))) != 0; }
@@ -7089,6 +7091,41 @@ private:
     }
 };
 
+// The page number at the foot of a page: "N / M" centred in the bottom margin, small and grey,
+// in Helvetica, which the page names `font`. A content stream of its own, after the page's,
+// which was rendered before the page count was known.
+RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t pages, double margin, const char* font) {
+    char label[48];
+    char* end = std::to_chars(label, label + 20, page).ptr;
+    memcpy(end, " / ", 3);
+    end = std::to_chars(end + 3, end + 23, pages).ptr;
+    const std::string_view text(label, (size_t)(end - label));
+    constexpr double kSize = 9.0;
+    std::string stream = "q 0.45 0.45 0.45 rg BT /";
+    stream += font;
+    stream += " 9 Tf 1 0 0 1 ";
+    AppendF(stream, (PAGE_W - Internal::StandardTextWidth(text, kSize, StandardTextFont::Regular)) * 0.5);
+    stream += " ";
+    AppendF(stream, margin * 0.5 - 3.0);
+    stream += " Tm (";
+    stream += text;
+    stream += ") Tj ET Q";
+    return pdf.AddStream("", stream);
+}
+
+// A page's /Contents: its own stream, and the page number's when there is one.
+static void AppendContents(std::string& page, int contentId, int numberId) {
+    page += " /Contents ";
+    if (numberId != 0) page += "[";
+    AppendInt(page, contentId);
+    page += " 0 R";
+    if (numberId != 0) {
+        page += " ";
+        AppendInt(page, numberId);
+        page += " 0 R]";
+    }
+}
+
 // Page content is rendered straight into the output buffer. A buffer the caller reuses
 // keeps its capacity; a new one starts at the size a document of this length usually
 // needs, so it does not grow several times while the pages are rendered.
@@ -7143,6 +7180,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
         int contentId = pdf.AddStreamInPlace("", pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
+        const int numberId = options.pageNumbers
+            ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), "F1") : 0;
         std::string page;
         page.reserve(192);
         page += "<< /Type /Page /Parent ";
@@ -7171,9 +7210,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         AppendMathFontResources(page, mathFontIds);
         page += " >>";
         AppendXObjectResources(page, imageObjectIds);
-        page += " >> /Contents ";
-        AppendInt(page, contentId);
-        page += " 0 R";
+        page += " >>";
+        AppendContents(page, contentId, numberId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
         page += " >>";
         pageIds.push_back(pdf.Add(std::move(page)));
@@ -7421,11 +7459,16 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     type0 += " 0 R >>";
     pdf.Set(type0FontId, std::move(type0));
 
+    // Helvetica for the page numbers.
+    const int numberFontId = options.pageNumbers
+        ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>") : 0;
     std::vector<int> pageIds;
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
         int contentId = pdf.AddStreamInPlace("", pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
+        const int numberId = options.pageNumbers
+            ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), "FN") : 0;
         std::string page;
         page.reserve(160);
         page += "<< /Type /Page /Parent ";
@@ -7437,12 +7480,16 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         page += "] /Resources << /Font << /F1 ";
         AppendInt(page, type0FontId);
         page += " 0 R";
+        if (numberFontId != 0) {
+            page += " /FN ";
+            AppendInt(page, numberFontId);
+            page += " 0 R";
+        }
         AppendMathFontResources(page, mathFontIds);
         page += " >>";
         AppendXObjectResources(page, imageObjectIds);
-        page += " >> /Contents ";
-        AppendInt(page, contentId);
-        page += " 0 R";
+        page += " >>";
+        AppendContents(page, contentId, numberId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
         page += " >>";
         pageIds.push_back(pdf.Add(std::move(page)));

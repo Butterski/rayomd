@@ -1387,6 +1387,32 @@ std::string MinimalTrueTypeCollection() {
     return collection + font + data;
 }
 
+// With pageNumbers every page gets "N / M" in a content stream of its own, in Helvetica (/FN
+// on Unicode pages); without it a page has one stream. In both renderers.
+bool CheckPageNumbers() {
+    std::string document = "# Pages\n\n";
+    for (int line = 0; line < 120; line++) document += "Line " + std::to_string(line) + " of text that fills pages.\n\n";
+    for (const std::string& text : { document, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + document }) {
+        const bool unicode = text != document;
+        TinyPdf::PdfOptions options;
+        options.pageNumbers = true;
+        std::string numbered;
+        std::string plain;
+        if (!TinyPdf::BuildPdf(text, options, numbered) || !Build(text, plain)) return false;
+        const size_t pages = CountOccurrences(plain, "/Type /Page ");
+        bool ok = pages >= 3 && plain.find("/Contents [") == std::string::npos &&
+            CountOccurrences(numbered, "/Contents [") == pages && (numbered.find(" /FN ") != std::string::npos) == unicode;
+        for (size_t page = 1; ok && page <= pages; page++) {
+            ok = numbered.find("(" + std::to_string(page) + " / " + std::to_string(pages) + ") Tj") != std::string::npos;
+        }
+        if (!ok) {
+            std::cerr << "page numbers mismatch (" << (unicode ? "Unicode" : "standard") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A document's title is the `title:` of its front matter, quoted or plain, else the text of its
 // first heading; a document with neither gets none instead of a made-up one. In both
 // renderers.
@@ -1680,6 +1706,7 @@ int main() {
     if (!CheckHeadingAnchors()) return 76;
     if (!CheckInvalidUtf8()) return 77;
     if (!CheckDocumentTitle()) return 78;
+    if (!CheckPageNumbers()) return 79;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

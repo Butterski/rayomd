@@ -277,6 +277,7 @@ struct CliExportOptions {
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
     bool embedSource = false;
+    bool pageNumbers = false;
     unsigned workers = 0;
 };
 
@@ -289,6 +290,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--allow-url-images") options.enableUrlImages = true;
         else if (value == "--allow-unsafe-local-images" || value == "--unsafe-local-images") options.allowUnsafeLocalImages = true;
         else if (value == "--embed-source") options.embedSource = true;
+        else if (value == "--page-numbers") options.pageNumbers = true;
         else if (value.rfind("--workers=", 0) == 0) {
             std::string count = value.substr(10);
             char* end = nullptr;
@@ -347,6 +349,7 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     pdfOptions.enableUrlImages = options.enableUrlImages;
     pdfOptions.allowUnsafeLocalImages = options.allowUnsafeLocalImages;
     pdfOptions.embedSource = options.embedSource;
+    pdfOptions.pageNumbers = options.pageNumbers;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, pdfOptions, pdfBuffer);
     if (!buildResult) {
         int code = 10 + static_cast<int>(buildResult.error);
@@ -591,6 +594,7 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     options.enableUrlImages = cliOptions.enableUrlImages;
     options.allowUnsafeLocalImages = cliOptions.allowUnsafeLocalImages;
     options.embedSource = cliOptions.embedSource;
+    options.pageNumbers = cliOptions.pageNumbers;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (!buildResult) {
         int code = 10 + static_cast<int>(buildResult.error);
@@ -717,6 +721,7 @@ void PrintUsage() {
         << "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
         << "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
         << "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source.\n"
+        << "Page flag: --page-numbers (\"N / M\" at the foot of every page).\n"
         << "Batch flag: --workers=N (1-64; automatic mode uses at most 6).\n";
 }
 

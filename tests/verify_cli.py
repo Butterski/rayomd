@@ -79,6 +79,9 @@ def verify(binary: Path, keep: Path | None) -> None:
         spaced_md.write_bytes(ascii_md.read_bytes())
         run(binary, "--export", str(spaced_md), str(spaced_pdf), "native", "tech", "margin=54pt")
         require_pdf(spaced_pdf, b"/Subtype /Link", b"https://example.com/one")
+        numbered_pdf = root / "numbered.pdf"
+        run(binary, "--export", str(ascii_md), str(numbered_pdf), "native", "modern", "normal", "--page-numbers")
+        require_pdf(numbered_pdf, b"/Contents [", b"(1 / 1) Tj")
 
         if os.name == "nt":
             adjacent_quote_pdf = root / "adjacent-quote.pdf"

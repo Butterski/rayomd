@@ -489,6 +489,17 @@ watch fixtures run 4 % to 6 % fewer instructions in 6.5 % to 9.5 % less time
 (geometric mean of all fixtures -4.9 %): the library decoder's allocation and
 per-call setup cost more than the decoding.
 
+## Page numbers, October 2026
+
+`PdfOptions::pageNumbers` (CLI `--page-numbers`) writes "N / M" centred in the
+bottom margin of every page. The pages are rendered before their count is
+known, so each number is a small content stream of its own that the page lists
+after its content, in Helvetica (Unicode pages get it as `/FN`). It is opt-in:
+without it the PDFs are byte for byte the same (2,757 corpus PDFs, against
+`d2882a4`) and the watch fixtures run the same instructions. The release build
+measured +1.1 % time with those same instructions, and +0.1 % with alignment
+pinned: code placement again.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

@@ -155,6 +155,7 @@ struct WinExportOptions {
     bool allowUnsafeLocalImages = false;
     unsigned workers = 0;
     bool embedSource = false;
+    bool pageNumbers = false;
 };
 
 #ifdef _WIN32
@@ -501,6 +502,7 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
     options.enableUrlImages = exportOptions.enableUrlImages;
     options.allowUnsafeLocalImages = exportOptions.allowUnsafeLocalImages;
     options.embedSource = exportOptions.embedSource;
+    options.pageNumbers = exportOptions.pageNumbers;
     TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     g_nativePdfLastError = static_cast<int>(result.error);
     return result.Ok();
@@ -641,6 +643,8 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.allowUnsafeLocalImages = true;
         } else if (lstrcmpiW(argv[i], L"--embed-source") == 0) {
             options.embedSource = true;
+        } else if (lstrcmpiW(argv[i], L"--page-numbers") == 0) {
+            options.pageNumbers = true;
         } else if (_wcsnicmp(argv[i], L"--workers=", 10) == 0) {
             wchar_t* end = nullptr;
             unsigned long parsed = std::wcstoul(argv[i] + 10, &end, 10);

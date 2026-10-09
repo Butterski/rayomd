@@ -56,6 +56,8 @@ struct PdfOptions {
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
     bool embedSource = false;
+    // "N / M" centred in the bottom margin of every page.
+    bool pageNumbers = false;
 };
 
 // Legacy error reporting is retained for the bool-returning compatibility
