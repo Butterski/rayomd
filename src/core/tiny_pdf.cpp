@@ -809,12 +809,14 @@ public:
     TailWriter(const TailWriter&) = delete;
     TailWriter& operator=(const TailWriter&) = delete;
 
+    // Always inlined: a copy of a known size and a pointer step. Left to GCC, the paint
+    // functions called Lit<2> out of line, and growth elsewhere in this file moves more.
     template <size_t N>
-    void Lit(const char (&text)[N]) {
+    RAYOMD_HOT_INLINE void Lit(const char (&text)[N]) {
         memcpy(cursor, text, N - 1);
         cursor += N - 1;
     }
-    void Bytes(const char* text, size_t size) {
+    RAYOMD_HOT_INLINE void Bytes(const char* text, size_t size) {
         memcpy(cursor, text, size);
         cursor += size;
     }

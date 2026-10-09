@@ -598,6 +598,19 @@ Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
 reference definition; the watch fixtures write the same bytes with 0.02 % more
 instructions (geometric mean) in the same time.
 
+## Inlined content-stream writes, October 2026
+
+`TailWriter::Lit` and `TailWriter::Bytes`, which copy an operator or operand of
+known size into a content stream, are always inlined now. GCC had left `Lit<2>`
+out of line in the paint functions (`StandardRenderer::Text`,
+`Renderer::PaintText`): a call for each one-byte separator. It came to light when
+a cold caller added for alerts moved `Lit<5>` out of line as well.
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`6a557f9`): all 2,757 corpus PDFs are byte-identical, and the watch fixtures run
+1.6 % faster (geometric mean; the 96 KiB table fixture 3.3 %, `baseline.md` 2.7 %)
+with 0.39 % fewer instructions. The executable grows by 4 KB, to 678,448 bytes.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
