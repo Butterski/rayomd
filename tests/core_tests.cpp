@@ -939,13 +939,14 @@ bool CheckMathPdf() {
 // document title started to come from the first heading, after headings started to make the
 // PDF outline, code backgrounds started at the first glyph of the code, the standard-font
 // renderer started to show bold, italic and strike-through, exact AFM widths,
-// WinAnsiEncoding, CommonMark list nesting and source-faithful word spacing. That renderer
-// does not depend on the platform or on installed fonts, so they hold on Windows and Linux.
+// WinAnsiEncoding, CommonMark list nesting, source-faithful word spacing and code tiles that
+// no longer cover the descenders and underscores of the line above. That renderer does not
+// depend on the platform or on installed fonts, so they hold on Windows and Linux.
 bool CheckNoMathGolden() {
     struct Golden { TinyPdf::PdfStyle style; size_t size; const char* sha256; };
     const Golden goldens[] = {
-        {TinyPdf::PdfStyle::Modern, 7355, "54f7e99421f7adca87246bfa344f19d4f3fd46debeab17d98b4e2f9160aaea49"},
-        {TinyPdf::PdfStyle::Tech, 7409, "caa033773f397d371808990aba469e9bd442078af5e8b38567aa380bd8e4c8be"},
+        {TinyPdf::PdfStyle::Modern, 7355, "d19e491636cc75bc83d5079a4878ae1220690aa1ff5c6084708eb1aa409e9e22"},
+        {TinyPdf::PdfStyle::Tech, 7409, "8a61b40ae384e02a880a7b2f68290252e6ed9eaaf6f3c6dad42f45f6ebc7d427"},
     };
     for (const Golden& golden : goldens) {
         TinyPdf::PdfOptions options;
@@ -2045,6 +2046,53 @@ bool CheckFootnotes() {
     return true;
 }
 
+// The tint tile of a line of code after the first one on its page starts below the descenders of
+// the line above, where Courier's underscore reaches 1.2 points under the baseline: drawn over
+// them, it hid underscores. The tiles of a block still overlap, so that it is one tint. In both
+// renderers.
+bool CheckCodeTiles() {
+    const std::string code = "```\nsnake_case_1\nsnake_case_2\nsnake_case_3\n```\n";
+    const std::string tint = "0.95 0.95 0.93 rg ";
+    for (const std::string& text : { code, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + code }) {
+        std::string pdf;
+        const size_t first = Build(text, pdf) ? pdf.find(tint) : std::string::npos;
+        const size_t streamEnd = pdf.find("endstream", first == std::string::npos ? 0 : first);
+        if (first == std::string::npos || streamEnd == std::string::npos) return false;
+        // The tiles and the lines of text in the order the page draws them.
+        int tiles = 0;
+        double baseline = 0.0;
+        double previousBottom = 0.0;
+        bool covers = false;
+        bool gap = false;
+        for (size_t at = pdf.rfind("stream", first);;) {
+            const size_t tile = pdf.find(tint, at);
+            const size_t line = pdf.find(" Tm ", at);
+            if (std::min(tile, line) >= streamEnd) break;
+            if (tile < line) {
+                double x = 0.0, bottom = 0.0, width = 0.0, height = 0.0;
+                if (std::sscanf(pdf.c_str() + tile + tint.size(), "%lf %lf %lf %lf re", &x, &bottom, &width, &height) != 4) {
+                    return false;
+                }
+                covers = covers || (tiles > 0 && bottom + height > baseline - 2.0);
+                gap = gap || (tiles > 0 && bottom + height < previousBottom);
+                previousBottom = bottom;
+                tiles++;
+                at = tile + tint.size();
+            } else {
+                baseline = std::atof(pdf.c_str() + pdf.rfind(' ', line - 1) + 1);
+                at = line + 4;
+            }
+        }
+        // Three lines and the empty one after them.
+        if (tiles != 4 || covers || gap) {
+            std::cerr << "code tiles mismatch: " << tiles << " tiles" << (covers ? ", one covers the line above" : "")
+                << (gap ? ", a gap between two" : "") << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -2442,6 +2490,7 @@ int main() {
     if (!CheckTheme()) return 90;
     if (!CheckPdfA()) return 91;
     if (!CheckFootnotes()) return 92;
+    if (!CheckCodeTiles()) return 93;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

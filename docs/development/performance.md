@@ -911,6 +911,30 @@ hooks and the rest GCC's inlining. Notes go after the text, as on GitHub; notes 
 foot of their page would need a reserve in `Ensure` and notes measured before their
 line, in both renderers.
 
+## Code tiles, October 2026
+
+Each line of a code block draws its tint tile before its text. The tile reached from 3
+points above the line to 2 points into the next one, so the next line's tile started 0.3
+points under this line's baseline and covered its descenders and underscores: `__init__`
+printed as `  init  ` on every line of a block but the last, in both renderers. Now the
+first line of a block on a page keeps that tile and the others start at their own top,
+3.3 points under the baseline above, deeper than Courier's underscore (1.2 points) or a
+Unicode font's descenders, and still reach 2 points into the next tile, as
+`RenderMathSource` already drew the source of formulas (`CodeTile`).
+
+`CodeTile` is out of line (`RAYOMD_SHARED`). Written into `RenderCode`, or with only its
+page check out of line, it moved GCC's inlining in `tiny_pdf.cpp` and outlined `"- " +
+text` in `RenderBullet`: +0.32 % instructions on `baseline.md`, which has no code. Out
+of line, `baseline.md` runs 0.01 % fewer instructions, and `RenderTable` takes the
+shift instead, in documents with code blocks: +0.42 % on `ascii_96kb.md` and +0.78 %
+on `table_96kb.md`. A cold `CodeTile` made that +1.10 %, an out-of-line `RenderCode`
+brought `RenderBullet`'s back.
+
+Measured on 2026-10-09 against the previous commit: of the 2,883 corpus PDFs, the
+1,023 of documents without a code block are byte-identical and the 1,860 that differ
+all have one. The watch fixtures run 0.15 % more instructions; pinned, time +0.13 %
+against A/A -0.15 %. The binary is the same size.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

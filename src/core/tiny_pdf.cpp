@@ -5639,15 +5639,29 @@ private:
         double lh = size * 1.35;
         double x = margin + 8.0;
         double width = pageW - margin * 2.0 - 16.0;
+        bool first = true;
         for (const auto& rawLine : raw) {
             std::wstring wide = Utf8ToWide(rawLine);
             for (const auto& line : WrapCodeLine(font, wide, width, size)) {
-                Ensure(lh + 4.0);
-                DrawRect(margin, y + 3.0, pageW - margin * 2.0, lh + 5.0, "0.95 0.95 0.93");
+                CodeTile(lh, first, "0.95 0.95 0.93");
                 DrawTextLine(x, size, line, "0.12 0.12 0.12");
             }
         }
         y -= 8.0;
+    }
+
+    // Makes room for a line of code `lh` high and draws its tile. The first line of a block on a
+    // page has one that reaches 3 points above it, the others one that starts at their top, below
+    // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
+    // points into the next, so that the block is one tint. Out of line: written into RenderCode,
+    // it moved GCC's inlining and outlined "- " + text in RenderBullet (+0.3 % on baseline.md).
+    RAYOMD_SHARED void CodeTile(double lh, bool& first, const char* color) {
+        const size_t pages = pageStarts.size();
+        Ensure(lh + 4.0);
+        if (pageStarts.size() != pages) first = true;
+        const double pad = first ? 3.0 : 0.0;
+        DrawRect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color);
+        first = false;
     }
 
     void RenderMath(const std::string& text) {
@@ -7812,14 +7826,28 @@ private:
         double lh = size * 1.35;
         double x = margin + 8.0;
         double width = pageW - margin * 2.0 - 16.0;
+        bool first = true;
         for (const auto& rawLine : raw) {
             for (const auto& line : WrapAsciiLiteral(rawLine, width, size)) {
-                Ensure(lh + 4.0);
-                Rect(margin, y + 3.0, pageW - margin * 2.0, lh + 5.0, "0.95 0.95 0.93");
+                CodeTile(lh, first, "0.95 0.95 0.93");
                 DrawTextLine(x, size, line, "F3", "0.12 0.12 0.12", true);
             }
         }
         y -= 8.0;
+    }
+
+    // Makes room for a line of code `lh` high and draws its tile. The first line of a block on a
+    // page has one that reaches 3 points above it, the others one that starts at their top, below
+    // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
+    // points into the next, so that the block is one tint. Out of line: written into RenderCode,
+    // it moved GCC's inlining and outlined "- " + text in RenderBullet (+0.3 % on baseline.md).
+    RAYOMD_SHARED void CodeTile(double lh, bool& first, const char* color) {
+        const size_t pages = pageStarts.size();
+        Ensure(lh + 4.0);
+        if (pageStarts.size() != pages) first = true;
+        const double pad = first ? 3.0 : 0.0;
+        Rect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color);
+        first = false;
     }
 
     void RenderMath(const std::string& text) {
