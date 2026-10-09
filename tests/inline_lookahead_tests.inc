@@ -111,6 +111,9 @@ bool CheckInlineLookahead() {
     large.push_back(Repeat("*a ", 40000) + "b*\n");
     large.push_back(Repeat("[a](", 30000) + ")\n");
     large.push_back(Repeat("<a ", 40000) + ">\n");
+    // Each "://" looks like a bare URL until the byte behind it; a scan to the next white space
+    // per "://" took a minute here.
+    large.push_back(Repeat("http://(", 125000) + "\n");
     large.push_back(Repeat("[a ", 40000) + "]\n");
     large.push_back("| a | b |\n|---|---|\n| " + Repeat("*a ", 30000) + " | x |\n");
     large.push_back("- " + Repeat("_a ", 30000) + "\n");

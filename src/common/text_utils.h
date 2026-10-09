@@ -65,6 +65,7 @@ enum ByteClass : unsigned char {
     kByteLineFeed = 2,       // '\n'
     kByteSymbolLead = 4,     // 0xE2, the first byte of the status symbols NormalizeSymbols rewrites
     kByteLiteralSpecial = 8, // ( ) \ and the control bytes 0..31 and 127: not copied as is into a PDF literal string
+    kByteAutolinkLead = 16,  // ':' and '@', where the inline parser finds a bare URL or email address
 };
 
 namespace Detail {
@@ -79,6 +80,8 @@ constexpr std::array<unsigned char, 256> MakeByteClasses() {
     }
     classes[static_cast<unsigned char>('\n')] |= kByteLineFeed;
     classes[0xE2] |= kByteSymbolLead;
+    classes[static_cast<unsigned char>(':')] |= kByteAutolinkLead;
+    classes[static_cast<unsigned char>('@')] |= kByteAutolinkLead;
     return classes;
 }
 inline constexpr std::array<unsigned char, 256> kByteClasses = MakeByteClasses();

@@ -147,7 +147,8 @@ Native mode supports ATX and Setext headings (as PDF bookmarks, and as targets o
 GitHub-style `#anchor` links), paragraphs, structured nested
 lists (with GitHub task lists) and block quotes, fenced and indented code, pipe tables, rules, page
 breaks, matching-run code spans, classic emphasis and escapes, inline and
-reference-style links, URL/email autolinks, standalone inline/reference images,
+reference-style links, URL/email autolinks (in angle brackets or bare, as on
+GitHub), standalone inline/reference images,
 natively typeset math for a TeX subset (`$...$`, `$$...$$`, fenced `math` blocks, in
 text, lists, quotes, headings and table cells), Unicode fonts, HTML comments
 (hidden), `<br>` line breaks, character references such as `&copy;`, and common

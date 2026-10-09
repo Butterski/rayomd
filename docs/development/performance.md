@@ -547,6 +547,39 @@ after `int number` it costs nothing. Measured on 2026-10-09 against `e19cf7d`:
 the 1,407 corpus PDFs that changed hold task items, and the watch fixtures
 write the same bytes with the same instructions.
 
+## Bare URLs and email addresses, October 2026
+
+A bare `http://` or `https://` URL and an email address in text become links, as
+on GitHub: the URL runs to white space or `<`, without the punctuation that ends
+a sentence, a `)` that closes no `(` of its own or a character reference at its
+end; an address needs a domain of two or more parts. Code spans, link text and a
+scheme inside a word (`xhttps://`) stay plain. The parser finds both at their `:`
+or `@`, a byte class of their own (`kByteAutolinkLead`), and `NeedsInlineParse`
+sends text without other inline syntax to the parser only when it holds a `://`
+or `@`, in the same pass that looks for syntax.
+
+Every test that can fail takes constant time; only a URL that becomes a link is
+scanned to its end. A first version scanned to the next white space before it
+tested the byte after `://`: 40,000 `http://(` in one paragraph took 2.3 s, growing
+with the square of the length. They take 5 ms now, and `CheckInlineLookahead`
+holds a megabyte of them.
+
+The time costs more than the instructions suggest, and it is work, not layout:
+with pinned alignment in one session, a build with only the `:` and `@` stops in
+the parser ran 0.62 % slower than `9bdb863`, one with only the fast-path check
+0.65 %, both 0.90 %, and one with all the code but neither 0.38 % (0.07 % in
+another session, so sessions differ by about 0.3 %). Callgrind's branch
+simulation shows no new mispredictions. Variants that ran more instructions:
+testing each 8-byte block before adding its classes to the sum (+0.2 % on the
+table fixture, whose short cells end in the byte loop), the check out of line
+(+0.45 %, a call per cell), and a stop mask that drops `:` and `@` once none
+lies ahead (+0.36 % on `single_01.md`: `RunWriter::Flush` was no longer inlined).
+
+Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
+`9bdb863`): the 2,187 corpus PDFs that changed hold a bare URL or address; the
+watch fixtures write the same bytes with 0.19 % more instructions (geometric
+mean, at most 0.26 %) in 0.7 % more time (0.84 % with pinned alignment).
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -633,6 +666,15 @@ fields), would avoid both. Each outline entry also formats up to seven object
 numbers with `std::to_chars`, about 50 instructions each; the entries' own
 numbers are consecutive and could be formatted once and copied, some 250
 instructions per heading.
+
+**SIMD byte classes.** The fast-path checks (`ContainsByteClass`,
+`NeedsInlineParse`) and the parser's runs of ordinary bytes look up a table entry
+per byte, about 28 instructions per 8 bytes. The out-of-line copy of the check
+alone runs 3.2 % of the instructions of the 96 KiB ASCII fixture and 3.3 % of the
+table fixture (callgrind, 2026-10-09). Comparing 16 bytes at a time with the ten
+syntax bytes in SSE2, which every x86-64 CPU has, takes about 22 instructions per
+16 bytes; a `pshufb` nibble table (SSSE3, behind a CPU check) about 8. Measure on
+short table cells, where the byte loop dominates, before choosing.
 
 ## Keeping the release light
 

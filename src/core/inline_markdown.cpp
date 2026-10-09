@@ -179,6 +179,92 @@ bool IsBreakTag(std::string_view tag) {
     return at == tag.size();
 }
 
+bool IsAsciiAlphanumeric(char ch) {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+}
+
+// Whether the ':' at `colon`, which a '/' follows, starts the "://" of a bare URL: "http" or
+// "https" in front of it, at the start of the text or after white space or one of * _ ~ (, and
+// a letter or digit behind it. `start` is where the scheme starts. Constant time: most ':' and
+// "://" in text start no link, and none may cost a scan.
+bool MatchUrlScheme(std::string_view source, size_t colon, size_t& start) {
+    if (colon + 3 >= source.size() || source[colon + 2] != '/' || !IsAsciiAlphanumeric(source[colon + 3])) return false;
+    const auto schemeIs = [&](const char* scheme, size_t length) {
+        if (colon < length) return false;
+        for (size_t k = 0; k < length; k++) {
+            if ((source[colon - length + k] | 0x20) != scheme[k]) return false;
+        }
+        return true;
+    };
+    const size_t schemeLength = schemeIs("https", 5) ? 5 : schemeIs("http", 4) ? 4 : 0;
+    if (schemeLength == 0) return false;
+    start = colon - schemeLength;
+    if (start > 0) {
+        const char before = source[start - 1];
+        if (!IsSpace(before) && before != '*' && before != '_' && before != '~' && before != '(') return false;
+    }
+    return true;
+}
+
+// The end of the bare URL whose domain starts with the letter or digit at `domain`. The URL runs
+// to white space or '<', less the punctuation that ends a sentence, a ')' that closes no '(' of
+// its own and a character reference at its end, as on GitHub. Only a URL that becomes a link is
+// scanned; what it leaves behind holds no '/', so no "://", and is never scanned again.
+size_t UrlAutolinkEnd(std::string_view source, size_t domain) {
+    size_t at = domain + 1;
+    while (at < source.size() && !IsSpace(source[at]) && source[at] != '<' && (unsigned char)source[at] >= 0x20) at++;
+    size_t opens = 0;
+    size_t closes = 0;
+    for (size_t k = domain; k < at; k++) {
+        opens += source[k] == '(';
+        closes += source[k] == ')';
+    }
+    size_t end = at;
+    while (end > domain) {
+        const char last = source[end - 1];
+        if (last == '?' || last == '!' || last == '.' || last == ',' || last == ':' || last == '*' || last == '_' ||
+            last == '~' || last == '\'' || last == '"') {
+            end--;
+        } else if (last == ')' && closes > opens) {
+            closes--;
+            end--;
+        } else if (last == ';') {
+            size_t name = end - 1;
+            while (name > domain && IsAsciiAlphanumeric(source[name - 1])) name--;
+            if (name == end - 1 || name <= domain || source[name - 1] != '&') break;
+            end = name - 1;
+        } else {
+            break;
+        }
+    }
+    return end;
+}
+
+// A bare email address around the '@' at `at`: letters, digits and . + - _ in front of it, and
+// behind it a domain of two or more parts of letters, digits, - and _ that does not end in - or
+// _. [start, end) is the address, without a '.' that ends a sentence.
+bool MatchEmailAutolink(std::string_view source, size_t at, size_t& start, size_t& end) {
+    start = at;
+    while (start > 0) {
+        const char ch = source[start - 1];
+        if (!IsAsciiAlphanumeric(ch) && ch != '.' && ch != '+' && ch != '-' && ch != '_') break;
+        start--;
+    }
+    if (start == at) return false;
+    const auto domainByte = [](char ch) { return IsAsciiAlphanumeric(ch) || ch == '-' || ch == '_'; };
+    size_t parts = 0;
+    for (size_t i = at + 1; i < source.size();) {
+        const size_t part = i;
+        while (i < source.size() && domainByte(source[i])) i++;
+        if (i == part) break;
+        parts++;
+        end = i;
+        if (i + 1 >= source.size() || source[i] != '.' || !domainByte(source[i + 1])) break;
+        i++;
+    }
+    return parts >= 2 && source[end - 1] != '-' && source[end - 1] != '_';
+}
+
 struct InlineLink {
     std::string_view label;
     std::string_view target;
@@ -353,9 +439,40 @@ private:
         return run;
     }
 
+public:
+    // Start of the text that belongs to no run yet.
+    size_t Pending() const { return pending; }
+
+private:
     InlineRuns& out;
     size_t pending = 0;     // start of the text that belongs to no run yet
 };
+
+// The bare URL or email address whose ':' or '@' is at source[at], as a link of its own: the
+// index behind it, or 0 when none is there. The scheme, or the name in front of the '@', is the
+// plain text written last and moves into the link. Out of the parse loop, which most ':' and
+// '@' leave at its first test.
+RAYOMD_NOINLINE size_t WriteAutolink(RunWriter& writer, InlineRuns& out, std::string_view source, size_t at,
+    bool bold, bool italic, bool strike) {
+    const bool email = source[at] == '@';
+    size_t start = at;
+    size_t end = 0;
+    if (!(email ? MatchEmailAutolink(source, at, start, end) : MatchUrlScheme(source, at, start))) return 0;
+    const size_t lead = at - start;
+    std::string& text = out.text;
+    if (text.size() < writer.Pending() + lead || text.compare(text.size() - lead, lead, source.data() + start, lead) != 0) {
+        return 0;
+    }
+    if (!email) end = UrlAutolinkEnd(source, at + 3);
+    text.resize(text.size() - lead);
+    writer.Flush(bold, italic, strike);
+    const size_t urlBegin = out.urls.size();
+    if (email) out.urls += "mailto:";
+    AppendDecoded(out.urls, source.substr(start, end - start));
+    AppendDecoded(text, source.substr(start, end - start));
+    writer.Close(bold, italic, strike, urlBegin, false);
+    return end;
+}
 
 bool IsClassicEscapable(char ch) {
     constexpr std::string_view punctuation = R"(\`*{}[]()#+-.!_)";
@@ -1103,8 +1220,11 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
         else writer.Math(match.display);
     };
     const auto& classes = RayoMd::Text::Detail::kByteClasses;
+    // A bare URL or email address is found at its ':' or '@'. Both are rare in text, and the
+    // stop costs less than looking for "://" and '@' in every text first.
+    constexpr unsigned char kStops = RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteAutolinkLead;
     auto ordinary = [&](size_t index) {
-        return (classes[(unsigned char)source[index]] & RayoMd::Text::kByteInlineSyntax) == 0;
+        return (classes[(unsigned char)source[index]] & kStops) == 0;
     };
 
     for (size_t i = 0; i < source.size();) {
@@ -1273,6 +1393,19 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
             }
             text.append(length, marker);
             i += length;
+            continue;
+        }
+        if (source[i] == ':' || source[i] == '@') {
+            // A bare URL or email address, found at its ':' or '@'. Most ':' are followed by no
+            // '/'; a ':' or '@' that starts no address is text.
+            if (source[i] == '@' || (i + 1 < source.size() && source[i + 1] == '/')) {
+                const size_t end = WriteAutolink(writer, out, source, i, bold, italic, strike);
+                if (end != 0) {
+                    i = end;
+                    continue;
+                }
+            }
+            text.push_back(source[i++]);
             continue;
         }
         if (i + 1 < source.size() && source.compare(i, 2, "~~") == 0) {

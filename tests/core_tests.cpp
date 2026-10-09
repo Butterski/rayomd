@@ -1387,6 +1387,36 @@ std::string MinimalTrueTypeCollection() {
     return collection + font + data;
 }
 
+// A bare http(s) URL or email address in text is a link, as on GitHub: without the
+// punctuation that ends a sentence or a ')' that closes no '(' of its own, and with its
+// character references decoded. Not in code, not inside other links, not after a letter, and
+// not an address without a dot in its domain. In both renderers and in table cells.
+bool CheckAutolinks() {
+    const std::string document =
+        "See https://a.example/p?x=1&amp;y=2. Or (http://b.example/c_(d)) and https://e.example/f), done!\n"
+        "Mail j.doe+tag@mail.example.com, not user@localhost, @name, `https://code.example` or xhttps://g.example.\n\n"
+        "| https://h.example | team@example.org |\n|---|---|\n| [label](https://i.example) | x |\n";
+    for (const std::string& text : { document, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + document }) {
+        std::string pdf;
+        if (!Build(text, pdf)) return false;
+        std::vector<std::string> uris;
+        for (size_t at = pdf.find("/URI ("); at != std::string::npos; at = pdf.find("/URI (", at + 1)) {
+            const size_t end = pdf.find(") >>", at);
+            uris.push_back(pdf.substr(at + 6, end - at - 6));
+        }
+        const std::vector<std::string> expected = { "https://a.example/p?x=1&y=2", "http://b.example/c_\\(d\\)",
+            "https://e.example/f", "mailto:j.doe+tag@mail.example.com", "https://h.example", "mailto:team@example.org",
+            "https://i.example" };
+        if (uris != expected) {
+            std::cerr << "autolinks mismatch (" << (text == document ? "standard" : "Unicode") << " renderer):";
+            for (const std::string& uri : uris) std::cerr << " " << uri;
+            std::cerr << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -1754,6 +1784,7 @@ int main() {
     if (!CheckPageNumbers()) return 79;
     if (!CheckHtmlInText()) return 80;
     if (!CheckTaskLists()) return 81;
+    if (!CheckAutolinks()) return 82;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

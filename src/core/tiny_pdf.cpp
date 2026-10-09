@@ -4240,7 +4240,7 @@ private:
             out.lineEnds.push_back(0);
             return false;
         }
-        if (!RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteInlineSyntax)) {
+        if (!Internal::NeedsInlineParse(text)) {
             // No inline syntax: every line is one unstyled run, also when it is empty.
             out.wide.clear();
             if (text.find('\xE2') == std::string_view::npos) AppendUtf8ToWide(out.wide, text);
@@ -4383,7 +4383,7 @@ private:
             }
             return explicitLines;
         }
-        if (!RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteInlineSyntax)) {
+        if (!Internal::NeedsInlineParse(text)) {
             std::vector<std::vector<StyledSpan>> lines;
             std::wstring wide = Utf8ToWide(NormalizeSymbols(text));
             std::vector<std::wstring> wrapped = WrapText(font, std::wstring_view(wide), width, size);
@@ -6822,7 +6822,7 @@ private:
     }
 
     void RenderParagraph(const std::string& text, double x, double width) {
-        if (RayoMd::Text::ContainsByteClass(text, RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteLineFeed)) {
+        if (Internal::NeedsInlineParse(text, RayoMd::Text::kByteLineFeed)) {
             if (math.Active()) math.Clear();
             if (WrapAsciiRuns(text, width, bodySize, paragraphRuns)) {
                 const double lh = bodySize * 1.35;
@@ -7095,7 +7095,7 @@ private:
             size_t maxLines = 1;
             for (size_t c = 0; c < columns; c++) {
                 const std::string& cell = c < rows[r].size() ? rows[r][c] : emptyCell;
-                styled[c] = RayoMd::Text::ContainsByteClass(cell, RayoMd::Text::kByteInlineSyntax) &&
+                styled[c] = Internal::NeedsInlineParse(cell) &&
                     WrapAsciiInline(cell, cellWidth, size, r == 0 ? kStyleBold : 0, tableCells[c]);
                 if (!styled[c]) {
                     WrapAsciiText(cell, cellWidth, size, r == 0 ? StandardTextFont::Bold : StandardTextFont::Regular,

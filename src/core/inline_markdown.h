@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../common/text_utils.h"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -83,6 +85,27 @@ std::vector<InlineSpan> ParseInlineSpans(std::string_view input, bool recognizeM
 // read in order, cover out.text without a gap.
 void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath = true,
     size_t lookaheadBudget = kDefaultLookaheadBudget);
+
+// Whether `text` needs the inline parser: inline syntax (or a byte of `classes`), or the "://"
+// or '@' of a bare URL or email address. One pass, which stops at the first inline syntax; only
+// text with a ':' or '@' and no syntax is searched again. The classes seen are summed before the
+// test: fewer instructions than testing each block first, mostly in short table cells.
+inline bool NeedsInlineParse(std::string_view text, unsigned char classes = 0) {
+    const unsigned syntax = RayoMd::Text::kByteInlineSyntax | classes;
+    const unsigned char* at = reinterpret_cast<const unsigned char*>(text.data());
+    size_t left = text.size();
+    const auto& byteClasses = RayoMd::Text::Detail::kByteClasses;
+    unsigned char seen = 0;
+    for (; left >= 8; at += 8, left -= 8) {
+        seen |= byteClasses[at[0]] | byteClasses[at[1]] | byteClasses[at[2]] | byteClasses[at[3]] |
+            byteClasses[at[4]] | byteClasses[at[5]] | byteClasses[at[6]] | byteClasses[at[7]];
+        if (seen & syntax) return true;
+    }
+    for (; left > 0; at++, left--) seen |= byteClasses[*at];
+    if (seen & syntax) return true;
+    return (seen & RayoMd::Text::kByteAutolinkLead) &&
+        (text.find("://") != std::string_view::npos || text.find('@') != std::string_view::npos);
+}
 
 // The character reference ("&amp;", "&#169;", "&#xA9;") at text[at]: its length in bytes, with
 // its code point, or 0 when none starts there. The named references are those of HTML 4 and
