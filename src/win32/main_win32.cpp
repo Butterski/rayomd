@@ -62,6 +62,7 @@
 #include "imgui/misc/cpp/imgui_stdlib.h"
 #include "rayomd/tiny_pdf.h"
 #include "../common/text_utils.h"
+#include "../common/batch_report.h"
 #include "../common/profiling.h"
 #include "../core/export_options.h"
 
@@ -157,6 +158,11 @@ struct WinExportOptions {
     unsigned workers = 0;
     bool embedSource = false;
     bool pageNumbers = false;
+    // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
+    // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
+    bool recursive = false;
+    bool skipUnchanged = false;
+    std::string report;
 };
 
 #ifdef _WIN32
@@ -494,8 +500,10 @@ bool WriteNewBinaryFile(const std::wstring& path, const std::string& content, bo
 
 #endif
 
+// `details`, when given, receives the result of the build: pages, characters without a glyph,
+// failed images.
 bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& exportOptions,
-    std::string& pdfBytes, const std::wstring& sourcePath = L"") {
+    std::string& pdfBytes, const std::wstring& sourcePath = L"", TinyPdf::BuildResult* details = nullptr) {
     TinyPdf::PdfOptions options;
     options.style = exportOptions.style;
     options.margin = exportOptions.margin;
@@ -506,6 +514,7 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
     options.embedSource = exportOptions.embedSource;
     options.pageNumbers = exportOptions.pageNumbers;
     TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdfBytes);
+    if (details) *details = result;
     g_nativePdfLastError = static_cast<int>(result.error);
     return result.Ok();
 }
@@ -651,6 +660,16 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             if (!TinyPdf::Internal::ParsePageSize(WideToUtf8(argv[i] + 12), options.pageSize)) {
                 error = L"--page-size must be a4, a3, a5, letter or legal (each also with -landscape), or "
                     L"WIDTHxHEIGHT in mm, cm, in or pt, such as 210x297mm";
+                return false;
+            }
+        } else if (lstrcmpiW(argv[i], L"--recursive") == 0) {
+            options.recursive = true;
+        } else if (lstrcmpiW(argv[i], L"--skip-unchanged") == 0) {
+            options.skipUnchanged = true;
+        } else if (_wcsnicmp(argv[i], L"--report=", 9) == 0) {
+            options.report = WideToUtf8(argv[i] + 9);
+            if (options.report.empty()) {
+                error = L"--report needs a file name, or - for standard output";
                 return false;
             }
         } else if (_wcsnicmp(argv[i], L"--workers=", 10) == 0) {
@@ -829,7 +848,7 @@ bool ExportOneFile(const std::wstring& inputPath, const std::wstring& outputPath
 }
 
 int ExportNativeFileWithBufferResult(const std::wstring& inputPath, const std::wstring& outputPath,
-    const WinExportOptions& options, std::string& pdfBuffer) {
+    const WinExportOptions& options, std::string& pdfBuffer, TinyPdf::BuildResult* details = nullptr) {
     const auto profileBefore = RayoMd::Profiling::Capture();
     auto finish = [&](int result) {
         RayoMd::Profiling::EmitDelta("export", profileBefore, RayoMd::Profiling::Capture());
@@ -838,7 +857,7 @@ int ExportNativeFileWithBufferResult(const std::wstring& inputPath, const std::w
     std::string markdown;
     if (!ReadUtf8File(inputPath, markdown)) return finish(3);
     pdfBuffer.clear();
-    if (!BuildNativePdfBytes(markdown, options, pdfBuffer, inputPath)) {
+    if (!BuildNativePdfBytes(markdown, options, pdfBuffer, inputPath, details)) {
         return finish(10 + GetNativePdfLastError());
     }
     return finish(WriteBinaryFile(outputPath, pdfBuffer) ? 0 : 12);
@@ -850,11 +869,50 @@ bool ExportNativeFileWithBuffer(const std::wstring& inputPath, const std::wstrin
 }
 
 struct WinBatchJob {
+    WinBatchJob(std::wstring input, std::wstring output) : inputPath(std::move(input)), outputPath(std::move(output)) {}
+
     std::wstring inputPath;
     std::wstring outputPath;
     int result = 0;
     std::string error;
+    bool skipped = false;
+    TinyPdf::BuildResult details;
+    uint64_t bytes = 0;
+    double milliseconds = 0.0;
 };
+
+RayoMd::Batch::Record WinRecordFor(const WinBatchJob& job) {
+    RayoMd::Batch::Record record;
+    record.input = WideToUtf8(job.inputPath);
+    record.output = WideToUtf8(job.outputPath);
+    record.milliseconds = job.milliseconds;
+    if (job.result != 0) {
+        record.status = "error";
+        record.code = job.result;
+        record.error = job.error.rfind("Error: ", 0) == 0 ? job.error.substr(7) : job.error;
+        return record;
+    }
+    record.bytes = job.bytes;
+    if (job.skipped) {
+        record.status = "skipped";
+        return record;
+    }
+    record.pages = job.details.pages;
+    record.missingCharacters = job.details.missingCharacters;
+    record.failedImages = job.details.failedImages;
+    return record;
+}
+
+// Opens --report, or says why it cannot; true without a report.
+bool OpenWinReport(RayoMd::Batch::Report& report, const WinExportOptions& options) {
+    if (options.report.empty() || report.Open(options.report)) return true;
+    WriteStdoutLine("Error: could not create the report file: " + options.report);
+    return false;
+}
+
+double MillisecondsSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
 
 unsigned ResolveWinWorkerCount(const WinExportOptions& options, const std::vector<WinBatchJob>& jobs) {
     if (jobs.empty() || options.engine != 0) return 1;
@@ -876,11 +934,27 @@ unsigned ResolveWinWorkerCount(const WinExportOptions& options, const std::vecto
 }
 
 int ExecuteWinBatchJobs(std::vector<WinBatchJob>& jobs, const WinExportOptions& options, const char* label) {
+    RayoMd::Batch::Report report;
+    if (!OpenWinReport(report, options)) return 12;
+    const auto upToDate = [&](const WinBatchJob& job) {
+        return options.skipUnchanged && RayoMd::Batch::OutputUpToDate(job.inputPath, job.outputPath);
+    };
+    const auto skip = [](WinBatchJob& job) {
+        std::error_code sizeError;
+        job.skipped = true;
+        job.bytes = std::filesystem::file_size(std::filesystem::path(job.outputPath), sizeError);
+    };
     if (options.engine != 0) {
         std::string warning;
         for (WinBatchJob& job : jobs) {
-            if (job.result != 0) continue;
-            if (!ExportOneFile(job.inputPath, job.outputPath, options, &warning)) job.result = 20;
+            if (job.result == 0 && upToDate(job)) {
+                skip(job);
+            } else if (job.result == 0) {
+                const auto start = std::chrono::steady_clock::now();
+                if (!ExportOneFile(job.inputPath, job.outputPath, options, &warning)) job.result = 20;
+                job.milliseconds = MillisecondsSince(start);
+            }
+            if (report.IsOpen()) report.Write(WinRecordFor(job));
         }
         if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
     } else {
@@ -896,13 +970,23 @@ int ExecuteWinBatchJobs(std::vector<WinBatchJob>& jobs, const WinExportOptions& 
                     size_t index = next.fetch_add(1, std::memory_order_relaxed);
                     if (index >= jobs.size()) break;
                     WinBatchJob& job = jobs[index];
-                    if (job.result != 0) continue;
-                    job.result = ExportNativeFileWithBufferResult(job.inputPath, job.outputPath, options, pdfBuffer);
+                    if (job.result == 0 && upToDate(job)) {
+                        skip(job);
+                    } else if (job.result == 0) {
+                        const auto start = std::chrono::steady_clock::now();
+                        job.result = ExportNativeFileWithBufferResult(job.inputPath, job.outputPath, options, pdfBuffer,
+                            &job.details);
+                        job.milliseconds = MillisecondsSince(start);
+                        if (job.result == 0) job.bytes = pdfBuffer.size();
+                    }
+                    if (report.IsOpen()) report.Write(WinRecordFor(job));
                 }
             });
         }
         for (std::thread& worker : workers) worker.join();
     }
+    const bool reported = report.Close();
+    if (!reported) WriteStdoutLine("Error: could not write the report file: " + options.report);
 
     int failures = 0;
     int lastResult = 0;
@@ -918,35 +1002,35 @@ int ExecuteWinBatchJobs(std::vector<WinBatchJob>& jobs, const WinExportOptions& 
         WriteStdoutLine("Error: " + std::string(label) + " failed for " +
             std::to_string(failures) + " file(s).");
     }
-    return failures == 0 ? 0 : lastResult;
+    return failures == 0 ? (reported ? 0 : 12) : lastResult;
 }
 
 int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, const WinExportOptions& options) {
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
-    WIN32_FIND_DATAW findData = {};
-    HANDLE hFind = FindFirstFileW(JoinPath(inputDir, L"*.md").c_str(), &findData);
-    if (hFind == INVALID_HANDLE_VALUE) return 3;
+    std::vector<RayoMd::Batch::File> files;
+    std::string listError;
+    if (!RayoMd::Batch::CollectMarkdown(std::filesystem::path(inputDir), std::filesystem::path(outputDir),
+            options.recursive, files, listError)) {
+        WriteStdoutLine("Error: could not read input folder: " + WideToUtf8(inputDir) + " (" + listError + ")");
+        return 3;
+    }
 
     std::vector<WinBatchJob> jobs;
+    jobs.reserve(files.size());
     std::set<std::wstring> seenOutputs;
-    do {
-        if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        std::wstring name = findData.cFileName;
-        std::wstring inputPath = JoinPath(inputDir, name);
-        std::wstring outputPath = JoinPath(outputDir, PdfNameForMarkdown(name));
-        WinBatchJob job{inputPath, outputPath};
-        std::wstring key = OutputPathKey(outputPath);
-        if (!seenOutputs.insert(key).second) {
+    for (const RayoMd::Batch::File& file : files) {
+        WinBatchJob job(file.input.wstring(), file.output.wstring());
+        // A subfolder's PDFs go to a subfolder of the output folder, made before the workers start.
+        const std::wstring folder = file.output.parent_path().wstring();
+        if (!seenOutputs.insert(OutputPathKey(job.outputPath)).second) {
             job.result = 12;
-            job.error = "Error: multiple inputs map to the same output PDF: " + WideToUtf8(outputPath);
+            job.error = "Error: multiple inputs map to the same output PDF: " + WideToUtf8(job.outputPath);
+        } else if (options.recursive && !EnsureDirectoryRecursive(folder)) {
+            job.result = 12;
+            job.error = "Error: could not create output folder: " + WideToUtf8(folder);
         }
         jobs.push_back(std::move(job));
-    } while (FindNextFileW(hFind, &findData));
-    FindClose(hFind);
-
-    std::sort(jobs.begin(), jobs.end(), [](const WinBatchJob& left, const WinBatchJob& right) {
-        return OutputPathKey(left.inputPath) < OutputPathKey(right.inputPath);
-    });
+    }
     return ExecuteWinBatchJobs(jobs, options, "batch export");
 }
 
@@ -991,7 +1075,7 @@ int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& o
         if (line.empty()) continue;
         std::wstring inputPath = Utf8ToWide(line);
         std::wstring outputPath = JoinPath(outputDir, PdfNameForMarkdown(inputPath));
-        WinBatchJob job{inputPath, outputPath};
+        WinBatchJob job(inputPath, outputPath);
         if (!seenOutputs.insert(OutputPathKey(outputPath)).second) {
             job.result = 12;
             job.error = "Error: multiple inputs map to the same output PDF: " + WideToUtf8(outputPath);
@@ -1051,6 +1135,8 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
     LARGE_INTEGER freq = {};
     QueryPerformanceFrequency(&freq);
 
+    RayoMd::Batch::Report report;
+    if (!OpenWinReport(report, options)) return 12;
     std::string pdfBuffer;
     pdfBuffer.reserve(1024 * 1024);
     std::string pending;
@@ -1064,19 +1150,25 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
         if (line.empty()) return true;
         if (line == "quit" || line == "exit") return false;
 
-        std::wstring inputPath = Utf8ToWide(line);
-        std::wstring outputPath = JoinPath(outputDir, PdfNameForMarkdown(inputPath));
+        WinBatchJob job(Utf8ToWide(line), std::wstring());
+        job.outputPath = JoinPath(outputDir, PdfNameForMarkdown(job.inputPath));
 
         LARGE_INTEGER start = {}, end = {};
         QueryPerformanceCounter(&start);
-        bool ok = options.engine == 0
-            ? ExportNativeFileWithBuffer(inputPath, outputPath, options, pdfBuffer)
-            : ExportOneFile(inputPath, outputPath, options, &warning);
+        if (options.engine == 0) {
+            job.result = ExportNativeFileWithBufferResult(job.inputPath, job.outputPath, options, pdfBuffer, &job.details);
+            if (job.result == 0) job.bytes = pdfBuffer.size();
+        } else if (!ExportOneFile(job.inputPath, job.outputPath, options, &warning)) {
+            job.result = 20;
+        }
         QueryPerformanceCounter(&end);
 
+        const bool ok = job.result == 0;
         double ms = (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        job.milliseconds = ms;
         if (!ok) failures++;
-        WriteStdoutLine(std::string(ok ? "OK\t" : "ERR\t") + RayoMd::Text::FormatDouble(ms) + "\t" + WideToUtf8(outputPath));
+        if (report.IsOpen()) report.Write(WinRecordFor(job));
+        WriteStdoutLine(std::string(ok ? "OK\t" : "ERR\t") + RayoMd::Text::FormatDouble(ms) + "\t" + WideToUtf8(job.outputPath));
         if (!warning.empty()) {
             WriteStdoutLine("Warning: " + warning);
             warning.clear();
@@ -1091,11 +1183,15 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
             std::string line = pending.substr(0, pos);
             if (!line.empty() && line.back() == '\r') line.pop_back();
             pending.erase(0, pos + 1);
-            if (!processLine(line)) return failures == 0 ? 0 : 20;
+            if (!processLine(line)) {
+                report.Close();
+                return failures == 0 ? 0 : 20;
+            }
         }
     }
 
     if (!pending.empty()) processLine(pending);
+    report.Close();
     return failures == 0 ? 0 : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20);
 }
 

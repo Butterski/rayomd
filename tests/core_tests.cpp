@@ -1,4 +1,5 @@
 #include "rayomd/tiny_pdf.h"
+#include "../src/common/batch_report.h"
 #include "../src/common/text_utils.h"
 #include "../src/core/export_options.h"
 #include "../src/core/inline_markdown.h"
@@ -1582,6 +1583,20 @@ bool CheckPageSize() {
     return true;
 }
 
+// A batch report line stays valid JSON for any file name: quotes, backslashes and control
+// characters are escaped, UTF-8 passes through, and bytes that are not UTF-8 (possible in Linux
+// names) become U+FFFD instead of breaking the line.
+bool CheckReportJson() {
+    std::string escaped;
+    RayoMd::Batch::AppendJsonString(escaped, std::string("q\"b\\n\nt\t\x01\x7F") + "\xC5\xBC" + "\xFF" + "\xC5");
+    const std::string expected = std::string("q\\\"b\\\\n\\nt\\t\\u0001\\u007f") + "\xC5\xBC" + "\\ufffd\\ufffd";
+    if (escaped != expected) {
+        std::cerr << "report JSON escaping mismatch: " << escaped << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -1955,6 +1970,7 @@ int main() {
     if (!CheckHeadingKeep()) return 85;
     if (!CheckTableHeaderRepeat()) return 86;
     if (!CheckPageSize()) return 87;
+    if (!CheckReportJson()) return 88;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

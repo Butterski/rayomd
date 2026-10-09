@@ -2646,7 +2646,17 @@ class ImageRegistry {
 public:
     explicit ImageRegistry(const PdfOptions& opts) : options(opts), localPolicy(opts) {}
 
+    // An image the document shows, by its source: false, and one more failed image, when the
+    // policy rejects it or it cannot be loaded or decoded; RenderImage then shows its alt text.
     bool Resolve(const std::string& src, const std::string& alt, int& index) {
+        const bool resolved = ResolveSource(src, alt, index);
+        failed += !resolved;
+        return resolved;
+    }
+    uint32_t FailedImages() const { return failed; }
+
+private:
+    bool ResolveSource(const std::string& src, const std::string& alt, int& index) {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Image);
         // Reuse raw sources only after this registry has accepted them through
         // its immutable policy; cross-build caches stay canonical-keyed.
@@ -2718,6 +2728,7 @@ public:
         return true;
     }
 
+public:
     const PdfImage& Get(int index) const {
         return *images[(size_t)index];
     }
@@ -2729,6 +2740,7 @@ private:
     LocalImagePolicy localPolicy;
     std::vector<SharedPdfImage> images;
     std::unordered_map<std::string, int> indexByKey;
+    uint32_t failed = 0;
     static std::unordered_map<std::string, SharedPdfImage>& Cache() {
         static std::unordered_map<std::string, SharedPdfImage> cache;
         return cache;
@@ -7386,7 +7398,7 @@ static void PrepareOutput(std::string& pdfBytes, size_t expectedBytes) {
 // `text` is ASCII, or with `winAnsi` the document transcoded to WinAnsiEncoding; `source` is
 // the document as given, which a reversible PDF embeds.
 static bool BuildStandardPdfBytes(const std::string& text, const std::string& source, bool winAnsi,
-    const PdfOptions& options, std::string& pdfBytes) {
+    const PdfOptions& options, std::string& pdfBytes, BuildResult& stats) {
     // Character references come out as the WinAnsi codes the standard fonts show.
     const Internal::WinAnsiReferences references;
     std::vector<Block> blocks;
@@ -7492,6 +7504,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     int infoId = pdf.Add(InfoDictionary("RayoMD Native Standard PDF", source, renderer.Headings(), winAnsi));
 
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
+    stats.pages = static_cast<uint32_t>(pageStarts.size());
+    stats.failedImages = imageRegistry.FailedImages();
     return true;
 }
 
@@ -7609,7 +7623,7 @@ RAYOMD_COLD static const TtfFont* BetterFontFor(const TtfFont& font, const CidLi
 // With `betterFont`, a document with characters that `font` has no glyph for is not built
 // when a fallback font has more of them: *betterFont is set, to build it again in that one.
 static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& font, const PdfOptions& options,
-    std::string& pdfBytes, const TtfFont** betterFont, size_t& missingCharacters) {
+    std::string& pdfBytes, const TtfFont** betterFont, size_t& missingCharacters, BuildResult& stats) {
     std::vector<Block> blocks;
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
@@ -7770,6 +7784,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     int infoId = pdf.Add(InfoDictionary("RayoMD Native Tiny PDF", markdown, renderer.Headings(), false));
 
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
+    stats.pages = static_cast<uint32_t>(pageStarts.size());
+    stats.failedImages = imageRegistry.FailedImages();
     return true;
 }
 
@@ -7793,6 +7809,7 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
     g_lastError = 0;
     bool built = false;
     uint32_t missingCharacters = 0;
+    BuildResult stats;
     // A character reference counts as the character it stands for: "&copy;" needs the WinAnsi
     // text of the standard fonts, "&rarr;" a Unicode font. A document is searched for them only
     // where it would otherwise go to the standard fonts.
@@ -7800,12 +7817,12 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
     Internal::ReferenceNeed references = Internal::ReferenceNeed::Ascii;
     std::string winAnsi;
     if (ascii && (references = Internal::CharacterReferenceNeed(markdown)) == Internal::ReferenceNeed::Ascii) {
-        built = BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes);
+        built = BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes, stats);
     } else {
         // Latin text needs no font file: the standard fonts show it in WinAnsiEncoding.
         if (references != Internal::ReferenceNeed::Unicode && RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi) &&
             (ascii || Internal::CharacterReferenceNeed(markdown) != Internal::ReferenceNeed::Unicode)) {
-            built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes);
+            built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats);
         } else {
             const TtfFont* font = nullptr;
             {
@@ -7815,15 +7832,15 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
             if (font) {
                 const TtfFont* better = nullptr;
                 size_t missing = 0;
-                built = BuildUnicodePdfBytes(markdown, *font, options, pdfBytes, &better, missing);
-                if (built && better) built = BuildUnicodePdfBytes(markdown, *better, options, pdfBytes, nullptr, missing);
+                built = BuildUnicodePdfBytes(markdown, *font, options, pdfBytes, &better, missing, stats);
+                if (built && better) built = BuildUnicodePdfBytes(markdown, *better, options, pdfBytes, nullptr, missing, stats);
                 missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
             } else {
                 // No TrueType font on this system: the standard fonts show what they can, and
                 // the caller learns how many characters they could not.
                 const size_t missing = RayoMd::Text::TranscodeToWinAnsiLossy(markdown, winAnsi);
                 missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
-                built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes);
+                built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats);
             }
         }
     }
@@ -7834,7 +7851,7 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
     }
     RayoMd::Profiling::EmitDelta("build", profileBefore, RayoMd::Profiling::Capture());
     if (!built) return BuildResult{ static_cast<BuildError>(g_lastError) };
-    BuildResult result;
+    BuildResult result = stats;
     result.missingCharacters = missingCharacters;
     return result;
 }

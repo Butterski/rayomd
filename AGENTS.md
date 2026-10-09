@@ -130,6 +130,12 @@ Important image/link details:
 - `src/core/export_options.cpp` and `src/common/text_utils.cpp`
   Shared typed style/margin conversion, CLI option parsing primitives, and non-public text helpers.
 
+- `src/common/batch_report.cpp`
+  What both command lines share for batch export: the JSON Lines report (one
+  line per document, written by the worker that finished it), the up-to-date
+  check behind `--skip-unchanged` (PDF newer than its Markdown and ending in
+  `%%EOF`) and the recursive collection behind `--recursive`.
+
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single
   export, stdin Markdown export, folder batch, stdin batch, warm serve mode,
@@ -137,7 +143,8 @@ Important image/link details:
 
 - `src/win32/main_win32.cpp`
   Windows Dear ImGui + DirectX 11 app, Windows CLI glue, drag/drop, Pandoc mode,
-  and native export integration.
+  and native export integration. Its batch modes mirror `main_cli.cpp`; change
+  both. A MinGW cross-build runs under Wine for local checks of the CLI glue.
 
 - `src/win32/rayomd.rc`
   Windows manifest and app icon resources. Keep resource changes localized here.

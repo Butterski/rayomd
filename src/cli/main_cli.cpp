@@ -1,5 +1,6 @@
 #include "rayomd/tiny_pdf.h"
 #include "../common/text_utils.h"
+#include "../common/batch_report.h"
 #include "../common/profiling.h"
 #include "../core/export_options.h"
 #include "../core/rayomd_pdf_source.h"
@@ -280,6 +281,11 @@ struct CliExportOptions {
     bool embedSource = false;
     bool pageNumbers = false;
     unsigned workers = 0;
+    // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
+    // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
+    bool recursive = false;
+    bool skipUnchanged = false;
+    std::string report;
 };
 
 bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& options,
@@ -296,6 +302,15 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
             if (!TinyPdf::Internal::ParsePageSize(std::string_view(value).substr(12), options.pageSize)) {
                 error = "--page-size must be a4, a3, a5, letter or legal (each also with -landscape), or "
                     "WIDTHxHEIGHT in mm, cm, in or pt, such as 210x297mm";
+                return false;
+            }
+        }
+        else if (value == "--recursive") options.recursive = true;
+        else if (value == "--skip-unchanged") options.skipUnchanged = true;
+        else if (value.rfind("--report=", 0) == 0) {
+            options.report = argv[i] + 9;
+            if (options.report.empty()) {
+                error = "--report needs a file name, or - for standard output";
                 return false;
             }
         }
@@ -346,9 +361,11 @@ fs::path PdfNameForMarkdown(const fs::path& path) {
     return out;
 }
 
+// `details`, when given, receives the result of a build that succeeded: pages, characters
+// without a glyph, failed images.
 int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourcePath,
     const fs::path& outputPath, const CliExportOptions& options, std::string& pdfBuffer,
-    const std::string& inputLabel, std::string* deferredError = nullptr) {
+    const std::string& inputLabel, std::string* deferredError = nullptr, TinyPdf::BuildResult* details = nullptr) {
     pdfBuffer.clear();
     TinyPdf::PdfOptions pdfOptions;
     pdfOptions.style = options.style;
@@ -370,6 +387,7 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
         return code;
     }
     if (buildResult.missingCharacters != 0) WarnMissingCharacters(inputLabel, buildResult.missingCharacters);
+    if (details) *details = buildResult;
     if (!WriteBinaryFilePortable(outputPath, pdfBuffer)) {
         ReportExportError(deferredError, "Error: could not write PDF file: " + PathToUtf8(outputPath));
         return 12;
@@ -377,8 +395,8 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     return 0;
 }
 
-int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath,
-    const CliExportOptions& options, std::string& pdfBuffer, std::string* deferredError = nullptr) {
+int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath, const CliExportOptions& options,
+    std::string& pdfBuffer, std::string* deferredError = nullptr, TinyPdf::BuildResult* details = nullptr) {
     const auto profileBefore = RayoMd::Profiling::Capture();
     std::string markdown;
     if (!ReadUtf8FilePortable(inputPath, markdown)) {
@@ -387,7 +405,7 @@ int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath,
         return 3;
     }
     int result = BuildNativePdfMarkdown(markdown, PathToUtf8(inputPath), outputPath, options,
-        pdfBuffer, PathToUtf8(inputPath), deferredError);
+        pdfBuffer, PathToUtf8(inputPath), deferredError, details);
     RayoMd::Profiling::EmitDelta("export", profileBefore, RayoMd::Profiling::Capture());
     return result;
 }
@@ -411,11 +429,46 @@ int RunStdinExport(const fs::path& outputPath, const CliExportOptions& options) 
 }
 
 struct BatchJob {
+    BatchJob(fs::path input, fs::path output) : inputPath(std::move(input)), outputPath(std::move(output)) {}
+
     fs::path inputPath;
     fs::path outputPath;
     int result = 0;
     std::string error;
+    bool skipped = false;
+    TinyPdf::BuildResult details;
+    uint64_t bytes = 0;
+    double milliseconds = 0.0;
 };
+
+RayoMd::Batch::Record RecordFor(const BatchJob& job) {
+    RayoMd::Batch::Record record;
+    record.input = PathToUtf8(job.inputPath);
+    record.output = PathToUtf8(job.outputPath);
+    record.milliseconds = job.milliseconds;
+    if (job.result != 0) {
+        record.status = "error";
+        record.code = job.result;
+        record.error = job.error.rfind("Error: ", 0) == 0 ? job.error.substr(7) : job.error;
+        return record;
+    }
+    record.bytes = job.bytes;
+    if (job.skipped) {
+        record.status = "skipped";
+        return record;
+    }
+    record.pages = job.details.pages;
+    record.missingCharacters = job.details.missingCharacters;
+    record.failedImages = job.details.failedImages;
+    return record;
+}
+
+// Opens --report, or says why it cannot; true without a report.
+bool OpenReport(RayoMd::Batch::Report& report, const CliExportOptions& options) {
+    if (options.report.empty() || report.Open(options.report)) return true;
+    std::cerr << "Error: could not create the report file: " << options.report << std::endl;
+    return false;
+}
 
 unsigned ResolveWorkerCount(const CliExportOptions& options, const std::vector<BatchJob>& jobs) {
     if (jobs.empty()) return 1;
@@ -438,6 +491,8 @@ unsigned ResolveWorkerCount(const CliExportOptions& options, const std::vector<B
 }
 
 int ExecuteBatchJobs(std::vector<BatchJob>& jobs, const CliExportOptions& options, const char* label) {
+    RayoMd::Batch::Report report;
+    if (!OpenReport(report, options)) return 12;
     const unsigned workerCount = ResolveWorkerCount(options, jobs);
     std::atomic<size_t> next{0};
     std::vector<std::thread> workers;
@@ -450,12 +505,24 @@ int ExecuteBatchJobs(std::vector<BatchJob>& jobs, const CliExportOptions& option
                 size_t index = next.fetch_add(1, std::memory_order_relaxed);
                 if (index >= jobs.size()) break;
                 BatchJob& job = jobs[index];
-                if (job.result != 0) continue;
-                job.result = BuildNativePdfFile(job.inputPath, job.outputPath, options, pdfBuffer, &job.error);
+                if (job.result == 0 && options.skipUnchanged &&
+                    RayoMd::Batch::OutputUpToDate(job.inputPath, job.outputPath)) {
+                    std::error_code sizeError;
+                    job.skipped = true;
+                    job.bytes = fs::file_size(job.outputPath, sizeError);
+                } else if (job.result == 0) {
+                    const auto start = std::chrono::steady_clock::now();
+                    job.result = BuildNativePdfFile(job.inputPath, job.outputPath, options, pdfBuffer, &job.error,
+                        &job.details);
+                    job.milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+                    if (job.result == 0) job.bytes = pdfBuffer.size();
+                }
+                if (report.IsOpen()) report.Write(RecordFor(job));
             }
         });
     }
     for (std::thread& worker : workers) worker.join();
+    const bool reported = report.Close();
 
     int failures = 0;
     int lastResult = 0;
@@ -465,11 +532,12 @@ int ExecuteBatchJobs(std::vector<BatchJob>& jobs, const CliExportOptions& option
         lastResult = job.result;
         if (!job.error.empty()) std::cerr << job.error << std::endl;
     }
+    if (!reported) std::cerr << "Error: could not write the report file: " << options.report << std::endl;
     if (failures != 0) {
         std::cerr << "Error: " << label << " failed for " << failures << " file(s)." << std::endl;
         return lastResult;
     }
-    return 0;
+    return reported ? 0 : 12;
 }
 
 int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const CliExportOptions& options) {
@@ -492,21 +560,23 @@ int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const Cl
         return 12;
     }
 
-    std::vector<BatchJob> jobs;
-    std::error_code iterError;
-    for (fs::directory_iterator it(inputDir, iterError), end; !iterError && it != end; it.increment(iterError)) {
-        std::error_code entryError;
-        if (!it->is_regular_file(entryError) || entryError || it->path().extension() != ".md") continue;
-        jobs.push_back({it->path(), outputDir / PdfNameForMarkdown(it->path())});
-    }
-    if (iterError) {
-        std::cerr << "Error: could not read input folder: " << PathToUtf8(inputDir)
-            << " (" << iterError.message() << ")" << std::endl;
+    std::vector<RayoMd::Batch::File> files;
+    if (!RayoMd::Batch::CollectMarkdown(inputDir, outputDir, options.recursive, files, fsError)) {
+        std::cerr << "Error: could not read input folder: " << PathToUtf8(inputDir) << " (" << fsError << ")" << std::endl;
         return 3;
     }
-    std::sort(jobs.begin(), jobs.end(), [](const BatchJob& left, const BatchJob& right) {
-        return left.inputPath.u8string() < right.inputPath.u8string();
-    });
+    std::vector<BatchJob> jobs;
+    jobs.reserve(files.size());
+    for (RayoMd::Batch::File& file : files) {
+        BatchJob job{ std::move(file.input), std::move(file.output) };
+        // A subfolder's PDFs go to a subfolder of the output folder, made before the workers start.
+        const fs::path folder = job.outputPath.parent_path();
+        if (options.recursive && folder != outputDir && !EnsureDirectoryPortable(folder, fsError)) {
+            job.result = 12;
+            job.error = "Error: could not create output folder: " + PathToUtf8(folder);
+        }
+        jobs.push_back(std::move(job));
+    }
     return ExecuteBatchJobs(jobs, options, "batch export");
 }
 
@@ -554,6 +624,8 @@ int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
         return 12;
     }
 
+    RayoMd::Batch::Report report;
+    if (!OpenReport(report, options)) return 12;
     std::string pdfBuffer;
     pdfBuffer.reserve(1024 * 1024);
     int failures = 0;
@@ -564,17 +636,25 @@ int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
         if (line.empty()) continue;
         if (line == "quit" || line == "exit") break;
 
-        fs::path inputPath(line);
-        fs::path outputPath = outputDir / PdfNameForMarkdown(inputPath);
+        BatchJob job{ fs::path(line), outputDir / PdfNameForMarkdown(fs::path(line)) };
         auto start = std::chrono::steady_clock::now();
-        int result = BuildNativePdfFile(inputPath, outputPath, options, pdfBuffer);
+        job.result = BuildNativePdfFile(job.inputPath, job.outputPath, options, pdfBuffer, &job.error, &job.details);
         auto end = std::chrono::steady_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(end - start).count();
-        if (result != 0) {
+        job.milliseconds = std::chrono::duration<double, std::milli>(end - start).count();
+        if (job.result != 0) {
             failures++;
-            lastResult = result;
+            lastResult = job.result;
+            std::cerr << job.error << std::endl;
+        } else {
+            job.bytes = pdfBuffer.size();
         }
-        std::cout << (result == 0 ? "OK\t" : "ERR\t") << RayoMd::Text::FormatDouble(ms) << "\t" << outputPath.string() << "\n";
+        if (report.IsOpen()) report.Write(RecordFor(job));
+        std::cout << (job.result == 0 ? "OK\t" : "ERR\t") << RayoMd::Text::FormatDouble(job.milliseconds) << "\t"
+            << job.outputPath.string() << "\n";
+    }
+    if (!report.Close()) {
+        std::cerr << "Error: could not write the report file: " << options.report << std::endl;
+        if (failures == 0) return 12;
     }
     return failures == 0 ? 0 : lastResult;
 }
@@ -733,7 +813,9 @@ void PrintUsage() {
         << "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source.\n"
         << "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         << "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4).\n"
-        << "Batch flag: --workers=N (1-64; automatic mode uses at most 6).\n";
+        << "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
+        << "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
+        << "  line per document; - for standard output).\n";
 }
 
 int PrintArgumentError(const std::string& message) {

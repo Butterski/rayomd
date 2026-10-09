@@ -678,6 +678,26 @@ Measured on 2026-10-09 with `tools/benchmark.py ab` (nine rounds, against
 run the same instructions (within 0.02 % each); time moved +0.19 % with pinned
 alignment (A/A -0.60 %), which is noise for a load in place of a constant.
 
+## Batch reports, October 2026
+
+Batch modes gained `--report=FILE` (one JSON line per document: status, exit code,
+pages, bytes, milliseconds, characters without a glyph, failed images; `-` for
+standard output), `--recursive` (subfolders mirrored under the output folder,
+hidden ones skipped) and `--skip-unchanged` (a PDF newer than its Markdown and
+ending in `%%EOF` is kept, so a stopped batch can go on and a cut-short PDF is
+redone). Workers write their own lines, buffered and flushed at least once a
+second, so a large batch can be followed live. `BuildResult` now reports `pages`
+and `failedImages`. The pieces both command lines share live in
+`src/common/batch_report.cpp`; the Windows copy was checked in a MinGW cross-build
+run under Wine.
+
+Measured on 2026-10-09: all 2,883 corpus PDFs are byte-identical, the watch
+fixtures run the same instructions, and time moved +0.51 % with pinned alignment
+(A/A -0.10 %), code placement after 8 KB more command-line code. 20,000 report
+documents of 4.3 KB (tmpfs, 6 workers) convert in 0.66 s, 0.67 s with
+`--report` (0.5 µs a line); a rerun that skips them all takes 0.29 s, 14 µs per
+document including listing 20,000 files.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

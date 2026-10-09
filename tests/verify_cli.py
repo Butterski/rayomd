@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
@@ -53,6 +54,51 @@ def require_pdf(path: Path, *needles: bytes) -> bytes:
     return data
 
 
+def report_records(text: str) -> dict[str, dict]:
+    """The JSON lines of a batch report by input file name (either path separator)."""
+    records = {}
+    for line in text.splitlines():
+        if line.startswith("{"):
+            record = json.loads(line)
+            records[record["input"].replace("\\", "/").rsplit("/", 1)[-1]] = record
+    return records
+
+
+def verify_batch(binary: Path, root: Path) -> None:
+    batch_in = root / "batch in"
+    (batch_in / "sub" / "deeper").mkdir(parents=True)
+    (batch_in / ".hidden").mkdir()
+    (batch_in / "a.md").write_text("# A\n\n![x](missing.png)\n", encoding="utf-8")
+    (batch_in / "sub" / "b.md").write_text("# B\n", encoding="utf-8")
+    (batch_in / "sub" / "deeper" / "c.md").write_text("# C\n", encoding="utf-8")
+    (batch_in / ".hidden" / "h.md").write_text("# H\n", encoding="utf-8")
+    batch_out = root / "batch out"
+    report_path = root / "report.jsonl"
+    run(binary, "--batch", str(batch_in), str(batch_out), "native", "modern", "normal", "--recursive",
+        f"--report={report_path}")
+    made = {path.relative_to(batch_out).as_posix() for path in batch_out.rglob("*.pdf")}
+    if made != {"a.pdf", "sub/b.pdf", "sub/deeper/c.pdf"}:
+        raise AssertionError(f"--recursive wrote {sorted(made)}")
+    records = report_records(report_path.read_text(encoding="utf-8"))
+    if sorted(records) != ["a.md", "b.md", "c.md"] or any(
+        record["status"] != "ok" or record["pages"] != 1 or record["bytes"] <= 0 for record in records.values()
+    ) or records["a.md"]["failed_images"] != 1:
+        raise AssertionError(f"unexpected batch report: {records}")
+    # Nothing changed, so the next run skips every document, except a PDF that was cut short.
+    cut = batch_out / "sub" / "b.pdf"
+    cut.write_bytes(cut.read_bytes()[:100])
+    rerun = run(binary, "--batch", str(batch_in), str(batch_out), "--recursive", "--skip-unchanged", "--report=-")
+    statuses = {name: record["status"] for name, record in report_records(rerun.stdout.decode("utf-8")).items()}
+    if statuses != {"a.md": "skipped", "b.md": "ok", "c.md": "skipped"}:
+        raise AssertionError(f"--skip-unchanged gave {statuses}")
+    missing = batch_in / "missing.md"
+    listed = run(binary, "--stdin-batch", str(root / "stdin batch out"), "--report=-",
+                 stdin=f"{batch_in / 'a.md'}\n{missing}\n", expect=3)
+    records = report_records(listed.stdout.decode("utf-8"))
+    if records.get("a.md", {}).get("status") != "ok" or records.get("missing.md", {}).get("code") != 3:
+        raise AssertionError(f"unexpected stdin batch report: {records}")
+
+
 def verify(binary: Path, keep: Path | None) -> None:
     binary = binary.resolve()
     if not binary.is_file():
@@ -89,6 +135,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         bad_size = run(binary, "--export", str(ascii_md), str(bad_size_pdf), "--page-size=b5", expect=2)
         if b"--page-size must be" not in bad_size.stdout or bad_size_pdf.exists():
             raise AssertionError("an invalid --page-size was not rejected")
+        verify_batch(binary, root)
 
         if os.name == "nt":
             adjacent_quote_pdf = root / "adjacent-quote.pdf"

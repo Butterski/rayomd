@@ -57,6 +57,10 @@ struct BuildResult {
     BuildError error = BuildError::None;
     // Characters no available font could show, drawn as their base letter or as '?'.
     uint32_t missingCharacters = 0;
+    // Pages in the PDF.
+    uint32_t pages = 0;
+    // Standalone images that could not be loaded or decoded and show their fallback text.
+    uint32_t failedImages = 0;
 
     constexpr bool Ok() const { return error == BuildError::None; }
     constexpr explicit operator bool() const { return Ok(); }
