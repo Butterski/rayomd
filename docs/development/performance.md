@@ -1027,6 +1027,60 @@ documentation sites of 400 KB each: +0.03 % instructions, time +0.82 % against A
 -0.35 %, pinned -0.48 % against A/A -0.09 %: code placement. The binary grew by 16 KB:
 8.4 KB of code in `tiny_pdf.cpp` and 4.1 KB in `contents.cpp`.
 
+## Books, October 2026
+
+`--book` (`BuildBookPdf`) makes one PDF of several Markdown files: those a `SUMMARY.md`
+lists as mdBook and GitBook read it (a first heading as the title unless it names the
+list, mdBook's `book.toml` title before it; later headings of level 1 or 2 as parts, which
+hold the list items after them; links of paragraphs as prefix and suffix chapters, in no
+part; drafts skipped), a folder's Markdown files by name with `README.md` or `index.md`
+first, or the files given, in their order. A file that is missing or listed twice fails
+with exit 3.
+
+- Each file is a document of its own, as Pandoc's `--file-scope` makes it: parsed alone,
+  so its link definitions, footnotes (numbered from 1, after its text) and heading anchors
+  are its own, and its relative images resolve from its directory but must lie in the
+  book's. A file of `SUMMARY.md` that does not begin with a level-1 heading gets one of its
+  title there, as mdBook prints it.
+- Every file and part begins on a new page; a part's title, and the book's (not under a
+  theme's cover), stand alone on a page. The bookmarks nest the files' headings under
+  their parts and under the files the list nests them in, six levels at most
+  (`AddOutline`). With `--toc` one table of contents lists the whole book after the title
+  page; without, the first `[TOC]` of any file holds it.
+- `#fragment` goes into the file whose page the link is on; `b.md` and `b.md#fragment` go
+  into another file of the book (relative to the linking file, a folder to its `README.md`
+  or `index.md`, a fragment the file lacks to its top); other links stay URIs. No structure
+  the renderers fill learned which file it belongs to: every file begins on a new page, so
+  the page of a link, a heading mark or a note mark tells its file, and `BookTargets` keeps
+  a `HeadingTargets` per file over its marks and notes.
+- The fonts are chosen once for the whole book as `BuildPdf` chooses them for a document
+  (`ChooseFonts`, `BuildDocument`): the standard fonts when all of its text is ASCII or
+  WinAnsi, else one TrueType font. A book of the eight documentation sites below (3.2 MB,
+  1,762 pages) takes 0.9 % more instructions and 1.9 % more time (141 ms, eight files read)
+  than their text as one document.
+
+Single documents keep their bytes and their work: `book` is null through the builders,
+and the book's state is a pointer they leave empty. As a local of the builders it grew
+their stack frames by 224 bytes and moved everything they call by half a cache line. The
+first version added 54 KB of code, the final one 44 KB (the file 40 KB): 25 KB in
+`book.cpp` (reading SUMMARY.md, folders and files, and parsing a book's files, at `-Os` and
+outside `tiny_pdf.cpp`'s inlining budget), 17 KB in `tiny_pdf.cpp` (the links of a book,
+title pages, building one) and 4 KB in the command line. Constant arguments from the
+title page made GCC clone `ForEachWrappedAsciiLine` and `WrapAsciiWords` (2.5 KB), so it
+wraps through the vector-returning `WrapAsciiText` as other cold callers do; the parse
+moved out of `tiny_pdf.cpp` took its vector and `Block` code (8 KB at `-O3`) with it.
+
+Measured on 2026-10-09 against the previous commit: all 2,883 corpus PDFs are
+byte-identical, also with `--page-numbers --compress`, `--toc` and `--pdfa`. The watch
+fixtures run 0.02 % more instructions (`baseline.md` 0.14 %: `AppendUriLiteral` called,
+no longer inlined, from the link annotations, now a template over the targets); time
++0.65 % against A/A -0.46 %, pinned -0.18 % against A/A -0.26 %. Eight documentation
+sites: -0.02 % instructions, time +0.25 % against A/A -0.52 %, pinned +0.58 % against A/A
+0.00 % (+0.62 % and +0.66 % in two runs before the frame fix, whose unpinned time was
+-1.0 %). No function runs more instructions; the new code moves the hot functions into
+other instruction-cache sets, which pinned alignment does not undo (see Measured
+opportunities).
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1155,6 +1209,16 @@ character (`WriteHexText`): 16.9 % of the instructions of a `unicode_96kb.md` bu
 bytes a CID would halve those bytes of every content stream; a byte that is `(`, `)`, `\`
 or CR needs a backslash before it (a reader takes a CR in a literal string for LF). It
 changes every Unicode PDF; weigh the escape test per byte against the shorter output.
+
+**Hot functions grouped in `.text.hot`.** Pinned alignment (`-falign-functions=64
+-falign-loops=32`) takes alignment out of a comparison, not which instruction-cache sets
+the hot functions fall into: code added anywhere before them moves them. 16 KB of book
+code that runs for no single document measured +0.58 % to +0.66 % pinned on the eight
+documentation sites, with the same instructions in every function (2026-10-09), and an
+unpinned -1.0 % to +0.25 % from build to build. Marking the renderers' hot functions
+`__attribute__((hot))` would put them together in `.text.hot`, where edits to cold code
+no longer move them; measure whether grouping them changes their speed, and whether the
+measurements of later changes become steadier.
 
 ## Keeping the release light
 

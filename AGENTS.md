@@ -72,6 +72,13 @@ lay out its entries in the flow and link them to the headings; the builder adds 
 numbers and the dot leaders afterwards as a content stream of each table page's own,
 beside a theme's header and footer, so one layout pass suffices. A TOC entry finds its
 heading by the address of the heading's text, which `HeadingMark::text` keeps.
+Books (`--book`, `BuildBookPdf`) make one PDF of the files a SUMMARY.md lists (mdBook,
+GitBook), of a folder, or of the files given. Each file is parsed on its own (its link
+definitions, footnotes and heading anchors are its own) and begins on a new page, so the
+page of a link, a heading mark or a note mark tells its file: `BookTargets` resolves
+`#fragment` within the file and `b.md#fragment` across files with no file field on the
+renderers' structures. Single documents pass `book == nullptr` through the builders and
+must keep their bytes; book-only work stays in `RAYOMD_COLD` code and `book.cpp`.
 Opt-in compression (`--compress`, `PdfOptions::compress`) writes page content, the
 font program and both CMaps as FlateDecode where that makes the file smaller, with
 RayoMD's own DEFLATE encoder; never the XMP metadata or an embedded source, which
@@ -162,8 +169,14 @@ Important image/link details:
 
 - `src/core/contents.h` and `src/core/contents.cpp`
   The table of contents: turning the marker paragraph into a `BlockType::Contents` block
-  (or inserting one for `--toc`) and listing the headings it shows. Built at `-Os`; the
-  marker scan runs for every document, so it looks at a block's text length first.
+  (or inserting one for `--toc`) and listing the headings it shows, also a book's. Built
+  at `-Os`; the marker scan runs for every document, so it looks at a block's text length
+  first.
+
+- `src/core/book.h` and `src/core/book.cpp`
+  Books: reading `--book`'s inputs for both command lines (SUMMARY.md as mdBook and
+  GitBook read it, a folder, files) and parsing a book's files for `BuildBookPdf`. Built at
+  `-Os`, outside `tiny_pdf.cpp` and its inlining budget.
 
 - `src/core/rayomd_pdf_source.h` and `src/core/rayomd_pdf_source.cpp`
   Bounded reversible-profile metadata, SHA-256 integrity, hostile-input
@@ -223,7 +236,7 @@ Important image/link details:
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single
   export, stdin Markdown export, folder batch, stdin batch, warm serve mode,
-  and benchmarks.
+  books, and benchmarks.
 
 - `src/win32/main_win32.cpp`
   Windows Dear ImGui + DirectX 11 app, Windows CLI glue, drag/drop, Pandoc mode,

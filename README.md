@@ -47,6 +47,7 @@ native exporter through a small CLI.
 - Natively typeset math for a TeX subset: no LaTeX, no browser, no embedded math fonts.
 - Optional exact Markdown recovery through reversible PDFs.
 - Tables of contents (`[TOC]` or `--toc`) with dot leaders, page numbers and links to the headings.
+- Books (`--book`): one PDF of the files a `SUMMARY.md` (mdBook, GitBook) or a folder lists, each from a new page, with the links between them, one outline and one table of contents.
 - Optional compression (`--compress`) with a built-in DEFLATE encoder: text-heavy PDFs come out two to five times smaller.
 - Company themes (`--theme=FILE`): your TrueType font, colours, header and footer text with a logo, and a cover page.
 - PDF/A-3b archives (`--pdfa`): every font embedded, sRGB output intent and XMP metadata; formulas show their TeX source.
@@ -126,6 +127,7 @@ rayomd --export input.md numbered.pdf --page-numbers --page-size=letter
 rayomd --export input.md small.pdf --compress
 rayomd --export input.md branded.pdf --theme=acme.theme
 rayomd --export input.md archive.pdf --pdfa
+rayomd --book docs/SUMMARY.md manual.pdf --toc
 rayomd --recover-source reversible.pdf recovered.md
 ```
 
@@ -171,8 +173,8 @@ text, lists, quotes, headings and table cells), Unicode fonts (or the PDF standa
 fonts when no system font is found), HTML comments (hidden), `<br>` line breaks,
 character references such as `&copy;`, PDF metadata from the front matter (title,
 else the first heading; author, subject, keywords and language), opt-in page numbers,
-a table of contents at a `[TOC]` or `[[_TOC_]]` paragraph or with `--toc`, and common
-status-symbol normalization.
+a table of contents at a `[TOC]` or `[[_TOC_]]` paragraph or with `--toc`, books of
+several files (`--book`), and common status-symbol normalization.
 Images embedded in paragraph text use a consistent `image: alt` fallback;
 standalone images retain native image layout and missing-image fallback text.
 

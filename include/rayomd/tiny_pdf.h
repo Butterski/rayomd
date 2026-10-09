@@ -143,6 +143,33 @@ struct BuildOptions {
 
 BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes);
 
+// A file of a book, or the title of a part of it on a page of its own (BuildBookPdf).
+struct BookChapter {
+    std::string markdown;   // the file's text; none for a part
+    std::string path;       // the file (UTF-8), which its relative images and links to it resolve from
+    // A part's title; a file's title in the book's list, put before it as a level-1 heading when
+    // it does not begin with one, or none.
+    std::string title;
+    // The levels its bookmarks move down in the book: 0 at its top, 1 in a part or under the file
+    // the list nests it in, and so on.
+    int depth = 0;
+    bool part = false;
+};
+
+struct Book {
+    std::string title;      // on a page of its own first (not with a theme's cover), and the PDF's title
+    std::string directory;  // local images must lie in it; with none, a book shows no local image
+    std::vector<BookChapter> chapters;
+};
+
+// One PDF of a book's files, each from a new page. Each file is a document of its own, with
+// its link definitions, footnotes and heading anchors; a link to another file of the book,
+// "b.md" or "b.md#heading", goes to it. The bookmarks nest the files' headings under their
+// parts, and a table of contents (options.toc, or the first "[TOC]" paragraph of any file)
+// lists them all. options.sourcePath and options.embedSource do not apply: a book is not
+// reversible.
+BuildResult BuildBookPdf(const Book& book, const PdfOptions& options, std::string& pdfBytes);
+
 // Compatibility entry points for the pre-typed C++ API. They intentionally
 // keep their established success/error behavior while all in-tree callers use
 // BuildPdf().

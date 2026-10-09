@@ -11,6 +11,7 @@
 #include "../src/core/pdfa.h"
 #include "../src/core/highlight.h"
 #include "../src/core/contents.h"
+#include "../src/core/book.h"
 
 #include <algorithm>
 #include <array>
@@ -2240,6 +2241,82 @@ bool CheckContents() {
     return true;
 }
 
+// The object numbers of the "N 0 R" references in `list`.
+std::vector<int> References(const std::string& list) {
+    std::vector<int> numbers;
+    std::istringstream in(list);
+    int number = 0;
+    int generation = 0;
+    std::string r;
+    while (in >> number >> generation >> r) numbers.push_back(number);
+    return numbers;
+}
+
+// Each page's links in their order: the page a link goes to, from 0, or -1 for one to a URI.
+std::vector<std::vector<int>> LinkTargetsByPage(const std::string& pdf) {
+    const auto object = [&pdf](int number) {
+        const std::string head = "\n" + std::to_string(number) + " 0 obj\n";
+        const size_t start = pdf.find(head);
+        return start == std::string::npos ? std::string() : pdf.substr(start, pdf.find("\nendobj", start) - start);
+    };
+    const auto between = [](const std::string& text, std::string_view open) {
+        const size_t start = text.find(open);
+        return start == std::string::npos ? std::string() : text.substr(start + open.size(), text.find(']', start) - start - open.size());
+    };
+    const std::vector<int> pages = References(between(pdf, "/Type /Pages /Kids ["));
+    std::vector<std::vector<int>> targets;
+    for (const int page : pages) {
+        std::vector<int>& links = targets.emplace_back();
+        for (const int annotation : References(between(object(page), "/Annots ["))) {
+            const std::vector<int> destination = References(between(object(annotation), "/Dest ["));
+            const auto found = destination.empty() ? pages.end() : std::find(pages.begin(), pages.end(), destination[0]);
+            links.push_back(found == pages.end() ? -1 : (int)(found - pages.begin()));
+        }
+    }
+    return targets;
+}
+
+// A book (BuildBookPdf): its title and each part on a page of their own, each file from a new
+// page, a file without a level-1 heading of its own after its title in the book's list. Notes and
+// anchors are a file's own; a link to another file of the book goes there, one to a file outside
+// it stays a URI. SUMMARY.md nests a part's files a level down, and its prefix and suffix
+// chapters not.
+bool CheckBook() {
+    const RayoMd::Book::Summary summary = RayoMd::Book::ParseSummary(
+        "# Summary\n\n[Intro](README.md)\n\n# Part A\n\n- [One](one.md)\n  - [Two *x*](sub/two%20x.md#frag)\n"
+        "- [Draft]()\n- [Web](https://example.com)\n\n---\n\n[End](end.md)\n");
+    const auto entry = [&summary](size_t index, const char* title, const char* path, int depth, bool part) {
+        return index < summary.entries.size() && summary.entries[index].title == title && summary.entries[index].path == path &&
+            summary.entries[index].depth == depth && summary.entries[index].part == part;
+    };
+    if (!summary.title.empty() || summary.entries.size() != 5 || !entry(0, "Intro", "README.md", 0, false) ||
+        !entry(1, "Part A", "", 0, true) || !entry(2, "One", "one.md", 1, false) || !entry(3, "Two x", "sub/two x.md", 2, false) ||
+        !entry(4, "End", "end.md", 0, false)) {
+        std::cerr << "SUMMARY.md mismatch" << std::endl;
+        return false;
+    }
+    TinyPdf::Book book;
+    book.title = "Guide";
+    book.chapters.push_back({ "", "", "Part one", 0, true });
+    book.chapters.push_back({ "## Setup\n\nNote[^1]. To [b](b.md#setup), [b top](b.md), [out](c.md), [web](https://example.com).\n\n"
+        "[^1]: A note.\n", "book/a.md", "Alpha title", 1, false });
+    book.chapters.push_back({ "# Beta\n\n## Setup\n\nNote[^1]. Back to [a](a.md#setup) and [here](#setup).\n\n[^1]: B note.\n",
+        "book/b.md", "Beta title", 1, false });
+    TinyPdf::PdfOptions options;
+    options.style = TinyPdf::PdfStyle::Modern;
+    std::string pdf;
+    const TinyPdf::BuildResult result = TinyPdf::BuildBookPdf(book, options, pdf);
+    const std::vector<std::vector<int>> links = LinkTargetsByPage(pdf);
+    const std::vector<std::vector<int>> expected = { {}, {}, { 2, 3, 3, -1, -1, 2 }, { 3, 2, 3, 3 } };
+    if (!result.Ok() || result.pages != 4 || links != expected || pdf.find("(Alpha title) Tj") == std::string::npos ||
+        pdf.find("(Beta title)") != std::string::npos || pdf.find("/Title (Part one) /Parent") == std::string::npos ||
+        CountOccurrences(pdf, "/Count 4 /Dest") != 1) {
+        std::cerr << "book mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -2640,6 +2717,7 @@ int main() {
     if (!CheckCodeTiles()) return 93;
     if (!CheckHighlighting()) return 94;
     if (!CheckContents()) return 95;
+    if (!CheckBook()) return 96;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

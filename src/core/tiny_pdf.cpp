@@ -5,6 +5,7 @@
 #include "inline_markdown.h"
 #include "../common/profiling.h"
 #include "../common/text_utils.h"
+#include "book.h"
 #include "contents.h"
 #include "markdown_parser.h"
 #include "highlight.h"
@@ -43,6 +44,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #ifdef RAYOMD_USE_CURL
@@ -1740,12 +1742,21 @@ public:
         if (safeBase.empty()) safeBase = ".";
     }
 
+    // A book's file (BuildBookPdf): its relative images resolve from its own directory, and must
+    // still lie in the book's.
+    void SetChapter(const std::string& pathUtf8) {
+        chapterBase = PathFromUtf8(pathUtf8).parent_path();
+        if (chapterBase.empty()) chapterBase = ".";
+        chapterRootReady = false;
+    }
+
 #ifdef _WIN32
     DirectLocalImageResult TryOpenDirect(
         const std::string& src, std::string& key, WinLocalImageFile& file) {
         if (src.empty() || IsHttpUrl(src)) return DirectLocalImageResult::Rejected;
         if (allowUnsafe) return DirectLocalImageResult::NotApplicable;
         if (!hasSourcePath || IsUnsafeLocalImageSource(src)) return DirectLocalImageResult::Rejected;
+        if (!chapterBase.empty()) return DirectLocalImageResult::NotApplicable;
 
         const std::filesystem::path& root = SafeRoot();
         if (!safeRootValid) return DirectLocalImageResult::Rejected;
@@ -1763,8 +1774,17 @@ public:
 
         const std::filesystem::path& root = SafeRoot();
         if (!safeRootValid) return false;
+        const std::filesystem::path* base = &root;
+        if (!chapterBase.empty()) {
+            if (!chapterRootReady) {
+                chapterRootValid = TryCanonicalForPolicy(chapterBase, chapterRoot);
+                chapterRootReady = true;
+            }
+            if (!chapterRootValid) return false;
+            base = &chapterRoot;
+        }
         std::filesystem::path normalized;
-        if (!TryCanonicalForPolicy(root / PathFromUtf8(src), normalized) ||
+        if (!TryCanonicalForPolicy(*base / PathFromUtf8(src), normalized) ||
             !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
 
         pathUtf8 = PathToUtf8(normalized);
@@ -1784,7 +1804,7 @@ private:
 
     bool ResolveUnsafe(const std::string& src, std::string& key, std::string& pathUtf8) const {
         std::filesystem::path path = PathFromUtf8(src);
-        if (path.is_relative() && hasSourcePath) path = sourceBase / path;
+        if (path.is_relative() && hasSourcePath) path = (chapterBase.empty() ? sourceBase : chapterBase) / path;
 
         std::filesystem::path normalized;
         if (!TryCanonicalForPolicy(path, normalized)) return false;
@@ -1798,9 +1818,13 @@ private:
     bool safeRootReady = false;
     bool safeRootValid = false;
     bool safeRootDirect = false;
+    bool chapterRootReady = false;
+    bool chapterRootValid = false;
     std::filesystem::path sourceBase;
     std::filesystem::path safeBase;
     std::filesystem::path safeRoot;
+    std::filesystem::path chapterBase;   // a book's file's directory, or empty
+    std::filesystem::path chapterRoot;   // and canonical
     std::wstring safeRootNt;
 };
 
@@ -2752,6 +2776,9 @@ class ImageRegistry {
 public:
     explicit ImageRegistry(const PdfOptions& opts) : options(opts), localPolicy(opts) {}
 
+    // The book's file whose images follow (BuildBookPdf).
+    void SetChapter(const std::string& pathUtf8) { localPolicy.SetChapter(pathUtf8); }
+
     // An image the document shows, by its source: false, and one more failed image, when the
     // policy rejects it or it cannot be loaded or decoded; RenderImage then shows its alt text.
     bool Resolve(const std::string& src, const std::string& alt, int& index) {
@@ -3638,6 +3665,10 @@ RAYOMD_COLD static void AppendFootnoteRule(std::string& c, const char* color, do
     c += " l S Q\n";
 }
 
+// Where a link goes (AddLinkAnnotationObjects): outside the document, as a URI, or to a place in
+// it, whose annotation is then reserved, or nowhere, when the place it names does not exist.
+enum class LinkTarget : uint8_t { External, Reserved, Dropped };
+
 // The headings that links to "#anchor" name. The anchors are made at the first such link, so a
 // document without one (links to footnotes and table entries do not count) does no work for them.
 class HeadingTargets {
@@ -3655,7 +3686,14 @@ public:
     // in a document with footnotes "^N" to note N and "^rN" to its first reference, and in one
     // with a table of contents "\x01N" to the heading of its entry N.
     RAYOMD_COLD bool Reserve(PdfObjects& pdf, const LinkRect& link, std::vector<InternalLink>& out) {
-        std::string fragment(std::string_view(link.url).substr(1));
+        return ReserveFragment(pdf, link, std::string_view(link.url).substr(1), 0, out);
+    }
+
+    // A link of a book's file (Target): links to the place `written` names, a fragment as in
+    // Reserve, an empty one and "top" to the top of page `topPage`.
+    RAYOMD_COLD bool ReserveFragment(PdfObjects& pdf, const LinkRect& link, std::string_view written, size_t topPage,
+        std::vector<InternalLink>& out) {
+        std::string fragment(written);
         if (winAnsi && !IsAllAscii(fragment)) fragment = RayoMd::Text::WinAnsiToUtf8(fragment);
         fragment = PercentDecoded(fragment);
         if (!notes.notes.empty() && !fragment.empty() && fragment[0] == '^') return ReserveNote(pdf, link, fragment, out);
@@ -3676,8 +3714,14 @@ public:
         }
         const bool top = fragment.empty() || (fragment.size() == 3 && (fragment[0] | 0x20) == 't' &&
             (fragment[1] | 0x20) == 'o' && (fragment[2] | 0x20) == 'p');
-        if (top) out.push_back({ pdf.Reserve(), &link, 0, pageTop });
+        if (top) out.push_back({ pdf.Reserve(), &link, topPage, pageTop });
         return top;
+    }
+
+    // Whether `link` goes outside the document or into it ("#fragment", Reserve).
+    LinkTarget Target(PdfObjects& pdf, const LinkRect& link, size_t, std::vector<InternalLink>& out) {
+        if (link.url[0] != '#') return LinkTarget::External;
+        return Reserve(pdf, link, out) ? LinkTarget::Reserved : LinkTarget::Dropped;
     }
 
 private:
@@ -3750,20 +3794,24 @@ static void AppendLinkAnnotationStart(std::string& annot, const LinkRect& link, 
     w.Lit("] /Border [0 0 0]");
 }
 
-// The link annotations of every page. Those of links to "#anchor" are left to `headings`, which
-// drops a link to an anchor the document does not have instead of leading nowhere.
+// The link annotations of every page. Those of links into the document are left to `targets`
+// (HeadingTargets, a book's BookTargets), which drops a link to a place the document does not
+// have instead of leading nowhere.
+template <typename Targets>
 static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
-    const std::vector<std::vector<LinkRect>>& linksByPage, bool winAnsiTargets, HeadingTargets& headings,
+    const std::vector<std::vector<LinkRect>>& linksByPage, bool winAnsiTargets, Targets& targets,
     std::vector<InternalLink>& internalLinks, bool print) {
     std::vector<std::vector<int>> idsByPage;
     idsByPage.reserve(linksByPage.size());
-    for (const auto& pageLinks : linksByPage) {
+    for (size_t page = 0; page < linksByPage.size(); page++) {
+        const std::vector<LinkRect>& pageLinks = linksByPage[page];
         std::vector<int> ids;
         ids.reserve(pageLinks.size());
         for (const LinkRect& link : pageLinks) {
             if (link.url.empty() || link.x2 <= link.x1 || link.y2 <= link.y1) continue;
-            if (link.url[0] == '#') {
-                if (headings.Reserve(pdf, link, internalLinks)) ids.push_back(internalLinks.back().id);
+            const LinkTarget target = targets.Target(pdf, link, page, internalLinks);
+            if (target != LinkTarget::External) {
+                if (target == LinkTarget::Reserved) ids.push_back(internalLinks.back().id);
                 continue;
             }
             std::string annot;
@@ -4264,6 +4312,154 @@ RAYOMD_COLD static void RenderWithFootnotes(RendererType& renderer, const std::v
     renderer.RenderFootnotes();
 }
 
+// A book for the builders (BuildBookPdf): its files' Markdown and the titles as the renderer
+// reads them, transcoded to WinAnsi when the standard fonts show the book.
+struct BookSource {
+    const Book* book = nullptr;
+    std::vector<std::string> texts;    // each file's, empty for a part
+    std::vector<std::string> titles;   // each file's or part's
+    std::string title;                 // the book's
+};
+
+// A book's files parsed (ParseBook), and where the renderer put them (RenderBook).
+struct BookParse {
+    Internal::BookFiles files;
+    bool contentsFirst = false;                   // --toc: the table of contents follows the title page
+    std::vector<size_t> firstPages;               // the page each file or part begins on
+    std::vector<NoteMarks> noteMarks;             // each file's notes and their first references
+};
+
+// A book: its title page and with --toc its table of contents, then each part's title page and
+// each file from a new page, the bookmarks of its headings as many levels down as its depth.
+template <typename RendererType>
+RAYOMD_COLD static void RenderBook(RendererType& renderer, ImageRegistry& images, const BookSource& source,
+    BookParse& parse, bool titlePage) {
+    const std::vector<BookChapter>& chapters = source.book->chapters;
+    if (titlePage) renderer.RenderTitlePage(source.title, false);
+    if (parse.contentsFirst) {
+        renderer.RenderPageBreak();
+        renderer.RenderContents();
+    }
+    std::vector<HeadingMark>& marks = renderer.headings;
+    for (size_t index = 0; index < chapters.size(); index++) {
+        const BookChapter& chapter = chapters[index];
+        renderer.RenderPageBreak();
+        parse.firstPages.push_back(renderer.pageStarts.size() - 1);
+        if (chapter.part) {
+            renderer.RenderTitlePage(source.titles[index], true);
+            continue;
+        }
+        const size_t before = marks.size();
+        images.SetChapter(chapter.path);
+        const Internal::Footnotes& footnotes = parse.files.footnotes[index];
+        if (footnotes.notes.empty()) {
+            renderer.Render(parse.files.blocks[index]);
+        } else {
+            RenderWithFootnotes(renderer, parse.files.blocks[index], footnotes);
+            renderer.SetFootnotes(nullptr);
+        }
+        const int depth = std::max(0, chapter.depth);
+        for (size_t at = before; at < marks.size(); at++) marks[at].level = std::min(6, marks[at].level + depth);
+        parse.noteMarks[index] = std::exchange(renderer.noteMarks, NoteMarks{});
+    }
+}
+
+// Where the links of a book go (BuildBookPdf): "#fragment" into the file whose page the link is
+// on, as in a document of its own (HeadingTargets); "b.md" and "b.md#fragment" to another file of
+// the book, relative to the linking file, a fragment the file does not have to its top; and those
+// of the table of contents to their headings.
+class BookTargets {
+public:
+    RAYOMD_COLD BookTargets(const std::vector<HeadingMark>& headings, const Book& book, const BookParse& bookParse,
+        bool winAnsiText, double pageHeight, const std::vector<size_t>* contentsHeadings)
+        : marks(headings), chapters(book.chapters), parse(bookParse), winAnsi(winAnsiText), pageTop(pageHeight),
+          contents(contentsHeadings), files(book.chapters.size()) {
+        size_t mark = 0;
+        for (size_t index = 0; index < files.size(); index++) {
+            File& file = files[index];
+            // The marks of the pages from the file's first to the next one's; none of those before.
+            const size_t end = index + 1 < files.size() ? parse.firstPages[index + 1] : std::string::npos;
+            while (mark < marks.size() && marks[mark].page < parse.firstPages[index]) mark++;
+            while (mark < marks.size() && marks[mark].page < end) file.marks.push_back(marks[mark++]);
+            file.targets = std::make_unique<HeadingTargets>(file.marks, winAnsi, pageTop, parse.noteMarks[index]);
+            if (!chapters[index].part) file.path = PathToUtf8(PathFromUtf8(chapters[index].path).lexically_normal());
+        }
+    }
+
+    // AddLinkAnnotationObjects: `link` is on page `page`.
+    RAYOMD_COLD LinkTarget Target(PdfObjects& pdf, const LinkRect& link, size_t page, std::vector<InternalLink>& out) {
+        const std::string_view url = link.url;
+        if (url.size() > 1 && url[0] == '#' && url[1] == '\x01') return ReserveContents(pdf, link, out);
+        const size_t file = FileOfPage(page);
+        if (url[0] == '#') {
+            if (file == kNone) return LinkTarget::Dropped;
+            return files[file].targets->ReserveFragment(pdf, link, url.substr(1), parse.firstPages[file], out)
+                ? LinkTarget::Reserved : LinkTarget::Dropped;
+        }
+        if (file == kNone) return LinkTarget::External;
+        const size_t hash = url.find('#');
+        const size_t target = FileOfLink(file, url.substr(0, hash));
+        if (target == kNone) return LinkTarget::External;
+        const std::string_view fragment = hash == std::string_view::npos ? std::string_view() : url.substr(hash + 1);
+        if (!files[target].targets->ReserveFragment(pdf, link, fragment, parse.firstPages[target], out)) {
+            out.push_back({ pdf.Reserve(), &link, parse.firstPages[target], pageTop });
+        }
+        return LinkTarget::Reserved;
+    }
+
+private:
+    static constexpr size_t kNone = std::string::npos;
+
+    // A file's path, normalized (none for a part), its headings, and the targets of its links
+    // (HeadingTargets keeps references to the headings).
+    struct File {
+        std::string path;
+        std::vector<HeadingMark> marks;
+        std::unique_ptr<HeadingTargets> targets;
+    };
+
+    // "#\x01N", entry N of the table of contents.
+    LinkTarget ReserveContents(PdfObjects& pdf, const LinkRect& link, std::vector<InternalLink>& out) const {
+        const size_t entry = (size_t)std::strtoull(link.url.c_str() + 2, nullptr, 10);
+        if (contents == nullptr || entry >= contents->size() || (*contents)[entry] >= marks.size()) return LinkTarget::Dropped;
+        const HeadingMark& heading = marks[(*contents)[entry]];
+        out.push_back({ pdf.Reserve(), &link, heading.page, heading.top + 4.0 });
+        return LinkTarget::Reserved;
+    }
+
+    // The file or part a page belongs to, kNone for the title page and a table of contents first.
+    size_t FileOfPage(size_t page) const {
+        const auto after = std::upper_bound(parse.firstPages.begin(), parse.firstPages.end(), page);
+        return after == parse.firstPages.begin() ? kNone : (size_t)(after - parse.firstPages.begin()) - 1;
+    }
+
+    // The file of the book a link of file `from` names, kNone for one outside it: a relative path,
+    // percent-encoded as a URL is, or a directory, whose README.md or index.md it names. A book
+    // has tens or hundreds of files, so they are looked through in turn.
+    RAYOMD_COLD size_t FileOfLink(size_t from, std::string_view written) const {
+        if (written.empty() || written[0] == '/' || written[0] == '\\' || HasUriScheme(written)) return kNone;
+        std::string path(written);
+        if (winAnsi && !IsAllAscii(path)) path = RayoMd::Text::WinAnsiToUtf8(path);
+        path = PercentDecoded(path);
+        const std::filesystem::path named = (PathFromUtf8(chapters[from].path).parent_path() / PathFromUtf8(path)).lexically_normal();
+        for (const char* index : { "", "README.md", "index.md" }) {
+            const std::string key = PathToUtf8(*index == '\0' ? named : (named / index).lexically_normal());
+            for (size_t file = 0; file < files.size(); file++) {
+                if (!files[file].path.empty() && files[file].path == key) return file;
+            }
+        }
+        return kNone;
+    }
+
+    const std::vector<HeadingMark>& marks;
+    const std::vector<BookChapter>& chapters;
+    const BookParse& parse;
+    bool winAnsi = false;
+    double pageTop = 0.0;
+    const std::vector<size_t>* contents = nullptr;   // the heading of each entry of the table of contents
+    std::vector<File> files;                         // each file's; sized once, as HeadingTargets refers to it
+};
+
 // The bar beside quoted text, by Block::alert: a plain quote's, then those of the GitHub alerts
 // in GitHub's colours, whose titles follow. Arrays, not pointers: no relocations.
 constexpr char kQuoteBars[][15] = { "0.45 0.62 0.72", "0.04 0.41 0.85", "0.10 0.50 0.22", "0.51 0.31 0.87",
@@ -4386,6 +4582,8 @@ private:
     friend void RenderMathTable(RendererType&, const Block&);
     template <typename RendererType>
     friend void RenderFootnoteSection(RendererType&, const Internal::Footnotes&);
+    template <typename RendererType>
+    friend void RenderBook(RendererType&, ImageRegistry&, const BookSource&, BookParse&, bool);
 
     const TtfFont& font;
     int fontId = 0;
@@ -5845,6 +6043,17 @@ private:
         w.Lit("ET Q\n");
     }
 
+    // A book's title, or a part's, alone on a page and centred a little above its middle, as a
+    // level-1 heading is drawn; with `mark` its bookmark (RenderBook).
+    RAYOMD_COLD void RenderTitlePage(const std::string& text, bool mark) {
+        RenderPageBreak();
+        const double size = kHeadingSizes[1];
+        const std::vector<std::wstring> lines = WrapText(font, Utf8ToWide(text), pageW - margin * 2.0, size);
+        y = std::min(pageH - margin, pageH * 0.6 + (double)lines.size() * size * 1.35 * 0.5);
+        if (mark) MarkHeading(1, text, 0.0);
+        for (const std::wstring& line : lines) DrawTextLine((pageW - TextWidth(font, line, size)) * 0.5, size, line, headingColor);
+    }
+
     // The table of contents (contents.h), once: a title, then each entry indented by its level and
     // linked to its heading, the top level in bold with room above it. The page numbers come later
     // (ContentsNumbers), so the entries' text ends 2.55 em before the right margin.
@@ -6791,6 +7000,8 @@ private:
     friend void RenderMathTable(RendererType&, const Block&);
     template <typename RendererType>
     friend void RenderFootnoteSection(RendererType&, const Internal::Footnotes&);
+    template <typename RendererType>
+    friend void RenderBook(RendererType&, ImageRegistry&, const BookSource&, BookParse&, bool);
 
     ImageRegistry* images = nullptr;
     PdfStyle style = PdfStyle::Elegant;
@@ -8235,6 +8446,17 @@ private:
         out.Lit("ET Q\n");
     }
 
+    // A book's title, or a part's, alone on a page and centred a little above its middle, as a
+    // level-1 heading is drawn; with `mark` its bookmark (RenderBook).
+    RAYOMD_COLD void RenderTitlePage(const std::string& text, bool mark) {
+        RenderPageBreak();
+        const double size = kHeadingSizes[1];
+        const std::vector<WrappedAsciiLine> lines = WrapAsciiText(text, pageW - margin * 2.0, size, StandardTextFont::Bold);
+        y = std::min(pageH - margin, pageH * 0.6 + (double)lines.size() * size * 1.35 * 0.5);
+        if (mark) MarkHeading(1, text, 0.0);
+        for (const WrappedAsciiLine& line : lines) DrawTextLine((pageW - line.width) * 0.5, size, line.text, "F2", headingColor);
+    }
+
     // The table of contents (contents.h), once: a title, then each entry indented by its level and
     // linked to its heading, the top level in bold with room above it. The page numbers come later
     // (ContentsNumbers), so the entries' text ends 2.55 em before the right margin.
@@ -8717,6 +8939,36 @@ RAYOMD_COLD static std::vector<std::string> ContentsOverlays(RendererType& rende
     return overlays;
 }
 
+// A book's files parsed (Internal::ParseBookFiles), and the entries of its table of contents.
+RAYOMD_COLD static std::vector<Internal::ContentsEntry> ParseBook(const BookSource& source, const PdfOptions& options,
+    BookParse& parse) {
+    Internal::ParseBookFiles(source.book->chapters, source.texts, source.titles, options.toc, options.tocDepth, parse.files);
+    parse.contentsFirst = options.toc;
+    parse.noteMarks.resize(source.book->chapters.size());
+    return std::move(parse.files.contents);
+}
+
+// A book's metadata: the front matter of its first file, with the book's title.
+RAYOMD_COLD static DocumentMetadata BookMetadata(const Book& book) {
+    DocumentMetadata metadata;
+    for (const BookChapter& chapter : book.chapters) {
+        if (chapter.part) continue;
+        metadata = FrontMatterMetadata(chapter.markdown);
+        break;
+    }
+    if (!book.title.empty()) metadata.title = book.title;
+    return metadata;
+}
+
+// The link annotations of a book's pages (AddLinkAnnotationObjects, BookTargets).
+RAYOMD_COLD static std::vector<std::vector<int>> AddBookLinkAnnotations(PdfObjects& pdf,
+    const std::vector<std::vector<LinkRect>>& links, bool winAnsi, const std::vector<HeadingMark>& headings,
+    const Book& book, const BookParse& parse, double pageTop, const std::vector<size_t>* contents,
+    std::vector<InternalLink>& internalLinks, bool print) {
+    BookTargets targets(headings, book, parse, winAnsi, pageTop, contents);
+    return AddLinkAnnotationObjects(pdf, links, winAnsi, targets, internalLinks, print);
+}
+
 // Page content is rendered straight into the output buffer. A buffer the caller reuses
 // keeps its capacity; a new one starts at the size a document of this length usually
 // needs, so it does not grow several times while the pages are rendered.
@@ -8728,18 +8980,25 @@ static void PrepareOutput(std::string& pdfBytes, size_t expectedBytes) {
 }
 
 // `text` is ASCII, or with `winAnsi` the document transcoded to WinAnsiEncoding; `source` is
-// the document as given, which a reversible PDF embeds.
+// the document as given, which a reversible PDF embeds. With `book`, the book's files instead,
+// and `text` all of their text.
 static bool BuildStandardPdfBytes(const std::string& text, const std::string& source, bool winAnsi,
-    const PdfOptions& options, std::string& pdfBytes, BuildResult& stats) {
+    const PdfOptions& options, std::string& pdfBytes, BuildResult& stats, const BookSource* book = nullptr) {
     // Character references come out as the WinAnsi codes the standard fonts show.
     const Internal::WinAnsiReferences references;
     std::vector<Block> blocks;
     Internal::Footnotes footnotes;
     std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
+    std::unique_ptr<BookParse> bookParse;   // a book's files: off the stack, which single documents keep as it was
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
-        blocks = ParseMarkdown(text, &footnotes);
-        contents = Internal::PlaceContents(blocks, options.toc, options.tocDepth);
+        if (book == nullptr) {
+            blocks = ParseMarkdown(text, &footnotes);
+            contents = Internal::PlaceContents(blocks, options.toc, options.tocDepth);
+        } else {
+            bookParse = std::make_unique<BookParse>();
+            contents = ParseBook(*book, options, *bookParse);
+        }
     }
     PdfObjects pdf;
     int pagesId = pdf.Reserve();
@@ -8758,13 +9017,15 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     if (!contents.empty()) renderer.SetContents(&contents);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
-        if (footnotes.notes.empty()) renderer.Render(blocks);
+        if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover);
+        else if (footnotes.notes.empty()) renderer.Render(blocks);
         else RenderWithFootnotes(renderer, blocks, footnotes);
     }
     // The headings without their footnote references, for anchors, bookmarks and titles.
     std::vector<HeadingMark> titledHeadings;
     std::vector<std::string> headingTitles;
-    const std::vector<HeadingMark>& headings = footnotes.notes.empty() ? renderer.Headings()
+    const std::vector<HeadingMark>& headings = footnotes.notes.empty() && (bookParse == nullptr || !bookParse->files.notes)
+        ? renderer.Headings()
         : TitledHeadings(renderer.Headings(), titledHeadings, headingTitles);
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
@@ -8774,8 +9035,10 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     HeadingTargets headingTargets(headings, winAnsi, renderer.PageHeight(), renderer.Notes());
     if (!contents.empty()) headingTargets.SetContents(&contentsTargets);
     std::vector<InternalLink> internalLinks;
-    std::vector<std::vector<int>> annotationIds =
-        AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks, false);
+    std::vector<std::vector<int>> annotationIds = book == nullptr
+        ? AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks, false)
+        : AddBookLinkAnnotations(pdf, renderer.PageLinks(), winAnsi, headings, *book->book, *bookParse,
+            renderer.PageHeight(), contents.empty() ? nullptr : &contentsTargets, internalLinks, false);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
     // The italic faces only when emphasis used them, so other documents keep their bytes.
@@ -8784,7 +9047,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     const int fontBoldObliqueId = renderer.BoldObliqueUsed()
         ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-BoldOblique /Encoding /WinAnsiEncoding >>") : 0;
 
-    const DocumentMetadata metadata = FrontMatterMetadata(source);
+    const DocumentMetadata metadata = book == nullptr ? FrontMatterMetadata(source) : BookMetadata(*book->book);
     std::vector<std::string> bands;   // a theme's header and footer, one stream per page
     std::string cover;                // and its cover page
     if (Internal::HasThemeBands(options.theme) || options.theme.cover) {
@@ -9012,15 +9275,23 @@ RAYOMD_COLD static const TtfFont* BetterFontFor(const TtfFont& font, const CidLi
 
 // With `betterFont`, a document with characters that `font` has no glyph for is not built
 // when a fallback font has more of them: *betterFont is set, to build it again in that one.
+// With `book`, the book's files instead of `markdown`, which then has all of their text.
 static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& font, const PdfOptions& options,
-    std::string& pdfBytes, const TtfFont** betterFont, size_t& missingCharacters, BuildResult& stats) {
+    std::string& pdfBytes, const TtfFont** betterFont, size_t& missingCharacters, BuildResult& stats,
+    const BookSource* book = nullptr) {
     std::vector<Block> blocks;
     Internal::Footnotes footnotes;
     std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
+    std::unique_ptr<BookParse> bookParse;   // a book's files: off the stack, which single documents keep as it was
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
-        blocks = ParseMarkdown(markdown, &footnotes);
-        contents = Internal::PlaceContents(blocks, options.toc, options.tocDepth);
+        if (book == nullptr) {
+            blocks = ParseMarkdown(markdown, &footnotes);
+            contents = Internal::PlaceContents(blocks, options.toc, options.tocDepth);
+        } else {
+            bookParse = std::make_unique<BookParse>();
+            contents = ParseBook(*book, options, *bookParse);
+        }
     }
 
     PdfObjects pdf;
@@ -9042,13 +9313,15 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (!contents.empty()) renderer.SetContents(&contents);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
-        if (footnotes.notes.empty()) renderer.Render(blocks);
+        if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover);
+        else if (footnotes.notes.empty()) renderer.Render(blocks);
         else RenderWithFootnotes(renderer, blocks, footnotes);
     }
     // The headings without their footnote references, for anchors, bookmarks and titles.
     std::vector<HeadingMark> titledHeadings;
     std::vector<std::string> headingTitles;
-    const std::vector<HeadingMark>& headings = footnotes.notes.empty() ? renderer.Headings()
+    const std::vector<HeadingMark>& headings = footnotes.notes.empty() && (bookParse == nullptr || !bookParse->files.notes)
+        ? renderer.Headings()
         : TitledHeadings(renderer.Headings(), titledHeadings, headingTitles);
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
@@ -9059,14 +9332,16 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     HeadingTargets headingTargets(headings, false, renderer.PageHeight(), renderer.Notes());
     if (!contents.empty()) headingTargets.SetContents(&contentsTargets);
     std::vector<InternalLink> internalLinks;
-    std::vector<std::vector<int>> annotationIds =
-        AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa);
+    std::vector<std::vector<int>> annotationIds = book == nullptr
+        ? AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa)
+        : AddBookLinkAnnotations(pdf, renderer.PageLinks(), false, headings, *book->book, *bookParse,
+            renderer.PageHeight(), contents.empty() ? nullptr : &contentsTargets, internalLinks, options.pdfa);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
     // A theme's header and footer, one stream per page, PDF/A's page numbers, and a theme's cover
     // page, before the font subset is made, which then has their glyphs.
-    DocumentMetadata metadata = FrontMatterMetadata(markdown);
+    DocumentMetadata metadata = book == nullptr ? FrontMatterMetadata(markdown) : BookMetadata(*book->book);
     std::vector<std::string> bands;
     std::string cover;
     if (Internal::HasThemeBands(options.theme) || options.theme.cover || (options.pdfa && options.pageNumbers)) {
@@ -9215,6 +9490,107 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     return true;
 }
 
+// The fonts that show a document's text (BuildPdf, BuildBookPdf): the standard fonts for ASCII,
+// and in WinAnsiEncoding for Latin text, which `winAnsi` then gets; else a TrueType font.
+enum class TextFonts : uint8_t { Ascii, WinAnsi, TrueType };
+
+static TextFonts ChooseFonts(const std::string& markdown, const PdfOptions& options, std::string& winAnsi) {
+    // A theme's font shows all text, and a theme's header and footer text that is not WinAnsi
+    // needs a TrueType font too, as PDF/A, which embeds every font, does for all text.
+    if (!options.theme.fontPath.empty() || options.pdfa || ThemeTextNeedsUnicode(options.theme)) return TextFonts::TrueType;
+    // A character reference counts as the character it stands for: "&copy;" needs the WinAnsi
+    // text of the standard fonts, "&rarr;" a Unicode font. A document is searched for them only
+    // where it would otherwise go to the standard fonts.
+    const bool ascii = IsPlainAsciiDocument(markdown);
+    Internal::ReferenceNeed references = Internal::ReferenceNeed::Ascii;
+    if (ascii && (references = Internal::CharacterReferenceNeed(markdown)) == Internal::ReferenceNeed::Ascii) {
+        return TextFonts::Ascii;
+    }
+    // Latin text needs no font file: the standard fonts show it in WinAnsiEncoding.
+    if (references != Internal::ReferenceNeed::Unicode && RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi) &&
+        (ascii || Internal::CharacterReferenceNeed(markdown) != Internal::ReferenceNeed::Unicode)) {
+        return TextFonts::WinAnsi;
+    }
+    return TextFonts::TrueType;
+}
+
+// A document in a TrueType font (TextFonts::TrueType): the theme's, without a fallback font: the
+// company's look; else the system's, built again in a fallback font that has more of the
+// characters it lacks. Without a font PDF/A fails, and other documents take the standard fonts,
+// which show what they can. `unicode(font, better, missing)` builds in a TrueType font and
+// `lossy(missing)` in the standard fonts; false with g_lastError set when nothing is built.
+template <typename Unicode, typename Lossy>
+static bool BuildInTrueType(const PdfOptions& options, uint32_t& missingCharacters, Unicode unicode, Lossy lossy) {
+    size_t missing = 0;
+    bool built = false;
+    if (!options.theme.fontPath.empty()) {
+        const TtfFont* font = ThemeFont(options.theme.fontPath);
+        if (!font) {
+            g_lastError = static_cast<int>(BuildError::ThemeFontUnavailable);
+            return false;
+        }
+        built = unicode(*font, nullptr, missing);
+    } else {
+        const TtfFont* font = nullptr;
+        {
+            RayoMd::Profiling::ScopedPhase fontProfile(RayoMd::Profiling::Phase::Font);
+            font = GetCachedFont();
+        }
+        if (font) {
+            const TtfFont* better = nullptr;
+            built = unicode(*font, &better, missing);
+            if (built && better) built = unicode(*better, nullptr, missing);
+        } else if (options.pdfa) {
+            g_lastError = static_cast<int>(BuildError::PdfaFontUnavailable);
+            return false;
+        } else {
+            // The caller learns how many characters the standard fonts could not show.
+            built = lossy(missing);
+        }
+    }
+    missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
+    return built;
+}
+
+// A book's text for the standard fonts in WinAnsiEncoding (BuildDocument), with `lossy` what they
+// cannot show as they can.
+RAYOMD_COLD static void TranscodeBook(BookSource& source, bool lossy) {
+    const auto transcode = [lossy](std::string& text) {
+        std::string latin;
+        if (lossy) RayoMd::Text::TranscodeToWinAnsiLossy(text, latin);
+        else RayoMd::Text::TranscodeToWinAnsi(text, &latin);
+        text = std::move(latin);
+    };
+    transcode(source.title);
+    for (std::string& text : source.texts) transcode(text);
+    for (std::string& text : source.titles) transcode(text);
+}
+
+// A document, or with `book` that book, of which `markdown` is then all the text, in the fonts its
+// text takes (ChooseFonts); `missingCharacters` gets how many characters they could not show.
+static bool BuildDocument(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes,
+    BuildResult& stats, uint32_t& missingCharacters, BookSource* book) {
+    std::string winAnsi;
+    switch (ChooseFonts(markdown, options, winAnsi)) {
+    case TextFonts::Ascii:
+        return BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes, stats, book);
+    case TextFonts::WinAnsi:
+        if (book != nullptr) TranscodeBook(*book, false);
+        return BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats, book);
+    case TextFonts::TrueType:
+        break;
+    }
+    return BuildInTrueType(options, missingCharacters,
+        [&](const TtfFont& font, const TtfFont** better, size_t& missing) {
+            return BuildUnicodePdfBytes(markdown, font, options, pdfBytes, better, missing, stats, book);
+        },
+        [&](size_t& missing) {
+            missing = RayoMd::Text::TranscodeToWinAnsiLossy(markdown, winAnsi);
+            if (book != nullptr) TranscodeBook(*book, true);
+            return BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats, book);
+        });
+}
+
 BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes) {
     if (&markdown == &pdfBytes) {
         // Pages are rendered straight into pdfBytes, so the source needs storage of its own.
@@ -9233,66 +9609,45 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
         }
     }
     g_lastError = 0;
-    bool built = false;
     uint32_t missingCharacters = 0;
     BuildResult stats;
-    // A character reference counts as the character it stands for: "&copy;" needs the WinAnsi
-    // text of the standard fonts, "&rarr;" a Unicode font. A document is searched for them only
-    // where it would otherwise go to the standard fonts.
-    const bool ascii = IsPlainAsciiDocument(markdown);
-    Internal::ReferenceNeed references = Internal::ReferenceNeed::Ascii;
-    std::string winAnsi;
-    // A theme's header and footer text that is not WinAnsi needs a TrueType font too, and PDF/A,
-    // which embeds every font, one for all text.
-    const bool trueTypeOnly = options.pdfa || ThemeTextNeedsUnicode(options.theme);
-    if (!options.theme.fontPath.empty()) {
-        // The theme's font shows all text, without a fallback font: the company's look.
-        const TtfFont* font = ThemeFont(options.theme.fontPath);
-        if (!font) {
-            g_lastError = static_cast<int>(BuildError::ThemeFontUnavailable);
-            return { BuildError::ThemeFontUnavailable };
-        }
-        size_t missing = 0;
-        built = BuildUnicodePdfBytes(markdown, *font, options, pdfBytes, nullptr, missing, stats);
-        missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
-    } else if (!trueTypeOnly && ascii &&
-        (references = Internal::CharacterReferenceNeed(markdown)) == Internal::ReferenceNeed::Ascii) {
-        built = BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes, stats);
-    } else {
-        // Latin text needs no font file: the standard fonts show it in WinAnsiEncoding.
-        if (!trueTypeOnly && references != Internal::ReferenceNeed::Unicode && RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi) &&
-            (ascii || Internal::CharacterReferenceNeed(markdown) != Internal::ReferenceNeed::Unicode)) {
-            built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats);
-        } else {
-            const TtfFont* font = nullptr;
-            {
-                RayoMd::Profiling::ScopedPhase fontProfile(RayoMd::Profiling::Phase::Font);
-                font = GetCachedFont();
-            }
-            if (font) {
-                const TtfFont* better = nullptr;
-                size_t missing = 0;
-                built = BuildUnicodePdfBytes(markdown, *font, options, pdfBytes, &better, missing, stats);
-                if (built && better) built = BuildUnicodePdfBytes(markdown, *better, options, pdfBytes, nullptr, missing, stats);
-                missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
-            } else if (options.pdfa) {
-                g_lastError = static_cast<int>(BuildError::PdfaFontUnavailable);
-                return { BuildError::PdfaFontUnavailable };
-            } else {
-                // No TrueType font on this system: the standard fonts show what they can, and
-                // the caller learns how many characters they could not.
-                const size_t missing = RayoMd::Text::TranscodeToWinAnsiLossy(markdown, winAnsi);
-                missingCharacters = static_cast<uint32_t>(std::min<size_t>(missing, UINT32_MAX));
-                built = BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats);
-            }
-        }
-    }
+    bool built = BuildDocument(markdown, options, pdfBytes, stats, missingCharacters, nullptr);
     if (built && options.embedSource && pdfBytes.size() > RayoMd::PdfSource::kMaxPdfBytes) {
         pdfBytes.clear();
         g_lastError = static_cast<int>(BuildError::ReversiblePdfTooLarge);
         built = false;
     }
     RayoMd::Profiling::EmitDelta("build", profileBefore, RayoMd::Profiling::Capture());
+    if (!built) return BuildResult{ static_cast<BuildError>(g_lastError) };
+    BuildResult result = stats;
+    result.missingCharacters = missingCharacters;
+    return result;
+}
+
+BuildResult BuildBookPdf(const Book& book, const PdfOptions& options, std::string& pdfBytes) {
+    const auto profileBefore = RayoMd::Profiling::Capture();
+    g_lastError = 0;
+    PdfOptions bookOptions = options;
+    bookOptions.embedSource = false;
+    bookOptions.sourcePath = book.directory.empty() ? std::string() : book.directory + '/';
+    // Its text as the renderer reads it, and all of it, for the choice of its fonts and the output
+    // buffer's first size.
+    BookSource source;
+    source.book = &book;
+    source.title = book.title;
+    std::string all = book.title;
+    for (const BookChapter& chapter : book.chapters) {
+        source.texts.push_back(chapter.markdown);
+        source.titles.push_back(chapter.title);
+        all += '\n';
+        all += chapter.title;
+        all += '\n';
+        all += chapter.markdown;
+    }
+    uint32_t missingCharacters = 0;
+    BuildResult stats;
+    const bool built = BuildDocument(all, bookOptions, pdfBytes, stats, missingCharacters, &source);
+    RayoMd::Profiling::EmitDelta("book", profileBefore, RayoMd::Profiling::Capture());
     if (!built) return BuildResult{ static_cast<BuildError>(g_lastError) };
     BuildResult result = stats;
     result.missingCharacters = missingCharacters;

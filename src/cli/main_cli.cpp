@@ -2,6 +2,7 @@
 #include "../common/text_utils.h"
 #include "../common/batch_report.h"
 #include "../common/profiling.h"
+#include "../core/book.h"
 #include "../core/export_options.h"
 #include "../core/rayomd_pdf_source.h"
 
@@ -391,12 +392,8 @@ fs::path PdfNameForMarkdown(const fs::path& path) {
     return out;
 }
 
-// `details`, when given, receives the result of a build that succeeded: pages, characters
-// without a glyph, failed images.
-int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourcePath,
-    const fs::path& outputPath, const CliExportOptions& options, std::string& pdfBuffer,
-    const std::string& inputLabel, std::string* deferredError = nullptr, TinyPdf::BuildResult* details = nullptr) {
-    pdfBuffer.clear();
+// The library's options for a document whose relative images resolve from `sourcePath`.
+TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::string& sourcePath) {
     TinyPdf::PdfOptions pdfOptions;
     pdfOptions.style = options.style;
     pdfOptions.margin = options.margin;
@@ -412,21 +409,34 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     pdfOptions.toc = options.toc;
     pdfOptions.tocDepth = options.tocDepth;
     pdfOptions.theme = options.theme;
-    TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, pdfOptions, pdfBuffer);
+    return pdfOptions;
+}
+
+// "Error: native PDF export failed for <label> (code N)." and what the code means.
+std::string ExportFailure(const TinyPdf::BuildResult& result, const std::string& inputLabel, const CliExportOptions& options) {
+    std::ostringstream message;
+    message << "Error: native PDF export failed";
+    if (!inputLabel.empty()) message << " for " << inputLabel;
+    message << " (code " << 10 + static_cast<int>(result.error) << ").";
+    if (result.error == TinyPdf::BuildError::ThemeFontUnavailable) {
+        message << " The theme's font cannot be read or is no TrueType font: " << options.theme.fontPath;
+    }
+    if (result.error == TinyPdf::BuildError::PdfaFontUnavailable) {
+        message << " PDF/A embeds every font, but no TrueType font was found; set RAYOMD_FONT to one.";
+    }
+    return message.str();
+}
+
+// `details`, when given, receives the result of a build that succeeded: pages, characters
+// without a glyph, failed images.
+int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourcePath,
+    const fs::path& outputPath, const CliExportOptions& options, std::string& pdfBuffer,
+    const std::string& inputLabel, std::string* deferredError = nullptr, TinyPdf::BuildResult* details = nullptr) {
+    pdfBuffer.clear();
+    TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, PdfOptionsFor(options, sourcePath), pdfBuffer);
     if (!buildResult) {
-        int code = 10 + static_cast<int>(buildResult.error);
-        std::ostringstream message;
-        message << "Error: native PDF export failed";
-        if (!inputLabel.empty()) message << " for " << inputLabel;
-        message << " (code " << code << ").";
-        if (buildResult.error == TinyPdf::BuildError::ThemeFontUnavailable) {
-            message << " The theme's font cannot be read or is no TrueType font: " << options.theme.fontPath;
-        }
-        if (buildResult.error == TinyPdf::BuildError::PdfaFontUnavailable) {
-            message << " PDF/A embeds every font, but no TrueType font was found; set RAYOMD_FONT to one.";
-        }
-        ReportExportError(deferredError, message.str());
-        return code;
+        ReportExportError(deferredError, ExportFailure(buildResult, inputLabel, options));
+        return 10 + static_cast<int>(buildResult.error);
     }
     if (buildResult.missingCharacters != 0) WarnMissingCharacters(inputLabel, buildResult.missingCharacters);
     if (details) *details = buildResult;
@@ -450,6 +460,28 @@ int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath, co
         pdfBuffer, PathToUtf8(inputPath), deferredError, details);
     RayoMd::Profiling::EmitDelta("export", profileBefore, RayoMd::Profiling::Capture());
     return result;
+}
+
+// --book: the files of a SUMMARY.md, a folder or the command line (RayoMd::Book::ReadBook) as one PDF.
+int RunBookExport(const std::vector<fs::path>& inputs, const fs::path& outputPath, const CliExportOptions& options) {
+    TinyPdf::Book book;
+    std::string error;
+    if (!RayoMd::Book::ReadBook(inputs, book, error)) {
+        std::cerr << "Error: " << error << "\n";
+        return 3;
+    }
+    std::string pdf;
+    const TinyPdf::BuildResult result = TinyPdf::BuildBookPdf(book, PdfOptionsFor(options, std::string()), pdf);
+    if (!result) {
+        std::cerr << ExportFailure(result, "the book", options) << "\n";
+        return 10 + static_cast<int>(result.error);
+    }
+    if (result.missingCharacters != 0) WarnMissingCharacters("the book", result.missingCharacters);
+    if (!WriteBinaryFilePortable(outputPath, pdf)) {
+        std::cerr << "Error: could not write PDF file: " << PathToUtf8(outputPath) << "\n";
+        return 12;
+    }
+    return 0;
 }
 
 int RunStdinExport(const fs::path& outputPath, const CliExportOptions& options) {
@@ -718,21 +750,7 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     }
 
     std::string pdfBytes;
-    TinyPdf::PdfOptions options;
-    options.style = cliOptions.style;
-    options.margin = cliOptions.margin;
-    options.pageSize = cliOptions.pageSize;
-    options.sourcePath = PathToUtf8(inputPath);
-    options.enableUrlImages = cliOptions.enableUrlImages;
-    options.allowUnsafeLocalImages = cliOptions.allowUnsafeLocalImages;
-    options.embedSource = cliOptions.embedSource;
-    options.pageNumbers = cliOptions.pageNumbers;
-    options.compress = cliOptions.compress;
-    options.pdfa = cliOptions.pdfa;
-    options.highlightCode = cliOptions.highlightCode;
-    options.toc = cliOptions.toc;
-    options.tocDepth = cliOptions.tocDepth;
-    options.theme = cliOptions.theme;
+    const TinyPdf::PdfOptions options = PdfOptionsFor(cliOptions, PathToUtf8(inputPath));
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (!buildResult) {
         int code = 10 + static_cast<int>(buildResult.error);
@@ -850,6 +868,7 @@ void PrintUsage() {
         << "  rayomd --inspect-source <input.pdf>\n"
         << "  rayomd --recover-source <input.pdf> <output.md>\n"
         << "  rayomd --export <input.md> <output.pdf> [native] [style] [margin]\n"
+        << "  rayomd --book <SUMMARY.md | folder | files.md...> <output.pdf> [native] [style] [margin]\n"
         << "  rayomd --stdin <output.pdf> [native] [style] [margin]\n"
         << "  rayomd --batch <input-folder> <output-folder> [native] [style] [margin]\n"
         << "  rayomd --stdin-batch <output-folder> [native] [style] [margin]\n"
@@ -870,7 +889,10 @@ void PrintUsage() {
         << "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4).\n"
         << "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
         << "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
-        << "  line per document; - for standard output).\n";
+        << "  line per document; - for standard output).\n"
+        << "Books: --book makes one PDF of the files a SUMMARY.md lists (mdBook, GitBook), of a folder's\n"
+        << "  Markdown files by name with README.md first, or of the files given: each from a new page, the\n"
+        << "  links between them kept, one outline, and with --toc one table of contents for all of them.\n";
 }
 
 int PrintArgumentError(const std::string& message) {
@@ -957,6 +979,23 @@ int main(int argc, char** argv) {
         std::string pdfBuffer;
         pdfBuffer.reserve(1024 * 1024);
         return BuildNativePdfFile(argv[2], outputPath, options, pdfBuffer);
+    }
+
+    if (command == "--book") {
+        // The inputs end at the output, the first argument that names a PDF; the options follow it.
+        int output = 2;
+        while (output < argc && Lower(fs::path(argv[output]).extension().string()) != ".pdf") output++;
+        if (output == 2 || output == argc) {
+            return PrintArgumentError("--book requires <SUMMARY.md | folder | files.md...> <output.pdf>.");
+        }
+        std::string error;
+        if (!ParseExportOptions(argc, argv, output + 1, options, error)) return PrintArgumentError(error);
+        if (options.embedSource) return PrintArgumentError("--embed-source does not apply to --book: a book is not reversible.");
+        if (options.engine != 0) {
+            std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
+            return 20;
+        }
+        return RunBookExport(std::vector<fs::path>(argv + 2, argv + output), argv[output], options);
     }
 
     return PrintArgumentError("unknown command '" + std::string(argv[1]) + "'.");

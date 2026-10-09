@@ -29,4 +29,22 @@ struct ContentsEntry {
 // leaves out, as it does a heading of footnote references alone.
 std::vector<ContentsEntry> PlaceContents(std::vector<Block>& blocks, bool insert, int depth);
 
+// A book's file (BuildBookPdf): makes its marker paragraphs Contents blocks, which draw the book's
+// table where the first of the book is reached; returns whether it has one.
+bool MarkContents(std::vector<Block>& blocks);
+
+// Whether a file's first heading on its top level is of level 1, its title (ParseBook).
+bool BeginsWithTitle(const std::vector<Block>& blocks);
+
+// A file of a book, or a part, as its table of contents lists it (BookContents).
+struct BookContentsFile {
+    const std::vector<Block>* blocks = nullptr;   // the file's; null for a part
+    const std::string* title = nullptr;           // the part's
+    int shift = 0;                                // the levels the file's headings move down in the book
+};
+
+// The table of contents of a book: each part's title and the files' headings of their top level,
+// as many levels down as the bookmarks have them; `depth` levels from the top one (taken as 1 to 6).
+std::vector<ContentsEntry> BookContents(const std::vector<BookContentsFile>& files, int depth);
+
 } // namespace TinyPdf::Internal

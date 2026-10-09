@@ -64,6 +64,7 @@
 #include "../common/text_utils.h"
 #include "../common/batch_report.h"
 #include "../common/profiling.h"
+#include "../core/book.h"
 #include "../core/export_options.h"
 
 // Forward declare message handler from imgui_impl_win32.cpp
@@ -506,10 +507,8 @@ bool WriteNewBinaryFile(const std::wstring& path, const std::string& content, bo
 
 #endif
 
-// `details`, when given, receives the result of the build: pages, characters without a glyph,
-// failed images.
-bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& exportOptions,
-    std::string& pdfBytes, const std::wstring& sourcePath = L"", TinyPdf::BuildResult* details = nullptr) {
+// The library's options for a document whose relative images resolve from `sourcePath`.
+TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const std::wstring& sourcePath) {
     TinyPdf::PdfOptions options;
     options.style = exportOptions.style;
     options.margin = exportOptions.margin;
@@ -525,7 +524,14 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
     options.toc = exportOptions.toc;
     options.tocDepth = exportOptions.tocDepth;
     options.theme = exportOptions.theme;
-    TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdfBytes);
+    return options;
+}
+
+// `details`, when given, receives the result of the build: pages, characters without a glyph,
+// failed images.
+bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& exportOptions,
+    std::string& pdfBytes, const std::wstring& sourcePath = L"", TinyPdf::BuildResult* details = nullptr) {
+    TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, PdfOptionsFor(exportOptions, sourcePath), pdfBytes);
     if (details) *details = result;
     g_nativePdfLastError = static_cast<int>(result.error);
     return result.Ok();
@@ -751,6 +757,28 @@ bool EnsureDirectoryRecursive(const std::wstring& path) {
 }
 
 void WriteStdoutLine(const std::string& line);
+
+// --book: the files of a SUMMARY.md, a folder or the command line (RayoMd::Book::ReadBook) as one PDF.
+int RunBookExport(const std::vector<std::filesystem::path>& inputs, const std::wstring& outputPath,
+    const WinExportOptions& exportOptions) {
+    TinyPdf::Book book;
+    std::string error;
+    if (!RayoMd::Book::ReadBook(inputs, book, error)) {
+        WriteStdoutLine("Error: " + error);
+        return 3;
+    }
+    std::string pdfBytes;
+    const TinyPdf::BuildResult result = TinyPdf::BuildBookPdf(book, PdfOptionsFor(exportOptions, L""), pdfBytes);
+    if (!result) {
+        WriteStdoutLine("Error: native PDF export failed for the book (code " + std::to_string(10 + static_cast<int>(result.error)) + ").");
+        return 10 + static_cast<int>(result.error);
+    }
+    if (!WriteBinaryFile(outputPath, pdfBytes)) {
+        WriteStdoutLine("Error: could not write PDF file: " + WideToUtf8(outputPath));
+        return 12;
+    }
+    return 0;
+}
 
 bool CanParseCommandLineLocally(LPCWSTR commandLine) {
     if (!commandLine || !*commandLine || *commandLine == L' ' || *commandLine == L'\t') {
@@ -1416,7 +1444,7 @@ int TryCommandLineExport() {
     if (argc < 2 || (lstrcmpiW(argv[1], L"--export") != 0 &&
         lstrcmpiW(argv[1], L"--stdin") != 0 && lstrcmpiW(argv[1], L"--batch") != 0 &&
         lstrcmpiW(argv[1], L"--stdin-batch") != 0 && lstrcmpiW(argv[1], L"--serve") != 0 &&
-        lstrcmpiW(argv[1], L"--bench") != 0)) {
+        lstrcmpiW(argv[1], L"--bench") != 0 && lstrcmpiW(argv[1], L"--book") != 0)) {
         LocalFree(argv);
         return -1;
     }
@@ -1473,6 +1501,31 @@ int TryCommandLineExport() {
             return 2;
         }
         int result = RunServeExport(argv[2], options);
+        LocalFree(argv);
+        return result;
+    }
+
+    if (lstrcmpiW(argv[1], L"--book") == 0) {
+        // The inputs end at the output, the first argument that names a PDF; the options follow it.
+        const auto namesPdf = [](const wchar_t* argument) {
+            const size_t length = wcslen(argument);
+            return length >= 4 && _wcsicmp(argument + length - 4, L".pdf") == 0;
+        };
+        int output = 2;
+        while (output < argc && !namesPdf(argv[output])) output++;
+        int result = 2;
+        if (output == 2 || output == argc) {
+            WriteStdoutLine("Error: --book requires <SUMMARY.md | folder | files.md...> <output.pdf>.");
+        } else if (parseOrReport(output + 1)) {
+            if (options.embedSource) {
+                WriteStdoutLine("Error: --embed-source does not apply to --book: a book is not reversible.");
+            } else if (options.engine != 0) {
+                WriteStdoutLine("Error: --book takes the native engine only.");
+                result = 20;
+            } else {
+                result = RunBookExport(std::vector<std::filesystem::path>(argv + 2, argv + output), argv[output], options);
+            }
+        }
         LocalFree(argv);
         return result;
     }

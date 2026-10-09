@@ -193,6 +193,26 @@ def verify_contents(binary: Path, root: Path) -> None:
     run(binary, "--export", str(source), str(root / "manual-bad.pdf"), "--toc-depth=7", expect=2)
 
 
+def verify_book(binary: Path, root: Path) -> None:
+    """--book: the files a SUMMARY.md lists as one PDF, each from a new page, a link between them
+    internal; a file it lists that is missing, and --embed-source, fail."""
+    book = root / "book"
+    (book / "part").mkdir(parents=True)
+    (book / "SUMMARY.md").write_text(
+        "# Summary\n\n- [One](one.md)\n- [Two](part/two%20b.md)\n", encoding="utf-8")
+    (book / "one.md").write_text("# One\n\nSee [two](part/two%20b.md#later).\n", encoding="utf-8")
+    (book / "part" / "two b.md").write_text("Text.\n\n## Later\n\nBack to [one](../one.md).\n", encoding="utf-8")
+    pdf = root / "book.pdf"
+    run(binary, "--book", str(book), str(pdf), "--toc")
+    data = require_pdf(pdf, b"(Contents) Tj")
+    # The table, one and two (titled from SUMMARY.md) on pages of their own; no link left as a URI.
+    if data.count(b"/Type /Page ") != 3 or b"(Two) Tj" not in data or b"/URI" in data:
+        raise AssertionError("--book: unexpected pages or links")
+    (book / "SUMMARY.md").write_text("- [Gone](gone.md)\n", encoding="utf-8")
+    run(binary, "--book", str(book), str(root / "book-missing.pdf"), expect=3)
+    run(binary, "--book", str(book / "one.md"), str(root / "book-embed.pdf"), "--embed-source", expect=2)
+
+
 def pdf_streams(data: bytes) -> list[tuple[bytes, bytes]]:
     """The dictionary and payload of every stream of a PDF, in file order."""
     streams = []
@@ -280,6 +300,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_footnotes(binary, root)
         verify_highlight(binary, root)
         verify_contents(binary, root)
+        verify_book(binary, root)
         verify_batch(binary, root)
 
         if os.name == "nt":
