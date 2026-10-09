@@ -1,5 +1,6 @@
 #include "rayomd/tiny_pdf.h"
 #include "../src/common/batch_report.h"
+#include "../src/core/flate.h"
 #include "../src/common/text_utils.h"
 #include "../src/core/export_options.h"
 #include "../src/core/inline_markdown.h"
@@ -25,6 +26,10 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#ifdef RAYOMD_USE_ZLIB
+#include <zlib.h>
+#endif
 
 #ifndef RAYOMD_TEST_SOURCE_DIR
 #define RAYOMD_TEST_SOURCE_DIR "."
@@ -1597,6 +1602,153 @@ bool CheckReportJson() {
     return true;
 }
 
+// The streams of a PDF in file order, each its dictionary and payload.
+std::vector<std::pair<std::string, std::string>> PdfStreams(const std::string& pdf) {
+    std::vector<std::pair<std::string, std::string>> streams;
+    for (size_t at = pdf.find(" 0 obj\n"); at != std::string::npos; at = pdf.find(" 0 obj\n", at)) {
+        at += 7;
+        const size_t open = pdf.find("\nstream\n", at);
+        if (open == std::string::npos || pdf.find("\nendobj\n", at) < open) continue;
+        std::string dictionary = pdf.substr(at, open - at);
+        const size_t length = std::strtoull(dictionary.c_str() + dictionary.find("/Length ") + 8, nullptr, 10);
+        at = open + 8 + length;
+        streams.emplace_back(std::move(dictionary), pdf.substr(open + 8, length));
+    }
+    return streams;
+}
+
+#ifdef RAYOMD_USE_ZLIB
+bool Inflates(std::string_view packed, const std::string& expected) {
+    std::string plain(expected.size() + 1, '\0');
+    uLongf size = plain.size();
+    return uncompress(reinterpret_cast<Bytef*>(&plain[0]), &size, reinterpret_cast<const Bytef*>(packed.data()),
+               packed.size()) == Z_OK && size == expected.size() && plain.compare(0, size, expected) == 0;
+}
+#endif
+
+// --compress: every content stream, font program and CMap is FlateDecode where that makes it
+// smaller and inflates to what the uncompressed PDF has, the font keeping its own size as
+// /Length1; a stream compression cannot shrink stays as it is. Output does not depend on what
+// the thread compressed before, nor on other threads compressing at the same time, and the
+// reversible profile still recovers its source. In both renderers.
+bool CheckCompression() {
+#ifdef RAYOMD_USE_ZLIB
+    // The encoder alone, at the edges of its blocks, window and match lengths, on runs and on
+    // data it cannot compress, within the size it promises.
+    RayoMd::Flate::Scratch scratch;
+    uint64_t seed = 88172645463325252ull;
+    const auto next = [&]() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        return seed;
+    };
+    std::vector<std::string> inputs = { "", "a", std::string(300000, '\0') };
+    for (size_t size : { 7, 8, 9, 258, 259, 32768, 32769, 65277, 65278, 65279, 65535, 65536, 140000 }) {
+        std::string noise(size, '\0');
+        std::string text(size, '\0');
+        for (size_t i = 0; i < size; i++) {
+            noise[i] = (char)next();
+            text[i] = (char)("BT 0 0 1 rg ()Tj\n"[next() % 17]);
+        }
+        inputs.push_back(std::move(noise));
+        inputs.push_back(std::move(text));
+    }
+    std::string skewed;   // Fibonacci counts: Huffman lengths past 15 bits before limiting
+    for (size_t symbol = 0, count = 1, previous = 1; symbol < 24; symbol++, std::swap(count, previous), count += previous) {
+        for (size_t k = 0; k < count; k++) skewed.push_back((char)symbol);
+    }
+    for (size_t i = skewed.size(); i > 1; i--) std::swap(skewed[i - 1], skewed[next() % i]);
+    inputs.push_back(std::move(skewed));
+    for (const std::string& input : inputs) {
+        std::string packed(RayoMd::Flate::ZlibBound(input.size()), '\0');
+        packed.resize(RayoMd::Flate::ZlibCompress(input, reinterpret_cast<uint8_t*>(&packed[0]), scratch));
+        if (packed.size() > RayoMd::Flate::ZlibBound(input.size()) - 8 || !Inflates(packed, input)) {
+            std::cerr << "DEFLATE round trip failed for " << input.size() << " bytes" << std::endl;
+            return false;
+        }
+    }
+#endif
+    std::string document = "# Packed\n\nA [link](#packed) and `code`.\n\n";
+    for (int line = 0; line < 120; line++) document += "Line " + std::to_string(line) + " of words that repeat on every page.\n\n";
+    const std::string unicode = "\xD0\x9C\xD0\xBE\xD1\x81\xD0\xBA\xD0\xB2\xD0\xB0 \xCE\x94\n\n" + document;
+    for (const std::string& text : { document, unicode }) {
+        const char* const renderer = text == document ? "standard" : "Unicode";
+        const std::string& otherText = text == document ? unicode : document;
+        TinyPdf::PdfOptions options;
+        options.pageNumbers = true;
+        std::string plain;
+        std::string packed;
+        std::string other;
+        std::string again;
+        bool ok = TinyPdf::BuildPdf(text, options, plain).Ok();
+        options.compress = true;
+        ok = ok && TinyPdf::BuildPdf(text, options, packed).Ok() && ValidPdf(packed) &&
+            TinyPdf::BuildPdf(otherText, options, other).Ok() && TinyPdf::BuildPdf(text, options, again).Ok() &&
+            again == packed && packed.size() * 2 < plain.size();
+        const auto plainStreams = PdfStreams(plain);
+        const auto packedStreams = PdfStreams(packed);
+        size_t flate = 0;
+        ok = ok && plainStreams.size() == packedStreams.size();
+        for (size_t i = 0; ok && i < plainStreams.size(); i++) {
+            const auto& [dictionary, payload] = packedStreams[i];
+            if (dictionary == plainStreams[i].first) {
+                // Page numbers, and nothing of this text large enough to shrink.
+                ok = payload == plainStreams[i].second && payload.size() < 256;
+                continue;
+            }
+            flate++;
+            const size_t font = plainStreams[i].first.find("/Length1 ");
+            ok = dictionary.find("/Filter /FlateDecode ") != std::string::npos && payload.size() < plainStreams[i].second.size() &&
+                (font == std::string::npos || dictionary.find(plainStreams[i].first.substr(font)) != std::string::npos);
+#ifdef RAYOMD_USE_ZLIB
+            ok = ok && Inflates(payload, plainStreams[i].second);
+#endif
+        }
+        // At least every page but the last, and for a font its program and both CMaps.
+        const size_t pages = CountOccurrences(plain, "/Type /Page ");
+        if (!ok || flate + 1 < pages + (text == document ? 0 : 3)) {
+            std::cerr << "compression mismatch (" << renderer << " renderer)" << std::endl;
+            return false;
+        }
+        std::vector<std::string> threaded(4);
+        std::vector<std::thread> threads;
+        for (std::string& output : threaded) {
+            threads.emplace_back([&]() {
+                std::string between;
+                TinyPdf::BuildPdf(text, options, output);
+                TinyPdf::BuildPdf(otherText, options, between);
+                TinyPdf::BuildPdf(text, options, output);
+            });
+        }
+        for (std::thread& thread : threads) thread.join();
+        for (const std::string& output : threaded) {
+            if (output != packed) {
+                std::cerr << "compression differs between threads (" << renderer << " renderer)" << std::endl;
+                return false;
+            }
+        }
+    }
+    std::string reversible;
+    TinyPdf::PdfOptions options;
+    options.embedSource = true;
+    options.compress = true;
+    if (!TinyPdf::BuildPdf(unicode, options, reversible).Ok() ||
+        reversible.find("/Filter /FlateDecode") == std::string::npos ||
+        RayoMd::PdfSource::Inspect(reversible, true).source != unicode) {
+        std::cerr << "reversible profile with compression mismatch" << std::endl;
+        return false;
+    }
+    std::string word;   // a page stream too short to shrink
+    options.embedSource = false;
+    if (!TinyPdf::BuildPdf("Hi.\n", options, word).Ok() || word.find("/FlateDecode") != std::string::npos ||
+        word.find("(Hi.) Tj") == std::string::npos) {
+        std::cerr << "a stream compression cannot shrink was compressed" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -1971,6 +2123,7 @@ int main() {
     if (!CheckTableHeaderRepeat()) return 86;
     if (!CheckPageSize()) return 87;
     if (!CheckReportJson()) return 88;
+    if (!CheckCompression()) return 89;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

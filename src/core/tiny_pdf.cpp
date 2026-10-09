@@ -1,4 +1,5 @@
 #include "rayomd/tiny_pdf.h"
+#include "flate.h"
 #include "export_options.h"
 #include "rayomd_pdf_source.h"
 #include "inline_markdown.h"
@@ -1234,6 +1235,87 @@ private:
 
     std::vector<Object> objects;
 };
+
+// --compress: a thread's encoder tables and output buffer, kept from export to export so a
+// batch worker allocates them once.
+struct FlateWork {
+    RayoMd::Flate::Scratch scratch;
+    std::string out;
+};
+
+RAYOMD_COLD static FlateWork& ThreadFlateWork() {
+    static thread_local FlateWork work;
+    return work;
+}
+
+// `data` FlateDecode-compressed into work.out. Returns its size, or 0 when the stream would not
+// be smaller with its dictionary's "/Filter /FlateDecode " added; `data` then stays as it is.
+RAYOMD_COLD static size_t Deflate(std::string_view data, FlateWork& work) {
+    constexpr size_t kFilterBytes = 21;
+    if (data.size() > RayoMd::Flate::kMaxInput) return 0;
+    const size_t bound = RayoMd::Flate::ZlibBound(data.size());
+    if (work.out.size() < bound) work.out.resize(bound);
+    const size_t size = RayoMd::Flate::ZlibCompress(data, reinterpret_cast<uint8_t*>(&work.out[0]), work.scratch);
+    return size + kFilterBytes < data.size() ? size : 0;
+}
+
+// A thread does not keep the output buffer of a large stream.
+RAYOMD_COLD static void TrimFlateWork(FlateWork& work) {
+    constexpr size_t kRetainedBytes = 4u * 1024u * 1024u;
+    if (work.out.capacity() > kRetainedBytes) std::string().swap(work.out);
+}
+
+// --compress: every page's content stream FlateDecode-compressed where that makes it smaller.
+// `pdfBytes` holds the streams and nothing else, page k's from starts[k]. They are moved together
+// at the front, none longer than before, so none overwrites one not yet read; `starts` and
+// `flate` then say where each lies and whether it is compressed.
+RAYOMD_COLD static void CompressPageContents(std::string& pdfBytes, std::vector<size_t>& starts, std::vector<bool>& flate) {
+    if (starts.empty()) return;
+    FlateWork& work = ThreadFlateWork();
+    flate.assign(starts.size(), false);
+    size_t write = starts[0];
+    for (size_t page = 0; page < starts.size(); page++) {
+        const size_t start = starts[page];
+        const size_t end = page + 1 < starts.size() ? starts[page + 1] : pdfBytes.size();
+        const size_t packed = Deflate(std::string_view(pdfBytes.data() + start, end - start), work);
+        starts[page] = write;
+        if (packed != 0) {
+            memcpy(&pdfBytes[write], work.out.data(), packed);
+            write += packed;
+            flate[page] = true;
+        } else {
+            memmove(&pdfBytes[write], pdfBytes.data() + start, end - start);
+            write += end - start;
+        }
+    }
+    pdfBytes.resize(write);
+    TrimFlateWork(work);
+}
+
+// --compress: `data` FlateDecode-compressed into `storage` when that makes it smaller.
+RAYOMD_COLD static bool CompressPayload(std::string_view data, std::string& storage) {
+    FlateWork& work = ThreadFlateWork();
+    const size_t packed = Deflate(data, work);
+    if (packed != 0) storage.assign(work.out.data(), packed);
+    TrimFlateWork(work);
+    return packed != 0;
+}
+
+// The stream object `id` with the payload `data`, referenced, not copied. With `compress` the
+// payload is compressed into `storage`, which then has to outlive BuildInto, where that makes
+// it smaller.
+static void SetPayloadStream(PdfObjects& pdf, int id, std::string_view data, bool compress, std::string& storage) {
+    std::string head;
+    if (compress && CompressPayload(data, storage)) {
+        data = storage;
+        head = "<< /Filter /FlateDecode /Length ";
+    } else {
+        head = "<< /Length ";
+    }
+    AppendSize(head, data.size());
+    head += " >>\nstream\n";
+    pdf.SetStreamView(id, std::move(head), data);
+}
 
 constexpr size_t kMaxImageBytes = 32u * 1024u * 1024u;
 constexpr size_t kMaxDecodedImageBytes = 96u * 1024u * 1024u;
@@ -3733,8 +3815,9 @@ public:
 
     void Render(const std::vector<Block>& blocks) { RenderBlocks(*this, blocks); }
 
-    // Offset in the output buffer at which the content stream of each page starts.
-    const std::vector<size_t>& PageStarts() const { return pageStarts; }
+    // Offset in the output buffer at which the content stream of each page starts; with
+    // --compress, CompressPageContents moves the streams and these with them.
+    std::vector<size_t>& PageStarts() { return pageStarts; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     const CidList& UsedCids() const { return usedCids.Values(); }
     uint32_t MissingCharacters() const { return usedCids.missing; }
@@ -5462,6 +5545,25 @@ static std::string BuildFontFileObject(const std::string& fontBytes) {
     return body;
 }
 
+// The font program FlateDecode-compressed, or as BuildFontFileObject has it when that would not
+// be smaller. /Length1 stays the size of the font itself.
+RAYOMD_COLD static std::string BuildFlateFontFileObject(const std::string& fontBytes) {
+    FlateWork& work = ThreadFlateWork();
+    const size_t packed = Deflate(fontBytes, work);
+    if (packed == 0) return BuildFontFileObject(fontBytes);
+    std::string body;
+    body.reserve(packed + 128);
+    body += "<< /Filter /FlateDecode /Length ";
+    AppendSize(body, packed);
+    body += " /Length1 ";
+    AppendSize(body, fontBytes.size());
+    body += " >>\nstream\n";
+    body.append(work.out.data(), packed);
+    body += "\nendstream";
+    TrimFlateWork(work);
+    return body;
+}
+
 class BoundedStringCache {
 public:
     BoundedStringCache(size_t maxEntriesValue, size_t maxBytesValue)
@@ -5497,17 +5599,19 @@ private:
 };
 
 // The font program of a document: the subset of the glyphs it shows, or the whole font when
-// it cannot be subset (CanSubset).
+// it cannot be subset (CanSubset). With `compress` FlateDecode-compressed, in a cache of its own.
 static std::shared_ptr<const std::string> CachedFontFileObject(
-    const TtfFont& font, const CidList& used, const std::string& key) {
-    static BoundedStringCache cache(8, 32u * 1024u * 1024u);
+    const TtfFont& font, const CidList& used, const std::string& key, bool compress) {
+    static BoundedStringCache plainCache(8, 32u * 1024u * 1024u);
+    static BoundedStringCache flateCache(8, 32u * 1024u * 1024u);
+    BoundedStringCache& cache = compress ? flateCache : plainCache;
     if (auto cached = cache.Get(key)) return cached;
 
     std::string bytes;
     if (!CanSubset(font) || !BuildSubsetFontBytes(font, SubsetGlyphs(font, used), bytes)) {
         bytes.assign((const char*)font.bytes.data(), font.bytes.size());
     }
-    return cache.Insert(key, BuildFontFileObject(bytes));
+    return cache.Insert(key, compress ? BuildFlateFontFileObject(bytes) : BuildFontFileObject(bytes));
 }
 
 // The glyph id of every used CID in the font program of CachedFontFileObject.
@@ -5848,8 +5952,9 @@ public:
 
     void Render(const std::vector<Block>& blocks) { RenderBlocks(*this, blocks); }
 
-    // Offset in the output buffer at which the content stream of each page starts.
-    const std::vector<size_t>& PageStarts() const { return pageStarts; }
+    // Offset in the output buffer at which the content stream of each page starts; with
+    // --compress, CompressPageContents moves the streams and these with them.
+    std::vector<size_t>& PageStarts() { return pageStarts; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     bool MathUsed() const { return math.Used(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
@@ -7436,11 +7541,14 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     const int fontBoldObliqueId = renderer.BoldObliqueUsed()
         ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-BoldOblique /Encoding /WinAnsiEncoding >>") : 0;
 
+    std::vector<bool> flatePages;   // --compress: the pages whose content stream is compressed
+    if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
     std::vector<int> pageIds;
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
-        int contentId = pdf.AddStreamInPlace("", pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
+        int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
+            pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = options.pageNumbers
             ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "F1") : 0;
         std::string page;
@@ -7665,18 +7773,14 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
 
     // The cached font objects are referenced, not copied: the shared pointers keep them
     // alive until BuildInto below.
-    std::shared_ptr<const std::string> fontFileObject = CachedFontFileObject(font, used, cidKey);
+    std::shared_ptr<const std::string> fontFileObject = CachedFontFileObject(font, used, cidKey, options.compress);
     pdf.SetView(fontFileId, *fontFileObject);
 
-    std::string cidMapHead = "<< /Length ";
-    AppendSize(cidMapHead, cidMapBytes->size());
-    cidMapHead += " >>\nstream\n";
-    pdf.SetStreamView(cidMapId, std::move(cidMapHead), *cidMapBytes);
-
-    std::string toUnicodeHead = "<< /Length ";
-    AppendSize(toUnicodeHead, toUnicodeBytes->size());
-    toUnicodeHead += " >>\nstream\n";
-    pdf.SetStreamView(toUnicodeId, std::move(toUnicodeHead), *toUnicodeBytes);
+    // With --compress, the compressed CMaps, which have to outlive BuildInto.
+    std::string cidMapFlate;
+    std::string toUnicodeFlate;
+    SetPayloadStream(pdf, cidMapId, *cidMapBytes, options.compress, cidMapFlate);
+    SetPayloadStream(pdf, toUnicodeId, *toUnicodeBytes, options.compress, toUnicodeFlate);
 
     std::string desc;
     desc.reserve(224);
@@ -7725,11 +7829,14 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     // Helvetica for the page numbers.
     const int numberFontId = options.pageNumbers
         ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>") : 0;
+    std::vector<bool> flatePages;   // --compress: the pages whose content stream is compressed
+    if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
     std::vector<int> pageIds;
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
-        int contentId = pdf.AddStreamInPlace("", pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
+        int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
+            pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = options.pageNumbers
             ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "FN") : 0;
         std::string page;

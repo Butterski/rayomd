@@ -158,6 +158,7 @@ struct WinExportOptions {
     unsigned workers = 0;
     bool embedSource = false;
     bool pageNumbers = false;
+    bool compress = false;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
     bool recursive = false;
@@ -513,6 +514,7 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
     options.allowUnsafeLocalImages = exportOptions.allowUnsafeLocalImages;
     options.embedSource = exportOptions.embedSource;
     options.pageNumbers = exportOptions.pageNumbers;
+    options.compress = exportOptions.compress;
     TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (details) *details = result;
     g_nativePdfLastError = static_cast<int>(result.error);
@@ -656,6 +658,8 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.embedSource = true;
         } else if (lstrcmpiW(argv[i], L"--page-numbers") == 0) {
             options.pageNumbers = true;
+        } else if (lstrcmpiW(argv[i], L"--compress") == 0) {
+            options.compress = true;
         } else if (_wcsnicmp(argv[i], L"--page-size=", 12) == 0) {
             if (!TinyPdf::Internal::ParsePageSize(WideToUtf8(argv[i] + 12), options.pageSize)) {
                 error = L"--page-size must be a4, a3, a5, letter or legal (each also with -landscape), or "

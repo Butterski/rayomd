@@ -107,12 +107,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/math_parser.cpp
         src/core/math_layout.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
+    # The opt-in DEFLATE encoder: -O2 is within 1 % of -O3 on RayoMD's streams at half the code.
+    set_source_files_properties(src/core/flate.cpp PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
 endif()
 
 if(WIN32)
     enable_language(RC)
     add_executable(rayomd WIN32
         src/core/tiny_pdf.cpp
+        src/core/flate.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
@@ -175,6 +178,7 @@ else()
 
     add_executable(rayomd
         src/core/tiny_pdf.cpp
+        src/core/flate.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
@@ -207,6 +211,7 @@ if(BUILD_TESTING)
     add_executable(rayomd-core-tests
         tests/core_tests.cpp
         src/core/tiny_pdf.cpp
+        src/core/flate.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp

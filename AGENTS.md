@@ -45,6 +45,11 @@ and character references, a document title, opt-in page numbers, page sizes (A4 
 default, presets, landscape and custom sizes; the renderers' `pageW`/`pageH`, never
 constants), standalone local images, and HTTP/HTTPS images on Windows or
 curl-enabled Linux builds with fallback text.
+Opt-in compression (`--compress`, `PdfOptions::compress`) writes page content, the
+font program and both CMaps as FlateDecode where that makes the file smaller, with
+RayoMD's own DEFLATE encoder; never the XMP metadata or an embedded source, which
+the reversible profile reads uncompressed. Without it the PDF bytes stay as they
+are.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
@@ -129,6 +134,13 @@ Important image/link details:
 
 - `src/core/export_options.cpp` and `src/common/text_utils.cpp`
   Shared typed style/margin conversion, CLI option parsing primitives, and non-public text helpers.
+
+- `src/core/flate.h` and `src/core/flate.cpp`
+  The DEFLATE/zlib encoder behind `--compress`: greedy matching over two hash
+  tables, per-block stored/fixed/dynamic choice by exact bit count, SSE2 Adler-32.
+  Output depends only on the input. Its tables live per thread in
+  `tiny_pdf.cpp` (`ThreadFlateWork`) and are never cleared between streams. Built
+  at `-O2`: within 1 % of `-O3` at half the code.
 
 - `src/common/batch_report.cpp`
   What both command lines share for batch export: the JSON Lines report (one

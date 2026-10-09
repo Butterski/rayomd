@@ -280,6 +280,7 @@ struct CliExportOptions {
     bool allowUnsafeLocalImages = false;
     bool embedSource = false;
     bool pageNumbers = false;
+    bool compress = false;
     unsigned workers = 0;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
@@ -298,6 +299,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--allow-unsafe-local-images" || value == "--unsafe-local-images") options.allowUnsafeLocalImages = true;
         else if (value == "--embed-source") options.embedSource = true;
         else if (value == "--page-numbers") options.pageNumbers = true;
+        else if (value == "--compress") options.compress = true;
         else if (value.rfind("--page-size=", 0) == 0) {
             if (!TinyPdf::Internal::ParsePageSize(std::string_view(value).substr(12), options.pageSize)) {
                 error = "--page-size must be a4, a3, a5, letter or legal (each also with -landscape), or "
@@ -376,6 +378,7 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     pdfOptions.allowUnsafeLocalImages = options.allowUnsafeLocalImages;
     pdfOptions.embedSource = options.embedSource;
     pdfOptions.pageNumbers = options.pageNumbers;
+    pdfOptions.compress = options.compress;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, pdfOptions, pdfBuffer);
     if (!buildResult) {
         int code = 10 + static_cast<int>(buildResult.error);
@@ -685,6 +688,7 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     options.allowUnsafeLocalImages = cliOptions.allowUnsafeLocalImages;
     options.embedSource = cliOptions.embedSource;
     options.pageNumbers = cliOptions.pageNumbers;
+    options.compress = cliOptions.compress;
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (!buildResult) {
         int code = 10 + static_cast<int>(buildResult.error);
@@ -811,6 +815,7 @@ void PrintUsage() {
         << "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
         << "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
         << "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source.\n"
+        << "Output flags: --compress (FlateDecode streams: smaller files, slower export).\n"
         << "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         << "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4).\n"
         << "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"

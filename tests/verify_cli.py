@@ -6,10 +6,12 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 
 
 def run(
@@ -99,6 +101,51 @@ def verify_batch(binary: Path, root: Path) -> None:
         raise AssertionError(f"unexpected stdin batch report: {records}")
 
 
+def pdf_streams(data: bytes) -> list[tuple[bytes, bytes]]:
+    """The dictionary and payload of every stream of a PDF, in file order."""
+    streams = []
+    at = 0
+    while (at := data.find(b" 0 obj\n", at)) != -1:
+        at += 7
+        start = data.find(b"\nstream\n", at)
+        if start == -1 or data.find(b"\nendobj\n", at) < start:
+            continue
+        dictionary = data[at:start]
+        length = int(re.search(rb"/Length (\d+)", dictionary).group(1))
+        streams.append((dictionary, data[start + 8:start + 8 + length]))
+        at = start + 8 + length
+    return streams
+
+
+def verify_compression(binary: Path, root: Path) -> None:
+    """--compress: what changes is FlateDecode and inflates (strict zlib: header and Adler-32)
+    to exactly the stream of the uncompressed export, and the file is smaller."""
+    source = root / "compress.md"
+    lines = "".join(f"Line {n} of the same words, Za\u017c\u00f3\u0142\u0107.\n\n" for n in range(150))
+    source.write_text("# Compressed\n\n" + lines, encoding="utf-8")
+    plain_pdf = root / "plain.pdf"
+    packed_pdf = root / "packed.pdf"
+    run(binary, "--export", str(source), str(plain_pdf), "--page-numbers")
+    run(binary, "--export", str(source), str(packed_pdf), "--page-numbers", "--compress")
+    plain = require_pdf(plain_pdf)
+    packed = require_pdf(packed_pdf, b"/Filter /FlateDecode")
+    plain_streams = pdf_streams(plain)
+    packed_streams = pdf_streams(packed)
+    if len(plain_streams) != len(packed_streams):
+        raise AssertionError("--compress changed the number of streams")
+    compressed = 0
+    for (plain_dict, plain_data), (packed_dict, packed_data) in zip(plain_streams, packed_streams):
+        if packed_dict == plain_dict:
+            if packed_data != plain_data:
+                raise AssertionError("--compress changed an uncompressed stream")
+            continue
+        if b"/Filter /FlateDecode" not in packed_dict or zlib.decompress(packed_data) != plain_data:
+            raise AssertionError(f"a compressed stream does not inflate to the original: {packed_dict!r}")
+        compressed += 1
+    if compressed < 2 or len(packed) * 2 > len(plain):
+        raise AssertionError(f"--compress: {compressed} streams compressed, {len(plain)} -> {len(packed)} bytes")
+
+
 def verify(binary: Path, keep: Path | None) -> None:
     binary = binary.resolve()
     if not binary.is_file():
@@ -135,6 +182,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         bad_size = run(binary, "--export", str(ascii_md), str(bad_size_pdf), "--page-size=b5", expect=2)
         if b"--page-size must be" not in bad_size.stdout or bad_size_pdf.exists():
             raise AssertionError("an invalid --page-size was not rejected")
+        verify_compression(binary, root)
         verify_batch(binary, root)
 
         if os.name == "nt":

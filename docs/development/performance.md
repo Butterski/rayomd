@@ -698,6 +698,81 @@ documents of 4.3 KB (tmpfs, 6 workers) convert in 0.66 s, 0.67 s with
 `--report` (0.5 µs a line); a rerun that skips them all takes 0.29 s, 14 µs per
 document including listing 20,000 files.
 
+## Opt-in compression, October 2026
+
+`--compress` (`PdfOptions::compress`) writes page content, the font program, the
+ToUnicode CMap and the CIDToGIDMap as FlateDecode streams, each only where the
+file gets smaller, counting the 21 bytes of `/Filter /FlateDecode `. Page
+numbers, images (already DCT or Flate), the XMP metadata and an embedded source
+stay as they are, so the reversible profile still reads its source. Page streams
+are compressed where they were rendered: none grows, so each moves to the front
+of the output buffer without overwriting one not yet read, and `BuildInto`
+assembles the file around them as before. Compressed font programs have a cache
+of their own beside the plain ones.
+
+The encoder is RayoMD's own, `src/core/flate.cpp` (11.6 KB of code at `-O2`), not
+zlib: the Windows build has no zlib, zlib's level 1 is slower on these streams
+and writes larger ones, and every `compress2` call sets up and clears about
+270 KB. The design came from measuring libdeflate, zlib-ng, ISA-L and zlib on
+streams RayoMD writes:
+
+- Greedy parsing over two hash tables: the two most recent positions per 8-byte
+  key, and the most recent per 4-byte key, which is what finds matches in text and
+  CMaps.
+- Every position inside a match of up to 16 bytes enters both tables, only the
+  first and last four of a longer one: within 0.5 % of inserting them all, a
+  fifth faster on pages and four times on the zero runs of CIDToGIDMaps.
+- Past 32 literals in a row the following bytes are taken along unsearched at a
+  growing step, as LZ4 does: font programs 14 % faster for 1.2 % more bytes,
+  pages within 1.5 %.
+- Blocks of at most 64 KB, each stored, fixed or dynamic by exact bit count;
+  Huffman lengths limited to 15 bits as libdeflate does, which keeps the code
+  complete at every step.
+- SSE2 Adler-32 as in libdeflate (+9 % on pages over the unrolled scalar loop),
+  and the bit writer copied into a local so it stays in registers.
+- The hash tables are kept per thread and never cleared: positions count from a
+  base that moves a window past each input, so no earlier entry is ever within
+  reach. That took a 160 KB clear off every 10 KB page.
+
+Output depends only on the input: the MinGW build under Wine (4 workers) wrote
+the same bytes as Linux for all nine test documents. The core tests inflate the
+encoder's output with zlib at block, window and length-limit edges (check 89) and
+check that every stream of a compressed PDF inflates to the uncompressed
+export's; `verify_cli.py` does the same with Python's zlib on both platforms.
+
+In-process on 2026-10-09 (Ryzen 5 PRO 4650GE, one CPU, best of nine; zlib 1.3,
+one `compress2` call per stream), on streams extracted from RayoMD's output of
+the corpus:
+
+| Streams | RayoMD | zlib -1 | zlib -6 | Size vs zlib -6 |
+| --- | ---: | ---: | ---: | ---: |
+| Pages, standard fonts (182, 1.97 MB) | 349 MB/s | 113 MB/s | 78 MB/s | 1.064 |
+| Pages, Unicode font (344, 4.58 MB) | 369 MB/s | 165 MB/s | 91 MB/s | 1.084 |
+| Font programs (46, 1.38 MB) | 151 MB/s | 73 MB/s | 48 MB/s | 1.049 |
+| ToUnicode CMaps (46, 68 KB) | 142 MB/s | 23 MB/s | 18 MB/s | 1.025 |
+| CIDToGIDMaps (46, 3.1 MB) | 2,700 MB/s | 988 MB/s | 330 MB/s | 1.006 |
+
+RayoMD's output is smaller than zlib -1's on every set. End to end (`--bench`,
+300 warm exports, best of three; the font program is compressed once and then
+comes from the cache, as in a warm server):
+
+| Document | Plain | `--compress` | Plain bytes | Compressed bytes |
+| --- | ---: | ---: | ---: | ---: |
+| `ascii_96kb.md` | 1.56 ms | 2.66 ms | 589,400 | 161,605 (0.27) |
+| `table_96kb.md` | 1.33 ms | 2.74 ms | 739,391 | 157,901 (0.21) |
+| `unicode_96kb.md` | 1.89 ms | 3.72 ms | 927,993 | 189,460 (0.20) |
+| `single_01.md` | 2.32 ms | 3.45 ms | 520,909 | 105,188 (0.20) |
+| `tester.md` (images) | 0.30 ms | 0.51 ms | 392,411 | 346,078 (0.88) |
+
+20,000 documents of 4.3 KB (`--batch`, 6 workers, tmpfs) take 0.67 s plain and
+0.92 s with `--compress`, and 609 MB of PDF become 201 MB. Peak memory grows by
+about 0.5 MB per worker (the tables and tokens).
+
+Without `--compress` all 2,883 corpus PDFs are byte-identical and the watch
+fixtures run 0.19 % fewer instructions; time moved -0.61 % (A/A -0.31 %), and
++0.49 % with pinned alignment (A/A -0.16 %): placement of 6 KB more engine code.
+The binary grew by 20 KB.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -769,12 +844,13 @@ faster (2026-10-09), and a document whose build lifts the heap past glibc's
 µs the bookmarks cost `baseline.md`.
 
 **CIDs in order of first use.** CIDs are Unicode code points, so the
-`CIDToGIDMap` stream runs up to the largest one a document shows, uncompressed:
-one arrow (U+2192) makes it 16 KB, CJK text up to 80 KB, now often more than the
-font subset itself. Numbering CIDs in the order characters first appear (a
-code-point table per renderer) would shrink the map to two bytes per character
-used, or remove it with `/CIDToGIDMap /Identity` when CIDs equal the subset's
-glyph ids, and keep `/W` short. The ToUnicode CMap already maps CIDs back.
+`CIDToGIDMap` stream runs up to the largest one a document shows, uncompressed
+without `--compress`: one arrow (U+2192) makes it 16 KB, CJK text up to 80 KB,
+now often more than the font subset itself. Numbering CIDs in the order
+characters first appear (a code-point table per renderer) would shrink the map to
+two bytes per character used, or remove it with `/CIDToGIDMap /Identity` when
+CIDs equal the subset's glyph ids, and keep `/W` short. The ToUnicode CMap
+already maps CIDs back.
 
 **The `name` table of the font subset.** At 15.6 KB it is now the largest part of
 a DejaVu Sans subset (33 KB). It carries the font's copyright and license
@@ -790,6 +866,16 @@ fields), would avoid both. Each outline entry also formats up to seven object
 numbers with `std::to_chars`, about 50 instructions each; the entries' own
 numbers are consecutive and could be formatted once and copied, some 250
 instructions per heading.
+
+**Branchless candidate choice in the DEFLATE encoder.** Font programs are its
+slowest input (151 MB/s). Callgrind's branch model counts about 0.5 mispredicted
+branches per byte there, 43 % of them on whether the newest long-table
+candidate and the short-table candidate are within the window, which is close to
+random while the tables fill. Comparing all three candidates' first eight bytes
+without branches (an out-of-window candidate made to fail) and taking the
+longest with conditional moves would leave one unpredictable branch per
+position, match or literal. Single large exports could also compress their
+pages on several threads; batches already use every core.
 
 ## Keeping the release light
 

@@ -76,6 +76,9 @@ struct PdfOptions {
     bool embedSource = false;
     // "N / M" centred in the bottom margin of every page.
     bool pageNumbers = false;
+    // FlateDecode page content, font program and CMaps where that makes the file smaller:
+    // text-heavy PDFs two to five times smaller, at the cost of compressing them.
+    bool compress = false;
 };
 
 // Legacy error reporting is retained for the bool-returning compatibility
