@@ -236,6 +236,15 @@ Important image/link details:
   files, `ParseTheme`), and non-public text helpers. `export_options.cpp` is built at
   `-Os`: it runs once per run.
 
+- `src/core/png_filter.cpp`
+  PNG row filters: undoing them when a PNG is decoded, choosing and applying them when
+  its pixels are re-encoded for a PDF. SSE2 on x86-64, with the scalar functions kept
+  as the reference and the fallback; core check 99 compares both with the textbook
+  filters.
+
+- `src/common/file_io.cpp`
+  Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows.
+
 - `src/core/flate.h` and `src/core/flate.cpp`
   The DEFLATE/zlib encoder behind `--compress`: greedy matching over two hash
   tables, per-block stored/fixed/dynamic choice by exact bit count, SSE2 Adler-32.
@@ -349,7 +358,8 @@ cmake --build build/linux --config Release
 
 The default Linux build intentionally avoids a libcurl runtime dependency. Use
 `-DRAYOMD_USE_CURL=ON` only when producing a Linux build that should fetch
-HTTP/HTTPS images and can target a known distro/libcurl baseline.
+HTTP/HTTPS images and can target a known distro/libcurl baseline. Release builds link
+libstdc++ and libgcc statically, so the binary needs only libc, libm and libz.
 
 Cross-platform CLI verification (after building):
 
@@ -414,6 +424,13 @@ GitHub CI entry points:
 ## Performance Guardrails
 
 - Keep the default native path dependency-light.
+- Linux release builds link the C++ runtime statically with `--gc-sections`: a process
+  starts 0.6 ms sooner and warm builds run 5 % faster than with `libstdc++.so`. Keep
+  iostreams (`<iostream>`, `<fstream>`, `<sstream>`) out of the CLI and the core: they
+  pull about 460 KB of locale and stream code into that build. Use `RayoMd::File` and
+  C stdio.
+- Fonts are mapped read-only (`FileBytes`); read font data in place instead of copying
+  the file.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document
   libraries to the native package.
 - Reuse output buffers in batch/server paths where practical.

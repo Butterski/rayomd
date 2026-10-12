@@ -1194,6 +1194,52 @@ The rest grows with the structure itself: an object for every element, a sequenc
 of content, the ParentTree's reference for each, and the links' text in their annotations (see
 Measured opportunities).
 
+## Cold exports, October 2026
+
+A one-shot `rayomd --export` spends most of its time outside the document: in 3.2.0 a short
+ASCII file took 1.63 ms, of which 1.47 ms was the process starting, and a 1024x1024 RGBA PNG
+took 87 ms, 99.7 % of it in re-encoding the image. Measured on 2026-10-12 with g++ 13.3 on
+Linux (Docker, files on tmpfs), fresh processes pinned to one CPU, medians of 40 runs, and
+whole-process instructions by callgrind; 3.2.0 (`7056be1`) against the last change below:
+
+| Export | 3.2.0 | Now | Change | Instructions |
+| --- | ---: | ---: | ---: | ---: |
+| one 1024x1024 RGBA PNG | 87.25 ms | 38.94 ms | -55.4 % | -71.1 % |
+| `tester.md` | 89.15 ms | 39.84 ms | -55.3 % | -70.8 % |
+| short ASCII document | 1.63 ms | 0.98 ms | -39.9 % | -86.7 % |
+| short Unicode document | 2.53 ms | 1.36 ms | -46.4 % | -60.1 % |
+| `single_01.md` | 6.22 ms | 4.87 ms | -21.7 % | -9.6 % |
+| short Chinese document, WenQuanYi fallback | 7.60 ms | 2.82 ms | -62.9 % | -50.7 % |
+| `single_01.md`, WenQuanYi installed | 13.12 ms | 7.91 ms | -39.7 % | -14.4 % |
+
+Warm `--bench` builds are 5.17 % faster (geometric mean of the watch fixtures, pinned, nine
+rounds; A/A -0.32 %), all from the static runtime. Every PDF is byte-identical: 334 corpus
+PDFs (the repository's Markdown and the watch fixtures in three styles and with `--compress`,
+`--pdfa`, `--pdfua`, `--toc`, `--page-numbers` and `--embed-source`, and 629 generated PNGs
+in every colour type, bit depth, input filter, interlacing and row-width remainder). The
+Linux executable grows from 1,034,800 to 1,215,464 bytes, the Windows one by 7,168 bytes.
+
+One change at a time, each against the one before:
+
+| Change | Commit | Effect |
+| --- | --- | --- |
+| PNG filters chosen in one pass | `177f5e6` | image 87.4 → 61.9 ms. The five filters were scored in five passes with a switch at every byte; one branch-free pass adds up all five. |
+| Pixels split through pointers | `5b65f09` | image -16 %: `push_back` per byte was not inlined. `ReadU32` is `RAYOMD_HOT_INLINE` since: the edit made GCC stop inlining it into `ParseLoca` (+56,000 instructions per Unicode export). |
+| One switch per row when unfiltering | `db8877b` | image -3 %. |
+| SSE2 filter scoring and filtering | `ca2094f` | image -18 %: `min(r, 256 - r)` is `pminub` of r and -r, summed by `psadbw`; floor((a + b) / 2) is `pavgb` less the odd bit; Paeth on 16-bit lanes. |
+| SSE2 unfiltering | `1408697` | image -5 %: Up sixteen bytes at a time, Sub, Average and Paeth one 3- or 4-byte pixel at a time. |
+| Fonts mapped, not read | `c1b5a58` | short Unicode -18 %, Chinese fallback -54 %: a fallback candidate was read whole (5 MB for WenQuanYi) to learn its coverage. |
+| C stdio instead of iostreams | `af966d7` | short ASCII -2.6 % instructions; no stream or locale symbol left to link. |
+| Static libstdc++ and libgcc, `--gc-sections` | `7265c5c` | short ASCII -41 %, warm -5.2 %: 92 % of a short export's instructions were the dynamic linker relocating `libstdc++.so`. |
+
+Static linking costs 181 KB here because nothing uses iostreams any more: a 40-line program
+using `std::filesystem` and one `std::cerr` links 769 KB of libstdc++ with `--gc-sections`
+and 306 KB without the `std::cerr`; without `--gc-sections` `std::filesystem` alone pulls in
+1.4 MB of locale code. The PNG code was checked against its scalar reference by core check 99
+(rows of 1 to 4 bytes per pixel, every width to 80, ties and saturation), by a build without
+SSE2, and with 164 hostile PNGs (bad filters, short and long rows, huge sizes, missing or
+short palettes and tRNS, random byte flips) under AddressSanitizer and UBSan.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1353,6 +1399,20 @@ artifact and then its text in its TD: two marked-content sequences a cell, and t
 table fixture runs 2.1 times as long as with `--pdfa`. Painting a row's borders first, in one
 artifact, then its cells' text would halve the sequences; it changes the order of RenderTable's
 loop, which untagged documents must not pay for.
+
+**zlib in image re-encoding.** After the PNG work above, deflate, inflate and `adler32` are
+63 % of a 1024x1024 RGBA image's export (2026-10-12), the filter choice 11.7 %, unfiltering
+5.4 % and splitting colour from alpha 5.2 %. A faster compressor (libdeflate, zlib-ng's
+level 1) writes different streams, so the PDF bytes change; a faster decompressor would not,
+but adds a dependency.
+
+**CID hex text.** `WriteHexText` is 9 % of a cold `single_01.md` export: per character a
+glyph lookup, a bitset insertion and four hex digits. SIMD could only take the hex digits; the
+lookup and the bitset are scattered per character, on the hot path at the inlining limit.
+
+**The width cache of a font.** `TtfFont` carries 65,536 atomic widths, 128 KB zeroed for
+each font loaded, a fallback candidate too; a lazily allocated or smaller cache would save
+the zeroing and 32 page faults per font.
 
 ## Keeping the release light
 
