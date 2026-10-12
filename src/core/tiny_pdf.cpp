@@ -2367,16 +2367,36 @@ static bool BuildFastPngImage(const PngInfo& png, PdfImage& image) {
 }
 
 #ifdef RAYOMD_USE_ZLIB
+// zlib streams are taken apart here: zlib inflates and deflates the raw data, and RayoMD reads or
+// writes the 2-byte header and the Adler-32 trailer. zlib computes that checksum a byte at a time
+// (11 % of an RGBA image's export), RayoMd::Flate::Adler32 sixteen at a time.
+static uint32_t ReadBigEndian32(const uint8_t* p) {
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+// What uncompress() accepts, into exactly `filtered.size()` bytes: a header without a preset
+// dictionary and with a window up to 32 KB, a stream that ends there, and a matching checksum.
 static bool InflatePngRows(const PngInfo& png, size_t rowBytes, std::vector<uint8_t>& filtered) {
     if (png.height == 0 || rowBytes == 0) return false;
     size_t expected = (rowBytes + 1) * (size_t)png.height;
     if (expected > kMaxDecodedImageBytes) return false;
+    const uint8_t* in = reinterpret_cast<const uint8_t*>(png.idat.data());
+    const size_t size = png.idat.size();
+    if (size < 2 || (in[0] & 15) != 8 || (in[0] >> 4) > 7 || ((in[0] << 8) | in[1]) % 31 != 0 || (in[1] & 0x20)) {
+        return false;
+    }
     filtered.assign(expected, 0);
-    uLongf destLen = (uLongf)filtered.size();
-    int result = uncompress(filtered.data(), &destLen,
-        reinterpret_cast<const Bytef*>(png.idat.data()), (uLong)png.idat.size());
-    if (result != Z_OK || destLen != filtered.size()) return false;
-    return true;
+    z_stream stream{};
+    if (inflateInit2(&stream, -MAX_WBITS) != Z_OK) return false;
+    stream.next_in = const_cast<Bytef*>(in + 2);
+    stream.avail_in = (uInt)(size - 2);
+    stream.next_out = filtered.data();
+    stream.avail_out = (uInt)expected;
+    const int result = inflate(&stream, Z_FINISH);
+    const bool ended = result == Z_STREAM_END && stream.total_out == expected && stream.avail_in >= 4 &&
+        ReadBigEndian32(stream.next_in) == RayoMd::Flate::Adler32(filtered.data(), expected);
+    inflateEnd(&stream);
+    return ended;
 }
 
 // Undoes the PNG filters row by row; the first row's `up` is a row of zeros.
@@ -2417,15 +2437,32 @@ static bool BuildPngPredictorRows(const std::string& raw, size_t width, size_t h
     return true;
 }
 
+// compress2() at Z_BEST_SPEED, byte for byte: its header is 78 01 (32 KB window, the fastest
+// level), the same deflate state writes the same blocks raw, and the trailer is the checksum.
 static bool CompressFlate(const std::string& input, std::string& output) {
     if (input.empty()) return false;
-    uLong sourceLen = (uLong)input.size();
-    uLongf destLen = compressBound(sourceLen);
-    output.assign((size_t)destLen, '\0');
-    int result = compress2(reinterpret_cast<Bytef*>(&output[0]), &destLen,
-        reinterpret_cast<const Bytef*>(input.data()), sourceLen, Z_BEST_SPEED);
-    if (result != Z_OK) return false;
-    output.resize((size_t)destLen);
+    z_stream stream{};
+    if (deflateInit2(&stream, Z_BEST_SPEED, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) return false;
+    const size_t bound = (size_t)deflateBound(&stream, (uLong)input.size());
+    output.assign(bound + 6, '\0');
+    uint8_t* out = reinterpret_cast<uint8_t*>(&output[0]);
+    out[0] = 0x78;
+    out[1] = 0x01;
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
+    stream.avail_in = (uInt)input.size();
+    stream.next_out = out + 2;
+    stream.avail_out = (uInt)bound;
+    const int result = deflate(&stream, Z_FINISH);
+    const size_t written = (size_t)stream.total_out;
+    deflateEnd(&stream);
+    if (result != Z_STREAM_END) return false;
+    const uint32_t adler = RayoMd::Flate::Adler32(reinterpret_cast<const uint8_t*>(input.data()), input.size());
+    uint8_t* tail = out + 2 + written;
+    tail[0] = (uint8_t)(adler >> 24);
+    tail[1] = (uint8_t)(adler >> 16);
+    tail[2] = (uint8_t)(adler >> 8);
+    tail[3] = (uint8_t)adler;
+    output.resize(2 + written + 4);
     return true;
 }
 

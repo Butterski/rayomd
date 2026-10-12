@@ -399,6 +399,8 @@ void EmitBlock(BitWriter& writer, const uint8_t* data, size_t size, const uint32
     EmitTokens(writer, tokens, count, dynamic);
 }
 
+} // namespace
+
 uint32_t Adler32(const uint8_t* data, size_t size) {
     uint32_t a = 1;
     uint32_t b = 0;
@@ -461,8 +463,6 @@ uint32_t Adler32(const uint8_t* data, size_t size) {
     }
     return b << 16 | a;
 }
-
-} // namespace
 
 size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
     const uint8_t* const in = reinterpret_cast<const uint8_t*>(input.data());
