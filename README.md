@@ -1,42 +1,162 @@
+<a id="readme-top"></a>
+
+<div align="center">
+
+<img src="docs/assets/branding/rayomd.png" alt="RayoMD mascot" width="170">
+
 # RayoMD
 
-<p align="center">
-  <a href="https://github.com/Butterski/rayomd/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Butterski/rayomd/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/Butterski/rayomd/actions/workflows/hygiene.yml"><img alt="Repository Hygiene" src="https://github.com/Butterski/rayomd/actions/workflows/hygiene.yml/badge.svg"></a>
-  <a href="https://github.com/Butterski/rayomd/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/rayomd/actions/workflows/release.yml/badge.svg"></a>
-  <a href="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml/badge.svg"></a>
-  <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 4.0.0 MathTex" src="https://img.shields.io/badge/version-4.0.0%20MathTex-informational">
-  <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
-  <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
-</p>
+**Markdown to PDF in milliseconds, from a single small executable.**<br>
+No browser. No LaTeX. No Pandoc. No runtime.
 
-<p align="center">
-  <img src="docs/assets/branding/rayomd.png" alt="RayoMD mascot" width="160">
-</p>
+<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.0.0 MathTex" src="https://img.shields.io/badge/version-4.0.0%20MathTex-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Butterski/rayomd/total?style=for-the-badge&color=2ea44f"></a>
+<a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 
-<p align="center">
-  <strong>Markdown to PDF in milliseconds, from a single small executable.</strong><br>
-  <a href="https://github.com/Butterski/rayomd/releases">Download</a>
-  ·
-  <a href="https://github.com/Butterski/rayomd/wiki">Documentation</a>
-</p>
+<a href="https://github.com/Butterski/rayomd/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Butterski/rayomd/actions/workflows/ci.yml/badge.svg"></a>
+<a href="https://github.com/Butterski/rayomd/actions/workflows/hygiene.yml"><img alt="Repository Hygiene" src="https://github.com/Butterski/rayomd/actions/workflows/hygiene.yml/badge.svg"></a>
+<a href="https://github.com/Butterski/rayomd/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/rayomd/actions/workflows/release.yml/badge.svg"></a>
+<a href="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml/badge.svg"></a>
+<img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
+<img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
+<a href="https://github.com/Butterski/rayomd/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Butterski/rayomd?style=social"></a>
 
-RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. It starts no
-browser and needs no Pandoc, LaTeX or runtime: Windows gets a compact Dear ImGui app with
-command-line modes, Linux a small CLI, and both share one exporter you can also embed through
-the [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
+[**Download**](https://github.com/Butterski/rayomd/releases/latest) ·
+[Quick start](#quick-start) ·
+[Features](#features) ·
+[Benchmarks](#performance) ·
+[Documentation](https://github.com/Butterski/rayomd/wiki)
 
-<p align="center">
-  <img src="docs/assets/demo/ui.png" alt="RayoMD Windows app screenshot" width="780"><br>
-  <a href="docs/assets/demo/show.gif">Demo (GIF)</a> · <a href="docs/assets/demo/show.mp4">Demo (MP4)</a>
-</p>
+<img src="docs/assets/demo/ui.png" alt="RayoMD Windows app screenshot" width="780">
+
+<sub><a href="docs/assets/demo/show.gif">Watch the demo (GIF)</a> · <a href="docs/assets/demo/show.mp4">MP4</a></sub>
+
+</div>
+
+> [!TIP]
+> **New in 4.0:** one-shot exports run **34 to 69 % faster** than 3.2.0, warm exports 16 %,
+> with byte-identical PDFs, and Linux gets a **fully static edition** with no runtime
+> dependency at all. See [the numbers](#performance).
+
+RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. Windows gets a
+compact Dear ImGui app with command-line modes, Linux a small CLI, and both share one exporter
+you can also embed through the [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
+
+## Highlights
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### Fast
+A short note in about **1 ms**, start to exit; a 1024×1024 PNG in 27 ms. Batches run on up
+to 64 threads.
+
+</td>
+<td width="33%" valign="top">
+
+### Small
+A **604 KB** Linux download and a 1.4 MB Windows app. No browser engine, TeX stack or
+runtime to install.
+
+</td>
+<td width="33%" valign="top">
+
+### Math
+A TeX subset **typeset natively**: fractions, roots, sums, matrices. No LaTeX, no embedded
+math fonts.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### Code and images
+Code coloured as on GitHub in **29 languages**; PNG, JPEG, and SVG drawn as vectors.
+
+</td>
+<td valign="top">
+
+### Books and themes
+One PDF from a `SUMMARY.md`, tables of contents, company fonts, colours, headers and a
+cover.
+
+</td>
+<td valign="top">
+
+### Standards
+Tagged **PDF/UA-1** for screen readers and **PDF/A-3b** for archives, validated with
+veraPDF.
+
+</td>
+</tr>
+</table>
+
+## Quick start
+
+<details open>
+<summary><b>Linux</b>: download and run</summary>
+
+```sh
+curl -LO https://github.com/Butterski/rayomd/releases/download/v4.0.0/rayomd-4.0.0-linux-x64-static.tar.gz
+tar -xzf rayomd-4.0.0-linux-x64-static.tar.gz
+./rayomd-4.0.0-linux-x64-static/rayomd --export input.md output.pdf
+```
+
+</details>
+
+<details>
+<summary><b>Windows</b>: the app and the CLI in one <code>rayomd.exe</code></summary>
+
+Download `rayomd-4.0.0-windows-x64.zip` from
+[Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
+without arguments opens the app: edit or drop a file, pick a style and margins, and press
+`Ctrl+E` to export. With arguments it is the same CLI as on Linux:
+
+```sh
+rayomd.exe --export input.md output.pdf
+```
+
+</details>
+
+<details>
+<summary><b>Build from source</b></summary>
+
+A C++17 compiler and CMake; on Linux also `zlib1g-dev` and a TrueType font such as
+`fonts-dejavu-core`. On Windows add `-G "MinGW Makefiles"`.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+./build/rayomd --doctor
+./build/rayomd --export input.md output.pdf
+```
+
+</details>
+
+| Package | For |
+|---|---|
+| `rayomd-<version>-windows-x64.zip` | Windows: the app and every CLI mode in one `rayomd.exe` |
+| `rayomd-<version>-linux-x64.tar.gz` | Linux: needs only glibc and zlib |
+| `rayomd-<version>-linux-x64-static.tar.gz` | Linux with no dependency at all, the fastest start |
+| `rayomd-<version>-linux-x64-curl.tar.gz` | Linux with HTTP/HTTPS images through libcurl |
+
+Every feature below works the same from both command lines and the
+[C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
 
 ## Performance
 
 4.0.0 against 3.2.0, measured on 2026-10-12: Linux x86-64, g++ 13.3, files on tmpfs, one
 pinned CPU core. A one-shot export is a fresh `rayomd --export` process, start to exit (median
-of 60 runs):
+of 60 runs).
+
+```mermaid
+xychart-beta
+    title "How much faster 4.0.0 exports than 3.2.0, in %"
+    x-axis ["ASCII note", "Polish note", "Formulas", "Chinese, fallback font", "1024x1024 PNG"]
+    y-axis "Faster by (%)" 0 --> 80
+    bar [38, 48, 34, 65, 69]
+```
 
 | Document | 3.2.0 | 4.0.0 | Faster by |
 |---|---:|---:|---:|
@@ -67,9 +187,17 @@ comparisons with other tools, and their caveats.
 RayoMD 4.0 moves the code where the time goes into lower-level, faster forms, one measured
 change at a time, and the 4.x releases continue it: plain C-style loops over raw buffers where
 library containers allocated and copied, SSE2 SIMD instructions where one operation can work on
-sixteen bytes, and a statically linked runtime where process start dominated. Each change has
-to keep every PDF byte-identical and show its gain in a pinned A/B; the ones that do not are
-measured and left out.
+sixteen bytes, and a statically linked runtime where process start dominated.
+
+```mermaid
+flowchart LR
+    A["Profile a real export"] --> B["Rewrite the hot spot:<br/>C-style loop or SSE2"]
+    B --> C{"Same PDF bytes<br/>on 3,353 PDFs?"}
+    C -- no --> X["Left out,<br/>recorded with its numbers"]
+    C -- yes --> D{"Faster in a<br/>pinned A/B?"}
+    D -- no --> X
+    D -- yes --> E["Committed and recorded<br/>in performance.md"]
+```
 
 - **Images.** PNGs are decoded and re-encoded one row at a time: no whole-image buffers, filter
   scoring and unfiltering in SSE2, zlib checksums with RayoMD's SSE2 Adler-32.
@@ -81,30 +209,7 @@ measured and left out.
 What is left in the profiles, and what was tried and rejected, is listed under *Measured
 opportunities* in [`performance.md`](docs/development/performance.md).
 
-## Quick start
-
-Download a package from [Releases](https://github.com/Butterski/rayomd/releases):
-
-| Package | For |
-|---|---|
-| `rayomd-<version>-windows-x64.zip` | Windows: the app and every CLI mode in one `rayomd.exe` |
-| `rayomd-<version>-linux-x64.tar.gz` | Linux: needs only glibc and zlib |
-| `rayomd-<version>-linux-x64-static.tar.gz` | Linux with no dependency at all, the fastest start |
-| `rayomd-<version>-linux-x64-curl.tar.gz` | Linux with HTTP/HTTPS images through libcurl |
-
-Or build from source (a C++17 compiler and CMake; on Linux also `zlib1g-dev` and a TrueType
-font such as `fonts-dejavu-core`):
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-./build/rayomd --doctor
-./build/rayomd --export input.md output.pdf
-```
-
-On Windows add `-G "MinGW Makefiles"`; `rayomd.exe` without arguments opens the app, with
-editing, drag-and-drop, style and margin choice, and `Ctrl+E` to export. Every feature below
-works the same from both command lines and the C++ API.
+<p align="right"><a href="#readme-top">back to top ↑</a></p>
 
 ## Features
 
@@ -228,6 +333,9 @@ colours, a header and footer with placeholders (`{title}`, `{author}`, `{subject
 `{page}`, `{pages}`, `{logo}`) and a logo, and a cover page. Paths are relative to the theme
 file; see [Themes](https://github.com/Butterski/rayomd/wiki/Themes).
 
+<details>
+<summary>Example theme file</summary>
+
 ```ini
 font = fonts/AcmeSans.ttf
 heading-color = #0B3D91
@@ -240,6 +348,8 @@ footer-right = {date}
 logo = acme-logo.svg
 cover = yes
 ```
+
+</details>
 
 ### Books
 
@@ -286,9 +396,11 @@ rayomd --export policy.md policy.pdf --pdfa --pdfua --compress
 ### Reversible PDFs
 
 `--embed-source` attaches the exact Markdown to the PDF and `--recover-source` gets it back byte
-for byte; `--inspect-source` describes it. It is off by default: the file then carries the whole
-source, including anything not shown on the pages. See
-[Reversible PDFs](https://github.com/Butterski/rayomd/wiki/Reversible-PDFs).
+for byte; `--inspect-source` describes it.
+
+> [!IMPORTANT]
+> Embedding is off by default: the file then carries the whole source, including anything not
+> shown on the pages. See [Reversible PDFs](https://github.com/Butterski/rayomd/wiki/Reversible-PDFs).
 
 ```sh
 rayomd --export notes.md notes.pdf --embed-source
@@ -307,17 +419,21 @@ rayomd --doctor
 rayomd --bench report.md bench-out 200 modern normal
 ```
 
+<p align="right"><a href="#readme-top">back to top ↑</a></p>
+
 ## Boundaries
 
-RayoMD's renderer is a fast Markdown subset, not a Pandoc clone. It does not promise full
-CommonMark/Pandoc compatibility, complete LaTeX math (packages, macros, automatic numbering),
-highlighting for every language, citations, filters, templates, right-to-left scripts (Arabic
-and Hebrew are drawn left to right, unshaped), complete SVG (radial gradients and patterns are
-approximated; markers, filters and masks are not drawn), or HTML/CSS layout. Under `--pdfua` a
-theme's cover page is tagged as decoration and an inline formula is text showing its TeX source.
-Missing or unsupported images and malformed math degrade to readable fallbacks instead of
-failing the export. When you need those features, use Pandoc, LaTeX or a browser renderer; the
-complete matrix is in
+> [!NOTE]
+> RayoMD's renderer is a fast Markdown subset, not a Pandoc clone. When you need the things
+> below, use Pandoc, LaTeX or a browser renderer.
+
+It does not promise full CommonMark/Pandoc compatibility, complete LaTeX math (packages,
+macros, automatic numbering), highlighting for every language, citations, filters, templates,
+right-to-left scripts (Arabic and Hebrew are drawn left to right, unshaped), complete SVG
+(radial gradients and patterns are approximated; markers, filters and masks are not drawn), or
+HTML/CSS layout. Under `--pdfua` a theme's cover page is tagged as decoration and an inline
+formula is text showing its TeX source. Missing or unsupported images and malformed math degrade
+to readable fallbacks instead of failing the export. The complete matrix is in
 [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support).
 
 ## Documentation
@@ -350,8 +466,20 @@ code comes with before/after measurements and byte-identical output unless chang
 is its purpose; benchmark claims stay dated and scoped; builds, PDFs and corpora stay out of
 the repository. Pandoc is never bundled into the lightweight packages.
 
+<a href="https://github.com/Butterski/rayomd/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=Butterski/rayomd" alt="Contributors">
+</a>
+
+## Star history
+
+<a href="https://star-history.com/#Butterski/rayomd&Date">
+  <img src="https://api.star-history.com/svg?repos=butterski%2Frayomd&type=Date" alt="Star history chart" width="600">
+</a>
+
 ## License
 
 RayoMD is released under the Apache License 2.0; see [`LICENSE`](LICENSE). [`NOTICE`](NOTICE)
 lists the third-party code and the runtime libraries linked into the release binaries. Dear
 ImGui keeps its own license in [`third_party/imgui/LICENSE.txt`](third_party/imgui/LICENSE.txt).
+
+<p align="right"><a href="#readme-top">back to top ↑</a></p>
