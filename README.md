@@ -331,6 +331,8 @@ Default releases remain dependency-light; see [Packaging and Releases](https://g
 - `rayomd-<version>-windows-x64.zip` — Windows GUI and CLI executable.
 - `rayomd-<version>-linux-x64.tar.gz` — portable Linux CLI without libcurl.
 - `rayomd-<version>-linux-x64-curl.tar.gz` — Linux CLI with URL-image support.
+- `rayomd-<version>-linux-x64-static.tar.gz` — fully static Linux CLI: no runtime
+  dependency, a faster start, a larger file.
 
 Do not bundle Pandoc into the lightweight package. It is an optional external
 compatibility path with separate licensing and deployment considerations.

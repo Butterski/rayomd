@@ -42,6 +42,15 @@ jobs:
         run: |
           cmake -S . -B build/linux-curl -DCMAKE_BUILD_TYPE=Release -DRAYOMD_USE_CURL=ON
           cmake --build build/linux-curl --config Release
+      - name: Build and verify fully static edition
+        run: |
+          cmake -S . -B build/linux-static -DCMAKE_BUILD_TYPE=Release -DRAYOMD_STATIC=ON
+          cmake --build build/linux-static --config Release
+          if ldd build/linux-static/rayomd >/dev/null 2>&1; then
+            echo "The static edition must not be a dynamic executable." >&2
+            exit 1
+          fi
+          python3 -B tests/verify_cli.py --binary build/linux-static/rayomd
 
   windows:
     name: Windows ImGui app

@@ -85,19 +85,35 @@ jobs:
           ./build/linux-curl/rayomd --bench docs/benchmark_smoke.md benchmark-output/linux-curl-release 50 modern normal
           test -s benchmark-output/linux-curl-release/sample.pdf
 
+      - name: Build fully static Linux CLI
+        run: |
+          cmake -S . -B build/linux-static -DCMAKE_BUILD_TYPE=Release -DRAYOMD_STATIC=ON
+          cmake --build build/linux-static --config Release
+          ./build/linux-static/rayomd --version
+          ./build/linux-static/rayomd --bench docs/benchmark_smoke.md benchmark-output/linux-static-release 50 modern normal
+          test -s benchmark-output/linux-static-release/sample.pdf
+          if ldd build/linux-static/rayomd >/dev/null 2>&1; then
+            echo "The static Linux CLI must not be a dynamic executable." >&2
+            exit 1
+          fi
+
       - name: Package Linux assets
         run: |
           default_name="rayomd-${RAYOMD_VERSION}-linux-x64"
           curl_name="rayomd-${RAYOMD_VERSION}-linux-x64-curl"
+          static_name="rayomd-${RAYOMD_VERSION}-linux-x64-static"
 
-          mkdir -p "dist/${default_name}" "dist/${curl_name}"
+          mkdir -p "dist/${default_name}" "dist/${curl_name}" "dist/${static_name}"
           cp build/linux/rayomd "dist/${default_name}/rayomd"
           cp build/linux-curl/rayomd "dist/${curl_name}/rayomd"
+          cp build/linux-static/rayomd "dist/${static_name}/rayomd"
           cp README.md LICENSE NOTICE VERSION "dist/${default_name}/"
           cp README.md LICENSE NOTICE VERSION "dist/${curl_name}/"
+          cp README.md LICENSE NOTICE VERSION "dist/${static_name}/"
 
           tar -czf "${default_name}.tar.gz" -C dist "${default_name}"
           tar -czf "${curl_name}.tar.gz" -C dist "${curl_name}"
+          tar -czf "${static_name}.tar.gz" -C dist "${static_name}"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
@@ -106,6 +122,7 @@ jobs:
           path: |
             rayomd-${{ needs.version.outputs.version }}-linux-x64.tar.gz
             rayomd-${{ needs.version.outputs.version }}-linux-x64-curl.tar.gz
+            rayomd-${{ needs.version.outputs.version }}-linux-x64-static.tar.gz
           if-no-files-found: error
 
   windows:
@@ -179,6 +196,7 @@ jobs:
           files=(
             "rayomd-linux-release/rayomd-${RAYOMD_VERSION}-linux-x64.tar.gz"
             "rayomd-linux-release/rayomd-${RAYOMD_VERSION}-linux-x64-curl.tar.gz"
+            "rayomd-linux-release/rayomd-${RAYOMD_VERSION}-linux-x64-static.tar.gz"
             "rayomd-windows-release/rayomd-${RAYOMD_VERSION}-windows-x64.zip"
           )
 

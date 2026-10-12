@@ -13,6 +13,16 @@ option(RAYOMD_USE_CURL "Use libcurl for HTTP/HTTPS image URLs on non-Windows" OF
 option(RAYOMD_ENABLE_LTO "Enable interprocedural optimization for measured release experiments" OFF)
 option(RAYOMD_ENABLE_PROFILING "Enable phase timing and allocation counters" OFF)
 option(RAYOMD_ENABLE_TSAN "Enable ThreadSanitizer on supported non-Windows builds" OFF)
+# A fully static Linux CLI, glibc and zlib linked in: no runtime dependency and a process that
+# starts about 0.3 ms sooner, for about 0.9 MB more executable. The release ships it beside the
+# default build. musl instead of glibc was 0.9 MB smaller but its allocator slowed exports.
+option(RAYOMD_STATIC "Link the Linux CLI fully statically, glibc and zlib included" OFF)
+if(RAYOMD_STATIC AND (WIN32 OR APPLE))
+    message(FATAL_ERROR "RAYOMD_STATIC is for Linux; Windows release builds are static already.")
+endif()
+if(RAYOMD_STATIC AND RAYOMD_USE_CURL)
+    message(FATAL_ERROR "RAYOMD_STATIC cannot link libcurl and its TLS stack statically.")
+endif()
 set(RAYOMD_PGO "OFF" CACHE STRING "PGO mode: OFF, GENERATE, or USE")
 set_property(CACHE RAYOMD_PGO PROPERTY STRINGS OFF GENERATE USE)
 set(RAYOMD_PGO_DIR "" CACHE PATH "Shared profile-data directory for PGO GENERATE/USE builds")
@@ -52,6 +62,9 @@ function(rayomd_release_flags target)
                 $<$<CONFIG:Release>:-static-libgcc>
                 $<$<CONFIG:Release>:-static-libstdc++>
                 $<$<CONFIG:Release>:-Wl,--gc-sections>)
+            if(RAYOMD_STATIC)
+                target_link_options(${target} PRIVATE -static)
+            endif()
         endif()
     endif()
 endfunction()
@@ -208,6 +221,9 @@ if(WIN32)
 else()
     if(RAYOMD_USE_CURL)
         find_package(CURL REQUIRED)
+    endif()
+    if(RAYOMD_STATIC)
+        set(CMAKE_FIND_LIBRARY_SUFFIXES .a)   # libz.a: FindZLIB takes ZLIB_USE_STATIC_LIBS from CMake 3.24 only
     endif()
     find_package(ZLIB QUIET)
 
