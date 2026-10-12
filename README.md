@@ -343,6 +343,10 @@ $$
 
 - PNG and JPEG, sized to the page; a missing or unreadable image shows its alt text, and an
   image inside a paragraph reads `image: alt`.
+- A PNG with transparency is re-encoded once: from 32,768 pixels on it is kept in the user
+  cache directory (`~/.cache/rayomd/images`, on Windows `%LOCALAPPDATA%\RayoMD\cache\images`;
+  at most about 256 MB), so later exports of the same image skip the work. The PDF is the same
+  either way; `--no-image-cache` keeps nothing.
 - SVG drawn as vectors by RayoMD's own converter: paths, shapes, transforms, clipping, linear
   gradients, opacity, text in the document's font, embedded PNG/JPEG, and Illustrator style
   sheets. Charts from matplotlib, Vega-Lite, Plotly and Graphviz draw close to a browser; an SVG

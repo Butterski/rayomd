@@ -108,6 +108,11 @@ struct PdfOptions {
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
     bool embedSource = false;
+    // A directory (UTF-8) where re-encoded PNGs with transparency are kept between runs, each
+    // named by the SHA-256 of the PNG: a later export of the same image, in any process, reads it
+    // instead of decoding the PNG again. The PDF bytes are the same either way. At most about
+    // 256 MB, the least recently used images removed first. Empty, the default: nothing is kept.
+    std::string imageCacheDirectory;
     // "N / M" centred in the bottom margin of every page.
     bool pageNumbers = false;
     // FlateDecode page content, font program and CMaps where that makes the file smaller:

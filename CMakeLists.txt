@@ -133,6 +133,7 @@ endfunction()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
         src/core/rayomd_pdf_source.cpp
+        src/core/image_cache.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp
         src/core/export_options.cpp
@@ -144,8 +145,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/svg.cpp
         src/core/tagged.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
-    # The opt-in DEFLATE encoder: -O2 is within 1 % of -O3 on RayoMD's streams at half the code.
-    # The highlighter's lexers read every byte of a code block: 1.5 times as fast at -O2 as at -Os.
+    # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
+    # RayoMD's streams at half the code. The highlighter's lexers read every byte of a code
+    # block: 1.5 times as fast at -O2 as at -Os.
     set_source_files_properties(src/core/flate.cpp src/core/highlight.cpp PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
 endif()
 
@@ -173,6 +175,7 @@ if(WIN32)
         src/core/pdfa.cpp
         src/core/png_filter.cpp
         src/core/flate.cpp
+        src/core/image_cache.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
@@ -244,6 +247,7 @@ else()
         src/core/pdfa.cpp
         src/core/png_filter.cpp
         src/core/flate.cpp
+        src/core/image_cache.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
@@ -283,6 +287,7 @@ if(BUILD_TESTING)
         src/core/pdfa.cpp
         src/core/png_filter.cpp
         src/core/flate.cpp
+        src/core/image_cache.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp

@@ -48,7 +48,9 @@ adds md-to-pdf (Node 22 or later for md-to-pdf 5; set `MD_TO_PDF_CHROME_ARGS=--n
 inside a container) and `--glu` adds glu. A tool that is missing is skipped, and each
 command starts in the document's folder. `--document FILE` measures that file instead of
 the corpus; `--pandoc-from` and `--pandoc-mainfont`/`--pandoc-monofont` set Pandoc's input
-format and fonts. The README's comparison on `tester.md` was taken this way:
+format and fonts. RayoMD runs with `--no-image-cache` where it has that flag, so every run
+re-encodes its PNGs as the other tools do; `--rayomd-image-cache` measures it with its
+persistent image cache instead. The README's comparison on `tester.md` was taken this way:
 
 ```sh
 python3 tools/benchmark.py competitors -- --rayomd build/linux/rayomd --node-modules /opt/node/node_modules \
@@ -1369,6 +1371,42 @@ and palette indices) fail or decode exactly as with 4.0, under AddressSanitizer 
 Every PDF without such a PNG is byte-identical (108 corpus PDFs in three styles, with
 `--compress`, `--page-numbers` and `--toc`), and warm builds of text are within 0.01 % of their
 instructions.
+
+**A persistent image cache.** A process keeps a decoded image for its later documents; now a
+re-encoded PNG of 32,768 pixels or more is also kept on disk for later processes
+(`PdfOptions::imageCacheDirectory`; the CLI and the app use the user cache directory, `--bench`
+and `--no-image-cache` do not). An entry is named by the SHA-256 of the PNG's bytes, so an
+edited file is a new image and a copy under another name is the same one; it holds the streams
+and what is needed to check them, never PDF syntax. Cold exports with SHA-NI, 60 runs, one
+pinned CPU, p50 / p95:
+
+| Document | Cache off | Miss | Hit |
+| --- | ---: | ---: | ---: |
+| the mascot alone | 15.26 / 15.36 ms | 15.82 / 15.93 ms | 2.19 / 2.23 ms |
+| `tester.md`, local images | 16.10 / 16.19 ms | 16.58 / 16.83 ms | 3.04 / 3.12 ms |
+| screenshot | 8.69 / 8.76 ms | 8.94 / 9.33 ms | 1.20 / 1.28 ms |
+| illustration, 2048x2048 | 41.16 / 41.38 ms | 41.54 / 41.77 ms | 1.66 / 1.71 ms |
+| noisy photo, a 3.4 MB PNG | 35.99 / 36.85 ms | 41.27 / 41.68 ms | 14.75 / 14.83 ms |
+| 182x182 RGBA | 2.12 ms | 2.28 ms | 0.96 ms |
+
+The PDF is byte for byte the same in all three. A miss costs the hash and writing the entry: 0.2
+to 0.6 ms, 5.3 ms for the noisy photo's 2.8 MB entry. A hit still reads and hashes the PNG and
+writes the PDF. SHA-256 is 7.5 times as fast with the x86 SHA extensions (2,095 MB/s against
+278 MB/s for the portable code, which serves CPUs without them); with the portable code alone
+the noisy photo's miss cost 15 ms and its hit 24.8 ms. Below 32,768 pixels an image re-encodes
+in under 0.7 ms (128x128 in 0.26 ms), about what finding, reading and checking its file takes.
+Taken over the other keys: the path with its size and time, which misses an edit that keeps
+both, and a non-cryptographic hash, whose collisions can be made to order. The cache lives in
+`image_cache.cpp`: inside `tiny_pdf.cpp` it took inline budget from `AppendInt`, whose
+`std::to_chars` became a call (+0.15 % on a warm `tester.md`); outside it, warm text builds
+are within 0.03 % of 4.0. The Linux executable grows by 16,384 bytes, to 1,244,160.
+
+Checks: `verify_cli.py` keeps the cache in its own directory and checks that a second export
+reads the entry without writing it, that a flipped or truncated entry is rewritten, and that the
+PDF never changes (it fails on a build that never reads the cache); 400 damaged entries, among
+them colour and mask lengths shifted with their sum kept, give the PDF of an export without the
+cache under AddressSanitizer and UBSan; the core tests compare the SHA extensions with the
+portable SHA-256 on FIPS 180-4's vectors and every length to 300 bytes and up to 1.2 MB.
 
 ## Measured opportunities
 

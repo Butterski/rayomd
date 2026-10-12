@@ -158,6 +158,7 @@ struct WinExportOptions {
     bool allowUnsafeLocalImages = false;
     unsigned workers = 0;
     bool embedSource = false;
+    bool imageCache = true;
     bool pageNumbers = false;
     bool compress = false;
     bool pdfa = false;
@@ -508,6 +509,16 @@ bool WriteNewBinaryFile(const std::wstring& path, const std::string& content, bo
 
 #endif
 
+// Where re-encoded images are kept between runs: %LOCALAPPDATA%\RayoMD\cache\images, or none
+// without that variable.
+const std::string& ImageCacheDirectory() {
+    static const std::string directory = []() {
+        const wchar_t* base = _wgetenv(L"LOCALAPPDATA");
+        return base && *base ? WideToUtf8(std::wstring(base) + L"\\RayoMD\\cache\\images") : std::string();
+    }();
+    return directory;
+}
+
 // The library's options for a document whose relative images resolve from `sourcePath`.
 TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const std::wstring& sourcePath) {
     TinyPdf::PdfOptions options;
@@ -518,6 +529,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const s
     options.enableUrlImages = exportOptions.enableUrlImages;
     options.allowUnsafeLocalImages = exportOptions.allowUnsafeLocalImages;
     options.embedSource = exportOptions.embedSource;
+    if (exportOptions.imageCache) options.imageCacheDirectory = ImageCacheDirectory();
     options.pageNumbers = exportOptions.pageNumbers;
     options.compress = exportOptions.compress;
     options.pdfa = exportOptions.pdfa;
@@ -674,6 +686,8 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.allowUnsafeLocalImages = true;
         } else if (lstrcmpiW(argv[i], L"--embed-source") == 0) {
             options.embedSource = true;
+        } else if (lstrcmpiW(argv[i], L"--no-image-cache") == 0) {
+            options.imageCache = false;
         } else if (lstrcmpiW(argv[i], L"--page-numbers") == 0) {
             options.pageNumbers = true;
         } else if (lstrcmpiW(argv[i], L"--compress") == 0) {
@@ -1269,8 +1283,11 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
 }
 
 int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
-    int iterations, const WinExportOptions& options) {
+    int iterations, const WinExportOptions& exportOptions) {
     if (iterations < 1) iterations = 1;
+    // A benchmark measures the work: no image is read from or kept in the persistent cache.
+    WinExportOptions options = exportOptions;
+    options.imageCache = false;
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
 
     std::string markdown;

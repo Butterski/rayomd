@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -434,12 +435,51 @@ def verify_png_lossless(binary: Path, root: Path) -> None:
                 raise AssertionError(f"PNG {name} {width} px wide: pixels changed in the PDF")
 
 
+def verify_image_cache(binary: Path, root: Path) -> None:
+    """A transparent PNG of 256x256 pixels is kept in the user cache directory under its SHA-256:
+    a later export reads it without writing it again, a damaged copy is found out and rewritten,
+    and --no-image-cache keeps nothing. The PDF is the same every time."""
+    cache = root / "user-cache" / ("RayoMD/cache/images" if os.name == "nt" else "rayomd/images")
+    folder = root / "image-cache"
+    folder.mkdir()
+    rows = [bytes(v for x in range(256) for v in ((x * 3 + y) & 255, (x ^ y) & 255, y & 255, (x + y * 7) & 255))
+            for y in range(256)]
+    png = png_file(256, 256, 6, rows, b"")
+    (folder / "picture.png").write_bytes(png)
+    source = folder / "picture.md"
+    source.write_text("![picture](picture.png)\n", encoding="utf-8")
+    entry = cache / (hashlib.sha256(png).hexdigest() + ".rimg")
+
+    def export(name: str, *flags: str) -> bytes:
+        run(binary, "--export", str(source), str(folder / name), *flags)
+        return require_pdf(folder / name)
+
+    plain = export("uncached.pdf", "--no-image-cache")
+    if cache.exists() and any(cache.iterdir()):
+        raise AssertionError("--no-image-cache: an image was kept")
+    if export("miss.pdf") != plain or [p.name for p in cache.iterdir()] != [entry.name]:
+        raise AssertionError(f"image cache: no single entry {entry.name} after the first export")
+    kept = entry.read_bytes()
+    inode = entry.stat().st_ino
+    if export("hit.pdf") != plain or entry.stat().st_ino != inode:
+        raise AssertionError("image cache: a kept image was not read, or was written again")
+    middle = len(kept) // 2
+    for damage in (kept[:middle] + bytes((kept[middle] ^ 1,)) + kept[middle + 1:], kept[:-9]):
+        entry.write_bytes(damage)
+        inode = entry.stat().st_ino
+        if export("damaged.pdf") != plain or entry.read_bytes() != kept or entry.stat().st_ino == inode:
+            raise AssertionError("image cache: a damaged entry was used or not written again")
+
+
 def verify(binary: Path, keep: Path | None) -> None:
     binary = binary.resolve()
     if not binary.is_file():
         raise FileNotFoundError(f"binary does not exist: {binary}")
     root = keep.resolve() if keep else Path(tempfile.mkdtemp(prefix="rayomd-verify-"))
     root.mkdir(parents=True, exist_ok=True)
+    # Images are kept in a cache of this run's own: an earlier build's could hide a broken encoder.
+    os.environ["XDG_CACHE_HOME"] = str(root / "user-cache")
+    os.environ["LOCALAPPDATA"] = str(root / "user-cache")
     try:
         run(binary, "--version")
         run(binary, "--doctor")
@@ -472,6 +512,7 @@ def verify(binary: Path, keep: Path | None) -> None:
             raise AssertionError("an invalid --page-size was not rejected")
         verify_compression(binary, root)
         verify_png_lossless(binary, root)
+        verify_image_cache(binary, root)
         verify_theme(binary, root)
         verify_pdfa(binary, root)
         verify_footnotes(binary, root)

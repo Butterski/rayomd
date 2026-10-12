@@ -141,6 +141,14 @@ Important image/link details:
 - Linux URL images use libcurl when `RAYOMD_USE_CURL` is defined.
 - PNGs with transparency are inflated by the vendored libdeflate decompressor and
   re-encoded by RayoMD's own encoder (`flate.cpp`), on every platform; no zlib.
+- Such a PNG of 32,768 pixels or more is kept between processes in
+  `PdfOptions::imageCacheDirectory`, a file per SHA-256 of the PNG (SHA-NI where the
+  CPU has it). The library default is off; the CLI and the Windows app use the user
+  cache directory unless `--no-image-cache`; `--bench` never does. An entry holds the
+  RayoMD version and, in `kMagic` of `src/core/image_cache.cpp`, the encoding's
+  generation: raise it with any change to the bytes `BuildDecodedPngImage` writes, and
+  compare image output between builds with `--no-image-cache`, or one build reads the
+  other's streams.
 - Failed images should degrade to useful fallback text instead of failing the
   whole conversion.
 - An SVG image (a file or URL) is converted by `src/core/svg.cpp`, without a
@@ -208,9 +216,15 @@ Important image/link details:
   heap memory of their own.
 
 - `src/core/rayomd_pdf_source.h` and `src/core/rayomd_pdf_source.cpp`
-  Bounded reversible-profile metadata, SHA-256 integrity, hostile-input
-  inspection, and byte-exact source recovery. Keep this limited to RayoMD's
-  exact classic-xref profile rather than growing a general PDF parser.
+  Bounded reversible-profile metadata, SHA-256 integrity (SHA-NI where the CPU has it,
+  checked against the portable code by the core tests), hostile-input inspection, and
+  byte-exact source recovery. Keep this limited to RayoMD's exact classic-xref profile
+  rather than growing a general PDF parser.
+
+- `src/core/image_cache.h` and `src/core/image_cache.cpp`
+  The persistent cache of re-encoded PNGs: entry format, checks, atomic writes and
+  least-recently-used trimming. Cold code, kept out of `tiny_pdf.cpp`, whose inline
+  budget it would otherwise take from hot calls.
 
 - `src/core/inline_markdown.cpp`
   Renderer-neutral inline span parsing for emphasis, code, images, links, and math

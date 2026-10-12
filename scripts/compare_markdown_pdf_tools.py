@@ -236,6 +236,9 @@ def main() -> int:
     parser.add_argument("--source-url", default=DEFAULT_SOURCE_URL)
     parser.add_argument("--offline", action="store_true", help="reuse the cached real-world source")
     parser.add_argument("--pinned-only", action="store_true", help="measure only the image-free synthetic README cases")
+    parser.add_argument("--rayomd-image-cache", action="store_true",
+        help="let RayoMD keep re-encoded PNGs between runs, so every run after the first reads them; "
+             "by default each run re-encodes, as the other tools do")
     args = parser.parse_args()
     args.root.mkdir(parents=True, exist_ok=True)
     if min(args.runs, args.large_runs, args.timeout, args.large_timeout, args.preflight_timeout) < 1:
@@ -248,8 +251,16 @@ def main() -> int:
         inputs, corpus_metadata = corpus(args.root, args.source_url, args.offline, args.pinned_only)
     runner = Path(__file__).with_name("md_to_pdf_runner.cjs").resolve()
     fonts = ["-f", args.pandoc_from, "-V", f"mainfont={args.pandoc_mainfont}", "-V", f"monofont={args.pandoc_monofont}"]
+    # Newer RayoMD builds keep re-encoded PNGs in the user cache directory; older ones reject the
+    # flag. A one-line export tells which (without arguments the Windows executable opens its window).
+    probe = args.root / "image-cache-probe.md"
+    probe.write_text("# probe\n", encoding="utf-8")
+    knows_flag = subprocess.run([str(args.rayomd.resolve()), "--export", str(probe), str(probe.with_suffix(".pdf")),
+                                 "--no-image-cache"], capture_output=True).returncode == 0
+    no_cache = ["--no-image-cache"] if knows_flag and not args.rayomd_image_cache else []
     tools = {
-        "rayomd": lambda src, dst: [str(args.rayomd.resolve()), "--export", str(src), str(dst.resolve()), "native", "modern", "normal"],
+        "rayomd": lambda src, dst: [str(args.rayomd.resolve()), "--export", str(src), str(dst.resolve()), "native", "modern",
+                                    "normal", *no_cache],
     }
     if shutil.which("pandoc") and shutil.which("xelatex"):
         tools["pandoc_xelatex"] = lambda src, dst: ["pandoc", str(src), "-o", str(dst.resolve()), "--pdf-engine=xelatex", "--no-highlight", *fonts]

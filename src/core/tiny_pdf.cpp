@@ -7,6 +7,7 @@
 #include "../common/profiling.h"
 #include "../common/text_utils.h"
 #include "book.h"
+#include "image_cache.h"
 #include "contents.h"
 #include "markdown_parser.h"
 #include "highlight.h"
@@ -2546,44 +2547,64 @@ static std::string BuildPngPredictorDecodeParms(size_t columns, size_t component
     return parms;
 }
 
-// A non-interlaced 8-bit PNG with transparency, decoded and re-encoded as /Predictor 15 streams
-// of colour and alpha. Its rows are inflated whole, then each is unfiltered, split, and its colour
+// The bytes of a decoded row and of a pixel of a PNG that BuildDecodedPngImage re-encodes: a
+// non-interlaced 8-bit one with alpha, or with a palette or tRNS, within kMaxDecodedImageBytes.
+// False for any other.
+static bool DecodedPngRows(const PngInfo& png, size_t& rowBytes, size_t& bpp) {
+    if (png.interlace != 0 || png.bitDepth != 8 || png.width == 0 || png.height == 0) return false;
+    if (png.colorType == 6) {
+        bpp = 4;
+    } else if (png.colorType == 4) {
+        bpp = 2;
+    } else if (png.colorType == 3 && !png.palette.empty()) {
+        bpp = 1;
+    } else if (png.colorType == 2 && png.transparency.size() >= 6) {
+        bpp = 3;
+    } else if (png.colorType == 0 && png.transparency.size() >= 2) {
+        bpp = 1;
+    } else {
+        return false;
+    }
+    rowBytes = (size_t)png.width * bpp;
+    const size_t pixels = (size_t)png.width * png.height;
+    return (rowBytes + 1) * png.height <= kMaxDecodedImageBytes && pixels * 4 <= kMaxDecodedImageBytes;
+}
+
+static bool PngHasRgbColor(const PngInfo& png) {
+    return png.colorType == 6 || png.colorType == 3 || png.colorType == 2;
+}
+
+// The dictionary entries of a re-encoded PNG whose streams are set: /Predictor 15 rows of its
+// colour and, when it has a soft mask, of its alpha.
+static void DescribeReencodedPng(const PngInfo& png, PdfImage& image) {
+    const size_t components = PngHasRgbColor(png) ? 3 : 1;
+    image.colorSpace = components == 3 ? "/DeviceRGB" : "/DeviceGray";
+    image.width = (int)png.width;
+    image.height = (int)png.height;
+    image.bitsPerComponent = 8;
+    image.filter = "/FlateDecode";
+    image.decodeParms = BuildPngPredictorDecodeParms(png.width, components);
+    if (!image.maskStream.empty()) {
+        image.maskFilter = "/FlateDecode";
+        image.maskDecodeParms = BuildPngPredictorDecodeParms(png.width, 1);
+    }
+}
+
+// A PNG that DecodedPngRows accepts, decoded and re-encoded as /Predictor 15 streams of colour
+// and alpha. Its rows are inflated whole, then each is unfiltered, split, and its colour
 // filtered again into the inflated rows' block behind the row being read: a colour row is no
 // longer than an inflated one but for a palette's, which takes a block of its own. The alpha rows,
 // each behind a byte for its filter, are filtered in place from the last up, and their stream is
 // written only when some pixel is translucent. Nothing is zeroed but a row of zeros for the first
 // row's neighbours.
 static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
-    if (png.interlace != 0 || png.bitDepth != 8) return false;
-    if (png.width == 0 || png.height == 0) return false;
-
     size_t rowBytes = 0;
     size_t bpp = 0;
-    if (png.colorType == 6) {
-        rowBytes = (size_t)png.width * 4;
-        bpp = 4;
-    } else if (png.colorType == 4) {
-        rowBytes = (size_t)png.width * 2;
-        bpp = 2;
-    } else if (png.colorType == 3 && !png.palette.empty()) {
-        rowBytes = (size_t)png.width;
-        bpp = 1;
-    } else if (png.colorType == 2 && png.transparency.size() >= 6) {
-        rowBytes = (size_t)png.width * 3;
-        bpp = 3;
-    } else if (png.colorType == 0 && png.transparency.size() >= 2) {
-        rowBytes = (size_t)png.width;
-        bpp = 1;
-    } else {
-        return false;
-    }
+    if (!DecodedPngRows(png, rowBytes, bpp)) return false;
 
     const size_t width = png.width;
     const size_t height = png.height;
-    const size_t pixels = width * height;
-    if ((rowBytes + 1) * height > kMaxDecodedImageBytes || pixels * 4 > kMaxDecodedImageBytes) return false;
-
-    const bool rgb = png.colorType == 6 || png.colorType == 3 || png.colorType == 2;
+    const bool rgb = PngHasRgbColor(png);
     const size_t colorComponents = rgb ? 3 : 1;
     const size_t colorRow = width * colorComponents;
     const bool colorInPlace = colorRow <= rowBytes;
@@ -2620,12 +2641,6 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     }
     PdfImage result;
     if (!CompressImageRows(filteredColors, (colorRow + 1) * height, result.stream)) return false;
-    result.colorSpace = rgb ? "/DeviceRGB" : "/DeviceGray";
-    result.width = (int)png.width;
-    result.height = (int)png.height;
-    result.bitsPerComponent = 8;
-    result.filter = "/FlateDecode";
-    result.decodeParms = BuildPngPredictorDecodeParms(png.width, colorComponents);
 
     if (opaque != 255) {
         // Row y's residuals replace its values, which only row y + 1, already filtered, reads.
@@ -2639,14 +2654,13 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
             std::memcpy(line + 1, residuals, width);
         }
         if (!CompressImageRows(alpha, (width + 1) * height, result.maskStream)) return false;
-        result.maskFilter = "/FlateDecode";
-        result.maskDecodeParms = BuildPngPredictorDecodeParms(png.width, 1);
     }
+    DescribeReencodedPng(png, result);
     image = std::move(result);
     return true;
 }
 
-static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image);
+static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {});
 
 #ifdef _WIN32
 template<typename T>
@@ -2858,17 +2872,42 @@ static bool BuildDecodedImageWithWic(const std::vector<uint8_t>&, PdfImage&) {
 }
 #endif
 
-static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image) {
+// With `cacheDirectory`, a PNG that is re-encoded is first looked for there, and kept there after
+// (image_cache.h).
+static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory) {
     PngInfo png;
     if (!ParsePngChunks(bytes, png)) return false;
     if (BuildFastPngImage(png, image)) return true;
-    if (BuildDecodedPngImage(png, image)) return true;
+    size_t rowBytes = 0;
+    size_t bpp = 0;
+    const bool cached = !cacheDirectory.empty() && DecodedPngRows(png, rowBytes, bpp) &&
+        (size_t)png.width * png.height >= Internal::kImageCacheMinPixels;
+    const uint32_t components = PngHasRgbColor(png) ? 3 : 1;
+    std::string digest;
+    if (cached) {
+        digest = RayoMd::PdfSource::Sha256Hex(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+        PdfImage kept;
+        if (Internal::LoadCachedImage(cacheDirectory, digest, png.width, png.height, components, kMaxImageBytes,
+            kept.stream, kept.maskStream)) {
+            DescribeReencodedPng(png, kept);
+            image = std::move(kept);
+            return true;
+        }
+    }
+    if (BuildDecodedPngImage(png, image)) {
+        if (cached) {
+            Internal::StoreCachedImage(cacheDirectory, digest, png.width, png.height, components, kMaxImageBytes,
+                image.stream, image.maskStream);
+        }
+        return true;
+    }
     return BuildDecodedImageWithWic(bytes, image);
 }
 
-static bool DecodeImageBytes(const std::vector<uint8_t>& bytes, PdfImage& image) {
+static bool DecodeImageBytes(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {}) {
     PdfImage parsed;
-    if (ParseJpegImage(bytes, parsed) || ParsePngImage(bytes, parsed) || BuildDecodedImageWithWic(bytes, parsed)) {
+    if (ParseJpegImage(bytes, parsed) || ParsePngImage(bytes, parsed, cacheDirectory) ||
+        BuildDecodedImageWithWic(bytes, parsed)) {
         image = std::move(parsed);
         return image.width > 0 && image.height > 0 && !image.stream.empty();
     }
@@ -3020,7 +3059,8 @@ public:
 
 private:
     // `bytes` as an image: an SVG converted for this document, as its forms name the document's
-    // fonts, else a PNG or JPEG decoded and kept for later documents.
+    // fonts, else a PNG or JPEG decoded and kept for later documents, and a re-encoded PNG in
+    // options.imageCacheDirectory for later processes too.
     bool Decode(const std::string& key, const std::vector<uint8_t>& bytes, SharedPdfImage& shared) {
         PdfImage image;
         const std::string_view view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
@@ -3029,7 +3069,7 @@ private:
             shared = std::make_shared<PdfImage>(std::move(image));
             return true;
         }
-        if (!DecodeImageBytes(bytes, image)) return false;
+        if (!DecodeImageBytes(bytes, image, options.imageCacheDirectory)) return false;
         shared = StoreDecodedImageInCache(key, std::move(image));
         return true;
     }

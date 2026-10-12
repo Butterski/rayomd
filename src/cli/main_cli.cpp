@@ -293,6 +293,7 @@ struct CliExportOptions {
     bool enableUrlImages = false;
     bool allowUnsafeLocalImages = false;
     bool embedSource = false;
+    bool imageCache = true;
     bool pageNumbers = false;
     bool compress = false;
     bool pdfa = false;
@@ -318,6 +319,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--allow-url-images") options.enableUrlImages = true;
         else if (value == "--allow-unsafe-local-images" || value == "--unsafe-local-images") options.allowUnsafeLocalImages = true;
         else if (value == "--embed-source") options.embedSource = true;
+        else if (value == "--no-image-cache") options.imageCache = false;
         else if (value == "--page-numbers") options.pageNumbers = true;
         else if (value == "--compress") options.compress = true;
         else if (value == "--pdfa") options.pdfa = true;
@@ -407,6 +409,23 @@ fs::path PdfNameForMarkdown(const fs::path& path) {
     return out;
 }
 
+// Where re-encoded images are kept between runs: %LOCALAPPDATA%\RayoMD\cache\images on Windows,
+// $XDG_CACHE_HOME/rayomd/images or ~/.cache/rayomd/images elsewhere; empty, so none, without them.
+const std::string& ImageCacheDirectory() {
+    static const std::string directory = []() {
+#ifdef _WIN32
+        const wchar_t* base = _wgetenv(L"LOCALAPPDATA");
+        return base && *base ? PathToUtf8(fs::path(base) / L"RayoMD" / L"cache" / L"images") : std::string();
+#else
+        const char* xdg = std::getenv("XDG_CACHE_HOME");
+        if (xdg && *xdg == '/') return PathToUtf8(fs::path(xdg) / "rayomd" / "images");
+        const char* home = std::getenv("HOME");
+        return home && *home ? PathToUtf8(fs::path(home) / ".cache" / "rayomd" / "images") : std::string();
+#endif
+    }();
+    return directory;
+}
+
 // The library's options for a document whose relative images resolve from `sourcePath`.
 TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::string& sourcePath) {
     TinyPdf::PdfOptions pdfOptions;
@@ -417,6 +436,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     pdfOptions.enableUrlImages = options.enableUrlImages;
     pdfOptions.allowUnsafeLocalImages = options.allowUnsafeLocalImages;
     pdfOptions.embedSource = options.embedSource;
+    if (options.imageCache) pdfOptions.imageCacheDirectory = ImageCacheDirectory();
     pdfOptions.pageNumbers = options.pageNumbers;
     pdfOptions.compress = options.compress;
     pdfOptions.pdfa = options.pdfa;
@@ -755,7 +775,9 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     }
 
     std::string pdfBytes;
-    const TinyPdf::PdfOptions options = PdfOptionsFor(cliOptions, PathToUtf8(inputPath));
+    // A benchmark measures the work: no image is read from or kept in the persistent cache.
+    TinyPdf::PdfOptions options = PdfOptionsFor(cliOptions, PathToUtf8(inputPath));
+    options.imageCacheDirectory.clear();
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (!buildResult) {
         int code = 10 + static_cast<int>(buildResult.error);
@@ -872,7 +894,9 @@ void PrintUsage() {
         "\n"
         "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
         "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
-        "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source.\n"
+        "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source, --no-image-cache\n"
+        "  (by default PNGs with transparency are re-encoded once and kept in ~/.cache/rayomd/images,\n"
+        "  or $XDG_CACHE_HOME/rayomd/images: at most about 256 MB, the PDF the same either way).\n"
         "Output flags: --compress (FlateDecode streams: smaller files, slower export), --pdfa (PDF/A-3b:\n"
         "  every font embedded, formulas as TeX source), --pdfua (PDF/UA-1, tagged for screen readers:\n"
         "  headings, lists, tables, figures with their alt text, links and notes; fonts and formulas as\n"
