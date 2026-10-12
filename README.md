@@ -178,6 +178,65 @@ edition starts another 0.3 ms sooner: a short ASCII note in 0.68 ms.
 | `rayomd-4.0.0-linux-x64-static.tar.gz` | 1,039 KB |
 | `rayomd-4.0.0-windows-x64.zip` (GUI and CLI) | 1,444 KB |
 
+### Against other tools
+
+The same machine (AMD Ryzen 5 PRO 4650GE, Debian 12 container, no network) converting the
+repository's `tester.md` (headings, Unicode text, code, tables, lists, quotes, footnotes and
+formulas), each tool as a fresh process, start to exit, median of 20 runs on 2026-10-12.
+
+**Without images**
+
+```mermaid
+%%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#2ea44f"}}}}%%
+xychart-beta
+    title "tester.md without images, in ms (lower is better)"
+    x-axis ["RayoMD", "glu", "Pandoc + Typst", "md-to-pdf", "Pandoc + XeLaTeX"]
+    y-axis "Milliseconds" 0 --> 1800
+    bar [1.6, 56, 112, 1670, 1708]
+```
+
+| Tool | Version | Time | Formulas |
+|---|---|---:|---|
+| **RayoMD** | 4.0.0 | **1.6 ms** | typeset |
+| glu | 0.0.43 | 55.8 ms (35×) | left as TeX source |
+| Pandoc + Typst | 3.12.1, Typst 0.15.1 | 112.2 ms (71×) | typeset |
+| md-to-pdf | 5.2.5, Chromium 154 | 1,669.8 ms (1,057×) | left as TeX source |
+| Pandoc + XeLaTeX | 3.12.1, TeX Live 2022 | 1,708.2 ms (1,081×) | typeset |
+
+In a running process (`--serve`, `--batch`, `--bench`) each further export takes **0.21 ms**.
+
+**With a 1024×1024 PNG**
+
+```mermaid
+%%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#2ea44f"}}}}%%
+xychart-beta
+    title "tester.md with its PNG, in ms (lower is better)"
+    x-axis ["RayoMD", "glu", "Pandoc + Typst", "md-to-pdf", "Pandoc + XeLaTeX"]
+    y-axis "Milliseconds" 0 --> 2800
+    bar [28, 86, 148, 1745, 2652]
+```
+
+| Tool | Time |
+|---|---:|
+| **RayoMD** | **27.9 ms** |
+| glu | 86.5 ms (3.1×) |
+| Pandoc + Typst | 148.5 ms (5.3×) |
+| md-to-pdf | 1,744.8 ms (63×) |
+| Pandoc + XeLaTeX | 2,651.8 ms (95×) |
+
+Most of RayoMD's 28 ms is decoding and re-encoding the PNG; a running process caches it, and
+each further export takes 0.25 ms.
+
+> [!NOTE]
+> Both documents are `tester.md` without the five lines that test fallbacks: the remote and
+> missing images and a formula with an unknown TeX command. RayoMD shows those as fallback
+> text; with them XeLaTeX and glu stop with an error, and Pandoc waits on the network. The
+> imageless one also drops the mascot PNG. Pandoc reads
+> `markdown+tex_math_single_backslash-raw_tex`, so `\[ … \]` is display math as in RayoMD.
+> The tools render different Markdown subsets, so this compares time to a finished PDF, not
+> identical output. Details and the command:
+> [comparison of 2026-10-12](https://github.com/Butterski/rayomd/wiki/Markdown-to-PDF-Speed-Comparison-2026-10-12).
+
 [`performance.md`](docs/development/performance.md) records how every number was taken and what
 each change gained; the warm comparisons come from `python3 tools/benchmark.py ab`. The
 [benchmark index](https://github.com/Butterski/rayomd/wiki/Benchmarks) keeps older reports,

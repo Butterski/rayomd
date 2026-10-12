@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Fresh-process Markdown-to-PDF comparison for RayoMD, Pandoc, and md-to-pdf."""
+"""Fresh-process Markdown-to-PDF comparison: RayoMD against Pandoc (XeLaTeX, Typst), md-to-pdf and glu.
+
+Each tool is optional except RayoMD: one that is not installed (or not given) is skipped. Every
+command starts in the document's folder, so relative images resolve the same way for all."""
 
 from __future__ import annotations
 
@@ -8,6 +11,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import statistics
 import subprocess
 import time
@@ -18,6 +22,13 @@ from pathlib import Path
 
 DEFAULT_SOURCE_URL = "https://daringfireball.net/projects/markdown/syntax.text"
 MIB = 1024 * 1024
+TOOL_LABELS = {
+    "rayomd": "RayoMD",
+    "pandoc_xelatex": "Pandoc + XeLaTeX",
+    "pandoc_typst": "Pandoc + Typst",
+    "md_to_pdf": "md-to-pdf",
+    "glu": "glu",
+}
 
 
 def write(path: Path, text: str) -> None:
@@ -143,7 +154,8 @@ def valid_pdf(path: Path) -> int:
     return len(data)
 
 
-def measure(name: str, command: list[str], output: Path, runs: int, timeout: int, warmups: int, preflight_timeout: int) -> dict[str, object]:
+def measure(name: str, command: list[str], output: Path, runs: int, timeout: int, warmups: int, preflight_timeout: int,
+    cwd: Path | None = None) -> dict[str, object]:
     times: list[float] = []
     sizes: list[int] = []
     for index in range(warmups + runs):
@@ -157,6 +169,7 @@ def measure(name: str, command: list[str], output: Path, runs: int, timeout: int
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=attempt_timeout,
+                cwd=cwd,
             )
         except subprocess.TimeoutExpired as error:
             output.unlink(missing_ok=True)
@@ -206,7 +219,14 @@ def format_measurement(result: dict[str, object]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rayomd", required=True, type=Path)
-    parser.add_argument("--node-modules", required=True, type=Path)
+    parser.add_argument("--node-modules", type=Path, help="node_modules holding md-to-pdf; without it md-to-pdf is skipped")
+    parser.add_argument("--glu", type=Path, help="the glu executable (boxesandglue); without it glu is skipped")
+    parser.add_argument("--document", action="append", type=Path, default=[],
+        help="measure this Markdown file instead of the built-in corpus (repeatable)")
+    parser.add_argument("--pandoc-mainfont", default="Arial" if os.name == "nt" else "DejaVu Sans")
+    parser.add_argument("--pandoc-monofont", default="Courier New" if os.name == "nt" else "DejaVu Sans Mono")
+    parser.add_argument("--pandoc-from", default="markdown",
+        help="Pandoc's input format, e.g. markdown+tex_math_single_backslash for \\[...\\] display math")
     parser.add_argument("--root", default=Path("benchmark-output/markdown-pdf-tools"), type=Path)
     parser.add_argument("--runs", default=7, type=int)
     parser.add_argument("--timeout", default=60, type=int)
@@ -221,14 +241,25 @@ def main() -> int:
     if min(args.runs, args.large_runs, args.timeout, args.large_timeout, args.preflight_timeout) < 1:
         raise RuntimeError("run counts and timeouts must be at least 1")
 
-    inputs, corpus_metadata = corpus(args.root, args.source_url, args.offline, args.pinned_only)
+    if args.document:
+        inputs = {path.stem: path.resolve() for path in args.document}
+        corpus_metadata = {"source": None, "cases": {name: {"kind": "document", "copies": 1} for name in inputs}}
+    else:
+        inputs, corpus_metadata = corpus(args.root, args.source_url, args.offline, args.pinned_only)
     runner = Path(__file__).with_name("md_to_pdf_runner.cjs").resolve()
-    node_modules = args.node_modules.resolve()
+    fonts = ["-f", args.pandoc_from, "-V", f"mainfont={args.pandoc_mainfont}", "-V", f"monofont={args.pandoc_monofont}"]
     tools = {
-        "rayomd": lambda src, dst: [str(args.rayomd.resolve()), "--export", str(src.resolve()), str(dst.resolve()), "native", "modern", "normal"],
-        "pandoc_xelatex": lambda src, dst: ["pandoc", str(src.resolve()), "-o", str(dst.resolve()), "--pdf-engine=xelatex", "--no-highlight", "-V", "mainfont=Arial", "-V", "monofont=Courier New"],
-        "md_to_pdf": lambda src, dst: ["node", str(runner), str(node_modules), str(src.resolve()), str(dst.resolve())],
+        "rayomd": lambda src, dst: [str(args.rayomd.resolve()), "--export", str(src), str(dst.resolve()), "native", "modern", "normal"],
     }
+    if shutil.which("pandoc") and shutil.which("xelatex"):
+        tools["pandoc_xelatex"] = lambda src, dst: ["pandoc", str(src), "-o", str(dst.resolve()), "--pdf-engine=xelatex", "--no-highlight", *fonts]
+    if shutil.which("pandoc") and shutil.which("typst"):
+        tools["pandoc_typst"] = lambda src, dst: ["pandoc", str(src), "-o", str(dst.resolve()), "--pdf-engine=typst", "--no-highlight", *fonts]
+    if args.node_modules:
+        node_modules = args.node_modules.resolve()
+        tools["md_to_pdf"] = lambda src, dst: ["node", str(runner), str(node_modules), str(src), str(dst.resolve())]
+    if args.glu:
+        tools["glu"] = lambda src, dst: [str(args.glu.resolve()), "-q", "-o", str(dst.resolve()), str(src)]
     case_metadata = corpus_metadata["cases"]
     results: dict[str, dict[str, object]] = {}
     unavailable_tools: dict[str, str] = {}
@@ -251,6 +282,7 @@ def main() -> int:
                     args.large_runs if large_case else args.runs,
                     args.large_timeout if large_case else args.timeout,
                     0 if large_case else 1, args.preflight_timeout,
+                    cwd=src.parent,
                 )
             results[case][tool] = result
             if result["status"] == "timeout":
@@ -275,8 +307,8 @@ def main() -> int:
         rayo_result = row["rayomd"]
         competitors = [
             float(row[name]["median_ms"])
-            for name in ("pandoc_xelatex", "md_to_pdf")
-            if row[name]["status"] == "ok"
+            for name in tools
+            if name != "rayomd" and row[name]["status"] == "ok"
         ]
         if rayo_result["status"] != "ok" or not competitors:
             speedups[case] = None
@@ -318,10 +350,13 @@ def main() -> int:
         },
         "versions": {
             "rayomd": version([str(args.rayomd.resolve()), "--version"]),
-            "pandoc": version(["pandoc", "--version"]),
-            "xelatex": version(["xelatex", "--version"]),
-            "node": version(["node", "--version"]),
-            "md-to-pdf": json.loads((node_modules / "md-to-pdf" / "package.json").read_text(encoding="utf-8"))["version"],
+            **({"pandoc": version(["pandoc", "--version"])} if any(t.startswith("pandoc") for t in tools) else {}),
+            **({"xelatex": version(["xelatex", "--version"])} if "pandoc_xelatex" in tools else {}),
+            **({"typst": version(["typst", "--version"])} if "pandoc_typst" in tools else {}),
+            **({"node": version(["node", "--version"]),
+                "md-to-pdf": json.loads((args.node_modules / "md-to-pdf" / "package.json").read_text(encoding="utf-8"))["version"]}
+               if "md_to_pdf" in tools else {}),
+            **({"glu": version([str(args.glu.resolve()), "--version"])} if "glu" in tools else {}),
         },
         "inputs": {
             name: {"path": str(path), "bytes": path.stat().st_size, **case_metadata[name]}
@@ -334,9 +369,12 @@ def main() -> int:
     write(args.root / "record.json", json.dumps(metadata, indent=2, ensure_ascii=False) + "\n")
     lines = [
         "# Markdown-to-PDF comparison", "",
+        "- Documents: " + ", ".join(f"`{path.name}`" for path in inputs.values()) if args.document else
         "- Scope: pinned image-free synthetic README cases." if args.pinned_only else f"- Real-world source: {args.source_url}",
     ]
-    if args.pinned_only:
+    if args.document:
+        lines.append("- Each tool renders its own subset of Markdown; timings do not imply rendering equivalence.")
+    elif args.pinned_only:
         lines.append("- The measured inputs contain no Markdown or HTML image syntax; RayoMD URL-image fetching is disabled.")
     else:
         lines.extend([
@@ -344,8 +382,8 @@ def main() -> int:
             "- The source contains HTML and features outside RayoMD's native subset; timings do not imply rendering equivalence.",
             "- Scaled cases repeat the complete source and measure size scaling, not additional syntax diversity.",
         ])
-    lines.extend(["", "| Case | Kind | Input | RayoMD | Pandoc + XeLaTeX | md-to-pdf | vs fastest competitor |",
-        "|---|---|---:|---:|---:|---:|---:|",
+    lines.extend(["", "| Case | Kind | Input | " + " | ".join(TOOL_LABELS[tool] for tool in tools) + " | vs fastest competitor |",
+        "|---|---|---:|" + "---:|" * len(tools) + "---:|",
     ])
     for case, src in inputs.items():
         row = results[case]
@@ -353,9 +391,8 @@ def main() -> int:
         speedup = speedups[case]
         speedup_text = f"`{speedup:.1f}x`" if speedup is not None else "not scored"
         lines.append(
-            f"| `{case}` | {kind} | `{src.stat().st_size:,} B` | "
-            f"{format_measurement(row['rayomd'])} | {format_measurement(row['pandoc_xelatex'])} | "
-            f"{format_measurement(row['md_to_pdf'])} | {speedup_text} |"
+            f"| `{case}` | {kind} | `{src.stat().st_size:,} B` | " +
+            " | ".join(format_measurement(row[tool]) for tool in tools) + f" | {speedup_text} |"
         )
     lines.append("")
     if overall_geomean is None:

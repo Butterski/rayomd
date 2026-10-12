@@ -43,6 +43,24 @@ overall, and large-document speedups against the fastest competitor. Use
 Markdown features outside RayoMD's focused native subset, so timings must be
 published with the compatibility caveat and not as rendering-equivalence claims.
 
+Pandoc runs with XeLaTeX and, when `typst` is installed, with Typst; `--node-modules`
+adds md-to-pdf (Node 22 or later for md-to-pdf 5; set `MD_TO_PDF_CHROME_ARGS=--no-sandbox`
+inside a container) and `--glu` adds glu. A tool that is missing is skipped, and each
+command starts in the document's folder. `--document FILE` measures that file instead of
+the corpus; `--pandoc-from` and `--pandoc-mainfont`/`--pandoc-monofont` set Pandoc's input
+format and fonts. The README's comparison on `tester.md` was taken this way:
+
+```sh
+python3 tools/benchmark.py competitors -- --rayomd build/linux/rayomd --node-modules /opt/node/node_modules \
+  --glu /opt/glu/glu --document tester-local.md --pandoc-from markdown+tex_math_single_backslash-raw_tex \
+  --runs 20 --timeout 120 --preflight-timeout 120 --root benchmark-output/competitors-tester
+```
+
+`tester-local.md` is `tester.md` without the lines that test fallbacks (the remote and
+missing images and the paragraph with an unknown TeX command): with them XeLaTeX and glu
+stop with an error and Pandoc waits on the network. `tester-noimg.md` also drops every other
+line that starts with an image and the `[logo-ref]` definition, so it holds no image at all.
+
 Each tool first gets a 15-second tiny-document preflight; a failure disables it
 for the rest of the run. Measured invocations have a 60-second default timeout,
 and scaled cases use one run without a warm-up. A timeout is recorded as a DNF
