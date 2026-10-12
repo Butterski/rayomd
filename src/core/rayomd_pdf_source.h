@@ -37,7 +37,10 @@ struct Result {
     bool Ok() const { return status == Status::Ok; }
 };
 
+// SHA-256 of `input` as 64 lowercase hex digits: with the x86 SHA extensions where the CPU has
+// them, else as Sha256HexPortable, the portable code the tests compare them with.
 std::string Sha256Hex(std::string_view input);
+std::string Sha256HexPortable(std::string_view input);
 bool IsValidUtf8(std::string_view input);
 std::string BuildXmpMetadata(std::string_view source, std::string_view producerVersion);
 Result Inspect(std::string_view pdfBytes, bool recoverSource);

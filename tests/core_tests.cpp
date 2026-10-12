@@ -2953,10 +2953,28 @@ int main() {
     }
     if (expected[2].find("/Subtype /Link") == std::string::npos) return 3;
     if (expected[3].find("/Subtype /Image") == std::string::npos) return 4;
-    if (RayoMd::PdfSource::Sha256Hex("abc") !=
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") {
-        std::cerr << "SHA-256 test vector failed" << std::endl;
-        return 7;
+    // FIPS 180-4's vectors in both implementations, and the dispatched one (the SHA extensions
+    // where the CPU has them) equal to the portable one at every tail length and across blocks.
+    const std::pair<const char*, const char*> vectors[] = {
+        {"", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        {"abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+        {"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"},
+    };
+    for (const auto& [message, digest] : vectors) {
+        if (RayoMd::PdfSource::Sha256Hex(message) != digest || RayoMd::PdfSource::Sha256HexPortable(message) != digest) {
+            std::cerr << "SHA-256 test vector failed for \"" << message << "\"" << std::endl;
+            return 7;
+        }
+    }
+    std::string shaInput;
+    for (size_t length = 0; length <= (1u << 20); length = length < 300 ? length + 1 : length * 4) {
+        while (shaInput.size() < length) shaInput.push_back((char)(shaInput.size() * 2654435761u >> 11));
+        const std::string_view prefix(shaInput.data(), length);
+        if (RayoMd::PdfSource::Sha256Hex(prefix) != RayoMd::PdfSource::Sha256HexPortable(prefix)) {
+            std::cerr << "SHA-256 differs from the portable code for " << length << " bytes" << std::endl;
+            return 7;
+        }
     }
     const std::vector<std::string> exactSources = {
         std::string(),
