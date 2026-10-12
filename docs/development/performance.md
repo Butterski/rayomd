@@ -1408,6 +1408,21 @@ them colour and mask lengths shifted with their sum kept, give the PDF of an exp
 cache under AddressSanitizer and UBSan; the core tests compare the SHA extensions with the
 portable SHA-256 on FIPS 180-4's vectors and every length to 300 bytes and up to 1.2 MB.
 
+**Alpha on a second thread.** A translucent PNG of 262,144 pixels or more has its alpha rows
+filtered and compressed on a thread of their own while the colour is compressed, when the
+process may run on more than one CPU (its affinity mask: `std::thread::hardware_concurrency`
+counts the machine's CPUs, and a thread on a process pinned to one CPU cost 1.5 %). The bytes
+are the same: each stream is compressed whole, as before. In process, two CPUs, p50: soft
+shadows 10.18 → 8.32 ms (-18.3 %), the illustration 29.20 → 25.14 (-13.9 %), the mascot 10.09 →
+8.78 (-13.0 %), the sprites -9.7 %, the noisy photo -4.3 %; opaque images start no thread.
+Cold, two CPUs: the mascot 15.19 → 13.85 ms (-8.8 %), `tester.md` -8.4 %, soft shadows -12.4 %,
+the illustration -9.6 %; one CPU within ±0.8 %. 48 documents with a distinct copy of the mascot
+each, `--batch --no-image-cache` on 12 CPUs: -7.8 % with the default workers, +0.6 % with
+`--workers=12`, which leave no CPU free. ThreadSanitizer finds nothing in single exports and in
+a four-worker batch of these documents. Below 262,144 pixels the alpha takes under 0.4 ms (the
+mascot's is 1.5 ms per megapixel), and a thread with fresh encoder tables cost 0.15 ms where it
+could not run beside the colour.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

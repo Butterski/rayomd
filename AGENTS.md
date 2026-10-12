@@ -461,7 +461,10 @@ GitHub CI entry points:
 - A PNG with transparency is inflated whole (libdeflate, to its exact size; RayoMD checks
   the header and Adler-32), its filtered colour rows written back into that buffer behind
   the row being read, and compressed with `ZlibCompressImage`. The encoder, its mode and the
-  filter heuristic all decide the image bytes; change them only on purpose.
+  filter heuristic all decide the image bytes; change them only on purpose. From
+  `kAlphaThreadPixels` the alpha is encoded on a second thread when the process's affinity
+  allows more than one CPU; until the join the threads write disjoint buffers and share
+  only data neither writes.
 - `WriteFixed2` may write one byte past the end it returns, within the
   `kFixed2MaxChars` every caller must leave.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document

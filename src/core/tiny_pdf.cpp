@@ -31,6 +31,7 @@
 #else
 #include <cerrno>
 #include <fcntl.h>
+#include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -51,6 +52,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -1482,6 +1484,28 @@ static void SetPayloadStream(PdfObjects& pdf, int id, std::string_view data, boo
 
 constexpr size_t kMaxImageBytes = 32u * 1024u * 1024u;
 constexpr size_t kMaxDecodedImageBytes = 96u * 1024u * 1024u;
+// From this many pixels a translucent PNG's alpha is encoded on a thread of its own.
+constexpr size_t kAlphaThreadPixels = size_t(1) << 18;
+
+// The CPUs this process may run on: its affinity mask, which taskset or a container narrows,
+// where std::thread::hardware_concurrency counts the machine's.
+RAYOMD_COLD static unsigned UsableCpus() {
+#ifdef _WIN32
+    DWORD_PTR process = 0;
+    DWORD_PTR system = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process != 0) {
+        unsigned count = 0;
+        for (; process != 0; process &= process - 1) count++;
+        return count;
+    }
+#elif defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) == 0) return (unsigned)CPU_COUNT(&set);
+#endif
+    return std::thread::hardware_concurrency();
+}
+
 // With `metadata` false the caller writes the XMP metadata, with the reversible profile's
 // properties: a PDF/A file has one packet for both.
 static void AddReversibleSource(PdfObjects& pdf, std::string& catalog, const std::string& markdown, bool metadata = true) {
@@ -2639,10 +2663,12 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
         filtered[0] = (uint8_t)filter;
         Internal::FilterPngRow(filter, color, colorUp, colorRow, colorComponents, filtered + 1);
     }
+    // The alpha rows are filtered and compressed beside the colour when the image is translucent,
+    // large enough and the machine has another CPU.
     PdfImage result;
-    if (!CompressImageRows(filteredColors, (colorRow + 1) * height, result.stream)) return false;
-
-    if (opaque != 255) {
+    const bool translucent = opaque != 255;
+    bool alphaOk = true;
+    const auto encodeAlpha = [&]() {
         // Row y's residuals replace its values, which only row y + 1, already filtered, reads.
         uint8_t* const residuals = decoded;
         for (size_t y = height; y-- > 0;) {
@@ -2653,8 +2679,17 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
             line[0] = (uint8_t)filter;
             std::memcpy(line + 1, residuals, width);
         }
-        if (!CompressImageRows(alpha, (width + 1) * height, result.maskStream)) return false;
+        alphaOk = CompressImageRows(alpha, (width + 1) * height, result.maskStream);
+    };
+    std::thread alphaThread;
+    static const unsigned cpus = UsableCpus();
+    if (translucent && width * height >= kAlphaThreadPixels && cpus > 1) {
+        alphaThread = std::thread(encodeAlpha);
     }
+    const bool colorOk = CompressImageRows(filteredColors, (colorRow + 1) * height, result.stream);
+    if (alphaThread.joinable()) alphaThread.join();
+    else if (translucent) encodeAlpha();
+    if (!colorOk || !alphaOk) return false;
     DescribeReencodedPng(png, result);
     image = std::move(result);
     return true;
