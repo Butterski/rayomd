@@ -6,7 +6,7 @@
   <a href="https://github.com/Butterski/rayomd/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/rayomd/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 3.1.0 MathTex" src="https://img.shields.io/badge/version-3.1.0%20MathTex-informational">
+  <img alt="Version: 3.2.0 MathTex" src="https://img.shields.io/badge/version-3.2.0%20MathTex-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
@@ -89,12 +89,13 @@ for p95 values, ranges, hashes, fixture details, and reproduction commands. The
 [benchmark index](https://github.com/Butterski/rayomd/wiki/Benchmarks) keeps
 cross-tool, warm-path, reversible-PDF, and older release reports organized.
 
-On 2026-10-09, warm `--bench` builds of the 3.1.0 Linux release against 3.0.0 (the
-same DejaVu Sans font, 11 CPU-pinned rounds of the nine watch-suite documents) ran
-about 1 % faster overall: Unicode documents up to 9 % faster, ASCII documents 7 % to
-17 % slower because they now draw bold and italic faces, formatted table cells with
-links, and a bookmark for each heading. [`performance.md`](docs/development/performance.md)
-records what each change cost.
+On 2026-10-12, builds of 3.2.0 against 3.1.0 on Linux (DejaVu Sans, native storage, the
+nine watch-suite documents) matched within about 1 %: warm `--bench` +0.5 % with pinned
+alignment (+0.3 % instructions), a cold `tester.md` export per process 4.6 % faster, and a
+6-worker `--batch` of 360 documents in tmpfs 1.4 % slower. Without the new options the PDFs
+are the same except code-block tints, which no longer overlap the line above. The Linux
+executable grew from 683 KB to 1,010 KB with the features 3.2 adds.
+[`performance.md`](docs/development/performance.md) records what each change cost.
 
 ## Quick start
 
