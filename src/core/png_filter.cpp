@@ -200,7 +200,7 @@ void FilterPngRow(int filter, const uint8_t* row, const uint8_t* up, size_t rowB
 #endif
 }
 
-bool UnfilterPngRow(uint8_t filter, const uint8_t* raw, const uint8_t* up, size_t rowBytes, size_t bpp,
+static bool UnfilterBytes(uint8_t filter, const uint8_t* raw, const uint8_t* up, size_t rowBytes, size_t bpp,
     uint8_t* row) {
     size_t lead = std::min(bpp, rowBytes);
     switch (filter) {
@@ -225,6 +225,69 @@ bool UnfilterPngRow(uint8_t filter, const uint8_t* raw, const uint8_t* up, size_
     default:
         return false;
     }
+}
+
+#if RAYOMD_PNG_SSE2
+template <size_t Bpp>
+static inline __m128i LoadPixel(const uint8_t* p) {
+    uint32_t value = 0;
+    std::memcpy(&value, p, Bpp);
+    return _mm_cvtsi32_si128((int)value);
+}
+
+template <size_t Bpp>
+static inline void StorePixel(uint8_t* p, __m128i pixel) {
+    uint32_t value = (uint32_t)_mm_cvtsi128_si32(pixel);
+    std::memcpy(p, &value, Bpp);
+}
+
+// Sub, Average and Paeth depend on the pixel just decoded, so these take one 3- or 4-byte pixel
+// per step, on 16-bit lanes; the first pixel's left and upper-left neighbours are zero.
+template <size_t Bpp>
+static void UnfilterPixels(uint8_t filter, const uint8_t* raw, const uint8_t* up, size_t rowBytes, uint8_t* row) {
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i low = _mm_set1_epi16(0xff);
+    __m128i a = zero;
+    __m128i c = zero;
+    for (size_t x = 0; x < rowBytes; x += Bpp) {
+        __m128i d = _mm_unpacklo_epi8(LoadPixel<Bpp>(raw + x), zero);
+        __m128i predictor;
+        if (filter == 1) {
+            predictor = a;
+        } else {
+            __m128i b = _mm_unpacklo_epi8(LoadPixel<Bpp>(up + x), zero);
+            predictor = filter == 3 ? _mm_srli_epi16(_mm_add_epi16(a, b), 1) : PaethLanes(a, b, c);
+            c = b;
+        }
+        a = _mm_and_si128(_mm_add_epi16(d, predictor), low);
+        StorePixel<Bpp>(row + x, _mm_packus_epi16(a, a));
+    }
+}
+#endif
+
+bool UnfilterPngRow(uint8_t filter, const uint8_t* raw, const uint8_t* up, size_t rowBytes, size_t bpp,
+    uint8_t* row) {
+#if RAYOMD_PNG_SSE2
+    if (filter == 2) {
+        size_t x = 0;
+        for (; x + 16 <= rowBytes; x += 16) {
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(row + x), _mm_add_epi8(Load16(raw + x), Load16(up + x)));
+        }
+        for (; x < rowBytes; x++) row[x] = (uint8_t)(raw[x] + up[x]);
+        return true;
+    }
+    if ((filter == 1 || filter == 3 || filter == 4) && rowBytes % bpp == 0) {
+        if (bpp == 4) {
+            UnfilterPixels<4>(filter, raw, up, rowBytes, row);
+            return true;
+        }
+        if (bpp == 3) {
+            UnfilterPixels<3>(filter, raw, up, rowBytes, row);
+            return true;
+        }
+    }
+#endif
+    return UnfilterBytes(filter, raw, up, rowBytes, bpp, row);
 }
 
 } // namespace TinyPdf::Internal
