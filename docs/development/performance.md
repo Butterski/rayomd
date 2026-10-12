@@ -1423,6 +1423,27 @@ a four-worker batch of these documents. Below 262,144 pixels the alpha takes und
 mascot's is 1.5 ms per megapixel), and a thread with fresh encoder tables cost 0.15 ms where it
 could not run beside the colour.
 
+**Huge pages for decoded images.** In a fresh process every 4 KB page of the whole-image
+buffers faults on first touch: 1,869 faults for the mascot, against 887 when 4.0 decoded a row
+at a time, 5,572 for the illustration. On Linux those buffers (the inflated rows, a palette's
+colour rows, the alpha rows) are now 2 MB-aligned and advised `MADV_HUGEPAGE`, which transparent
+huge pages in the common `madvise` mode honour. Cold exports, one pinned CPU, p50:
+
+| Document | Before | Now | Faults | Peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| the mascot | 15.26 ms | 13.68 ms (-10.4 %) | 1,869 → 849 | 9.5 → 11.4 MB |
+| soft shadows | 15.13 ms | 13.58 ms (-10.2 %) | 1,769 → 747 | 9.2 → 11.1 MB |
+| screenshot | 8.72 ms | 7.31 ms (-16.2 %) | 1,332 → 538 | 7.6 → 8.3 MB |
+| illustration, 2048x2048 | 41.35 ms | 32.59 ms (-21.2 %) | 5,572 → 462 | 24.4 → 28.7 MB |
+| noisy photo | 35.49 ms | 33.90 ms (-4.5 %) | 5,310 → 4,289 | 20.6 → 22.8 MB |
+
+The compressor's output buffer stays on ordinary pages: it is sized for the worst case and
+mostly written in part, and on huge pages it took the mascot 1.7 MB more memory and 1 % more
+time (only the noisy photo, whose 2.8 MB stream fills it, gained 3 %). glibc's own switch,
+`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`, gained less (the mascot -5.3 %, the illustration
+-16.4 %), most likely as its large chunks are not 2 MB-aligned and so cover fewer whole huge
+pages. Elsewhere, and on Windows, the buffers are plain `malloc`.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

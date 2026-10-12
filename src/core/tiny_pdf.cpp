@@ -2456,11 +2456,35 @@ static bool InflateZlibStream(const std::string& data, uint8_t* out, size_t size
         ReadBigEndian32(in + 2 + consumed) == RayoMd::Flate::Adler32(out, size);
 }
 
+// A decoded image's working buffers, not zeroed, on 2 MB pages where Linux offers them
+// (transparent huge pages in "madvise" or "always" mode): a fresh process faults a 4 MB buffer in
+// twice instead of 1,024 times. Cold exports of a 1024x1024 RGBA PNG 15.26 -> 13.68 ms, of a
+// 2048x2048 one 41.35 -> 32.59 ms, for 2 to 4 MB more peak memory (2026-10-13).
+struct FreeBuffer {
+    void operator()(uint8_t* buffer) const { std::free(buffer); }
+};
+using ImageBuffer = std::unique_ptr<uint8_t[], FreeBuffer>;
+
+static ImageBuffer AllocateImageBuffer(size_t size) {
+#ifdef __linux__
+    constexpr size_t kHugePage = size_t(2) << 20;
+    if (size >= kHugePage) {
+        const size_t rounded = (size + kHugePage - 1) & ~(kHugePage - 1);
+        void* const buffer = std::aligned_alloc(kHugePage, rounded);
+        if (buffer) madvise(buffer, rounded, MADV_HUGEPAGE);
+        return ImageBuffer(static_cast<uint8_t*>(buffer));
+    }
+#endif
+    return ImageBuffer(static_cast<uint8_t*>(std::malloc(size)));
+}
+
 // `size` bytes of PNG-predicted rows as a zlib stream (ZlibCompressImage).
 static bool CompressImageRows(const uint8_t* rows, size_t size, std::string& stream) {
     if (size > RayoMd::Flate::kMaxInput) return false;
-    // Not zeroed: the encoder writes only the output, and the pages it does not reach stay unused.
-    std::unique_ptr<uint8_t[]> out(new (std::nothrow) uint8_t[RayoMd::Flate::ZlibBound(size)]);
+    // Ordinary pages: the encoder writes only the output, mostly a fraction of the bound, and the
+    // pages it does not reach stay unused (on huge pages a 1024x1024 image took 1.7 MB more memory
+    // and 1 % more time).
+    ImageBuffer out(static_cast<uint8_t*>(std::malloc(RayoMd::Flate::ZlibBound(size))));
     if (!out) return false;
     const size_t written = RayoMd::Flate::ZlibCompressImage(
         std::string_view(reinterpret_cast<const char*>(rows), size), out.get(), ThreadFlateWork().scratch);
@@ -2632,10 +2656,10 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     const size_t colorComponents = rgb ? 3 : 1;
     const size_t colorRow = width * colorComponents;
     const bool colorInPlace = colorRow <= rowBytes;
-    std::unique_ptr<uint8_t[]> inflated(new (std::nothrow) uint8_t[(rowBytes + 1) * height]);
-    std::unique_ptr<uint8_t[]> paletteColors(colorInPlace ? nullptr : new (std::nothrow) uint8_t[(colorRow + 1) * height]);
+    ImageBuffer inflated = AllocateImageBuffer((rowBytes + 1) * height);
+    ImageBuffer paletteColors = colorInPlace ? ImageBuffer() : AllocateImageBuffer((colorRow + 1) * height);
     // This and the previous decoded row, this and the previous colour row, and the alpha rows.
-    std::unique_ptr<uint8_t[]> scratch(new (std::nothrow) uint8_t[2 * rowBytes + 2 * colorRow + (width + 1) * height]);
+    ImageBuffer scratch = AllocateImageBuffer(2 * rowBytes + 2 * colorRow + (width + 1) * height);
     if (!inflated || (!colorInPlace && !paletteColors) || !scratch ||
         !InflateZlibStream(png.idat, inflated.get(), (rowBytes + 1) * height)) {
         return false;

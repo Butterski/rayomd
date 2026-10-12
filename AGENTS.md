@@ -464,7 +464,8 @@ GitHub CI entry points:
   filter heuristic all decide the image bytes; change them only on purpose. From
   `kAlphaThreadPixels` the alpha is encoded on a second thread when the process's affinity
   allows more than one CPU; until the join the threads write disjoint buffers and share
-  only data neither writes.
+  only data neither writes. Its decode buffers come from `AllocateImageBuffer`: on Linux
+  2 MB-aligned with `MADV_HUGEPAGE`, which saves most of a fresh process's page faults.
 - `WriteFixed2` may write one byte past the end it returns, within the
   `kFixed2MaxChars` every caller must leave.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document
