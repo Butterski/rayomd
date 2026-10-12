@@ -394,11 +394,12 @@ GitHub CI entry points:
 
 ## Benchmark And Documentation Rules
 
-- Keep `README.md` concise: product identity, essential quick start, a scoped
-  headline result, and links. Put complete commands, build variants, feature
-  matrices, API guidance, and benchmark methodology in the GitHub wiki.
-- When user-visible behavior changes, update the relevant wiki page and refresh
-  the README summary only when the landing-page promise or quick start changed.
+- `README.md` describes every user-visible feature in its Features section, each with a
+  short, working example; keep that section in step when a feature is added or changes.
+  Complete flag tables, exit codes, build variants, API details and benchmark methodology
+  stay in the GitHub wiki.
+- When user-visible behavior changes, update the relevant wiki page and the README's
+  Features section.
 - Update `VERSION` and the README version badge together when preparing a
   release.
 - Keep benchmark claims dated and scoped.

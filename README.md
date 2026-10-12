@@ -119,27 +119,173 @@ cmake --build build/linux --config Release
 ./build/linux/rayomd --export input.md output.pdf
 ```
 
-Common CLI workflows:
+The Windows app supports editing, drag-and-drop, engine/style/margin selection,
+URL-image opt-in, reversible-PDF inspection, and `Ctrl+E` export. Every feature below
+works from both command lines (`rayomd` on Linux, `rayomd.exe` on Windows) and from the
+[C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
+
+## Features
+
+### Markdown
+
+- Headings (ATX and Setext) become PDF bookmarks and the targets of GitHub-style
+  `#anchor` links; a heading never ends a page.
+- Paragraphs, emphasis (bold, italic, strikethrough), code spans and backslash escapes.
+- Nested bullet and numbered lists, and GitHub task lists (`- [ ]`, `- [x]`) with checkboxes.
+- Block quotes, and GitHub alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`,
+  `[!CAUTION]`) with a coloured bar and title.
+- Pipe tables with alignment and inline Markdown in cells; the header row repeats on every
+  page a table reaches.
+- Links: inline, reference-style (full, collapsed and shortcut `[label]`), `<…>` autolinks,
+  and bare URLs and email addresses, all clickable.
+- Footnotes as on GitHub: `[^label]` references and `[^label]:` definitions (also in quotes
+  and list items), numbered by first reference, set after the text with links both ways.
+- Rules, page breaks (`\pagebreak`, `\newpage`, `<!-- pagebreak -->`), hidden HTML comments,
+  `<br>`, and character references such as `&copy;`.
+- Unicode text in an embedded subset of a system font (or the one `RAYOMD_FONT` names), with
+  fallback fonts for scripts it lacks; Latin text stays on the PDF standard fonts, which
+  keeps those files small.
+
+### Code highlighting
+
+Fenced code whose info string names one of 29 languages is coloured as GitHub's light theme
+colours it: shell and console, PowerShell, batch, JavaScript, TypeScript, Python, C, C++, C#,
+Java, Kotlin, Go, Rust, Swift, PHP, Ruby, SQL, HTML, XML, CSS, SCSS, JSON, YAML, TOML, INI,
+Dockerfile and diff. `--no-highlight` draws every block in one colour.
+
+### Math
+
+A TeX subset typeset natively, with no LaTeX and no embedded math fonts: `$...$`, `$$...$$`
+and fenced `math` blocks, in text, lists, quotes, headings and table cells. Unknown or
+malformed input degrades to readable output. See
+[`native_math.md`](docs/development/native_math.md).
+
+### Images
+
+- Standalone PNG and JPEG images, sized to the page; a missing or unreadable one shows its
+  alt text, and an image inside a paragraph reads `image: alt`.
+- SVG images drawn as vectors by RayoMD's own converter: paths, shapes, transforms, clipping,
+  linear gradients, opacity, text in the document's font, embedded PNG/JPEG, and style
+  sheets as Illustrator writes them. Charts from matplotlib, Vega-Lite, Plotly and Graphviz
+  draw close to a browser; an SVG that needs scripts or HTML (Mermaid) shows its alt text.
+- Local images must lie in the input file's folder unless `--allow-unsafe-local-images`;
+  HTTP/HTTPS images load only with `--allow-url-images` (Windows, and the curl Linux build).
+
+### Page layout
+
+- Styles `elegant` (default), `modern` and `tech`; margins `compact`, `normal`, `wide`, or a
+  size such as `margin=0.75in` or `margin=54pt`.
+- `--page-size=SIZE`: `a4` (default), `a3`, `a5`, `letter` or `legal`, each also with
+  `-landscape`, or any `WIDTHxHEIGHT` in `mm`, `cm`, `in` or `pt` (`6x9in`).
+- `--page-numbers` writes "N / M" at the foot of every page.
 
 ```sh
-rayomd --export input.md output.pdf
-rayomd --batch input-folder output-folder --recursive --skip-unchanged --report=report.jsonl --workers=8
-rayomd --export input.md reversible.pdf native elegant normal --embed-source
-rayomd --export input.md numbered.pdf --page-numbers --page-size=letter
-rayomd --export input.md small.pdf --compress
-rayomd --export input.md branded.pdf --theme=acme.theme
-rayomd --export input.md archive.pdf --pdfa
-rayomd --export input.md accessible.pdf --pdfua
-rayomd --book docs/SUMMARY.md manual.pdf --toc
-rayomd --recover-source reversible.pdf recovered.md
+rayomd --export report.md report.pdf modern wide --page-size=letter-landscape --page-numbers
 ```
 
-The Windows app supports editing, drag-and-drop, engine/style/margin selection,
-URL-image opt-in, reversible-PDF inspection, and `Ctrl+E` export.
+### Document metadata
 
-For dependencies, curl-enabled Linux builds, stdin/serve modes, security flags,
-exit codes, and all options, use the [Getting Started](https://github.com/Butterski/rayomd/wiki/Getting-Started)
-and [CLI Reference](https://github.com/Butterski/rayomd/wiki/CLI-Reference).
+The YAML front matter fills the PDF's metadata and is not shown on the page:
+
+```yaml
+---
+title: Quarterly report
+author: [Ann Smith, Bob Lee]
+subject: Sales in Q3
+keywords: [sales, q3]
+lang: en-GB
+---
+```
+
+Without a `title`, the first heading is the title; `description` stands in for `subject`.
+
+### Tables of contents
+
+A paragraph `[TOC]` or `[[_TOC_]]` becomes a table of contents with dot leaders, page
+numbers and links to the headings; `--toc` puts one first (after a title heading).
+`--toc-depth=N` (1 to 6, default 3) sets how many heading levels it lists.
+
+### Themes
+
+`--theme=FILE` lays a company look over a style: your TrueType font for all text, heading,
+link and accent colours, a header and footer with placeholders and a logo, and a cover page.
+
+```ini
+font = fonts/AcmeSans.ttf
+heading-color = #0B3D91
+link-color = #0B6E4F
+accent-color = #F2A900
+header-left = {logo}
+header-right = {title}
+footer-left = {author}
+footer-right = {date}
+logo = acme-logo.svg
+cover = yes
+```
+
+Placeholders are `{title}`, `{author}`, `{subject}`, `{date}`, `{page}`, `{pages}` and
+`{logo}`; paths are relative to the theme file. See
+[Themes](https://github.com/Butterski/rayomd/wiki/Themes).
+
+### Books
+
+`--book` makes one PDF of several Markdown files: those a `SUMMARY.md` lists (as mdBook and
+GitBook read it, with parts and nesting), a folder's files by name with `README.md` first,
+or the files given. Each file starts on a new page and keeps its own footnotes and anchors,
+links between the files (`other.md#heading`) stay links inside the PDF, the bookmarks nest
+by part, and `--toc` gives one table of contents for the whole book.
+
+```sh
+rayomd --book docs/src/SUMMARY.md manual.pdf --toc --page-numbers
+```
+
+### Batch conversion
+
+```sh
+rayomd --batch docs pdf-out --recursive --skip-unchanged --report=report.jsonl --workers=8
+```
+
+`--batch` converts a folder on up to 64 threads (6 by default), `--recursive` mirrors its
+subfolders, `--skip-unchanged` keeps PDFs newer than their Markdown, and `--report` writes one
+JSON line per document (status, exit code, pages, bytes, milliseconds, characters without a
+glyph, failed images; `-` for standard output). `--stdin-batch` and `--serve` read paths from
+standard input, and `--stdin` converts Markdown piped in.
+
+### Compression
+
+`--compress` writes page content, fonts and CMaps as FlateDecode streams with RayoMD's own
+DEFLATE encoder: text-heavy PDFs come out two to five times smaller, at some export time.
+
+### PDF/A-3b and PDF/UA-1
+
+- `--pdfa` writes PDF/A-3b for archiving: every font embedded, an sRGB output intent, XMP
+  metadata and a file identifier.
+- `--pdfua` writes tagged PDF/UA-1 for screen readers: a structure tree of headings, lists,
+  tables (header cells with scope), figures with their alt text, formulas, links and
+  footnotes in reading order, with decoration, headers and footers marked as artifacts. The
+  language is the front matter's `lang`, else `en`.
+
+Both need a TrueType font to embed and show formulas as their TeX source; together the file
+claims both standards. All test documents pass veraPDF. See
+[Archival and Accessible PDFs](https://github.com/Butterski/rayomd/wiki/Archival-and-Accessible-PDFs).
+
+### Reversible PDFs
+
+`--embed-source` attaches the exact Markdown to the PDF, and `--recover-source` gets it back
+byte for byte (`--inspect-source` describes it). It is off by default, because the file then
+carries the whole source, including anything not shown on the pages. See
+[Reversible PDFs](https://github.com/Butterski/rayomd/wiki/Reversible-PDFs).
+
+```sh
+rayomd --export notes.md notes.pdf --embed-source
+rayomd --recover-source notes.pdf recovered.md
+```
+
+### Diagnostics
+
+`--doctor` checks fonts, temporary output and a smoke export; `--bench` times repeated
+exports of one document; `--version` prints the version. Exit codes are listed in the
+[CLI Reference](https://github.com/Butterski/rayomd/wiki/CLI-Reference).
 
 ## Documentation
 
@@ -147,6 +293,10 @@ and [CLI Reference](https://github.com/Butterski/rayomd/wiki/CLI-Reference).
 |---|---|
 | Installation and builds | [Getting Started](https://github.com/Butterski/rayomd/wiki/Getting-Started) |
 | Commands, flags, and exit codes | [CLI Reference](https://github.com/Butterski/rayomd/wiki/CLI-Reference) |
+| Folders, reports, incremental runs | [Batch Conversion](https://github.com/Butterski/rayomd/wiki/Batch-Conversion) |
+| One PDF of many files | [Books](https://github.com/Butterski/rayomd/wiki/Books) |
+| Fonts, colours, headers, cover pages | [Themes](https://github.com/Butterski/rayomd/wiki/Themes) |
+| PDF/A-3b and PDF/UA-1 | [Archival and Accessible PDFs](https://github.com/Butterski/rayomd/wiki/Archival-and-Accessible-PDFs) |
 | Supported Markdown subset | [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support) |
 | Exact source recovery and privacy | [Reversible PDFs](https://github.com/Butterski/rayomd/wiki/Reversible-PDFs) |
 | Embedding the exporter | [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API) |
@@ -161,36 +311,16 @@ Version-specific engineering contracts remain beside the code:
 - [`docs/development/performance.md`](docs/development/performance.md)
 - [`docs/development/arbitrary_pdf_research_decision.md`](docs/development/arbitrary_pdf_research_decision.md)
 
-## Native renderer scope
+## Boundaries
 
-Native mode supports ATX and Setext headings (as PDF bookmarks and as targets of
-GitHub-style `#anchor` links; a heading never ends a page), paragraphs, structured
-nested lists (with GitHub task lists), block quotes and GitHub alerts (`> [!NOTE]`
-and the other four), fenced and indented code (fenced code in a language GitHub knows in
-its colours, `--no-highlight` to keep it one colour), footnotes, pipe tables (whose header row repeats
-on every page), rules, page breaks, matching-run code spans, classic emphasis and
-escapes, inline and reference-style links, URL/email autolinks (in angle brackets or
-bare, as on GitHub), standalone inline/reference images (PNG, JPEG, and SVG drawn as
-vectors with their text in the document's font),
-natively typeset math for a TeX subset (`$...$`, `$$...$$`, fenced `math` blocks, in
-text, lists, quotes, headings and table cells), Unicode fonts (or the PDF standard
-fonts when no system font is found), HTML comments (hidden), `<br>` line breaks,
-character references such as `&copy;`, PDF metadata from the front matter (title,
-else the first heading; author, subject, keywords and language), opt-in page numbers,
-a table of contents at a `[TOC]` or `[[_TOC_]]` paragraph or with `--toc`, books of
-several files (`--book`), tagged PDF/UA-1 (`--pdfua`; a theme's cover page is tagged as
-decoration, and an inline formula is text showing its TeX source), and common status-symbol
-normalization.
-Images embedded in paragraph text use a consistent `image: alt` fallback;
-standalone images retain native image layout and missing-image fallback text.
-
-It deliberately does not promise full CommonMark/Pandoc compatibility, complete
-LaTeX math (packages, macros, automatic numbering), highlighting for every language,
-citations, filters, templates, right-to-left scripts (Arabic and Hebrew are drawn
-left to right, unshaped), complete SVG (filters, masks, radial gradients, patterns,
-markers, and HTML or scripts in SVG are not drawn as a browser draws them; an SVG that
-needs HTML, scripts or style sheets it cannot match shows its alt text), or HTML/CSS
-layout fidelity. The complete and current
+RayoMD's native renderer is a fast Markdown subset, not a Pandoc clone. It deliberately does
+not promise full CommonMark/Pandoc compatibility, complete LaTeX math (packages, macros,
+automatic numbering), highlighting for every language, citations, filters, templates,
+right-to-left scripts (Arabic and Hebrew are drawn left to right, unshaped), complete SVG
+(radial gradients and patterns are approximated; markers, filters and masks are not drawn),
+or HTML/CSS layout fidelity. Under `--pdfua`, a theme's cover page is tagged as decoration
+and an inline formula is text showing its TeX source. Missing or unsupported images and
+malformed math degrade to readable fallbacks instead of failing the export. The complete
 matrix is maintained in
 [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support).
 
