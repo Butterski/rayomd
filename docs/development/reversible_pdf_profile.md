@@ -11,7 +11,7 @@ ordinary export path remains unchanged and emits PDF 1.7. An export requested
 with `--embed-source` emits PDF 2.0 and uses the standard Associated Files
 relationship to identify the attachment as the document source. With `--pdfa`
 too it stays PDF 1.7, as PDF/A-3 (ISO 19005-3), which allows the attachment, is
-based on PDF 1.7.
+based on PDF 1.7; so does `--pdfua`, as PDF/UA-1 (ISO 14289-1) is.
 
 The profile is deliberately narrow. RayoMD recovers only the classic-xref
 structure written by its own native exporter. It does not repair PDFs, parse
@@ -112,11 +112,11 @@ in the dated
   310 MB plain PDF, exceeded the reversible PDF ceiling, and peaked near
   1.5 GiB RSS, so larger inputs are rejected before rendering.
 - Maximum classic xref entries: 1,000,001 including object zero.
-- Maximum XMP profile stream: 16 KiB. A PDF/A-3b export cuts each metadata value
-  to 2 KiB of XML (`PdfaText`), in the Info dictionary too, so its packet fits.
+- Maximum XMP profile stream: 16 KiB. A PDF/A-3b or PDF/UA-1 export cuts each metadata
+  value to 2 KiB of XML (`PdfaText`), in the Info dictionary too, so its packet fits.
 - Exactly one classic xref section and generation zero are accepted. A PDF 1.7
-  header only with a packet that declares `pdfaid:part="3"`, and a trailer `/ID`
-  of hex strings, as PDF/A-3b exports have them.
+  header only with a packet that declares `pdfaid:part="3"` or
+  `pdfuaid:part="1"`; a PDF/A-3b export's trailer `/ID` holds hex strings.
 - Source streams with filters are rejected by profile version 1.
 - `/Prev`, `/XRefStm`, `/Encrypt`, xref streams, object streams, duplicate
   `source.md` entries, duplicate profile attributes, malformed offsets,

@@ -161,6 +161,7 @@ struct WinExportOptions {
     bool pageNumbers = false;
     bool compress = false;
     bool pdfa = false;
+    bool pdfua = false;
     bool highlightCode = true;
     bool toc = false;
     int tocDepth = 3;
@@ -520,6 +521,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const s
     options.pageNumbers = exportOptions.pageNumbers;
     options.compress = exportOptions.compress;
     options.pdfa = exportOptions.pdfa;
+    options.pdfua = exportOptions.pdfua;
     options.highlightCode = exportOptions.highlightCode;
     options.toc = exportOptions.toc;
     options.tocDepth = exportOptions.tocDepth;
@@ -678,6 +680,8 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.compress = true;
         } else if (lstrcmpiW(argv[i], L"--pdfa") == 0) {
             options.pdfa = true;
+        } else if (lstrcmpiW(argv[i], L"--pdfua") == 0) {
+            options.pdfua = true;
         } else if (lstrcmpiW(argv[i], L"--no-highlight") == 0) {
             options.highlightCode = false;
         } else if (lstrcmpiW(argv[i], L"--toc") == 0) {

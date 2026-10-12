@@ -1139,6 +1139,61 @@ transparency and an SVG logo. Under Wine the Windows build overflows the stack i
 decoding an RGBA PNG, before this change too; Windows CI decodes them, so Wine smoke tests
 leave them out.
 
+## Tagged PDF/UA, October 2026
+
+`--pdfua` (`PdfOptions::pdfua`) writes PDF/UA-1 (ISO 14289-1), validated with veraPDF 1.30
+(`verapdf -f ua1`): all 970 corpus documents, the documentation sites, `tester.md` and a book,
+with page numbers, a table of contents, `--compress`, a theme with an SVG logo and a cover,
+and with `--pdfa` (which then passes `-f 3b` as well). It takes the Unicode renderer and its
+embedded font, as PDF/A does, and adds a structure tree (`src/core/tagged.cpp`).
+
+- Elements: headings as H1 to H6, never deeper than one below the last (`## A` first becomes
+  H1); P; L, LI, Lbl and LBody (an item's text is its body's own content, a nested list goes
+  into the body, a task's box is its label with ☐ or ☑ as ActualText); BlockQuote, and Div for
+  an alert; Code with block placement; Table, THead and TBody, TR, TH with a column scope and
+  TD, a header row repeated on a new page an artifact; Figure with its alt text and box, an
+  image without alt text an artifact; Formula with its TeX source as Alt (shown as source, as
+  with PDF/A); Link around link text and linked images, with its annotation as an object
+  reference; Reference and Note (with an /ID) for footnotes; TOC, TOCI and Caption.
+- Content: the renderer says before each paint whether it draws content (`PaintText`,
+  `DrawImage`, highlighted code) or decoration (`DrawRect`, `DrawStrokeRect`, rules, the note
+  separator); the tree opens a sequence only when that changes and closes it at a page break,
+  so a paragraph is one sequence a page. Bold text is drawn once, filled and stroked (`2 Tr`),
+  instead of twice: a screen reader read the doubled text twice. The streams of headers,
+  footers, page numbers, a cover and the table of contents' dots and numbers are artifacts.
+- The rest of PDF/UA: `/StructParents` and `/Tabs /S` on each page, `/StructParent` and
+  `/Contents` (the link's text) on each link annotation, `/MarkInfo`, `DisplayDocTitle`, the
+  front matter's language (else `en`) and a title (the front matter's, else the first
+  heading, else the file name), and XMP with `pdfuaid:part` 1, declared to PDF/A by an
+  extension schema when both are claimed. With `--embed-source` the file stays PDF 1.7.
+
+Untagged documents keep their bytes (all 2,883 corpus PDFs, also with `--page-numbers
+--compress`, `--toc`, `--pdfa`, `--pdfa --embed-source` and a theme). The tests of `tags` in
+the hooks cost the watch fixtures 0.09 % more instructions (0.06 % to 0.22 % a build by
+callgrind) and the documentation sites 0.15 %; pinned time +0.04 % against A/A -0.01 %, sites
+-0.12 % against -0.27 %. GCC outlined `"- " + text` in the standard renderer's bullets again
+(+0.3 % on `baseline.md`); it is spelled out now. The executable grows by 33 KB: 19 KB in
+`tagged.cpp`, the rest the hooks and the tagged annotation writer. Tagging
+first took 5 to 9 times as long as PDF/A and 1 s for the fastapi documentation: the builder
+counted the tree's objects once per object, a quadratic loop, and writing an element cost 4,300
+instructions (a string per object, `std::to_chars` at `-Os`, three strings and a vector in each
+element). Elements without heap memory, kids as a linked list in one vector, attributes in one
+pool, the tree written once into a buffer the objects view, digits by multiplication, ASCII
+text strings as literals, and a list item without a P of its own left these, against `--pdfa`:
+
+| Document | `--pdfa` | `--pdfua` | Size |
+| --- | ---: | ---: | ---: |
+| `baseline.md` | 0.44 ms | 0.76 ms | 202 → 343 KB |
+| `ascii_96kb.md` | 2.11 ms | 3.22 ms | 923 → 1,502 KB |
+| `table_96kb.md` | 2.20 ms | 4.59 ms | 1,112 → 1,810 KB |
+| `unicode_96kb.md` | 1.96 ms | 3.64 ms | 930 → 1,527 KB |
+| kubernetes documentation | 9.24 ms | 11.16 ms | 2,748 → 3,639 KB |
+| fastapi documentation | 22.01 ms | 37.67 ms | 6,425 → 10,823 KB |
+
+The rest grows with the structure itself: an object for every element, a sequence for each run
+of content, the ParentTree's reference for each, and the links' text in their annotations (see
+Measured opportunities).
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1284,6 +1339,20 @@ plot in 57 ms instead of 69 ms, for 53 KB more executable (2026-10-09). A batch 
 document shows the same SVG, a theme logo for one, converts it once per document, as a form
 names the document's fonts and images; a form without text and images could be kept like a
 PNG, keyed by its path. Measure how often batches repeat an SVG before taking either.
+
+**Object streams for tagged documents.** A PDF/UA file has a structure element for every
+paragraph, list item part, table cell and link: 24,228 objects in the fastapi documentation,
+each 66 bytes of dictionary on average plus 40 of `obj`/`endobj` and xref entry, 2.6 MB of the
+4.4 MB it has over PDF/A (2026-10-09). Compressed object streams (PDF 1.5, allowed by PDF/UA-1
+and PDF/A-3) would hold them in a fraction of that, and BuildInto would write a
+cross-reference stream. The reversible profile accepts only a classic xref table, so tagged
+files with an embedded source would keep the table.
+
+**Table borders in one artifact per row.** Tagged, each table cell paints its border as an
+artifact and then its text in its TD: two marked-content sequences a cell, and the tagged
+table fixture runs 2.1 times as long as with `--pdfa`. Painting a row's borders first, in one
+artifact, then its cells' text would halve the sequences; it changes the order of RenderTable's
+loop, which untagged documents must not pay for.
 
 ## Keeping the release light
 

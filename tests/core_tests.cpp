@@ -2373,6 +2373,64 @@ bool CheckSvg() {
     return true;
 }
 
+// PDF/UA-1: a structure tree in reading order. Headings from H1, one level deeper at most; lists
+// as L, LI, Lbl and LBody, an item's text the body's own content and a nested list in that body,
+// a task's box its label with the state as ActualText; a table's header cells TH with a column
+// scope, its header row repeated on a new page an artifact; an image a Figure with its alt text,
+// without one an artifact; links and footnotes Link, Reference and Note elements whose
+// annotations point back at them, their text in literal strings where it is ASCII. Every page's
+// marked content numbered from 0, every sequence closed, bold text drawn once, and the catalog,
+// pages and XMP that PDF/UA requires, without claiming PDF/A.
+bool CheckTaggedPdf() {
+    const auto npos = std::string::npos;
+    std::string document = "## First\n\nSee [the site](https://example.com) and **bold**.[^n]\n\n"
+        "- one\n  - inner\n- [x] done\n\n#### Deep\n\n![RayoMD](docs/assets/branding/rayomd.png)\n\n"
+        "![](docs/assets/branding/rayomd.png)\n\n| A | B |\n|---|---|\n";
+    for (int row = 0; row < 60; row++) document += "| r" + std::to_string(row) + " | v |\n";
+    document += "\n[^n]: The note.\n";
+    TinyPdf::PdfOptions options;
+    options.pdfua = true;
+    options.sourcePath = std::string(RAYOMD_TEST_SOURCE_DIR) + "/tester.md";
+    std::string pdf;
+    const TinyPdf::BuildResult result = TinyPdf::BuildPdf(document, options, pdf);
+    bool numbered = true;
+    int expected = 0;
+    for (size_t at = pdf.find("<</MCID "); at != npos; at = pdf.find("<</MCID ", at + 1)) {
+        const int mcid = std::atoi(pdf.c_str() + at + 8);
+        numbered = numbered && (mcid == 0 || mcid == expected);
+        expected = mcid + 1;
+    }
+    const size_t links = CountOccurrences(pdf, "/Subtype /Link");
+    if (!result.Ok() || result.pages < 2 || !numbered || pdf.rfind("%PDF-1.7\n", 0) != 0 ||
+        pdf.find("/Subtype /Type1") != npos || pdf.find("/MarkInfo << /Marked true >> /StructTreeRoot ") == npos ||
+        pdf.find("/ViewerPreferences << /DisplayDocTitle true >>") == npos || pdf.find("/Lang (en)") == npos ||
+        pdf.find("pdfuaid:part=\"1\"") == npos || pdf.find("pdfaid:part") != npos || pdf.find("/OutputIntents") != npos ||
+        XmpText(pdf, "xml:lang=\"x-default\">", '<') != "First" ||
+        CountOccurrences(pdf, "BDC\n") + CountOccurrences(pdf, "BMC\n") != CountOccurrences(pdf, "EMC\n") ||
+        CountOccurrences(pdf, "/Tabs /S") != result.pages || CountOccurrences(pdf, "/StructParents ") != result.pages ||
+        links < 3 || CountOccurrences(pdf, "/Type /OBJR") != links || CountOccurrences(pdf, "/StructParent ") != links ||
+        CountOccurrences(pdf, " /Contents (") + CountOccurrences(pdf, " /Contents <FEFF") != links ||
+        CountOccurrences(pdf, "/S /P ") != 2 ||
+        pdf.find("/S /H1 ") == npos || pdf.find("/S /H2 ") == npos || pdf.find("/S /H4 ") != npos ||
+        CountOccurrences(pdf, "/S /L ") != 2 || CountOccurrences(pdf, "/S /LI ") != 3 || CountOccurrences(pdf, "/S /LBody ") != 3 ||
+        pdf.find("/ActualText <FEFF2611>") == npos || CountOccurrences(pdf, "/S /TH ") != 2 ||
+        CountOccurrences(pdf, "/Scope /Column") != 2 || CountOccurrences(pdf, "/S /TD ") != 120 ||
+        CountOccurrences(pdf, "/S /Figure ") != 1 || pdf.find("/Alt (RayoMD)") == npos ||
+        CountOccurrences(pdf, " Do Q") != 2 || pdf.find("/S /Note ") == npos || pdf.find("/IDTree ") == npos ||
+        pdf.find("/S /Reference ") == npos || CountOccurrences(pdf, "0062006F006C0064") != 1) {
+        std::cerr << "tagged PDF mismatch" << std::endl;
+        return false;
+    }
+    // Claimed with PDF/A too, the packet declares PDF/UA's schema to PDF/A.
+    options.pdfa = true;
+    if (!TinyPdf::BuildPdf(document, options, pdf).Ok() || pdf.find("pdfaid:part=\"3\"") == npos ||
+        pdf.find("pdfuaid:part=\"1\"") == npos || pdf.find("<pdfaSchema:prefix>pdfuaid</pdfaSchema:prefix>") == npos) {
+        std::cerr << "tagged PDF/A mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
 // a task item in a quote, keep it as text. In both renderers.
@@ -2775,6 +2833,7 @@ int main() {
     if (!CheckContents()) return 95;
     if (!CheckBook()) return 96;
     if (!CheckSvg()) return 97;
+    if (!CheckTaggedPdf()) return 98;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

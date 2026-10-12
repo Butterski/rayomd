@@ -82,7 +82,8 @@ enum class BuildError : uint8_t {
     ReversiblePdfTooLarge = 6,
     // PdfTheme::fontPath cannot be read or is no TrueType font.
     ThemeFontUnavailable = 7,
-    // PdfOptions::pdfa, but no TrueType font to embed: neither RAYOMD_FONT nor a system font.
+    // PdfOptions::pdfa or pdfua, but no TrueType font to embed: neither RAYOMD_FONT nor a
+    // system font.
     PdfaFontUnavailable = 8,
 };
 
@@ -115,6 +116,11 @@ struct PdfOptions {
     // PDF/A-3b (ISO 19005-3): every font embedded, so all text takes a TrueType font and
     // formulas show their TeX source; an sRGB output intent, XMP metadata and a file identifier.
     bool pdfa = false;
+    // PDF/UA-1 (ISO 14289-1), a tagged PDF for assistive technology: a structure tree of the
+    // headings, paragraphs, lists, tables, figures (their alt text), links and notes in reading
+    // order, decoration marked as artifacts, and, as with pdfa, every font embedded and formulas
+    // as their TeX source. The language is the front matter's `lang`, else "en".
+    bool pdfua = false;
     // Fenced code whose info string names a language GitHub knows (python, js, bash, ...) in
     // the colours of GitHub's light theme; false shows every code block in one colour.
     bool highlightCode = true;

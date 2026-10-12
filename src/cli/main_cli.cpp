@@ -283,6 +283,7 @@ struct CliExportOptions {
     bool pageNumbers = false;
     bool compress = false;
     bool pdfa = false;
+    bool pdfua = false;
     bool highlightCode = true;
     bool toc = false;
     int tocDepth = 3;
@@ -307,6 +308,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--page-numbers") options.pageNumbers = true;
         else if (value == "--compress") options.compress = true;
         else if (value == "--pdfa") options.pdfa = true;
+        else if (value == "--pdfua") options.pdfua = true;
         else if (value == "--no-highlight") options.highlightCode = false;
         else if (value == "--toc") options.toc = true;
         else if (value.rfind("--toc-depth=", 0) == 0) {
@@ -405,6 +407,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     pdfOptions.pageNumbers = options.pageNumbers;
     pdfOptions.compress = options.compress;
     pdfOptions.pdfa = options.pdfa;
+    pdfOptions.pdfua = options.pdfua;
     pdfOptions.highlightCode = options.highlightCode;
     pdfOptions.toc = options.toc;
     pdfOptions.tocDepth = options.tocDepth;
@@ -879,9 +882,12 @@ void PrintUsage() {
         << "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
         << "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source.\n"
         << "Output flags: --compress (FlateDecode streams: smaller files, slower export), --pdfa (PDF/A-3b:\n"
-        << "  every font embedded, formulas as TeX source), --theme=FILE (key = value lines: font, logo,\n"
-        << "  heading-color, link-color, accent-color, header-left/center/right, footer-left/center/right\n"
-        << "  with {title} {author} {subject} {date} {page} {pages} {logo}, cover), --no-highlight (code\n"
+        << "  every font embedded, formulas as TeX source), --pdfua (PDF/UA-1, tagged for screen readers:\n"
+        << "  headings, lists, tables, figures with their alt text, links and notes; fonts and formulas as\n"
+        << "  with --pdfa; the language is the front matter's lang, else en), --theme=FILE (key = value\n"
+        << "  lines: font, logo, heading-color, link-color, accent-color, header-left/center/right,\n"
+        << "  footer-left/center/right with {title} {author} {subject} {date} {page} {pages} {logo},\n"
+        << "  cover), --no-highlight (code\n"
         << "  blocks in one colour; by default fenced code in a language GitHub knows is coloured), --toc\n"
         << "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
         << "  --toc-depth=N (heading levels it lists, 1-6; default 3).\n"

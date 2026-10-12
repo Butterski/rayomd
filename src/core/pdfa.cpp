@@ -156,10 +156,15 @@ std::string PdfaXmpMetadata(const PdfaMetadata& metadata) {
     std::string out;
     out.reserve(metadata.source.empty() ? 1024 : 3584);
     out += "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?><x:xmpmeta xmlns:x=\"adobe:ns:meta/\">"
-        "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
-        "<rdf:Description rdf:about=\"\" xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"3\" "
-        "pdfaid:conformance=\"B\"/>"
-        "<rdf:Description rdf:about=\"\" xmlns:pdf=\"http://ns.adobe.com/pdf/1.3/\" pdf:Producer=\"";
+        "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">";
+    if (metadata.pdfa) {
+        out += "<rdf:Description rdf:about=\"\" xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"3\" "
+            "pdfaid:conformance=\"B\"/>";
+    }
+    if (metadata.pdfua) {
+        out += "<rdf:Description rdf:about=\"\" xmlns:pdfuaid=\"http://www.aiim.org/pdfua/ns/id/\" pdfuaid:part=\"1\"/>";
+    }
+    out += "<rdf:Description rdf:about=\"\" xmlns:pdf=\"http://ns.adobe.com/pdf/1.3/\" pdf:Producer=\"";
     AppendXml(out, metadata.producer);
     out += '"';
     if (!metadata.keywords.empty()) {
@@ -186,27 +191,41 @@ std::string PdfaXmpMetadata(const PdfaMetadata& metadata) {
     }
     out += "</rdf:Description>";
     if (!metadata.source.empty()) {
-        // The reversible profile's properties, each once (Inspect reads them), and the extension
-        // schema that declares them to PDF/A.
+        // The reversible profile's properties, each once (Inspect reads them).
         out += "<rdf:Description rdf:about=\"\" xmlns:rayomd=\"https://rayomd.dev/ns/source/1.0/\" "
             "rayomd:profile=\"rayomd-source/1\" rayomd:producer=\"";
         AppendXml(out, metadata.version);
         out += "\" rayomd:encoding=\"UTF-8\" rayomd:length=\"" + std::to_string(metadata.source.size());
         out += "\" rayomd:sha256=\"" + RayoMd::PdfSource::Sha256Hex(metadata.source);
-        out += "\" rayomd:attachment=\"source.md\"/>"
-            "<rdf:Description rdf:about=\"\" xmlns:pdfaExtension=\"http://www.aiim.org/pdfa/ns/extension/\" "
+        out += "\" rayomd:attachment=\"source.md\"/>";
+    }
+    if (metadata.pdfa && (!metadata.source.empty() || metadata.pdfua)) {
+        // The extension schemas that declare to PDF/A the properties it does not know.
+        out += "<rdf:Description rdf:about=\"\" xmlns:pdfaExtension=\"http://www.aiim.org/pdfa/ns/extension/\" "
             "xmlns:pdfaSchema=\"http://www.aiim.org/pdfa/ns/schema#\" xmlns:pdfaProperty=\"http://www.aiim.org/pdfa/ns/property#\">"
-            "<pdfaExtension:schemas><rdf:Bag><rdf:li rdf:parseType=\"Resource\">"
-            "<pdfaSchema:schema>RayoMD reversible source</pdfaSchema:schema>"
-            "<pdfaSchema:namespaceURI>https://rayomd.dev/ns/source/1.0/</pdfaSchema:namespaceURI>"
-            "<pdfaSchema:prefix>rayomd</pdfaSchema:prefix><pdfaSchema:property><rdf:Seq>";
-        AppendSchemaProperty(out, "profile", "Text", "RayoMD source profile identifier");
-        AppendSchemaProperty(out, "producer", "Text", "RayoMD version that embedded the source");
-        AppendSchemaProperty(out, "encoding", "Text", "Character encoding of the source");
-        AppendSchemaProperty(out, "length", "Integer", "Size of the source in bytes");
-        AppendSchemaProperty(out, "sha256", "Text", "SHA-256 of the source, hexadecimal");
-        AppendSchemaProperty(out, "attachment", "Text", "File name of the embedded source");
-        out += "</rdf:Seq></pdfaSchema:property></rdf:li></rdf:Bag></pdfaExtension:schemas></rdf:Description>";
+            "<pdfaExtension:schemas><rdf:Bag>";
+        if (!metadata.source.empty()) {
+            out += "<rdf:li rdf:parseType=\"Resource\">"
+                "<pdfaSchema:schema>RayoMD reversible source</pdfaSchema:schema>"
+                "<pdfaSchema:namespaceURI>https://rayomd.dev/ns/source/1.0/</pdfaSchema:namespaceURI>"
+                "<pdfaSchema:prefix>rayomd</pdfaSchema:prefix><pdfaSchema:property><rdf:Seq>";
+            AppendSchemaProperty(out, "profile", "Text", "RayoMD source profile identifier");
+            AppendSchemaProperty(out, "producer", "Text", "RayoMD version that embedded the source");
+            AppendSchemaProperty(out, "encoding", "Text", "Character encoding of the source");
+            AppendSchemaProperty(out, "length", "Integer", "Size of the source in bytes");
+            AppendSchemaProperty(out, "sha256", "Text", "SHA-256 of the source, hexadecimal");
+            AppendSchemaProperty(out, "attachment", "Text", "File name of the embedded source");
+            out += "</rdf:Seq></pdfaSchema:property></rdf:li>";
+        }
+        if (metadata.pdfua) {
+            out += "<rdf:li rdf:parseType=\"Resource\">"
+                "<pdfaSchema:schema>PDF/UA Universal Accessibility Schema</pdfaSchema:schema>"
+                "<pdfaSchema:namespaceURI>http://www.aiim.org/pdfua/ns/id/</pdfaSchema:namespaceURI>"
+                "<pdfaSchema:prefix>pdfuaid</pdfaSchema:prefix><pdfaSchema:property><rdf:Seq>";
+            AppendSchemaProperty(out, "part", "Integer", "Part of ISO 14289 the file conforms to");
+            out += "</rdf:Seq></pdfaSchema:property></rdf:li>";
+        }
+        out += "</rdf:Bag></pdfaExtension:schemas></rdf:Description>";
     }
     out += "</rdf:RDF></x:xmpmeta><?xpacket end=\"w\"?>";
     return out;

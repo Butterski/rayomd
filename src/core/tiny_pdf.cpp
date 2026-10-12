@@ -12,6 +12,7 @@
 #include "math_layout.h"
 #include "pdfa.h"
 #include "svg.h"
+#include "tagged.h"
 #include "theme.h"
 
 #ifdef _WIN32
@@ -3684,23 +3685,34 @@ static void AppendLanguage(std::string& catalog, const DocumentMetadata& metadat
     catalog += ")";
 }
 
-// PDF/A-3b: the sRGB output intent and the XMP metadata, which holds the reversible profile's
-// properties when `source` is embedded. The Info dictionary has to tell what the packet does:
-// `metadata` takes the title, else the first heading's text, and every value as both hold it,
-// and the Info dictionary is then made from it without the headings.
-RAYOMD_COLD static void AddPdfaCatalogEntries(PdfObjects& pdf, std::string& catalog, DocumentMetadata& metadata,
-    const std::vector<HeadingMark>& headings, const char* producer, std::string_view source) {
+// PDF/A-3b and PDF/UA-1: the XMP metadata, which holds the reversible profile's properties when
+// `source` is embedded, and for PDF/A the sRGB output intent. The Info dictionary has to tell
+// what the packet does: `metadata` takes the title, else the first heading's text, and every
+// value as both hold it, and the Info dictionary is then made from it without the headings.
+// PDF/UA adds what makes a document tagged: the structure tree `structTreeRoot`, the language
+// readers speak it in (`metadata.lang`) and its title in the viewer's title bar.
+RAYOMD_COLD static void AddArchivalCatalogEntries(PdfObjects& pdf, std::string& catalog, DocumentMetadata& metadata,
+    const std::vector<HeadingMark>& headings, const char* producer, std::string_view source, bool pdfa,
+    int structTreeRoot) {
     metadata.title = Internal::PdfaText(!metadata.title.empty() || headings.empty() ? std::string_view(metadata.title)
         : headings.front().text);
     metadata.author = Internal::PdfaText(metadata.author);
     metadata.subject = Internal::PdfaText(metadata.subject);
     metadata.keywords = Internal::PdfaText(metadata.keywords);
-    catalog += " /OutputIntents [<< /Type /OutputIntent /S /GTS_PDFA1 /OutputConditionIdentifier (sRGB IEC61966-2.1)"
-        " /RegistryName (http://www.color.org) /Info (sRGB IEC61966-2.1) /DestOutputProfile ";
-    AppendInt(catalog, pdf.AddStreamView("/N 3", Internal::SrgbIccProfile()));
-    catalog += " 0 R >>] /Metadata ";
+    if (pdfa) {
+        catalog += " /OutputIntents [<< /Type /OutputIntent /S /GTS_PDFA1 /OutputConditionIdentifier (sRGB IEC61966-2.1)"
+            " /RegistryName (http://www.color.org) /Info (sRGB IEC61966-2.1) /DestOutputProfile ";
+        AppendInt(catalog, pdf.AddStreamView("/N 3", Internal::SrgbIccProfile()));
+        catalog += " 0 R >>]";
+    }
+    if (structTreeRoot != 0) {
+        catalog += " /MarkInfo << /Marked true >> /StructTreeRoot ";
+        AppendInt(catalog, structTreeRoot);
+        catalog += " 0 R /ViewerPreferences << /DisplayDocTitle true >>";
+    }
+    catalog += " /Metadata ";
     const Internal::PdfaMetadata xmp{ producer, metadata.title, metadata.author, metadata.subject, metadata.keywords,
-        source, RAYOMD_VERSION };
+        source, RAYOMD_VERSION, pdfa, structTreeRoot != 0 };
     AppendInt(catalog, pdf.AddStream("/Type /Metadata /Subtype /XML", Internal::PdfaXmpMetadata(xmp)));
     catalog += " 0 R";
 }
@@ -3994,24 +4006,46 @@ static void AppendLinkAnnotationStart(std::string& annot, const LinkRect& link, 
     w.Lit("] /Border [0 0 0]");
 }
 
+// PDF/UA: the Link element of link rectangle `index` of `page`, -1 for none.
+RAYOMD_COLD static int TaggedLinkElement(const Internal::StructTree& tags, size_t page, size_t index) {
+    const std::vector<std::vector<int>>& rects = tags.LinkRects();
+    return page < rects.size() && index < rects[page].size() ? rects[page][index] : -1;
+}
+
+// PDF/UA: a link annotation, object `id`, of the Link `element`: its /StructParent and /Contents.
+RAYOMD_COLD static std::string TaggedAnnotationEntries(Internal::StructTree& tags, int element, int id) {
+    tags.AddAnnotation(element, id);
+    return tags.AnnotationEntries(id);
+}
+
 // The link annotations of every page. Those of links into the document are left to `targets`
 // (HeadingTargets, a book's BookTargets), which drops a link to a place the document does not
-// have instead of leading nowhere.
-template <typename Targets>
+// have instead of leading nowhere. `Tagged` (PDF/UA): each annotation belongs to the Link its
+// rectangle was drawn in (`tags`), with its /StructParent and /Contents; a rectangle drawn in
+// no Link, in an artifact, gets none.
+template <typename Targets, bool Tagged = false>
 static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
     const std::vector<std::vector<LinkRect>>& linksByPage, bool winAnsiTargets, Targets& targets,
-    std::vector<InternalLink>& internalLinks, bool print) {
+    std::vector<InternalLink>& internalLinks, bool print, Internal::StructTree* tags = nullptr) {
     std::vector<std::vector<int>> idsByPage;
     idsByPage.reserve(linksByPage.size());
     for (size_t page = 0; page < linksByPage.size(); page++) {
         const std::vector<LinkRect>& pageLinks = linksByPage[page];
         std::vector<int> ids;
         ids.reserve(pageLinks.size());
-        for (const LinkRect& link : pageLinks) {
+        for (size_t index = 0; index < pageLinks.size(); index++) {
+            const LinkRect& link = pageLinks[index];
             if (link.url.empty() || link.x2 <= link.x1 || link.y2 <= link.y1) continue;
+            [[maybe_unused]] int element = -1;
+            if constexpr (Tagged) {
+                if ((element = TaggedLinkElement(*tags, page, index)) < 0) continue;
+            }
             const LinkTarget target = targets.Target(pdf, link, page, internalLinks);
             if (target != LinkTarget::External) {
-                if (target == LinkTarget::Reserved) ids.push_back(internalLinks.back().id);
+                if (target == LinkTarget::Reserved) {
+                    ids.push_back(internalLinks.back().id);
+                    if constexpr (Tagged) tags->AddAnnotation(element, ids.back());
+                }
                 continue;
             }
             std::string annot;
@@ -4019,17 +4053,27 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
             AppendLinkAnnotationStart(annot, link, print);
             annot += " /A << /S /URI /URI (";
             AppendUriLiteral(annot, link.url, winAnsiTargets);
-            annot += ") >> >>";
-            ids.push_back(pdf.Add(std::move(annot)));
+            if constexpr (Tagged) {
+                const int id = pdf.Reserve();
+                annot += ") >>";
+                annot += TaggedAnnotationEntries(*tags, element, id);
+                annot += " >>";
+                pdf.Set(id, std::move(annot));
+                ids.push_back(id);
+            } else {
+                annot += ") >> >>";
+                ids.push_back(pdf.Add(std::move(annot)));
+            }
         }
         idsByPage.push_back(std::move(ids));
     }
     return idsByPage;
 }
 
-// Writes the annotations of the links to headings, now that the pages they go to exist.
+// Writes the annotations of the links to headings, now that the pages they go to exist; tagged,
+// with their place in the structure tree (`tags`, PDF/UA).
 RAYOMD_COLD static void AddInternalLinks(PdfObjects& pdf, const std::vector<InternalLink>& links,
-    const std::vector<int>& pageIds, bool print) {
+    const std::vector<int>& pageIds, bool print, const Internal::StructTree* tags = nullptr) {
     for (const InternalLink& internal : links) {
         std::string annot;
         annot.reserve(176);
@@ -4038,7 +4082,9 @@ RAYOMD_COLD static void AddInternalLinks(PdfObjects& pdf, const std::vector<Inte
         AppendInt(annot, pageIds[std::min(internal.page, pageIds.size() - 1)]);
         annot += " 0 R /XYZ null ";
         AppendF(annot, internal.top);
-        annot += " null] >>";
+        annot += " null]";
+        if (tags != nullptr) annot += tags->AnnotationEntries(internal.id);
+        annot += " >>";
         pdf.Set(internal.id, std::move(annot));
     }
 }
@@ -4293,6 +4339,7 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
     };
 
     renderer.y -= 3.0;
+    renderer.TagTableBegin(rows.size());
     // A table that goes on to a new page repeats its header row there, unless it and the row
     // that moved do not fit a page together: the loop draws row 0 again, then that row.
     double headerHeight = 0.0;  // the header row's height; 0 when it was cut into slices
@@ -4319,6 +4366,7 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
             std::vector<size_t> next(columns, 0);
             std::vector<size_t> end(columns, 0);
             bool freshPage = false;
+            renderer.TagTableRowStart(r, columns, false);
             for (;;) {
                 const double room = renderer.y - renderer.margin - 5.0 - pad * 2.0;
                 double sliceHeight = 0.0;
@@ -4350,7 +4398,9 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
                     double cellX = renderer.margin + c * colWidth;
                     renderer.TableStroke(cellX, top, colWidth, boxHeight);
                     int align = c < block.aligns.size() ? block.aligns[c] : -1;
+                    renderer.TagCell(c, true);
                     paintLines(wrapped[c], next[c], end[c], cellX, top, align, r == 0);
+                    renderer.TagCell(c, false);
                     next[c] = end[c];
                     remaining = remaining || next[c] < wrapped[c].size();
                 }
@@ -4359,6 +4409,7 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
                 renderer.NewPage();
                 freshPage = true;
             }
+            renderer.TagTableRowEnd();
             continue;
         }
         if (r == 0) {
@@ -4373,20 +4424,25 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
                 continue;
             }
         }
+        renderer.TagTableRowStart(r, columns, r == 0 && resumeRow != 0);
         double top = renderer.y;
         if (r == 0) renderer.TableFill(renderer.margin, top, tableWidth, rowHeight);
         for (size_t c = 0; c < columns; c++) {
             double cellX = renderer.margin + c * colWidth;
             renderer.TableStroke(cellX, top, colWidth, rowHeight);
             int align = c < block.aligns.size() ? block.aligns[c] : -1;
+            renderer.TagCell(c, true);
             paintLines(wrapped[c], 0, wrapped[c].size(), cellX, top, align, r == 0);
+            renderer.TagCell(c, false);
         }
+        renderer.TagTableRowEnd();
         renderer.y -= rowHeight;
         if (resumeRow != 0) {
             r = resumeRow - 1;
             resumeRow = 0;
         }
     }
+    renderer.TagTableEnd();
     renderer.y -= 9.0;
 }
 
@@ -4446,9 +4502,11 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         return;
     }
     bool pageBreakPending = false;
+    renderer.TagEnterBlocks();
     for (const Block& block : blocks) {
         if (block.type == BlockType::PageBreak) { pageBreakPending = true; continue; }
         if (pageBreakPending) { renderer.RenderPageBreak(); pageBreakPending = false; }
+        renderer.TagBlock(block);
         switch (block.type) {
         case BlockType::Heading:
             renderer.RenderHeading(block, HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight));
@@ -4469,6 +4527,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         case BlockType::Contents: renderer.RenderContents(); break;
         }
     }
+    renderer.TagLeaveBlocks();
 }
 
 // The footnotes after the text, as GitHub shows them: a short rule, then each note at
@@ -4478,6 +4537,7 @@ template <typename RendererType>
 RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Internal::Footnotes& footnotes) {
     renderer.Ensure(renderer.lineHeight * 2.0 + 18.0);
     renderer.y -= 8.0;
+    renderer.TagArtifact();
     AppendFootnoteRule(renderer.content, renderer.ruleColor, renderer.margin, renderer.y,
         (renderer.pageW - renderer.margin * 2.0) / 3.0);
     renderer.y -= 10.0;
@@ -4490,6 +4550,7 @@ RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Inte
         renderer.Ensure(renderer.lineHeight);
         renderer.noteMarks.notes[index] = { renderer.pageStarts.size() - 1, renderer.y };
         const Block& note = footnotes.notes[index];
+        const int tagged = renderer.TagBeginNote();
         renderer.RenderParagraph(note.text);
         if (!note.children.empty()) {
             const double margin = renderer.margin;
@@ -4497,6 +4558,7 @@ RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Inte
             RenderBlocks(renderer, note.children);
             renderer.margin = margin;
         }
+        renderer.TagEnd(tagged);
     }
     renderer.bodySize = bodySize;
     renderer.lineHeight = lineHeight;
@@ -4726,6 +4788,8 @@ public:
     }
     // The entries of the table of contents (contents.h), which RenderContents draws.
     void SetContents(const std::vector<Internal::ContentsEntry>* entries) { contents = entries; }
+    // PDF/UA: the structure tree the pages' marked content goes into (tagged.h); none untagged.
+    void SetTags(Internal::StructTree* tree) { tags = tree; }
 
     // The page numbers of the table's entries, right-aligned on the last line of each and after a
     // row of dots below the top level: one stream for each page, for the builder to add to the
@@ -4830,6 +4894,8 @@ private:
     // The table of contents' entries, and where each ended (RenderContents).
     const std::vector<Internal::ContentsEntry>* contents = nullptr;
     std::vector<ContentsLine> contentsLines;
+    // PDF/UA's structure tree, or none: every hook below tests it before anything else.
+    Internal::StructTree* tags = nullptr;
 
     // Text the standard math fonts cannot show (\text{...} in another script) is
     // measured and painted with the embedded document font, at the text size the
@@ -4874,6 +4940,7 @@ private:
         const double x = margin + 16.0 + block.level * 18.0;
         const double side = bodySize * 0.7;
         Ensure(bodySize * 1.35);
+        if (tags != nullptr) tags->LabelContent(block.task == 2 ? u"\u2611" : u"\u2610");
         AppendCheckbox(content, x, y - bodySize - 0.4, side, block.task == 2);
         RenderParagraph(block.text, x + side + 5.0, pageW - margin * 2.0 - 16.0 - block.level * 18.0 - side - 5.0);
         y -= 2.0;
@@ -4981,8 +5048,15 @@ private:
         const double raised = baseline + size * kNoteRiseFactor;
         const double width = math.Width(index);
         const std::string number = std::to_string(note);
+        int reference = -1;
+        if (tags != nullptr) {
+            tags->LinkRun({});
+            reference = tags->Begin(Internal::StructType::Reference);
+            tags->Begin(Internal::StructType::Link);
+        }
         PaintText(x, raised, size * kNoteSizeFactor, std::wstring(number.begin(), number.end()), linkColor);
         AddLink(x, raised, width, size * kNoteSizeFactor, "#^" + number);
+        if (tags != nullptr) tags->End(reference);
         noteMarks.MarkReference(note, pageStarts.size() - 1, baseline + size);
         return width;
     }
@@ -5288,9 +5362,26 @@ private:
     // run is measured only when its width is drawn.
     RAYOMD_SHARED void PaintStyledRuns(const StyledRuns& runs, size_t begin, size_t end, double x, double top,
         double baseline, double size, double lh, const RunColors& colors, bool bold = false) {
+        if (tags != nullptr) {
+            PaintTaggedRuns(runs, begin, end, x, top, baseline, size, lh, colors, bold);
+            return;
+        }
+        PaintRuns<false>(runs, begin, end, x, top, baseline, size, lh, colors, bold);
+    }
+
+    // PDF/UA: the same, with each link run in a Link element.
+    RAYOMD_COLD void PaintTaggedRuns(const StyledRuns& runs, size_t begin, size_t end, double x, double top,
+        double baseline, double size, double lh, const RunColors& colors, bool bold) {
+        PaintRuns<true>(runs, begin, end, x, top, baseline, size, lh, colors, bold);
+    }
+
+    template <bool Tagged>
+    RAYOMD_HOT_INLINE void PaintRuns(const StyledRuns& runs, size_t begin, size_t end, double x, double top,
+        double baseline, double size, double lh, const RunColors& colors, bool bold) {
         for (size_t index = begin; index < end; index++) {
             const StyledRun& run = runs.runs[index];
             const std::wstring_view runText = runs.Text(run);
+            if constexpr (Tagged) tags->LinkRun(run.url);
             const bool measured = index + 1 < end || run.code || !run.url.empty();
             const double spanWidth = measured ? TextWidth(font, runText, size) : 0.0;
             if (run.code) CodeBackground(x, top, spanWidth, lh, runText, size, colors.codeFill);
@@ -5653,6 +5744,7 @@ private:
     }
 
     void NewPage() {
+        if (tags != nullptr) tags->PageBreak();
         pageStarts.push_back(content.size());
         pageLinks.push_back({});
         y = pageH - margin;
@@ -5668,6 +5760,10 @@ private:
 
     void PaintText(double x, double baseline, double size, std::wstring_view line, const char* color,
         bool fauxBold = false, bool italic = false, bool strike = false) {
+        if (tags != nullptr) {
+            PaintTaggedText(x, baseline, size, line, color, fauxBold, italic, strike);
+            return;
+        }
         const size_t colorSize = strlen(color);
         const size_t hexBytes = HexTextBytes(line);
         TailWriter w(content, 96 + colorSize * 2 + kOperandBytes * 9 + hexBytes * 2);
@@ -5725,6 +5821,7 @@ private:
     }
 
     void DrawRect(double x, double top, double w, double h, const char* color) {
+        if (tags != nullptr) tags->Artifact();
         const size_t colorSize = strlen(color);
         TailWriter out(content, 24 + colorSize + kOperandBytes * 4);
         out.Lit("q ");
@@ -5748,6 +5845,7 @@ private:
     }
 
     void DrawStrokeRect(double x, double top, double w, double h, const char* color = "0.72 0.72 0.72", double lineWidth = 0.45) {
+        if (tags != nullptr) tags->Artifact();
         const size_t colorSize = strlen(color);
         TailWriter out(content, 24 + colorSize + kOperandBytes * 5);
         out.Lit("q ");
@@ -5767,10 +5865,163 @@ private:
 
     void AddLink(double x, double baseline, double width, double size, std::string_view url) {
         if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
+        if (tags != nullptr) {
+            TagLinkRect(x, baseline, width, size, url);
+            return;
+        }
         AddLinkRect(pageLinks.back(), x, baseline, width, size, url);
     }
 
+    // PDF/UA: the same, noting the Link of a new rectangle; one that extends the last is its.
+    RAYOMD_COLD void TagLinkRect(double x, double baseline, double width, double size, std::string_view url) {
+        const size_t before = pageLinks.back().size();
+        AddLinkRect(pageLinks.back(), x, baseline, width, size, url);
+        if (pageLinks.back().size() != before) tags->LinkRect();
+    }
+
+    // PDF/UA: `line` as content of the open element, painted by PaintText with the tree set aside
+    // (taken by value, so that the untagged path keeps its operands in registers). A list item's
+    // label at its start is painted first, as the label's content. Bold text is painted once
+    // (PaintStrokedBold): drawn twice, as PaintText draws it, a screen reader would read it twice.
+    RAYOMD_COLD void PaintTaggedText(double x, double baseline, double size, std::wstring_view line, const char* color,
+        bool fauxBold, bool italic, bool strike) {
+        Internal::StructTree* const tree = tags;
+        const size_t label = std::min(tree->TakeLabel(), line.size());
+        for (int part = label != 0 ? 0 : 1; part < 2 && !line.empty(); part++) {
+            const std::wstring_view text = part == 0 ? line.substr(0, label) : line;
+            if (part == 0) tree->LabelContent();
+            else tree->Content(text);
+            if (fauxBold) {
+                PaintStrokedBold(x, baseline, size, text, color, italic, strike);
+            } else {
+                tags = nullptr;
+                PaintText(x, baseline, size, text, color, false, italic, strike);
+                tags = tree;
+            }
+            if (part == 0) {
+                x += TextWidth(font, text, size);
+                line.remove_prefix(label);
+            }
+        }
+    }
+
+    // Bold text as PaintText draws it, but once: filled and outlined in its colour (2 Tr), as
+    // thick as PaintText's second copy, 0.28 points to the right, makes it.
+    RAYOMD_COLD void PaintStrokedBold(double x, double baseline, double size, std::wstring_view line, const char* color,
+        bool italic, bool strike) {
+        const size_t colorSize = strlen(color);
+        TailWriter w(content, 112 + colorSize * 2 + kOperandBytes * 8 + HexTextBytes(line));
+        w.Lit("q ");
+        w.Bytes(color, colorSize);
+        w.Lit(" rg ");
+        w.Bytes(color, colorSize);
+        w.Lit(" RG 0.28 w 1 j BT /F1 ");
+        w.Fixed(size);
+        w.Lit(" Tf 2 Tr 1 0 ");
+        if (italic) w.Lit("0.18 ");
+        else w.Lit("0 ");
+        w.Lit("1 ");
+        w.Fixed(x + 0.14);
+        w.Lit(" ");
+        w.Fixed(baseline);
+        w.Lit(" Tm ");
+        w.cursor = WriteHexText(w.cursor, font, line, usedCids);
+        w.Lit(" Tj ET");
+        if (strike && !line.empty()) {
+            const double width = TextWidth(font, line, size);
+            w.Lit(" 0.55 w ");
+            w.Fixed(x);
+            w.Lit(" ");
+            w.Fixed(baseline + size * 0.34);
+            w.Lit(" m ");
+            w.Fixed(x + width);
+            w.Lit(" ");
+            w.Fixed(baseline + size * 0.34);
+            w.Lit(" l S");
+        }
+        w.Lit(" Q\n");
+    }
+
+    // PDF/UA hooks of the block loops the renderers share (RenderBlocks, RenderFootnoteSection):
+    // each tests `tags`, so that untagged documents pay one comparison.
+    void TagEnterBlocks() {
+        if (tags != nullptr) tags->EnterBlocks();
+    }
+    void TagLeaveBlocks() {
+        if (tags != nullptr) tags->LeaveBlocks();
+    }
+    void TagBlock(const Block& block) {
+        if (tags == nullptr) return;
+        const bool item = block.type == BlockType::Bullet || block.type == BlockType::Numbered;
+        tags->Block(item, block.task != 0 ? Internal::ListKind::Task
+            : block.type == BlockType::Numbered ? Internal::ListKind::Ordered : Internal::ListKind::Bullet, block.level);
+    }
+    void TagArtifact() {
+        if (tags != nullptr) tags->Artifact();
+    }
+    int TagBegin(Internal::StructType type) {
+        return tags != nullptr ? tags->Begin(type) : -1;
+    }
+    int TagBeginNote() {
+        if (tags == nullptr) return -1;
+        const int note = tags->Begin(Internal::StructType::Note);
+        tags->MarkNote(note);
+        return note;
+    }
+    void TagEnd(int element) {
+        if (tags != nullptr) tags->End(element);
+    }
+    // The end of a paragraph that BeginParagraph opened, or not: a link at its end ends with it.
+    void TagEndParagraph(int element) {
+        if (tags == nullptr) return;
+        tags->LinkRun({});
+        tags->End(element);
+    }
+    // A link run: a Link element around it while its URL lasts.
+    void TagLinkRun(std::string_view url) {
+        if (tags != nullptr) tags->LinkRun(url);
+    }
+
+    // PDF/UA tables (RenderTable, RenderMathTable; tagged.h).
+    void TagTableBegin(size_t rows) {
+        if (tags != nullptr) tags->TableBegin(rows);
+    }
+    void TagTableRowStart(size_t r, size_t columns, bool repeated) {
+        if (tags != nullptr) tags->TableRow(r, columns, repeated);
+    }
+    void TagCell(size_t c, bool open) {
+        if (tags != nullptr) tags->TableCell(c, open);
+    }
+    void TagTableRowEnd() {
+        if (tags != nullptr) tags->TableRowEnd();
+    }
+    void TagTableEnd() {
+        if (tags != nullptr) tags->TableEnd();
+    }
+
+    // PDF/UA: an image drawn at [left, right] x [bottom, top], a Figure with its alt text, in a
+    // Link when it links; one without alt text is decoration, an artifact. Returns the element
+    // to end after it.
+    RAYOMD_COLD int TagFigure(const std::string& alt, const std::string& link, double left, double bottom,
+        double right, double top) {
+        int outer = -1;
+        if (!link.empty()) {
+            tags->LinkRun({});
+            outer = tags->Begin(Internal::StructType::Link);
+            tags->SetText(outer, alt.empty() ? std::string_view(link) : std::string_view(alt));
+        }
+        if (alt.empty()) {
+            tags->SetArtifacts(true);
+            return outer;
+        }
+        const int figure = tags->Begin(Internal::StructType::Figure);
+        tags->SetAlt(figure, alt);
+        tags->SetBox(figure, left, bottom, right, top);
+        return outer >= 0 ? outer : figure;
+    }
+
     void DrawImage(int imageIndex, double x, double top, double w, double h) {
+        if (tags != nullptr) tags->Content();
         std::string& c = content;
         c += "q ";
         AppendF(c, w);
@@ -5797,6 +6048,8 @@ private:
             return;
         }
         const double lh = bodySize * 1.35;
+        const int tagged = TagBegin(Internal::StructType::P);
+        TagLinkRun(image.link);
         for (const std::wstring& line : WrapText(font, Utf8ToWide(fallback), pageW - margin * 2.0, bodySize)) {
             Ensure(lh);
             PaintText(margin, y - bodySize, bodySize, line, linkColor);
@@ -5804,6 +6057,7 @@ private:
             y -= lh;
         }
         y -= 5.0;
+        TagEnd(tagged);
     }
 
     void RenderImage(const Block& block) {
@@ -5834,9 +6088,17 @@ private:
 
         Ensure(h + 10.0);
         double x = margin + (maxW - w) * 0.5;
-        DrawImage(index, x, y, w, h);
         const std::string& link = block.image->link;
-        if (!link.empty() && !pageLinks.empty()) pageLinks.back().push_back({ x, y - h, x + w, y, link });
+        const int tagged = tags != nullptr ? TagFigure(block.text, link, x, y - h, x + w, y) : -1;
+        DrawImage(index, x, y, w, h);
+        if (!link.empty() && !pageLinks.empty()) {
+            pageLinks.back().push_back({ x, y - h, x + w, y, link });
+            if (tags != nullptr) tags->LinkRect();
+        }
+        if (tags != nullptr) {
+            tags->End(tagged);
+            tags->SetArtifacts(false);
+        }
         y -= h + 10.0;
     }
 
@@ -5846,10 +6108,12 @@ private:
         double size = kHeadingSizes[level];
         if (y < pageH - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
         Ensure(size * 1.35 + keep);
+        const int tagged = tags != nullptr ? tags->BeginHeading(level) : -1;
 
         if (block.hasMath) {
             RenderMathTextLines(block.text, level, margin, pageW - margin * 2.0, size, headingColor, false, false);
             y -= level <= 2 ? 8.0 : 5.0;
+            TagEnd(tagged);
             return;
         }
         MarkHeading(level, block.text, size * 1.35);
@@ -5858,6 +6122,7 @@ private:
             DrawTextLine(margin, size, line, headingColor);
         }
         y -= level <= 2 ? 8.0 : 5.0;
+        TagEnd(tagged);
     }
 
     // Heading lines that contain formulas: plain text and formulas in one colour,
@@ -5915,6 +6180,7 @@ private:
                         : math.Emit(span.math, content, cursor, baseline, textColor);
                     continue;
                 }
+                TagLinkRun(span.url);
                 double spanWidth = TextWidth(font, span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
                 const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : linkColor;
@@ -5933,6 +6199,7 @@ private:
     void RenderParagraph(const std::string& text, double x, double width) {
         double lh = bodySize * 1.35;
         if (math.Active()) math.Clear();
+        const int tagged = tags != nullptr ? tags->BeginParagraph() : -1;
         if (WrapStyledRuns(text, width, bodySize, paragraphRuns)) {
             size_t index = 0;
             for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
@@ -5942,12 +6209,14 @@ private:
                 y -= lh;
             }
             y -= 5.0;
+            TagEndParagraph(tagged);
             return;
         }
         const std::vector<std::vector<StyledSpan>> lines = WrapStyled(text, width, bodySize);
         if (math.Active()) {
             RenderMathLines(lines, x, width, false);
             y -= 5.0;
+            TagEndParagraph(tagged);
             return;
         }
         for (const auto& line : lines) {
@@ -5955,6 +6224,7 @@ private:
             double cursor = x;
             double baseline = y - bodySize;
             for (const auto& span : line) {
+                TagLinkRun(span.url);
                 double spanWidth = TextWidth(font, span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.94 0.94 0.92");
                 const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
@@ -5965,24 +6235,23 @@ private:
             y -= lh;
         }
         y -= 5.0;
+        TagEndParagraph(tagged);
     }
 
     void RenderListItem(const std::string& marker, const Block& block) {
         double x = margin + 16.0 + block.level * 18.0;
         double width = pageW - margin * 2.0 - 16.0 - block.level * 18.0;
+        if (tags != nullptr) tags->Label(marker.size());
         RenderParagraph(marker + block.text, x, width);
     }
 
     void RenderQuote(const Block& block) {
-        if (block.alert != 0) {
-            RenderAlert(block);
-            return;
-        }
-        if (block.children.empty()) {
-            RenderQuote(block.text);
-            return;
-        }
-        RenderQuoteChildren(block.children);
+        // A quote is a BlockQuote; an alert, whose title tells what it is, a Div, as on GitHub.
+        const int tagged = TagBegin(block.alert != 0 ? Internal::StructType::Div : Internal::StructType::BlockQuote);
+        if (block.alert != 0) RenderAlert(block);
+        else if (block.children.empty()) RenderQuote(block.text);
+        else RenderQuoteChildren(block.children);
+        TagEnd(tagged);
     }
 
     // A GitHub alert: a quote whose bar takes the alert's colour, under the alert's bold title
@@ -5992,7 +6261,9 @@ private:
         Ensure(lineHeight * 2.0 + 2.0);
         QuoteStrip(lineHeight + 3.0);
         const std::string_view title = kAlertTitles[block.alert];
+        const int tagged = TagBegin(Internal::StructType::P);
         PaintText(margin + 14.0, y - bodySize, bodySize, std::wstring(title.begin(), title.end()), quoteBar, true);
+        TagEnd(tagged);
         y -= lineHeight;
         if (block.children.empty()) RenderQuote(block.text);
         else RenderQuoteChildren(block.children);
@@ -6066,9 +6337,11 @@ private:
         double height = size * 1.35;
         double x = margin + 14.0;
         double width = pageW - margin * 2.0 - 22.0;
+        const int tagged = tags != nullptr ? tags->BeginHeading(level) : -1;
         if (block.hasMath) {
             RenderMathTextLines(block.text, level, x, width, size, "0.10 0.15 0.18", true, true);
             y -= 7.0;
+            TagEnd(tagged);
             return;
         }
         MarkHeading(level, block.text, height + 2.0);
@@ -6080,11 +6353,13 @@ private:
             y -= height;
         }
         y -= 7.0;
+        TagEnd(tagged);
     }
     void RenderQuote(const std::string& text) {
         double x = margin + 14.0;
         double width = pageW - margin * 2.0 - 22.0;
         if (math.Active()) math.Clear();
+        const int tagged = TagBegin(Internal::StructType::P);
         if (WrapStyledRuns(text, width, bodySize, paragraphRuns)) {
             size_t index = 0;
             for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
@@ -6095,12 +6370,14 @@ private:
                 y -= lineHeight;
             }
             y -= 7.0;
+            TagEnd(tagged);
             return;
         }
         const std::vector<std::vector<StyledSpan>> lines = WrapStyled(text, width, bodySize);
         if (math.Active()) {
             RenderMathLines(lines, x, width, true);
             y -= 7.0;
+            TagEnd(tagged);
             return;
         }
         for (const auto& line : lines) {
@@ -6109,6 +6386,7 @@ private:
             double cursor = x;
             double baseline = y - bodySize;
             for (const StyledSpan& span : line) {
+                TagLinkRun(span.url);
                 double spanWidth = TextWidth(font, span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
                 const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
@@ -6119,11 +6397,15 @@ private:
             y -= lineHeight;
         }
         y -= 7.0;
+        TagEnd(tagged);
     }
 
     void RenderCode(const Block& block) {
+        const int tagged = TagBegin(Internal::StructType::Code);
+        if (tagged >= 0) tags->SetBlockPlacement(tagged);
         if (block.codeLanguage != 0 && highlightCode) {
             RenderHighlightedCode(block.text, block.codeLanguage);
+            TagEnd(tagged);
             return;
         }
         std::vector<std::string> raw = SplitLines(block.text);
@@ -6140,6 +6422,7 @@ private:
             }
         }
         y -= 8.0;
+        TagEnd(tagged);
     }
 
     // Makes room for a line of code `lh` high and draws its tile. The first line of a block on a
@@ -6218,6 +6501,7 @@ private:
             PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color));
             return;
         }
+        if (tags != nullptr) tags->Content();
         TailWriter w(content, 64 + kOperandBytes * 3 + text.size() * 4 + codeRuns.size() * 32);
         size_t begin = 0;
         for (const CodeRun& run : codeRuns) {
@@ -6251,7 +6535,9 @@ private:
         const std::vector<std::wstring> lines = WrapText(font, Utf8ToWide(text), pageW - margin * 2.0, size);
         y = std::min(pageH - margin, pageH * 0.6 + (double)lines.size() * size * 1.35 * 0.5);
         if (mark) MarkHeading(1, text, 0.0);
+        const int tagged = tags != nullptr ? tags->BeginHeading(1) : -1;
         for (const std::wstring& line : lines) DrawTextLine((pageW - TextWidth(font, line, size)) * 0.5, size, line, headingColor);
+        TagEnd(tagged);
     }
 
     // The table of contents (contents.h), once: a title, then each entry indented by its level and
@@ -6262,7 +6548,13 @@ private:
         const double titleSize = kHeadingSizes[1];
         if (y < pageH - margin - 4.0) y -= 12.0;
         Ensure(titleSize * 1.35 + lineHeight * 2.0);
+        // Tagged, a TOC whose Caption is the title, and an entry a TOCI with a Reference to its
+        // heading's Link; the dots and page numbers, drawn later in streams of their own, are
+        // artifacts.
+        const int tagged = TagBegin(Internal::StructType::TOC);
+        const int caption = TagBegin(Internal::StructType::Caption);
         DrawTextLine(margin, titleSize, std::wstring(L"Contents"), headingColor);
+        TagEnd(caption);
         y -= 8.0;
         const double em = bodySize;
         const double lh = bodySize * 1.35;
@@ -6276,6 +6568,9 @@ private:
             const std::string_view link(url, (size_t)(std::to_chars(url + 2, url + sizeof(url), index).ptr - url));
             ContentsLine& last = contentsLines[index];
             last = { index, pageStarts.size() - 1, y - bodySize, x };
+            const int item = TagBegin(Internal::StructType::TOCI);
+            TagBegin(Internal::StructType::Reference);
+            TagBegin(Internal::StructType::Link);
             for (const std::wstring& line : WrapText(font, Utf8ToWide(entry.text), pageW - margin - x - 2.55 * em, bodySize)) {
                 Ensure(lh);
                 const double baseline = y - bodySize;
@@ -6285,8 +6580,10 @@ private:
                 last = { index, pageStarts.size() - 1, baseline, x + width };
                 y -= lh;
             }
+            TagEnd(item);
         }
         y -= 5.0;
+        TagEnd(tagged);
     }
 
     // Text at (x, baseline) in the body size, appended to `out`, a stream of its own; `spacing` is
@@ -6337,12 +6634,15 @@ private:
         double padTop = quoted ? kQuoteMathPad : kDisplayMathAbove;
         double padBottom = quoted ? kQuoteMathPad : 0.0;
         double maxHeight = pageH - margin * 2.0 - padTop - padBottom - 3.0;
+        const int tagged = TagBegin(Internal::StructType::Formula);
+        if (tagged >= 0) tags->SetAlt(tagged, tex);
         MathFormula formula;
         if (math.Disabled() || !LayoutMathToFit(tex, bodySize, true, false, available, maxHeight, &mathFallback, formula)) {
             double savedMargin = margin;
             if (quoted) margin += 14.0;
             RenderMathSource(tex);
             margin = savedMargin;
+            TagEnd(tagged);
             return;
         }
         double total = padTop + formula.Ascent() + formula.Descent() + padBottom;
@@ -6350,11 +6650,13 @@ private:
         if (quoted) {
             QuoteStrip(total + 3.0);
         }
+        if (tags != nullptr) tags->Content();
         formula.Emit(content, left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
             quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08");
         math.MarkUsed();
         y -= total;
         y -= quoted ? 7.0 : kDisplayMathBelow;
+        TagEnd(tagged);
     }
 
     // The pre-math rendering of a formula block: its source in a tinted box.
@@ -6400,6 +6702,7 @@ private:
         static const std::string emptyCell;
 
         y -= 3.0;
+        TagTableBegin(rows.size());
         // A table that goes on to a new page repeats its header row there, unless it and the row
         // that moved do not fit a page together: the loop draws row 0 again, then that row.
         double headerHeight = 0.0;  // the header row's height; 0 when it was cut into slices
@@ -6429,6 +6732,7 @@ private:
                     continue;
                 }
             }
+            TagTableRowStart(r, columns, r == 0 && resumeRow != 0);
             for (;;) {
                 rowHeight = count * lh + pad * 2.0;
                 double top = y;
@@ -6438,6 +6742,7 @@ private:
                     double cellX = margin + c * colWidth;
                     DrawStrokeRect(cellX, top, colWidth, rowHeight);
 
+                    TagCell(c, true);
                     int align = c < aligns.size() ? aligns[c] : -1;
                     const StyledRuns& cellRuns = tableCells[c];
                     const size_t end = std::min(cellRuns.lineEnds.size(), first + count);
@@ -6458,6 +6763,7 @@ private:
                         PaintStyledRuns(cellRuns, runBegin, runEnd, tx, top - pad - (lineIdx - first) * lh, baseline, size,
                             lh, r == 0 ? kHeaderCellRunColors : kCellRunColors, r == 0);
                     }
+                    TagCell(c, false);
                 }
 
                 y -= rowHeight;
@@ -6465,11 +6771,13 @@ private:
                 if (first == maxLines) break;
                 count = TallTableRowSlice(first, maxLines, lh, pad);
             }
+            TagTableRowEnd();
             if (resumeRow != 0) {
                 r = resumeRow - 1;
                 resumeRow = 0;
             }
         }
+        TagTableEnd();
         y -= 9.0;
     }
 
@@ -6494,6 +6802,7 @@ private:
     void RenderRule() {
         Ensure(18.0);
         y -= 5.0;
+        TagArtifact();
         std::string& c = content;
         c += "q ";
         c += ruleColor;
@@ -7294,8 +7603,12 @@ private:
             RenderTaskItem(block);
             return;
         }
-        RenderParagraph("- " + block.text, margin + 16.0 + block.level * 18.0,
-            pageW - margin * 2.0 - 16.0 - block.level * 18.0);
+        // "- " + text spelled out: GCC outlined operator+ here when unrelated code changed.
+        std::string item;
+        item.reserve(block.text.size() + 2);
+        item.append("- ", 2);
+        item.append(block.text);
+        RenderParagraph(item, margin + 16.0 + block.level * 18.0, pageW - margin * 2.0 - 16.0 - block.level * 18.0);
         y -= 2.0;
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
@@ -7333,6 +7646,20 @@ private:
         RenderBlocks(*this, blocks);
         margin = savedMargin;
     }
+
+    // The standard fonts are not embedded, so these documents are never tagged (PDF/UA): the
+    // hooks of the block loops the renderers share do nothing here.
+    void TagEnterBlocks() {}
+    void TagLeaveBlocks() {}
+    void TagBlock(const Block&) {}
+    void TagArtifact() {}
+    int TagBeginNote() { return -1; }
+    void TagEnd(int) {}
+    void TagTableBegin(size_t) {}
+    void TagTableRowStart(size_t, size_t, bool) {}
+    void TagCell(size_t, bool) {}
+    void TagTableRowEnd() {}
+    void TagTableEnd() {}
 
     void NewPage() {
         pageStarts.push_back(content.size());
@@ -9030,8 +9357,9 @@ RAYOMD_COLD static void LayOutTheme(const PdfOptions& options, const Internal::T
     const std::string title = !metadata.title.empty() || headings.empty() ? metadata.title
         : winAnsi ? RayoMd::Text::WinAnsiToUtf8(headings.front().text) : std::string(headings.front().text);
     const Internal::ThemeDocument document{ title, metadata.author, metadata.subject, metadata.date };
-    // PDF/A's page numbers too: a footer in the document's font, as Helvetica is not embedded.
-    if (Internal::HasThemeBands(options.theme) || (options.pdfa && options.pageNumbers)) {
+    // PDF/A's and PDF/UA's page numbers too: a footer in the document's font, as Helvetica is not
+    // embedded.
+    if (Internal::HasThemeBands(options.theme) || ((options.pdfa || options.pdfua) && options.pageNumbers)) {
         bands = Internal::ThemeBandStreams(options.theme, options.pageNumbers, document, pages, page, logo, font);
     }
     if (options.theme.cover) cover = Internal::ThemeCoverStream(document, page, logo, font, palette.heading, palette.rule);
@@ -9160,12 +9488,14 @@ RAYOMD_COLD static DocumentMetadata BookMetadata(const Book& book) {
     return metadata;
 }
 
-// The link annotations of a book's pages (AddLinkAnnotationObjects, BookTargets).
+// The link annotations of a book's pages (AddLinkAnnotationObjects, BookTargets), tagged with
+// `tags` (PDF/UA).
 RAYOMD_COLD static std::vector<std::vector<int>> AddBookLinkAnnotations(PdfObjects& pdf,
     const std::vector<std::vector<LinkRect>>& links, bool winAnsi, const std::vector<HeadingMark>& headings,
     const Book& book, const BookParse& parse, double pageTop, const std::vector<size_t>* contents,
-    std::vector<InternalLink>& internalLinks, bool print) {
+    std::vector<InternalLink>& internalLinks, bool print, Internal::StructTree* tags = nullptr) {
     BookTargets targets(headings, book, parse, winAnsi, pageTop, contents);
+    if (tags != nullptr) return AddLinkAnnotationObjects<BookTargets, true>(pdf, links, winAnsi, targets, internalLinks, print, tags);
     return AddLinkAnnotationObjects(pdf, links, winAnsi, targets, internalLinks, print);
 }
 
@@ -9473,6 +9803,45 @@ RAYOMD_COLD static const TtfFont* BetterFontFor(const TtfFont& font, const CidLi
     return chosen.font.get();
 }
 
+// PDF/UA: the streams a page draws besides its own are decoration, artifacts: a theme's header and
+// footer, and the page numbers, as pagination, and a cover page and the table of contents' dots
+// and numbers.
+RAYOMD_COLD static void MarkArtifacts(std::vector<std::string>& bands, std::string& cover, std::vector<std::string>& overlays) {
+    for (std::string& band : bands) band = "/Artifact << /Type /Pagination >> BDC\n" + band + "\nEMC\n";
+    if (!cover.empty()) cover = "/Artifact BMC\n" + cover + "\nEMC\n";
+    for (std::string& overlay : overlays) {
+        if (!overlay.empty()) overlay = "/Artifact BMC\n" + overlay + "\nEMC\n";
+    }
+}
+
+// PDF/UA: a page's key in the ParentTree, and its annotations in the order of its structure.
+RAYOMD_COLD static void AppendTaggedPage(std::string& page, size_t pageIndex) {
+    page += " /StructParents ";
+    AppendSize(page, pageIndex);
+    page += " /Tabs /S";
+}
+
+// PDF/UA: the structure tree's objects, numbered one after another from its root, which it
+// returns; they view the tree's buffer, which outlives BuildInto.
+RAYOMD_COLD static int AddStructTree(PdfObjects& pdf, Internal::StructTree& tags, const std::vector<int>& pageIds) {
+    const int root = pdf.Reserve();
+    const size_t count = tags.ObjectCount();
+    for (size_t index = 1; index < count; index++) pdf.Reserve();
+    tags.Write(root, pageIds);
+    for (size_t index = 0; index < count; index++) pdf.SetView(root + (int)index, tags.Object(index));
+    return root;
+}
+
+// PDF/UA: a language and a title every tagged document has; English when the front matter names
+// no language, and without a title or heading, the name of the file.
+RAYOMD_COLD static void TaggedDocumentDefaults(DocumentMetadata& metadata, const std::vector<HeadingMark>& headings,
+    const std::string& sourcePath) {
+    if (metadata.lang.empty()) metadata.lang = "en";
+    if (!metadata.title.empty() || !headings.empty()) return;
+    metadata.title = PathToUtf8(PathFromUtf8(sourcePath).stem());
+    if (metadata.title.empty()) metadata.title = "Document";
+}
+
 // With `betterFont`, a document with characters that `font` has no glyph for is not built
 // when a fallback font has more of them: *betterFont is set, to build it again in that one.
 // With `book`, the book's files instead of `markdown`, which then has all of their text.
@@ -9508,7 +9877,15 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     PrepareOutput(pdfBytes, markdown.size() * 8 + 256 * 1024);
     const ThemePalette palette(options.theme);
     Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, options.pageSize, &imageRegistry, palette);
-    if (options.pdfa) renderer.DisableMath();
+    // PDF/A and PDF/UA embed every font, so formulas show their TeX source.
+    if (options.pdfa || options.pdfua) renderer.DisableMath();
+    // PDF/UA: the structure tree that the pages' marked content goes into; off the stack, which
+    // untagged documents keep as it was.
+    std::unique_ptr<Internal::StructTree> tags;
+    if (options.pdfua) {
+        tags = std::make_unique<Internal::StructTree>(pdfBytes);
+        renderer.SetTags(tags.get());
+    }
     imageRegistry.SetFont(&font, &renderer.Cids());
     if (!options.highlightCode) renderer.DisableHighlighting();
     if (!contents.empty()) renderer.SetContents(&contents);
@@ -9518,6 +9895,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         else if (footnotes.notes.empty()) renderer.Render(blocks);
         else RenderWithFootnotes(renderer, blocks, footnotes);
     }
+    if (tags) tags->Finish();
     // The headings without their footnote references, for anchors, bookmarks and titles.
     std::vector<HeadingMark> titledHeadings;
     std::vector<std::string> headingTitles;
@@ -9529,27 +9907,30 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images(), type0FontId, 0, options.compress);
     // The table of contents' page numbers, before the font subset is made, which then has their glyphs.
     std::vector<size_t> contentsTargets;   // the heading of each entry of the table of contents
-    const std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);
+    std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);
     HeadingTargets headingTargets(headings, false, renderer.PageHeight(), renderer.Notes());
     if (!contents.empty()) headingTargets.SetContents(&contentsTargets);
     std::vector<InternalLink> internalLinks;
-    std::vector<std::vector<int>> annotationIds = book == nullptr
-        ? AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa)
-        : AddBookLinkAnnotations(pdf, renderer.PageLinks(), false, headings, *book->book, *bookParse,
-            renderer.PageHeight(), contents.empty() ? nullptr : &contentsTargets, internalLinks, options.pdfa);
+    std::vector<std::vector<int>> annotationIds = book != nullptr
+        ? AddBookLinkAnnotations(pdf, renderer.PageLinks(), false, headings, *book->book, *bookParse,
+            renderer.PageHeight(), contents.empty() ? nullptr : &contentsTargets, internalLinks, options.pdfa, tags.get())
+        : tags ? AddLinkAnnotationObjects<HeadingTargets, true>(pdf, renderer.PageLinks(), false, headingTargets, internalLinks,
+            options.pdfa, tags.get())
+        : AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
 
-    // A theme's header and footer, one stream per page, PDF/A's page numbers, and a theme's cover
-    // page, before the font subset is made, which then has their glyphs.
+    // A theme's header and footer, one stream per page, PDF/A's and PDF/UA's page numbers, and a
+    // theme's cover page, before the font subset is made, which then has their glyphs.
     DocumentMetadata metadata = book == nullptr ? FrontMatterMetadata(markdown) : BookMetadata(*book->book);
     std::vector<std::string> bands;
     std::string cover;
-    if (Internal::HasThemeBands(options.theme) || options.theme.cover || (options.pdfa && options.pageNumbers)) {
+    if (Internal::HasThemeBands(options.theme) || options.theme.cover || ((options.pdfa || options.pdfua) && options.pageNumbers)) {
         LayOutTheme(options, UnicodeThemeText(font, renderer.Cids()), metadata, headings, false,
             renderer.PageStarts().size(), { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin() }, logo, palette,
             bands, cover);
     }
+    if (tags) MarkArtifacts(bands, cover, contentsOverlays);
     const CidList& used = renderer.UsedCids();
     if (betterFont && (*betterFont = BetterFontFor(font, used)) != nullptr) return true;
     missingCharacters = renderer.MissingCharacters();
@@ -9650,6 +10031,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         page += " >>";
         AppendContents(page, contentId, numberId, contentsId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
+        if (tags) AppendTaggedPage(page, pageIndex);
         page += " >>";
         pageIds.push_back(pdf.Add(std::move(page)));
     }
@@ -9662,30 +10044,32 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.PageHeight(), fonts, imageObjectIds, cover);
     }
     pdf.Set(pagesId, PagesDictionary(pageIds, coverId));
-    AddInternalLinks(pdf, internalLinks, pageIds, options.pdfa);
+    const int structTreeRoot = tags ? AddStructTree(pdf, *tags, pageIds) : 0;
+    AddInternalLinks(pdf, internalLinks, pageIds, options.pdfa, tags.get());
 
     std::string catalog;
-    catalog.reserve(options.embedSource || options.pdfa ? 512 : 64);
+    catalog.reserve(options.embedSource || options.pdfa || options.pdfua ? 512 : 64);
     catalog += "<< /Type /Catalog /Pages ";
     AppendInt(catalog, pagesId);
     catalog += " 0 R";
+    if (tags) TaggedDocumentDefaults(metadata, headings, options.sourcePath);
     AppendLanguage(catalog, metadata);
     if (coverId != 0) catalog += kCoverPageLabels;
     std::string outline;
     AddOutline(pdf, catalog, headings, pageIds, false, outline);
     const char* const producer = "RayoMD Native Tiny PDF";
-    if (options.pdfa) {
-        AddPdfaCatalogEntries(pdf, catalog, metadata, headings, producer,
-            options.embedSource ? std::string_view(markdown) : std::string_view());
+    if (options.pdfa || tags) {
+        AddArchivalCatalogEntries(pdf, catalog, metadata, headings, producer,
+            options.embedSource ? std::string_view(markdown) : std::string_view(), options.pdfa, structTreeRoot);
     }
-    if (options.embedSource) AddReversibleSource(pdf, catalog, markdown, !options.pdfa);
+    if (options.embedSource) AddReversibleSource(pdf, catalog, markdown, !options.pdfa && !tags);
     catalog += " >>";
     int catalogId = pdf.Add(std::move(catalog));
-    const std::vector<HeadingMark> noHeadings;      // PDF/A: `metadata` has the title
-    int infoId = pdf.Add(InfoDictionary(producer, metadata, options.pdfa ? noHeadings : headings, false));
+    const std::vector<HeadingMark> noHeadings;      // PDF/A and PDF/UA: `metadata` has the title
+    int infoId = pdf.Add(InfoDictionary(producer, metadata, options.pdfa || tags ? noHeadings : headings, false));
 
-    // PDF/A-3 is PDF 1.7, also with the source embedded, and has a file identifier.
-    pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource && !options.pdfa, options.pdfa);
+    // PDF/A-3 and PDF/UA-1 are PDF 1.7, also with the source embedded; PDF/A has a file identifier.
+    pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource && !options.pdfa && !tags, options.pdfa);
     stats.pages = static_cast<uint32_t>(pageStarts.size() + (coverId != 0));
     stats.failedImages = imageRegistry.FailedImages();
     return true;
@@ -9697,8 +10081,10 @@ enum class TextFonts : uint8_t { Ascii, WinAnsi, TrueType };
 
 static TextFonts ChooseFonts(const std::string& markdown, const PdfOptions& options, std::string& winAnsi) {
     // A theme's font shows all text, and a theme's header and footer text that is not WinAnsi
-    // needs a TrueType font too, as PDF/A, which embeds every font, does for all text.
-    if (!options.theme.fontPath.empty() || options.pdfa || ThemeTextNeedsUnicode(options.theme)) return TextFonts::TrueType;
+    // needs a TrueType font too, as PDF/A and PDF/UA, which embed every font, do for all text.
+    if (!options.theme.fontPath.empty() || options.pdfa || options.pdfua || ThemeTextNeedsUnicode(options.theme)) {
+        return TextFonts::TrueType;
+    }
     // A character reference counts as the character it stands for: "&copy;" needs the WinAnsi
     // text of the standard fonts, "&rarr;" a Unicode font. A document is searched for them only
     // where it would otherwise go to the standard fonts.
@@ -9741,7 +10127,7 @@ static bool BuildInTrueType(const PdfOptions& options, uint32_t& missingCharacte
             const TtfFont* better = nullptr;
             built = unicode(*font, &better, missing);
             if (built && better) built = unicode(*better, nullptr, missing);
-        } else if (options.pdfa) {
+        } else if (options.pdfa || options.pdfua) {
             g_lastError = static_cast<int>(BuildError::PdfaFontUnavailable);
             return false;
         } else {

@@ -597,10 +597,11 @@ Result Inspect(std::string_view pdf, bool recoverSource) {
     if (result.info.profile != "rayomd-source/1") {
         result.status = Status::UnsupportedProfile; return result;
     }
-    // PDF 2.0, or PDF 1.7 in a PDF/A-3 export, which cannot be a PDF 2.0 file.
+    // PDF 2.0, or PDF 1.7 in a PDF/A-3 or PDF/UA-1 export, which cannot be a PDF 2.0 file.
     const std::string_view header = pdf.substr(0, 8);
-    const bool pdfa = header == "%PDF-1.7" && xml.find(" pdfaid:part=\"3\"") != std::string_view::npos;
-    if ((header != "%PDF-2.0" && !pdfa) ||
+    const bool archival = header == "%PDF-1.7" && (xml.find(" pdfaid:part=\"3\"") != std::string_view::npos ||
+        xml.find(" pdfuaid:part=\"1\"") != std::string_view::npos);
+    if ((header != "%PDF-2.0" && !archival) ||
         !ExtractAttribute(xml, "producer", result.info.producerVersion) ||
         !ExtractAttribute(xml, "encoding", result.info.encoding) ||
         !ExtractAttribute(xml, "length", lengthText) ||

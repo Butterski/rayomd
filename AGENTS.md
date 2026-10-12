@@ -99,6 +99,14 @@ sRGB output intent, XMP metadata that tells what the Info dictionary does
 (`PdfaText` makes both hold the same text), a trailer `/ID` and `/F 4` on links,
 and stays PDF 1.7 with an embedded source. Check changes with veraPDF
 (`verapdf -f 3b`). Without it the PDF bytes stay as they are.
+`PdfOptions::pdfua` (`--pdfua`) writes tagged PDF/UA-1: the fonts and formulas as with
+`pdfa`, and a structure tree (`src/core/tagged.h`) that the Unicode renderer fills as it
+paints. Every paint of that renderer goes through it: `PaintText` and `DrawImage` mark
+content of the open element, `DrawRect`, `DrawStrokeRect` and rules mark artifacts, and
+every block opens its element. A new paint call in the Unicode renderer must do the same,
+or veraPDF fails with "content neither marked as Artifact nor tagged" (`verapdf -f ua1`),
+and Debug builds assert. Untagged documents keep their bytes: each hook tests `tags` first,
+and the tagged-only work is in `RAYOMD_COLD` functions and `tagged.cpp`.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
@@ -190,6 +198,13 @@ Important image/link details:
   linear gradients, `use`, text in the host's font and `data:` images through the
   host (`SvgHost`, implemented by `tiny_pdf.cpp` for each renderer). Built at `-Os`;
   every input-size, depth, work and output limit makes `ConvertSvg` return false.
+
+- `src/core/tagged.h` and `src/core/tagged.cpp`
+  PDF/UA's structure tree: elements opened and closed as the renderer paints, marked
+  content and artifacts in the page streams, lists, tables and links tracked across
+  blocks and pages, and the tree's objects written into one buffer the PDF views
+  (StructTreeRoot, elements, ParentTree, IDTree). Built at `-Os`; elements hold no
+  heap memory of their own.
 
 - `src/core/rayomd_pdf_source.h` and `src/core/rayomd_pdf_source.cpp`
   Bounded reversible-profile metadata, SHA-256 integrity, hostile-input

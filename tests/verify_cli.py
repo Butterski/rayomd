@@ -227,6 +227,18 @@ def verify_svg(binary: Path, root: Path) -> None:
         raise AssertionError("SVG image: drawn as a raster image")
 
 
+def verify_pdfua(binary: Path, root: Path) -> None:
+    """--pdfua: a tagged PDF 1.7, its link annotation in a Link element of its structure tree."""
+    source = root / "tagged.md"
+    source.write_text("# Tagged\n\nA [link](https://example.com).\n\n- item\n", encoding="utf-8")
+    pdf = root / "tagged.pdf"
+    run(binary, "--export", str(source), str(pdf), "--pdfua")
+    data = require_pdf(pdf, b"/StructTreeRoot", b"/MarkInfo << /Marked true >>", b"pdfuaid:part=\"1\"",
+                       b"/S /Link", b"/Type /OBJR", b"/StructParent ", b"/Tabs /S")
+    if not data.startswith(b"%PDF-1.7") or data.count(b"BDC\n") + data.count(b"BMC\n") != data.count(b"EMC\n"):
+        raise AssertionError("--pdfua: unbalanced marked content or wrong version")
+
+
 def pdf_streams(data: bytes) -> list[tuple[bytes, bytes]]:
     """The dictionary and payload of every stream of a PDF, in file order."""
     streams = []
@@ -316,6 +328,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_contents(binary, root)
         verify_book(binary, root)
         verify_svg(binary, root)
+        verify_pdfua(binary, root)
         verify_batch(binary, root)
 
         if os.name == "nt":

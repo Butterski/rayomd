@@ -51,6 +51,7 @@ native exporter through a small CLI.
 - Optional compression (`--compress`) with a built-in DEFLATE encoder: text-heavy PDFs come out two to five times smaller.
 - Company themes (`--theme=FILE`): your TrueType font, colours, header and footer text with a logo, and a cover page.
 - PDF/A-3b archives (`--pdfa`): every font embedded, sRGB output intent and XMP metadata; formulas show their TeX source.
+- Tagged PDF/UA-1 for screen readers (`--pdfua`): headings, lists, tables, figures with their alt text, links and footnotes in reading order, decoration marked as artifacts; validated with veraPDF, also together with `--pdfa`.
 - Optional Windows Pandoc mode when the native subset is not enough.
 
 Use native RayoMD for simple reports and bulk conversion when startup time,
@@ -127,6 +128,7 @@ rayomd --export input.md numbered.pdf --page-numbers --page-size=letter
 rayomd --export input.md small.pdf --compress
 rayomd --export input.md branded.pdf --theme=acme.theme
 rayomd --export input.md archive.pdf --pdfa
+rayomd --export input.md accessible.pdf --pdfua
 rayomd --book docs/SUMMARY.md manual.pdf --toc
 rayomd --recover-source reversible.pdf recovered.md
 ```
@@ -175,7 +177,9 @@ fonts when no system font is found), HTML comments (hidden), `<br>` line breaks,
 character references such as `&copy;`, PDF metadata from the front matter (title,
 else the first heading; author, subject, keywords and language), opt-in page numbers,
 a table of contents at a `[TOC]` or `[[_TOC_]]` paragraph or with `--toc`, books of
-several files (`--book`), and common status-symbol normalization.
+several files (`--book`), tagged PDF/UA-1 (`--pdfua`; a theme's cover page is tagged as
+decoration, and an inline formula is text showing its TeX source), and common status-symbol
+normalization.
 Images embedded in paragraph text use a consistent `image: alt` fallback;
 standalone images retain native image layout and missing-image fallback text.
 
