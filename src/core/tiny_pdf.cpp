@@ -998,12 +998,21 @@ static void AppendCheckbox(std::string& content, double x, double bottom, double
     out.Lit(" Q\n");
 }
 
-static char* WriteHex4(char* out, uint16_t value) {
-    static constexpr char digits[] = "0123456789ABCDEF";
-    out[0] = digits[(value >> 12) & 0xf];
-    out[1] = digits[(value >> 8) & 0xf];
-    out[2] = digits[(value >> 4) & 0xf];
-    out[3] = digits[value & 0xf];
+// "00" to "FF": the four hex digits of a CID are two copies.
+static constexpr std::array<char, 512> MakeHexPairs() {
+    std::array<char, 512> pairs{};
+    constexpr char digits[] = "0123456789ABCDEF";
+    for (unsigned value = 0; value < 256; value++) {
+        pairs[2 * value] = digits[value >> 4];
+        pairs[2 * value + 1] = digits[value & 15];
+    }
+    return pairs;
+}
+static constexpr std::array<char, 512> kHexPairs = MakeHexPairs();
+
+static RAYOMD_HOT_INLINE char* WriteHex4(char* out, uint16_t value) {
+    memcpy(out, kHexPairs.data() + 2 * (value >> 8), 2);
+    memcpy(out + 2, kHexPairs.data() + 2 * (value & 0xff), 2);
     return out + 4;
 }
 
