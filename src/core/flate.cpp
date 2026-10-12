@@ -401,9 +401,9 @@ void EmitBlock(BitWriter& writer, const uint8_t* data, size_t size, const uint32
 
 } // namespace
 
-uint32_t Adler32(const uint8_t* data, size_t size) {
-    uint32_t a = 1;
-    uint32_t b = 0;
+uint32_t Adler32(const uint8_t* data, size_t size, uint32_t adler) {
+    uint32_t a = adler & 0xffff;
+    uint32_t b = adler >> 16;
 #ifdef RAYOMD_FLATE_SSE2
     // 32 bytes a step, as libdeflate does: a takes the byte sums, b the earlier steps' sums of a
     // times 32 plus every byte times its distance from the step's end. 4096 bytes keep the 16-bit

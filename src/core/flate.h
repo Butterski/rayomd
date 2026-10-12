@@ -37,8 +37,9 @@ constexpr size_t kMaxInput = (size_t(1) << 31) - 1;
 // ZlibBound(input.size()) - 8).
 size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch);
 
-// The Adler-32 checksum (RFC 1950) of `size` bytes, as zlib's adler32(1, data, size): the
-// trailer of a zlib stream. SSE2 where the target has it.
-uint32_t Adler32(const uint8_t* data, size_t size);
+// The Adler-32 checksum (RFC 1950) of `size` bytes, as zlib's adler32(adler, data, size): the
+// trailer of a zlib stream. Start with 1; pass the result on to continue over more bytes. SSE2
+// where the target has it.
+uint32_t Adler32(const uint8_t* data, size_t size, uint32_t adler = 1);
 
 } // namespace RayoMd::Flate

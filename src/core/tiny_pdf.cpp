@@ -2367,102 +2367,177 @@ static bool BuildFastPngImage(const PngInfo& png, PdfImage& image) {
 }
 
 #ifdef RAYOMD_USE_ZLIB
-// zlib streams are taken apart here: zlib inflates and deflates the raw data, and RayoMD reads or
+// zlib streams are taken apart here: zlib inflates and deflates raw data, and RayoMD reads or
 // writes the 2-byte header and the Adler-32 trailer. zlib computes that checksum a byte at a time
 // (11 % of an RGBA image's export), RayoMd::Flate::Adler32 sixteen at a time.
 static uint32_t ReadBigEndian32(const uint8_t* p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
-// What uncompress() accepts, into exactly `filtered.size()` bytes: a header without a preset
-// dictionary and with a window up to 32 KB, a stream that ends there, and a matching checksum.
-static bool InflatePngRows(const PngInfo& png, size_t rowBytes, std::vector<uint8_t>& filtered) {
-    if (png.height == 0 || rowBytes == 0) return false;
-    size_t expected = (rowBytes + 1) * (size_t)png.height;
-    if (expected > kMaxDecodedImageBytes) return false;
-    const uint8_t* in = reinterpret_cast<const uint8_t*>(png.idat.data());
-    const size_t size = png.idat.size();
-    if (size < 2 || (in[0] & 15) != 8 || (in[0] >> 4) > 7 || ((in[0] << 8) | in[1]) % 31 != 0 || (in[1] & 0x20)) {
-        return false;
+// A zlib stream read in pieces, accepting what uncompress() accepts: a header without a preset
+// dictionary and with a window up to 32 KB, deflate data that ends right after the bytes read,
+// and their checksum.
+class ZlibReader {
+public:
+    ZlibReader() = default;
+    ZlibReader(const ZlibReader&) = delete;
+    ZlibReader& operator=(const ZlibReader&) = delete;
+    ~ZlibReader() {
+        if (ready_) inflateEnd(&stream_);
     }
-    filtered.assign(expected, 0);
-    z_stream stream{};
-    if (inflateInit2(&stream, -MAX_WBITS) != Z_OK) return false;
-    stream.next_in = const_cast<Bytef*>(in + 2);
-    stream.avail_in = (uInt)(size - 2);
-    stream.next_out = filtered.data();
-    stream.avail_out = (uInt)expected;
-    const int result = inflate(&stream, Z_FINISH);
-    const bool ended = result == Z_STREAM_END && stream.total_out == expected && stream.avail_in >= 4 &&
-        ReadBigEndian32(stream.next_in) == RayoMd::Flate::Adler32(filtered.data(), expected);
-    inflateEnd(&stream);
-    return ended;
-}
 
-// Undoes the PNG filters row by row; the first row's `up` is a row of zeros.
-static bool PngUnfilter(const std::vector<uint8_t>& filtered, size_t height, size_t rowBytes, size_t bpp,
-    std::vector<uint8_t>& rows) {
-    if (height == 0 || rowBytes == 0 || bpp == 0) return false;
-    if (filtered.size() != (rowBytes + 1) * height) return false;
-
-    rows.assign(rowBytes * height, 0);
-    std::vector<uint8_t> zeros(rowBytes, 0);
-    for (size_t y = 0; y < height; y++) {
-        const uint8_t* src = filtered.data() + y * (rowBytes + 1);
-        uint8_t* row = rows.data() + y * rowBytes;
-        const uint8_t* up = y ? row - rowBytes : zeros.data();
-        if (!Internal::UnfilterPngRow(src[0], src + 1, up, rowBytes, bpp, row)) return false;
+    bool Begin(const std::string& data) {
+        const uint8_t* in = reinterpret_cast<const uint8_t*>(data.data());
+        if (data.size() < 2 || (in[0] & 15) != 8 || (in[0] >> 4) > 7 || ((in[0] << 8) | in[1]) % 31 != 0 ||
+            (in[1] & 0x20)) {
+            return false;
+        }
+        if (inflateInit2(&stream_, -MAX_WBITS) != Z_OK) return false;
+        ready_ = true;
+        stream_.next_in = const_cast<Bytef*>(in + 2);
+        stream_.avail_in = (uInt)(data.size() - 2);
+        return true;
     }
-    return true;
-}
 
-static bool BuildPngPredictorRows(const std::string& raw, size_t width, size_t height,
-    size_t components, std::string& predicted) {
-    if (width == 0 || height == 0 || components == 0) return false;
-    size_t rowBytes = width * components;
-    if (rowBytes == 0 || raw.size() != rowBytes * height) return false;
-
-    predicted.clear();
-    predicted.resize((rowBytes + 1) * height);
-    std::vector<uint8_t> zeros(rowBytes, 0);
-    const uint8_t* rows = reinterpret_cast<const uint8_t*>(raw.data());
-    uint8_t* out = reinterpret_cast<uint8_t*>(&predicted[0]);
-    for (size_t y = 0; y < height; y++, out += rowBytes + 1) {
-        const uint8_t* row = rows + y * rowBytes;
-        const uint8_t* up = y ? row - rowBytes : zeros.data();
-        int filter = Internal::ChoosePngFilter(row, up, rowBytes, components);
-        out[0] = (uint8_t)filter;
-        Internal::FilterPngRow(filter, row, up, rowBytes, components, out + 1);
+    // The next `size` bytes; false when the stream is broken or ends first.
+    bool Read(uint8_t* out, size_t size) {
+        stream_.next_out = out;
+        stream_.avail_out = (uInt)size;
+        while (stream_.avail_out != 0 && !ended_) {
+            const int result = inflate(&stream_, Z_NO_FLUSH);
+            if (result == Z_STREAM_END) ended_ = true;
+            else if (result != Z_OK) return false;
+        }
+        if (stream_.avail_out != 0) return false;
+        adler_ = RayoMd::Flate::Adler32(out, size, adler_);
+        return true;
     }
-    return true;
-}
 
-// compress2() at Z_BEST_SPEED, byte for byte: its header is 78 01 (32 KB window, the fastest
-// level), the same deflate state writes the same blocks raw, and the trailer is the checksum.
-static bool CompressFlate(const std::string& input, std::string& output) {
-    if (input.empty()) return false;
-    z_stream stream{};
-    if (deflateInit2(&stream, Z_BEST_SPEED, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) return false;
-    const size_t bound = (size_t)deflateBound(&stream, (uLong)input.size());
-    output.assign(bound + 6, '\0');
-    uint8_t* out = reinterpret_cast<uint8_t*>(&output[0]);
-    out[0] = 0x78;
-    out[1] = 0x01;
-    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
-    stream.avail_in = (uInt)input.size();
-    stream.next_out = out + 2;
-    stream.avail_out = (uInt)bound;
-    const int result = deflate(&stream, Z_FINISH);
-    const size_t written = (size_t)stream.total_out;
-    deflateEnd(&stream);
-    if (result != Z_STREAM_END) return false;
-    const uint32_t adler = RayoMd::Flate::Adler32(reinterpret_cast<const uint8_t*>(input.data()), input.size());
-    uint8_t* tail = out + 2 + written;
-    tail[0] = (uint8_t)(adler >> 24);
-    tail[1] = (uint8_t)(adler >> 16);
-    tail[2] = (uint8_t)(adler >> 8);
-    tail[3] = (uint8_t)adler;
-    output.resize(2 + written + 4);
+    // Whether the stream ends after the bytes read, with their checksum.
+    bool End() {
+        if (!ended_) {
+            uint8_t spare = 0;
+            stream_.next_out = &spare;
+            stream_.avail_out = 1;
+            if (inflate(&stream_, Z_NO_FLUSH) != Z_STREAM_END || stream_.avail_out != 1) return false;
+        }
+        return stream_.avail_in >= 4 && ReadBigEndian32(stream_.next_in) == adler_;
+    }
+
+private:
+    z_stream stream_{};
+    bool ready_ = false;
+    bool ended_ = false;
+    uint32_t adler_ = 1;
+};
+
+// A zlib stream written in pieces at Z_BEST_SPEED, compress2()'s bytes for the same input: its
+// header 78 01 (32 KB window, the fastest level), the deflate blocks, which do not depend on how
+// the input arrives, and the checksum.
+class ZlibWriter {
+public:
+    ZlibWriter() = default;
+    ZlibWriter(const ZlibWriter&) = delete;
+    ZlibWriter& operator=(const ZlibWriter&) = delete;
+    ~ZlibWriter() {
+        if (ready_) deflateEnd(&stream_);
+    }
+
+    // `size`: all the bytes that Write will be given.
+    bool Begin(size_t size) {
+        if (deflateInit2(&stream_, Z_BEST_SPEED, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) return false;
+        ready_ = true;
+        const size_t capacity = (size_t)deflateBound(&stream_, (uLong)size) + 6;
+        out_.reset(new (std::nothrow) uint8_t[capacity]);   // not zeroed: only the output is touched
+        if (!out_) return false;
+        out_[0] = 0x78;
+        out_[1] = 0x01;
+        stream_.next_out = out_.get() + 2;
+        stream_.avail_out = (uInt)(capacity - 6);
+        return true;
+    }
+
+    bool Write(const uint8_t* data, size_t size) {
+        adler_ = RayoMd::Flate::Adler32(data, size, adler_);
+        stream_.next_in = const_cast<Bytef*>(data);
+        stream_.avail_in = (uInt)size;
+        return deflate(&stream_, Z_NO_FLUSH) == Z_OK && stream_.avail_in == 0;
+    }
+
+    bool Finish(std::string& stream) {
+        if (deflate(&stream_, Z_FINISH) != Z_STREAM_END) return false;
+        uint8_t* tail = stream_.next_out;
+        tail[0] = (uint8_t)(adler_ >> 24);
+        tail[1] = (uint8_t)(adler_ >> 16);
+        tail[2] = (uint8_t)(adler_ >> 8);
+        tail[3] = (uint8_t)adler_;
+        stream.assign(reinterpret_cast<const char*>(out_.get()), (size_t)(tail + 4 - out_.get()));
+        return true;
+    }
+
+private:
+    z_stream stream_{};
+    bool ready_ = false;
+    uint32_t adler_ = 1;
+    std::unique_ptr<uint8_t[]> out_;
+};
+
+// Splits a decoded row of `width` pixels into colour (RGB or grey) and alpha; `opaque` keeps the
+// AND of the alpha values. False for a palette index past the palette.
+static bool SplitPngRow(const PngInfo& png, const uint8_t* s, size_t width, uint8_t* c, uint8_t* al,
+    unsigned& opaque) {
+    unsigned all = opaque;
+    if (png.colorType == 6) {
+        for (size_t i = 0; i < width; i++, s += 4, c += 3) {
+            c[0] = s[0];
+            c[1] = s[1];
+            c[2] = s[2];
+            al[i] = s[3];
+            all &= s[3];
+        }
+    } else if (png.colorType == 4) {
+        for (size_t i = 0; i < width; i++, s += 2) {
+            c[i] = s[0];
+            al[i] = s[1];
+            all &= s[1];
+        }
+    } else if (png.colorType == 3) {
+        const size_t entries = png.palette.size() / 3;
+        const uint8_t* palette = reinterpret_cast<const uint8_t*>(png.palette.data());
+        const uint8_t* transparency = reinterpret_cast<const uint8_t*>(png.transparency.data());
+        const size_t transparent = png.transparency.size();
+        for (size_t i = 0; i < width; i++, c += 3) {
+            const size_t index = s[i];
+            if (index >= entries) return false;
+            c[0] = palette[index * 3 + 0];
+            c[1] = palette[index * 3 + 1];
+            c[2] = palette[index * 3 + 2];
+            const uint8_t a = index < transparent ? transparency[index] : 255;
+            al[i] = a;
+            all &= a;
+        }
+    } else if (png.colorType == 2) {
+        const uint16_t tr = (uint16_t)((png.transparency[0] << 8) | png.transparency[1]);
+        const uint16_t tg = (uint16_t)((png.transparency[2] << 8) | png.transparency[3]);
+        const uint16_t tb = (uint16_t)((png.transparency[4] << 8) | png.transparency[5]);
+        for (size_t i = 0; i < width; i++, s += 3, c += 3) {
+            c[0] = s[0];
+            c[1] = s[1];
+            c[2] = s[2];
+            const uint8_t a = (s[0] == tr && s[1] == tg && s[2] == tb) ? 0 : 255;
+            al[i] = a;
+            all &= a;
+        }
+    } else {
+        const uint16_t transparent = (uint16_t)((png.transparency[0] << 8) | png.transparency[1]);
+        for (size_t i = 0; i < width; i++) {
+            c[i] = s[i];
+            const uint8_t a = s[i] == transparent ? 0 : 255;
+            al[i] = a;
+            all &= a;
+        }
+    }
+    opaque = all;
     return true;
 }
 
@@ -2477,6 +2552,10 @@ static std::string BuildPngPredictorDecodeParms(size_t columns, size_t component
     return parms;
 }
 
+// A non-interlaced 8-bit PNG with transparency, decoded and re-encoded as /Predictor 15 streams
+// of colour and alpha one row at a time: a row is inflated, unfiltered, split, filtered again and
+// deflated before the next. Only the alpha plane is kept whole: its stream is written only when
+// some pixel is translucent. Nothing is zeroed but a row of zeros for the first row's neighbours.
 static bool BuildDecodedPngImageWithZlib(const PngInfo& png, PdfImage& image) {
     if (png.interlace != 0 || png.bitDepth != 8) return false;
     if (png.width == 0 || png.height == 0) return false;
@@ -2502,103 +2581,70 @@ static bool BuildDecodedPngImageWithZlib(const PngInfo& png, PdfImage& image) {
         return false;
     }
 
-    std::vector<uint8_t> filtered;
-    if (!InflatePngRows(png, rowBytes, filtered)) return false;
-    std::vector<uint8_t> rows;
-    if (!PngUnfilter(filtered, png.height, rowBytes, bpp, rows)) return false;
+    const size_t width = png.width;
+    const size_t height = png.height;
+    const size_t pixels = width * height;
+    if ((rowBytes + 1) * height > kMaxDecodedImageBytes || pixels * 4 > kMaxDecodedImageBytes) return false;
 
-    size_t pixels = (size_t)png.width * (size_t)png.height;
-    if (pixels == 0 || pixels * 4 > kMaxDecodedImageBytes) return false;
+    const bool rgb = png.colorType == 6 || png.colorType == 3 || png.colorType == 2;
+    const size_t colorComponents = rgb ? 3 : 1;
+    const size_t colorRow = width * colorComponents;
+    // One block for the inflated row, this and the previous decoded row, this and the previous
+    // colour row, a filtered row, and the alpha plane.
+    std::unique_ptr<uint8_t[]> scratch(new (std::nothrow) uint8_t[(rowBytes + 1) + 2 * rowBytes + 2 * colorRow +
+        (colorRow + 1) + pixels]);
+    if (!scratch) return false;
+    uint8_t* const inflated = scratch.get();
+    uint8_t* const decoded = inflated + rowBytes + 1;
+    uint8_t* const colors = decoded + 2 * rowBytes;
+    uint8_t* const filtered = colors + 2 * colorRow;
+    uint8_t* const alpha = filtered + colorRow + 1;
+    const std::vector<uint8_t> zeros(std::max(rowBytes, colorRow), 0);
 
-    // Colour and alpha are written through pointers into buffers sized once; `opaque` stays 255
-    // only while every alpha value is 255.
-    bool rgb = png.colorType == 6 || png.colorType == 3 || png.colorType == 2;
-    std::string color(pixels * (rgb ? 3 : 1), '\0');
-    std::string alpha(pixels, '\0');
-    uint8_t* c = reinterpret_cast<uint8_t*>(&color[0]);
-    uint8_t* al = reinterpret_cast<uint8_t*>(&alpha[0]);
-    const uint8_t* s = rows.data();
+    PdfImage result;
+    ZlibReader reader;
+    ZlibWriter colorWriter;
+    if (!reader.Begin(png.idat) || !colorWriter.Begin((colorRow + 1) * height)) return false;
     unsigned opaque = 255;
-
-    if (png.colorType == 6) {
-        for (size_t i = 0; i < pixels; i++, s += 4, c += 3) {
-            c[0] = s[0];
-            c[1] = s[1];
-            c[2] = s[2];
-            al[i] = s[3];
-            opaque &= s[3];
+    for (size_t y = 0; y < height; y++) {
+        uint8_t* const row = decoded + (y & 1) * rowBytes;
+        const uint8_t* const rowUp = y ? decoded + ((y - 1) & 1) * rowBytes : zeros.data();
+        uint8_t* const color = colors + (y & 1) * colorRow;
+        const uint8_t* const colorUp = y ? colors + ((y - 1) & 1) * colorRow : zeros.data();
+        if (!reader.Read(inflated, rowBytes + 1) ||
+            !Internal::UnfilterPngRow(inflated[0], inflated + 1, rowUp, rowBytes, bpp, row) ||
+            !SplitPngRow(png, row, width, color, alpha + y * width, opaque)) {
+            return false;
         }
-        image.colorSpace = "/DeviceRGB";
-    } else if (png.colorType == 4) {
-        for (size_t i = 0; i < pixels; i++, s += 2) {
-            c[i] = s[0];
-            al[i] = s[1];
-            opaque &= s[1];
-        }
-        image.colorSpace = "/DeviceGray";
-    } else if (png.colorType == 3) {
-        size_t entries = png.palette.size() / 3;
-        const uint8_t* palette = reinterpret_cast<const uint8_t*>(png.palette.data());
-        const uint8_t* transparency = reinterpret_cast<const uint8_t*>(png.transparency.data());
-        size_t transparent = png.transparency.size();
-        for (size_t i = 0; i < pixels; i++, c += 3) {
-            size_t index = s[i];
-            if (index >= entries) return false;
-            c[0] = palette[index * 3 + 0];
-            c[1] = palette[index * 3 + 1];
-            c[2] = palette[index * 3 + 2];
-            uint8_t a = index < transparent ? transparency[index] : 255;
-            al[i] = a;
-            opaque &= a;
-        }
-        image.colorSpace = "/DeviceRGB";
-    } else if (png.colorType == 2) {
-        uint16_t tr = (uint16_t)((png.transparency[0] << 8) | png.transparency[1]);
-        uint16_t tg = (uint16_t)((png.transparency[2] << 8) | png.transparency[3]);
-        uint16_t tb = (uint16_t)((png.transparency[4] << 8) | png.transparency[5]);
-        for (size_t i = 0; i < pixels; i++, s += 3, c += 3) {
-            c[0] = s[0];
-            c[1] = s[1];
-            c[2] = s[2];
-            uint8_t a = (s[0] == tr && s[1] == tg && s[2] == tb) ? 0 : 255;
-            al[i] = a;
-            opaque &= a;
-        }
-        image.colorSpace = "/DeviceRGB";
-    } else {
-        uint16_t transparent = (uint16_t)((png.transparency[0] << 8) | png.transparency[1]);
-        for (size_t i = 0; i < pixels; i++) {
-            c[i] = s[i];
-            uint8_t a = s[i] == transparent ? 0 : 255;
-            al[i] = a;
-            opaque &= a;
-        }
-        image.colorSpace = "/DeviceGray";
+        const int filter = Internal::ChoosePngFilter(color, colorUp, colorRow, colorComponents);
+        filtered[0] = (uint8_t)filter;
+        Internal::FilterPngRow(filter, color, colorUp, colorRow, colorComponents, filtered + 1);
+        if (!colorWriter.Write(filtered, colorRow + 1)) return false;
     }
-    bool hasAlpha = opaque != 255;
+    if (!reader.End() || !colorWriter.Finish(result.stream)) return false;
+    result.colorSpace = rgb ? "/DeviceRGB" : "/DeviceGray";
+    result.width = (int)png.width;
+    result.height = (int)png.height;
+    result.bitsPerComponent = 8;
+    result.filter = "/FlateDecode";
+    result.decodeParms = BuildPngPredictorDecodeParms(png.width, colorComponents);
 
-    image.width = (int)png.width;
-    image.height = (int)png.height;
-    image.bitsPerComponent = 8;
-
-    size_t colorComponents = image.colorSpace == "/DeviceRGB" ? 3 : 1;
-    std::string predictedColor;
-    std::string compressedColor;
-    if (!BuildPngPredictorRows(color, png.width, png.height, colorComponents, predictedColor)) return false;
-    if (!CompressFlate(predictedColor, compressedColor)) return false;
-    image.stream = std::move(compressedColor);
-    image.filter = "/FlateDecode";
-    image.decodeParms = BuildPngPredictorDecodeParms(png.width, colorComponents);
-
-    if (hasAlpha) {
-        std::string predictedAlpha;
-        std::string compressedAlpha;
-        if (!BuildPngPredictorRows(alpha, png.width, png.height, 1, predictedAlpha)) return false;
-        if (!CompressFlate(predictedAlpha, compressedAlpha)) return false;
-        image.maskStream = std::move(compressedAlpha);
-        image.maskFilter = "/FlateDecode";
-        image.maskDecodeParms = BuildPngPredictorDecodeParms(png.width, 1);
+    if (opaque != 255) {
+        ZlibWriter alphaWriter;
+        if (!alphaWriter.Begin((width + 1) * height)) return false;
+        for (size_t y = 0; y < height; y++) {
+            const uint8_t* const row = alpha + y * width;
+            const uint8_t* const up = y ? row - width : zeros.data();
+            const int filter = Internal::ChoosePngFilter(row, up, width, 1);
+            filtered[0] = (uint8_t)filter;
+            Internal::FilterPngRow(filter, row, up, width, 1, filtered + 1);
+            if (!alphaWriter.Write(filtered, width + 1)) return false;
+        }
+        if (!alphaWriter.Finish(result.maskStream)) return false;
+        result.maskFilter = "/FlateDecode";
+        result.maskDecodeParms = BuildPngPredictorDecodeParms(png.width, 1);
     }
+    image = std::move(result);
     return true;
 }
 #else
