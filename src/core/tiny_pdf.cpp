@@ -2267,47 +2267,6 @@ static bool BuildFastPngImage(const PngInfo& png, PdfImage& image) {
     return true;
 }
 
-static uint8_t PngPaeth(uint8_t a, uint8_t b, uint8_t c) {
-    int p = (int)a + (int)b - (int)c;
-    int pa = std::abs(p - (int)a);
-    int pb = std::abs(p - (int)b);
-    int pc = std::abs(p - (int)c);
-    if (pa <= pb && pa <= pc) return a;
-    return pb <= pc ? b : c;
-}
-
-static bool PngUnfilter(const std::vector<uint8_t>& filtered, size_t width, size_t height,
-    size_t rowBytes, size_t bpp, std::vector<uint8_t>& rows) {
-    if (height == 0 || rowBytes == 0 || bpp == 0) return false;
-    if (filtered.size() != (rowBytes + 1) * height) return false;
-
-    rows.assign(rowBytes * height, 0);
-    for (size_t y = 0; y < height; y++) {
-        const uint8_t* src = filtered.data() + y * (rowBytes + 1);
-        uint8_t filter = src[0];
-        const uint8_t* raw = src + 1;
-        uint8_t* cur = rows.data() + y * rowBytes;
-        const uint8_t* prev = y == 0 ? nullptr : rows.data() + (y - 1) * rowBytes;
-
-        for (size_t x = 0; x < rowBytes; x++) {
-            uint8_t left = x >= bpp ? cur[x - bpp] : 0;
-            uint8_t up = prev ? prev[x] : 0;
-            uint8_t upLeft = (prev && x >= bpp) ? prev[x - bpp] : 0;
-            uint8_t value = raw[x];
-            switch (filter) {
-            case 0: break;
-            case 1: value = (uint8_t)(value + left); break;
-            case 2: value = (uint8_t)(value + up); break;
-            case 3: value = (uint8_t)(value + (uint8_t)(((int)left + (int)up) >> 1)); break;
-            case 4: value = (uint8_t)(value + PngPaeth(left, up, upLeft)); break;
-            default: return false;
-            }
-            cur[x] = value;
-        }
-    }
-    return true;
-}
-
 #ifdef RAYOMD_USE_ZLIB
 static bool InflatePngRows(const PngInfo& png, size_t rowBytes, std::vector<uint8_t>& filtered) {
     if (png.height == 0 || rowBytes == 0) return false;
@@ -2327,14 +2286,56 @@ static inline uint64_t PngResidualCost(int residual) {
     return r < 128 ? r : 256 - r;
 }
 
-// PngPaeth without its branches, so the loops that call it stay straight: p - a = b - c,
-// p - b = a - c, p - c = a + b - 2c.
+// The PNG Paeth predictor (whichever of a, b, c is nearest to p = a + b - c, in that order on ties)
+// without branches, so the loops that call it stay straight: p - a = b - c, p - b = a - c,
+// p - c = a + b - 2c.
 static inline int PngPaethPredictor(int a, int b, int c) {
     int pa = std::abs(b - c);
     int pb = std::abs(a - c);
     int pc = std::abs(a + b - 2 * c);
     int bc = pb <= pc ? b : c;
     return (pa <= pb && pa <= pc) ? a : bc;
+}
+
+// Undoes the PNG filters, one switch per row; the first row's `up` is a row of zeros.
+static bool PngUnfilter(const std::vector<uint8_t>& filtered, size_t height, size_t rowBytes, size_t bpp,
+    std::vector<uint8_t>& rows) {
+    if (height == 0 || rowBytes == 0 || bpp == 0) return false;
+    if (filtered.size() != (rowBytes + 1) * height) return false;
+
+    rows.assign(rowBytes * height, 0);
+    std::vector<uint8_t> zeros(rowBytes, 0);
+    size_t lead = std::min(bpp, rowBytes);
+    for (size_t y = 0; y < height; y++) {
+        const uint8_t* src = filtered.data() + y * (rowBytes + 1);
+        const uint8_t* raw = src + 1;
+        uint8_t* cur = rows.data() + y * rowBytes;
+        const uint8_t* up = y ? cur - rowBytes : zeros.data();
+        switch (src[0]) {
+        case 0:
+            std::memcpy(cur, raw, rowBytes);
+            break;
+        case 1:
+            std::memcpy(cur, raw, lead);
+            for (size_t x = lead; x < rowBytes; x++) cur[x] = (uint8_t)(raw[x] + cur[x - bpp]);
+            break;
+        case 2:
+            for (size_t x = 0; x < rowBytes; x++) cur[x] = (uint8_t)(raw[x] + up[x]);
+            break;
+        case 3:
+            for (size_t x = 0; x < lead; x++) cur[x] = (uint8_t)(raw[x] + (up[x] >> 1));
+            for (size_t x = lead; x < rowBytes; x++) cur[x] = (uint8_t)(raw[x] + ((cur[x - bpp] + up[x]) >> 1));
+            break;
+        case 4:
+            for (size_t x = 0; x < lead; x++) cur[x] = (uint8_t)(raw[x] + up[x]);   // Paeth(0, b, 0) is b
+            for (size_t x = lead; x < rowBytes; x++)
+                cur[x] = (uint8_t)(raw[x] + PngPaethPredictor(cur[x - bpp], up[x], up[x - bpp]));
+            break;
+        default:
+            return false;
+        }
+    }
+    return true;
 }
 
 // The filter with the smallest sum of residual magnitudes, the lowest on ties. All five sums come
@@ -2465,7 +2466,7 @@ static bool BuildDecodedPngImageWithZlib(const PngInfo& png, PdfImage& image) {
     std::vector<uint8_t> filtered;
     if (!InflatePngRows(png, rowBytes, filtered)) return false;
     std::vector<uint8_t> rows;
-    if (!PngUnfilter(filtered, png.width, png.height, rowBytes, bpp, rows)) return false;
+    if (!PngUnfilter(filtered, png.height, rowBytes, bpp, rows)) return false;
 
     size_t pixels = (size_t)png.width * (size_t)png.height;
     if (pixels == 0 || pixels * 4 > kMaxDecodedImageBytes) return false;
