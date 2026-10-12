@@ -128,6 +128,7 @@ if(WIN32)
         src/core/tiny_pdf.cpp
         src/core/theme.cpp
         src/core/pdfa.cpp
+        src/core/png_filter.cpp
         src/core/flate.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp
@@ -199,6 +200,7 @@ else()
         src/core/tiny_pdf.cpp
         src/core/theme.cpp
         src/core/pdfa.cpp
+        src/core/png_filter.cpp
         src/core/flate.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
@@ -240,6 +242,7 @@ if(BUILD_TESTING)
         src/core/tiny_pdf.cpp
         src/core/theme.cpp
         src/core/pdfa.cpp
+        src/core/png_filter.cpp
         src/core/flate.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp

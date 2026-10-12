@@ -12,6 +12,7 @@
 #include "../src/core/highlight.h"
 #include "../src/core/contents.h"
 #include "../src/core/book.h"
+#include "../src/core/png_filter.h"
 
 #include <algorithm>
 #include <array>
@@ -2779,6 +2780,89 @@ bool CheckLatinText() {
     return true;
 }
 
+// The PNG row filters against the textbook definitions (PNG specification, section 9): the
+// residuals of every filter, the encoder heuristic's choice (least sum of residual magnitudes as
+// signed bytes, the lowest filter on ties), the SSE2 code against its scalar reference, and
+// unfiltering back to the row. Rows of 1 to 4 bytes per pixel and every width around the 16-byte
+// vectors, with patterns that tie, saturate, or favour each filter.
+bool CheckPngFilters() {
+    using namespace TinyPdf::Internal;
+    uint32_t seed = 20261013u;
+    auto next = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return (uint8_t)(seed >> 24);
+    };
+    auto paeth = [](int a, int b, int c) {
+        int p = a + b - c;
+        int pa = std::abs(p - a), pb = std::abs(p - b), pc = std::abs(p - c);
+        if (pa <= pb && pa <= pc) return a;
+        return pb <= pc ? b : c;
+    };
+    std::vector<size_t> widths;
+    for (size_t width = 1; width <= 80; width++) widths.push_back(width);
+    widths.insert(widths.end(), {255, 256, 1000, 4099});
+    std::vector<uint8_t> up, row, expected, filtered, scalar, back;
+    for (size_t bpp = 1; bpp <= 4; bpp++) {
+        for (size_t rowBytes : widths) {
+            for (int pattern = 0; pattern < 7; pattern++) {
+                up.assign(rowBytes, 0);
+                row.assign(rowBytes, 0);
+                for (size_t x = 0; x < rowBytes; x++) {
+                    uint8_t noise = next();
+                    switch (pattern) {
+                    case 0: up[x] = next(); row[x] = noise; break;                          // noise
+                    case 1: up[x] = 77; row[x] = 77; break;                                  // flat: ties
+                    case 2: row[x] = noise; break;                                           // first row
+                    case 3: up[x] = (uint8_t)(x * 5); row[x] = (uint8_t)(x * 5 + 3); break;  // gradient
+                    case 4: up[x] = next(); row[x] = (uint8_t)(up[x] + (noise & 3)); break;  // like the row above
+                    case 5: up[x] = (uint8_t)(noise & 128 ? 255 : 0); row[x] = (uint8_t)(noise & 1 ? 128 : 0); break;
+                    default: up[x] = next(); row[x] = (uint8_t)(x >= bpp ? row[x - bpp] + (noise & 1) : noise); break;
+                    }
+                }
+                uint64_t costs[5] = {};
+                for (int filter = 0; filter < 5; filter++) {
+                    expected.assign(rowBytes, 0);
+                    for (size_t x = 0; x < rowBytes; x++) {
+                        int a = x >= bpp ? row[x - bpp] : 0, b = up[x], c = x >= bpp ? up[x - bpp] : 0;
+                        int predictor = filter == 0 ? 0 : filter == 1 ? a : filter == 2 ? b
+                            : filter == 3 ? (a + b) / 2 : paeth(a, b, c);
+                        expected[x] = (uint8_t)(row[x] - predictor);
+                        costs[filter] += (uint64_t)std::abs((int)(int8_t)expected[x]);
+                    }
+                    filtered.assign(rowBytes, 0);
+                    scalar.assign(rowBytes, 0);
+                    back.assign(rowBytes, 0);
+                    FilterPngRow(filter, row.data(), up.data(), rowBytes, bpp, filtered.data());
+                    FilterPngRowScalar(filter, row.data(), up.data(), rowBytes, bpp, scalar.data());
+                    bool unfiltered = UnfilterPngRow((uint8_t)filter, filtered.data(), up.data(), rowBytes, bpp, back.data());
+                    if (filtered != expected || scalar != expected || !unfiltered || back != row) {
+                        std::cerr << "PNG filter " << filter << " wrong: " << bpp << " bytes per pixel, " << rowBytes
+                                  << " bytes, pattern " << pattern << std::endl;
+                        return false;
+                    }
+                }
+                int best = 0;
+                for (int filter = 1; filter < 5; filter++) {
+                    if (costs[filter] < costs[best]) best = filter;
+                }
+                int chosen = ChoosePngFilter(row.data(), up.data(), rowBytes, bpp);
+                int reference = ChoosePngFilterScalar(row.data(), up.data(), rowBytes, bpp);
+                if (chosen != best || reference != best) {
+                    std::cerr << "PNG filter choice " << chosen << " / " << reference << ", expected " << best << ": "
+                              << bpp << " bytes per pixel, " << rowBytes << " bytes, pattern " << pattern << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+    uint8_t one = 1, out = 0;
+    if (UnfilterPngRow(5, &one, &one, 1, 1, &out)) {
+        std::cerr << "PNG filter 5 accepted" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -2834,6 +2918,7 @@ int main() {
     if (!CheckBook()) return 96;
     if (!CheckSvg()) return 97;
     if (!CheckTaggedPdf()) return 98;
+    if (!CheckPngFilters()) return 99;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

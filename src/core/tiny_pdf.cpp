@@ -11,6 +11,7 @@
 #include "highlight.h"
 #include "math_layout.h"
 #include "pdfa.h"
+#include "png_filter.h"
 #include "svg.h"
 #include "tagged.h"
 #include "theme.h"
@@ -2280,24 +2281,7 @@ static bool InflatePngRows(const PngInfo& png, size_t rowBytes, std::vector<uint
     return true;
 }
 
-// What the PNG encoder's heuristic adds up for a residual: its magnitude as a signed byte.
-static inline uint64_t PngResidualCost(int residual) {
-    uint32_t r = (uint32_t)residual & 0xffu;
-    return r < 128 ? r : 256 - r;
-}
-
-// The PNG Paeth predictor (whichever of a, b, c is nearest to p = a + b - c, in that order on ties)
-// without branches, so the loops that call it stay straight: p - a = b - c, p - b = a - c,
-// p - c = a + b - 2c.
-static inline int PngPaethPredictor(int a, int b, int c) {
-    int pa = std::abs(b - c);
-    int pb = std::abs(a - c);
-    int pc = std::abs(a + b - 2 * c);
-    int bc = pb <= pc ? b : c;
-    return (pa <= pb && pa <= pc) ? a : bc;
-}
-
-// Undoes the PNG filters, one switch per row; the first row's `up` is a row of zeros.
+// Undoes the PNG filters row by row; the first row's `up` is a row of zeros.
 static bool PngUnfilter(const std::vector<uint8_t>& filtered, size_t height, size_t rowBytes, size_t bpp,
     std::vector<uint8_t>& rows) {
     if (height == 0 || rowBytes == 0 || bpp == 0) return false;
@@ -2305,93 +2289,13 @@ static bool PngUnfilter(const std::vector<uint8_t>& filtered, size_t height, siz
 
     rows.assign(rowBytes * height, 0);
     std::vector<uint8_t> zeros(rowBytes, 0);
-    size_t lead = std::min(bpp, rowBytes);
     for (size_t y = 0; y < height; y++) {
         const uint8_t* src = filtered.data() + y * (rowBytes + 1);
-        const uint8_t* raw = src + 1;
-        uint8_t* cur = rows.data() + y * rowBytes;
-        const uint8_t* up = y ? cur - rowBytes : zeros.data();
-        switch (src[0]) {
-        case 0:
-            std::memcpy(cur, raw, rowBytes);
-            break;
-        case 1:
-            std::memcpy(cur, raw, lead);
-            for (size_t x = lead; x < rowBytes; x++) cur[x] = (uint8_t)(raw[x] + cur[x - bpp]);
-            break;
-        case 2:
-            for (size_t x = 0; x < rowBytes; x++) cur[x] = (uint8_t)(raw[x] + up[x]);
-            break;
-        case 3:
-            for (size_t x = 0; x < lead; x++) cur[x] = (uint8_t)(raw[x] + (up[x] >> 1));
-            for (size_t x = lead; x < rowBytes; x++) cur[x] = (uint8_t)(raw[x] + ((cur[x - bpp] + up[x]) >> 1));
-            break;
-        case 4:
-            for (size_t x = 0; x < lead; x++) cur[x] = (uint8_t)(raw[x] + up[x]);   // Paeth(0, b, 0) is b
-            for (size_t x = lead; x < rowBytes; x++)
-                cur[x] = (uint8_t)(raw[x] + PngPaethPredictor(cur[x - bpp], up[x], up[x - bpp]));
-            break;
-        default:
-            return false;
-        }
+        uint8_t* row = rows.data() + y * rowBytes;
+        const uint8_t* up = y ? row - rowBytes : zeros.data();
+        if (!Internal::UnfilterPngRow(src[0], src + 1, up, rowBytes, bpp, row)) return false;
     }
     return true;
-}
-
-// The filter with the smallest sum of residual magnitudes, the lowest on ties. All five sums come
-// from one pass; `up` is the previous row, or zeros for the first one.
-static int ChoosePngFilter(const uint8_t* row, const uint8_t* up, size_t rowBytes, size_t bpp) {
-    uint64_t c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
-    size_t lead = std::min(bpp, rowBytes);
-    for (size_t x = 0; x < lead; x++) {            // no left neighbour: left = upLeft = 0
-        int v = row[x], b = up[x];
-        c0 += PngResidualCost(v);
-        c1 += PngResidualCost(v);
-        c2 += PngResidualCost(v - b);
-        c3 += PngResidualCost(v - (b >> 1));
-        c4 += PngResidualCost(v - b);               // Paeth(0, b, 0) is b
-    }
-    for (size_t x = lead; x < rowBytes; x++) {
-        int v = row[x], a = row[x - bpp], b = up[x], c = up[x - bpp];
-        c0 += PngResidualCost(v);
-        c1 += PngResidualCost(v - a);
-        c2 += PngResidualCost(v - b);
-        c3 += PngResidualCost(v - ((a + b) >> 1));
-        c4 += PngResidualCost(v - PngPaethPredictor(a, b, c));
-    }
-    int best = 0;
-    uint64_t bestCost = c0;
-    if (c1 < bestCost) { best = 1; bestCost = c1; }
-    if (c2 < bestCost) { best = 2; bestCost = c2; }
-    if (c3 < bestCost) { best = 3; bestCost = c3; }
-    if (c4 < bestCost) best = 4;
-    return best;
-}
-
-static void WritePngFilteredRow(const uint8_t* row, const uint8_t* up, size_t rowBytes, size_t bpp,
-    int filter, uint8_t* out) {
-    size_t lead = std::min(bpp, rowBytes);
-    switch (filter) {
-    case 0:
-        std::memcpy(out, row, rowBytes);
-        break;
-    case 1:
-        std::memcpy(out, row, lead);
-        for (size_t x = lead; x < rowBytes; x++) out[x] = (uint8_t)(row[x] - row[x - bpp]);
-        break;
-    case 2:
-        for (size_t x = 0; x < rowBytes; x++) out[x] = (uint8_t)(row[x] - up[x]);
-        break;
-    case 3:
-        for (size_t x = 0; x < lead; x++) out[x] = (uint8_t)(row[x] - (up[x] >> 1));
-        for (size_t x = lead; x < rowBytes; x++) out[x] = (uint8_t)(row[x] - ((row[x - bpp] + up[x]) >> 1));
-        break;
-    default:
-        for (size_t x = 0; x < lead; x++) out[x] = (uint8_t)(row[x] - up[x]);
-        for (size_t x = lead; x < rowBytes; x++)
-            out[x] = (uint8_t)(row[x] - PngPaethPredictor(row[x - bpp], up[x], up[x - bpp]));
-        break;
-    }
 }
 
 static bool BuildPngPredictorRows(const std::string& raw, size_t width, size_t height,
@@ -2408,9 +2312,9 @@ static bool BuildPngPredictorRows(const std::string& raw, size_t width, size_t h
     for (size_t y = 0; y < height; y++, out += rowBytes + 1) {
         const uint8_t* row = rows + y * rowBytes;
         const uint8_t* up = y ? row - rowBytes : zeros.data();
-        int filter = ChoosePngFilter(row, up, rowBytes, components);
+        int filter = Internal::ChoosePngFilter(row, up, rowBytes, components);
         out[0] = (uint8_t)filter;
-        WritePngFilteredRow(row, up, rowBytes, components, filter, out + 1);
+        Internal::FilterPngRow(filter, row, up, rowBytes, components, out + 1);
     }
     return true;
 }
