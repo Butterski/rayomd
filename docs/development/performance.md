@@ -1240,6 +1240,52 @@ and 306 KB without the `std::cerr`; without `--gc-sections` `std::filesystem` al
 SSE2, and with 164 hostile PNGs (bad filters, short and long rows, huge sizes, missing or
 short palettes and tRNS, random byte flips) under AddressSanitizer and UBSan.
 
+## 4.0, October 2026
+
+A second pass over what the profiles of the cold-export work still showed: zlib's checksum and
+whole-image buffers in PNG re-encoding, number and hex formatting, per-word strings in formula
+text, character widths, and font allocation. Measured on 2026-10-12 like the section above
+(g++ 13.3, Linux in Docker, files on tmpfs, CPU 3); 3.2.0 (`7056be1`) against 4.0:
+
+| Export | 3.2.0 | 4.0 | Change | Instructions |
+| --- | ---: | ---: | ---: | ---: |
+| one 1024x1024 RGBA PNG | 87.56 ms | 27.26 ms | -68.9 % | -75.7 % |
+| `tester.md` | 89.31 ms | 28.13 ms | -68.5 % | -75.4 % |
+| short ASCII document | 1.69 ms | 1.04 ms | -38.2 % | -86.6 % |
+| short Unicode document | 2.53 ms | 1.31 ms | -48.2 % | -66.6 % |
+| `single_01.md` | 6.27 ms | 4.14 ms | -34.0 % | -36.4 % |
+| short Chinese document, WenQuanYi fallback | 7.59 ms | 2.67 ms | -64.9 % | |
+| `single_01.md`, WenQuanYi installed | 13.09 ms | 6.89 ms | -47.4 % | |
+
+Warm `--bench` builds run 16.1 % faster (geometric mean of the watch fixtures, pinned, nine
+rounds; A/A -0.07 %): the formula fixtures 21.6 to 25.2 %, `unicode_96kb.md` 12.9 %, the
+ASCII ones 7.4 to 8.6 %. Every change kept the bytes: all 3,353 corpus PDFs (319 Markdown
+documents, 300 of them generated with formulas, tables, lists, links, footnotes, code and
+Unicode, and 629 PNGs, in three styles and with `--compress`, `--pdfa`, `--pdfua`, `--toc`,
+`--page-numbers`, `--embed-source` and letter pages) are byte for byte those of the commit
+before the first change, and the fixtures those of 3.2.0.
+
+| Change | Commit | Effect |
+| --- | --- | --- |
+| zlib streams wrapped by RayoMD | `966527f` | image -4 %: zlib deflates and inflates raw data, RayoMD writes and checks the header and the Adler-32 with the SSE2 checksum of `flate.cpp` (zlib's was 11 % of an image export). |
+| PNGs re-encoded a row at a time | `22214ca` | image -26 %: no whole-image buffer is zeroed or kept but the alpha plane; zlib's deflate output does not depend on how its input arrives. |
+| PDF numbers two digits at a time | `64c890e` | warm -2.2 %, tables -4.2 %: `WriteFixed2` was 5 to 14.5 % of a warm build. |
+| Formula text without a string per word | `a3ace2e` | formula fixtures warm -11.6 to -15.5 %. |
+| Fonts allocated zeroed | `2446541` | cold Unicode -4.6 %, `single_01.md` -7.5 %: each of up to 11 fallback candidates zeroed a 128 KB width cache. |
+| A character's width in one lookup | `cbc4830` | warm Unicode -3.0 to -3.9 %: the width cache is keyed by code point too. |
+| CID hex from a pair table | `325f3aa` | warm Unicode -1.8 to -3.2 %. |
+| A fully static Linux edition | `b606f17` | a second Linux asset: short ASCII 1.05 to 0.68 ms (-35 %), short Unicode -22.5 %, `single_01.md` -9.3 %, images -2.5 %, for 2,165,888 bytes against 1,215,464. |
+
+Checks: core check 99 and the `--compress` round trips (the shared Adler-32); 29.6 million
+values of `WriteFixed2` against the previous implementation (every hundredth to 12,000 and its
+rounding neighbours, signs, the 2^52 boundary); 217 altered zlib streams and 255 hostile PNGs
+give the PDFs of the commit before, under AddressSanitizer and UBSan, which also ran the tests
+and the corpus; a build without SSE2 writes the same corpus; 22 CLI cases behave the same.
+
+Measured and not taken (see Measured opportunities): exact cell reservation in table rows,
+an SSE2 scan of PDF literal strings, SSE2 runs of ASCII in UTF-8 decoding, and a static build
+against musl.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1400,19 +1446,41 @@ table fixture runs 2.1 times as long as with `--pdfa`. Painting a row's borders 
 artifact, then its cells' text would halve the sequences; it changes the order of RenderTable's
 loop, which untagged documents must not pay for.
 
-**zlib in image re-encoding.** After the PNG work above, deflate, inflate and `adler32` are
-63 % of a 1024x1024 RGBA image's export (2026-10-12), the filter choice 11.7 %, unfiltering
-5.4 % and splitting colour from alpha 5.2 %. A faster compressor (libdeflate, zlib-ng's
+**zlib in image re-encoding.** After the 4.0 work, zlib's deflate and inflate are 63 % of a
+1024x1024 RGBA image's export, the filter choice 13.9 %, unfiltering 6.4 %, splitting colour
+from alpha 6.3 %, the Adler-32 3.4 % (2026-10-12). A faster compressor (libdeflate, zlib-ng's
 level 1) writes different streams, so the PDF bytes change; a faster decompressor would not,
 but adds a dependency.
 
-**CID hex text.** `WriteHexText` is 9 % of a cold `single_01.md` export: per character a
-glyph lookup, a bitset insertion and four hex digits. SIMD could only take the hex digits; the
-lookup and the bitset are scattered per character, on the hot path at the inlining limit.
+**CID hex text.** `WriteHexText` is still 11.7 to 15.9 % of a warm Unicode build after its
+pair table (2026-10-12): per character a glyph lookup and a bitset insertion, scattered loads
+that SIMD does not help.
 
-**The width cache of a font.** `TtfFont` carries 65,536 atomic widths, 128 KB zeroed for
-each font loaded, a fallback candidate too; a lazily allocated or smaller cache would save
-the zeroing and 32 page faults per font.
+**`BuildInto` moves every page's content once.** 2.6 to 4.7 % of a warm build is that move:
+a page is rendered before the text of the objects in front of it is known (font objects,
+`/Length` values, later pages), so its bytes shift by that much when the file is assembled.
+Rendering elsewhere copies as much; placing the content where it ends up needs another object
+order, which changes the bytes.
+
+**Growth without zero-filling in `TailWriter`.** Each drawing operation grows the content
+stream by an upper bound, which `std::string::resize` zero-fills before the operators
+overwrite it: `_M_replace_aux` is 0.8 to 3.6 % of a warm build. C++23's
+`resize_and_overwrite` skips the fill; in C++17 it takes a content buffer type of its own.
+
+**Exact cell reservation in table rows** (2026-10-12): counting a plain row's pipes to reserve
+its cells saved `table_96kb.md` 0.57 % of its instructions and cost the other fixtures 0.10 to
+0.29 %, most of whose rows fit the four cells reserved now.
+
+**An SSE2 scan of PDF literal strings** (2026-10-12): testing and copying sixteen bytes at a
+time in `WriteEscapedLiteral` saved 0.07 % (geometric mean): most strings drawn are shorter.
+
+**SSE2 runs of ASCII in UTF-8 decoding** (2026-10-12): widening sixteen ASCII bytes at a time
+in `WriteUtf8Units` saved the single fixtures 0.5 % and cost `unicode_96kb.md` 0.53 %, where
+other characters break the runs, as simdutf did.
+
+**A static build against musl** (Alpine, 2026-10-12): 1,304,960 bytes, a short ASCII export
+41 % faster than the default build, but `single_01.md` 45 % and a PNG 8 % slower: musl's
+allocator. glibc's static build is the `-static` asset.
 
 ## Keeping the release light
 

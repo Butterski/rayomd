@@ -360,6 +360,8 @@ The default Linux build intentionally avoids a libcurl runtime dependency. Use
 `-DRAYOMD_USE_CURL=ON` only when producing a Linux build that should fetch
 HTTP/HTTPS images and can target a known distro/libcurl baseline. Release builds link
 libstdc++ and libgcc statically, so the binary needs only libc, libm and libz.
+`-DRAYOMD_STATIC=ON` links glibc and zlib in as well: the `-static` release asset, about
+0.9 MB larger and 0.3 ms faster to start, with no runtime dependency.
 
 Cross-platform CLI verification (after building):
 
@@ -431,6 +433,15 @@ GitHub CI entry points:
   C stdio.
 - Fonts are mapped read-only (`FileBytes`); read font data in place instead of copying
   the file.
+- `TtfFont` is allocated by its own `operator new` (calloc) or lives in static storage:
+  its 128 KB width cache relies on starting zeroed. Never put one on the stack. The cache
+  is read by code point (`CodepointWidth`) and by CID (`WidthForCid`); both must keep the
+  rule of `CidForCodepoint`.
+- PNG re-encoding streams rows through zlib with RayoMD writing the zlib header and
+  Adler-32 (`RayoMd::Flate::Adler32`); keep compress2's parameters (level 1, 32 KB window,
+  memory level 8) and no flushes, or the image streams change.
+- `WriteFixed2` may write one byte past the end it returns, within the
+  `kFixed2MaxChars` every caller must leave.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document
   libraries to the native package.
 - Reuse output buffers in batch/server paths where practical.
