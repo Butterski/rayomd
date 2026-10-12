@@ -63,8 +63,8 @@ struct PdfTheme {
     std::string footerLeft;
     std::string footerCenter;
     std::string footerRight;
-    // A PNG or JPEG image for {logo} and the cover. One that cannot be read counts as a failed
-    // image.
+    // A PNG, JPEG or SVG image for {logo} and the cover. One that cannot be read counts as a
+    // failed image.
     std::string logoPath;
     // A first page with the logo, the title, the subject, the author and the date of the front
     // matter; {page} and {pages} count the pages after it.
