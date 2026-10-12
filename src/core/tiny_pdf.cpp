@@ -3,6 +3,7 @@
 #include "export_options.h"
 #include "rayomd_pdf_source.h"
 #include "inline_markdown.h"
+#include "../common/file_io.h"
 #include "../common/profiling.h"
 #include "../common/text_utils.h"
 #include "book.h"
@@ -45,7 +46,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -277,13 +277,7 @@ static RAYOMD_HOT_INLINE uint32_t ReadU32(const Bytes& data, size_t off) {
 }
 
 static bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& bytes) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) return false;
-    std::streamsize size = file.tellg();
-    if (size <= 0 || size > 64LL * 1024LL * 1024LL) return false;
-    file.seekg(0, std::ios::beg);
-    bytes.resize((size_t)size);
-    return (bool)file.read((char*)bytes.data(), size);
+    return RayoMd::File::ReadAll(std::filesystem::path(path), 64u * 1024u * 1024u, bytes) && !bytes.empty();
 }
 
 #ifdef _WIN32

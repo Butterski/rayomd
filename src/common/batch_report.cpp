@@ -1,9 +1,10 @@
 #include "batch_report.h"
 
+#include "file_io.h"
 #include "text_utils.h"
 
 #include <algorithm>
-#include <fstream>
+#include <string_view>
 
 namespace fs = std::filesystem;
 
@@ -122,15 +123,15 @@ bool OutputUpToDate(const fs::path& input, const fs::path& output) {
     if (error) return false;
     const auto inputTime = fs::last_write_time(input, error);
     if (error || outputTime < inputTime) return false;
-    std::ifstream file(output, std::ios::binary | std::ios::ate);
+    std::FILE* file = RayoMd::File::Open(output, "rb");
     if (!file) return false;
-    const std::streamoff size = file.tellg();
-    const std::streamoff tail = std::min<std::streamoff>(size, 32);
-    if (tail < 5) return false;
+    const long long size = RayoMd::File::SizeOf(file);
+    const long long tail = std::min<long long>(size, 32);
     char bytes[32];
-    file.seekg(size - tail);
-    if (!file.read(bytes, tail)) return false;
-    return std::string_view(bytes, static_cast<size_t>(tail)).find("%%EOF") != std::string_view::npos;
+    const bool read = tail >= 5 && RayoMd::File::SeekTo(file, size - tail) &&
+        std::fread(bytes, 1, static_cast<size_t>(tail), file) == static_cast<size_t>(tail);
+    std::fclose(file);
+    return read && std::string_view(bytes, static_cast<size_t>(tail)).find("%%EOF") != std::string_view::npos;
 }
 
 bool CollectMarkdown(const fs::path& inputDir, const fs::path& outputDir, bool recursive, std::vector<File>& files,

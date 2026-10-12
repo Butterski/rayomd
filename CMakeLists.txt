@@ -144,6 +144,7 @@ if(WIN32)
         src/core/math_layout.cpp
         src/common/text_utils.cpp
         src/common/batch_report.cpp
+        src/common/file_io.cpp
         src/win32/main_win32.cpp
         src/win32/rayomd.rc
         third_party/imgui/imgui.cpp
@@ -215,6 +216,7 @@ else()
         src/core/math_layout.cpp
         src/common/text_utils.cpp
         src/common/batch_report.cpp
+        src/common/file_io.cpp
         src/core/rayomd_pdf_source.cpp
         src/cli/main_cli.cpp
     )
@@ -257,7 +259,8 @@ if(BUILD_TESTING)
         src/core/math_parser.cpp
         src/core/math_layout.cpp
         src/common/text_utils.cpp
-        src/common/batch_report.cpp)
+        src/common/batch_report.cpp
+        src/common/file_io.cpp)
     target_include_directories(rayomd-core-tests PRIVATE include)
     target_compile_definitions(rayomd-core-tests PRIVATE RAYOMD_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(rayomd-core-tests PRIVATE Threads::Threads)

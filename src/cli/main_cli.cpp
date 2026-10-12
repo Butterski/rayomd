@@ -1,4 +1,5 @@
 #include "rayomd/tiny_pdf.h"
+#include "../common/file_io.h"
 #include "../common/text_utils.h"
 #include "../common/batch_report.h"
 #include "../common/profiling.h"
@@ -11,14 +12,13 @@
 #include <chrono>
 #include <cctype>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <sstream>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -38,6 +38,41 @@ namespace fs = std::filesystem;
 #endif
 
 constexpr long long kMaxMarkdownInputBytes = 128LL * 1024LL * 1024LL;
+
+// The command line prints through C stdio (see file_io.h). A message is one fwrite, and stderr
+// is unbuffered, so the lines of batch workers do not mix.
+void Print(std::FILE* stream, std::string_view text) {
+    std::fwrite(text.data(), 1, text.size(), stream);
+}
+
+// `message` and a line break on standard error.
+void PrintError(std::string message) {
+    message += '\n';
+    Print(stderr, message);
+}
+
+// " (why)" after a message, or nothing.
+std::string Reason(const std::string& why) {
+    return why.empty() ? std::string() : " (" + why + ")";
+}
+
+// A line of standard input without its line break; false at the end. Standard output is flushed
+// first, as std::cin's tie to std::cout did, so a --serve client gets each reply before it sends
+// the next path.
+bool ReadLine(std::string& line) {
+    std::fflush(stdout);
+    line.clear();
+    char buffer[4096];
+    while (std::fgets(buffer, sizeof(buffer), stdin)) {
+        const size_t length = std::strlen(buffer);
+        if (length != 0 && buffer[length - 1] == '\n') {
+            line.append(buffer, length - 1);
+            return true;
+        }
+        line.append(buffer, length);
+    }
+    return !line.empty();
+}
 
 bool ReadUtf8FilePortable(const fs::path& path, std::string& content) {
     RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Io);
@@ -64,39 +99,25 @@ bool ReadUtf8FilePortable(const fs::path& path, std::string& content) {
     }
 #endif
 
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) return false;
-    std::streamsize size = file.tellg();
-    if (size < 0 || size > kMaxMarkdownInputBytes) return false;
-    file.seekg(0, std::ios::beg);
-    content.assign((size_t)size, '\0');
-    return size == 0 || (bool)file.read(content.data(), size);
+    return RayoMd::File::ReadAll(path, (size_t)kMaxMarkdownInputBytes, content);
 }
 
 bool ReadStdinPortable(std::string& content) {
     content.clear();
     char buffer[64 * 1024];
-    while (std::cin) {
-        std::cin.read(buffer, sizeof(buffer));
-        std::streamsize read = std::cin.gcount();
+    for (;;) {
+        const size_t read = std::fread(buffer, 1, sizeof(buffer), stdin);
         if (read > 0) {
-            if ((long long)content.size() + read > kMaxMarkdownInputBytes) return false;
-            content.append(buffer, buffer + read);
+            if ((long long)(content.size() + read) > kMaxMarkdownInputBytes) return false;
+            content.append(buffer, read);
         }
-        if (!std::cin) {
-            if (std::cin.eof()) break;
-            return false;
-        }
+        if (read < sizeof(buffer)) return !std::ferror(stdin);
     }
-    return true;
 }
 
 bool WriteBinaryFilePortable(const fs::path& path, const std::string& content) {
     RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Io);
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file) return false;
-    file.write(content.data(), (std::streamsize)content.size());
-    return (bool)file;
+    return RayoMd::File::WriteAll(path, content);
 }
 
 bool WriteUtf8FilePortable(const fs::path& path, const std::string& content) {
@@ -105,13 +126,7 @@ bool WriteUtf8FilePortable(const fs::path& path, const std::string& content) {
 std::string PathToUtf8(const fs::path& path);
 
 bool ReadBinaryFileLimited(const fs::path& path, size_t maximum, std::string& content) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) return false;
-    std::streamsize size = file.tellg();
-    if (size < 0 || static_cast<uintmax_t>(size) > maximum) return false;
-    file.seekg(0, std::ios::beg);
-    content.assign(static_cast<size_t>(size), '\0');
-    return size == 0 || static_cast<bool>(file.read(content.data(), size));
+    return RayoMd::File::ReadAll(path, maximum, content);
 }
 
 bool WriteNewFileAtomicPortable(const fs::path& path, const std::string& content, bool& existed) {
@@ -188,42 +203,40 @@ int RecoveryExitCode(RayoMd::PdfSource::Status status) {
 int RunInspectSource(const fs::path& inputPath) {
     std::string pdf;
     if (!ReadBinaryFileLimited(inputPath, RayoMd::PdfSource::kMaxPdfBytes, pdf)) {
-        std::cerr << "Error: could not read PDF or input exceeds "
-            << RayoMd::PdfSource::kMaxPdfBytes << " bytes.\n";
+        PrintError("Error: could not read PDF or input exceeds " + std::to_string(RayoMd::PdfSource::kMaxPdfBytes) +
+            " bytes.");
         return 3;
     }
     RayoMd::PdfSource::Result result = RayoMd::PdfSource::Inspect(pdf, false);
     if (!result.Ok()) {
-        std::cerr << "Error: " << RayoMd::PdfSource::StatusMessage(result.status) << ".\n";
+        PrintError(std::string("Error: ") + RayoMd::PdfSource::StatusMessage(result.status) + ".");
         return RecoveryExitCode(result.status);
     }
-    std::cout << "status=intact\nprofile=" << result.info.profile
-        << "\nproducer_version=" << result.info.producerVersion
-        << "\nsource_bytes=" << result.info.sourceBytes
-        << "\nencoding=" << result.info.encoding
-        << "\ndigest=valid\nattachment=" << result.info.attachmentName << "\n";
+    Print(stdout, "status=intact\nprofile=" + result.info.profile + "\nproducer_version=" + result.info.producerVersion +
+        "\nsource_bytes=" + std::to_string(result.info.sourceBytes) + "\nencoding=" + result.info.encoding +
+        "\ndigest=valid\nattachment=" + result.info.attachmentName + "\n");
     return 0;
 }
 
 int RunRecoverSource(const fs::path& inputPath, const fs::path& outputPath) {
     std::string pdf;
     if (!ReadBinaryFileLimited(inputPath, RayoMd::PdfSource::kMaxPdfBytes, pdf)) {
-        std::cerr << "Error: could not read PDF or input exceeds "
-            << RayoMd::PdfSource::kMaxPdfBytes << " bytes.\n";
+        PrintError("Error: could not read PDF or input exceeds " + std::to_string(RayoMd::PdfSource::kMaxPdfBytes) +
+            " bytes.");
         return 3;
     }
     RayoMd::PdfSource::Result result = RayoMd::PdfSource::Inspect(pdf, true);
     if (!result.Ok()) {
-        std::cerr << "Error: " << RayoMd::PdfSource::StatusMessage(result.status) << ".\n";
+        PrintError(std::string("Error: ") + RayoMd::PdfSource::StatusMessage(result.status) + ".");
         return RecoveryExitCode(result.status);
     }
     bool existed = false;
     if (!WriteNewFileAtomicPortable(outputPath, result.source, existed)) {
-        std::cerr << (existed ? "Error: destination already exists: " : "Error: could not write recovered source: ")
-            << PathToUtf8(outputPath) << "\n";
+        PrintError(std::string(existed ? "Error: destination already exists: " : "Error: could not write recovered source: ") +
+            PathToUtf8(outputPath));
         return existed ? 34 : 12;
     }
-    std::cout << "Recovered " << result.info.sourceBytes << " bytes to " << PathToUtf8(outputPath) << "\n";
+    Print(stdout, "Recovered " + std::to_string(result.info.sourceBytes) + " bytes to " + PathToUtf8(outputPath) + "\n");
     return 0;
 }
 
@@ -374,7 +387,7 @@ void ReportExportError(std::string* deferredError, const std::string& message) {
     if (deferredError) {
         *deferredError = message;
     } else {
-        std::cerr << message << std::endl;
+        PrintError(message);
     }
 }
 // A warning, not an error: the PDF is written. One write, so batch workers do not mix lines.
@@ -386,7 +399,7 @@ void WarnMissingCharacters(const std::string& inputLabel, uint32_t count) {
     message += " character(s) have no glyph in the fonts found and are shown as a base letter or '?'."
         " Install a font that has them (DejaVu Sans or Noto Sans for most alphabets, WenQuanYi Micro Hei"
         " for Chinese), or set RAYOMD_FONT or RAYOMD_FALLBACK_FONT to a .ttf or .ttc file.\n";
-    std::cerr << message << std::flush;
+    Print(stderr, message);
 }
 fs::path PdfNameForMarkdown(const fs::path& path) {
     fs::path out = path.filename();
@@ -417,17 +430,16 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
 
 // "Error: native PDF export failed for <label> (code N)." and what the code means.
 std::string ExportFailure(const TinyPdf::BuildResult& result, const std::string& inputLabel, const CliExportOptions& options) {
-    std::ostringstream message;
-    message << "Error: native PDF export failed";
-    if (!inputLabel.empty()) message << " for " << inputLabel;
-    message << " (code " << 10 + static_cast<int>(result.error) << ").";
+    std::string message = "Error: native PDF export failed";
+    if (!inputLabel.empty()) message += " for " + inputLabel;
+    message += " (code " + std::to_string(10 + static_cast<int>(result.error)) + ").";
     if (result.error == TinyPdf::BuildError::ThemeFontUnavailable) {
-        message << " The theme's font cannot be read or is no TrueType font: " << options.theme.fontPath;
+        message += " The theme's font cannot be read or is no TrueType font: " + options.theme.fontPath;
     }
     if (result.error == TinyPdf::BuildError::PdfaFontUnavailable) {
-        message << " PDF/A embeds every font, but no TrueType font was found; set RAYOMD_FONT to one.";
+        message += " PDF/A embeds every font, but no TrueType font was found; set RAYOMD_FONT to one.";
     }
-    return message.str();
+    return message;
 }
 
 // `details`, when given, receives the result of a build that succeeded: pages, characters
@@ -470,18 +482,18 @@ int RunBookExport(const std::vector<fs::path>& inputs, const fs::path& outputPat
     TinyPdf::Book book;
     std::string error;
     if (!RayoMd::Book::ReadBook(inputs, book, error)) {
-        std::cerr << "Error: " << error << "\n";
+        PrintError("Error: " + error);
         return 3;
     }
     std::string pdf;
     const TinyPdf::BuildResult result = TinyPdf::BuildBookPdf(book, PdfOptionsFor(options, std::string()), pdf);
     if (!result) {
-        std::cerr << ExportFailure(result, "the book", options) << "\n";
+        PrintError(ExportFailure(result, "the book", options));
         return 10 + static_cast<int>(result.error);
     }
     if (result.missingCharacters != 0) WarnMissingCharacters("the book", result.missingCharacters);
     if (!WriteBinaryFilePortable(outputPath, pdf)) {
-        std::cerr << "Error: could not write PDF file: " << PathToUtf8(outputPath) << "\n";
+        PrintError("Error: could not write PDF file: " + PathToUtf8(outputPath));
         return 12;
     }
     return 0;
@@ -489,14 +501,14 @@ int RunBookExport(const std::vector<fs::path>& inputs, const fs::path& outputPat
 
 int RunStdinExport(const fs::path& outputPath, const CliExportOptions& options) {
     if (options.engine != 0) {
-        std::cerr << "Error: stdin export only supports native mode.\n";
+        PrintError("Error: stdin export only supports native mode.");
         return 20;
     }
 
     std::string markdown;
     if (!ReadStdinPortable(markdown)) {
-        std::cerr << "Error: could not read Markdown from stdin or input exceeded "
-            << kMaxMarkdownInputBytes << " bytes.\n";
+        PrintError("Error: could not read Markdown from stdin or input exceeded " + std::to_string(kMaxMarkdownInputBytes) +
+            " bytes.");
         return 3;
     }
 
@@ -543,7 +555,7 @@ RayoMd::Batch::Record RecordFor(const BatchJob& job) {
 // Opens --report, or says why it cannot; true without a report.
 bool OpenReport(RayoMd::Batch::Report& report, const CliExportOptions& options) {
     if (options.report.empty() || report.Open(options.report)) return true;
-    std::cerr << "Error: could not create the report file: " << options.report << std::endl;
+    PrintError("Error: could not create the report file: " + options.report);
     return false;
 }
 
@@ -607,11 +619,11 @@ int ExecuteBatchJobs(std::vector<BatchJob>& jobs, const CliExportOptions& option
         if (job.result == 0) continue;
         failures++;
         lastResult = job.result;
-        if (!job.error.empty()) std::cerr << job.error << std::endl;
+        if (!job.error.empty()) PrintError(job.error);
     }
-    if (!reported) std::cerr << "Error: could not write the report file: " << options.report << std::endl;
+    if (!reported) PrintError("Error: could not write the report file: " + options.report);
     if (failures != 0) {
-        std::cerr << "Error: " << label << " failed for " << failures << " file(s)." << std::endl;
+        PrintError("Error: " + std::string(label) + " failed for " + std::to_string(failures) + " file(s).");
         return lastResult;
     }
     return reported ? 0 : 12;
@@ -619,27 +631,23 @@ int ExecuteBatchJobs(std::vector<BatchJob>& jobs, const CliExportOptions& option
 
 int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const CliExportOptions& options) {
     if (options.engine != 0) {
-        std::cerr << "Error: Pandoc mode is currently only wired into the Windows build." << std::endl;
+        PrintError("Error: Pandoc mode is currently only wired into the Windows build.");
         return 20;
     }
 
     std::string fsError;
     if (!IsDirectoryPortable(inputDir, fsError)) {
-        std::cerr << "Error: input folder is not a readable directory: " << PathToUtf8(inputDir);
-        if (!fsError.empty()) std::cerr << " (" << fsError << ")";
-        std::cerr << std::endl;
+        PrintError("Error: input folder is not a readable directory: " + PathToUtf8(inputDir) + Reason(fsError));
         return 3;
     }
     if (!EnsureDirectoryPortable(outputDir, fsError)) {
-        std::cerr << "Error: could not create output folder: " << PathToUtf8(outputDir);
-        if (!fsError.empty()) std::cerr << " (" << fsError << ")";
-        std::cerr << std::endl;
+        PrintError("Error: could not create output folder: " + PathToUtf8(outputDir) + Reason(fsError));
         return 12;
     }
 
     std::vector<RayoMd::Batch::File> files;
     if (!RayoMd::Batch::CollectMarkdown(inputDir, outputDir, options.recursive, files, fsError)) {
-        std::cerr << "Error: could not read input folder: " << PathToUtf8(inputDir) << " (" << fsError << ")" << std::endl;
+        PrintError("Error: could not read input folder: " + PathToUtf8(inputDir) + " (" + fsError + ")");
         return 3;
     }
     std::vector<BatchJob> jobs;
@@ -659,21 +667,19 @@ int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const Cl
 
 int RunStdinBatchExport(const fs::path& outputDir, const CliExportOptions& options) {
     if (options.engine != 0) {
-        std::cerr << "Error: Pandoc mode is currently only wired into the Windows build." << std::endl;
+        PrintError("Error: Pandoc mode is currently only wired into the Windows build.");
         return 20;
     }
     std::string fsError;
     if (!EnsureDirectoryPortable(outputDir, fsError)) {
-        std::cerr << "Error: could not create output folder: " << PathToUtf8(outputDir);
-        if (!fsError.empty()) std::cerr << " (" << fsError << ")";
-        std::cerr << std::endl;
+        PrintError("Error: could not create output folder: " + PathToUtf8(outputDir) + Reason(fsError));
         return 12;
     }
 
     std::vector<BatchJob> jobs;
     std::set<std::string> outputs;
     std::string line;
-    while (std::getline(std::cin, line)) {
+    while (ReadLine(line)) {
         line = RayoMd::Text::Trim(line);
         if (line.empty()) continue;
         fs::path inputPath(line);
@@ -690,14 +696,12 @@ int RunStdinBatchExport(const fs::path& outputDir, const CliExportOptions& optio
 
 int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
     if (options.engine != 0) {
-        std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
+        PrintError("Error: Pandoc mode is currently only wired into the Windows build.");
         return 20;
     }
     std::string fsError;
     if (!EnsureDirectoryPortable(outputDir, fsError)) {
-        std::cerr << "Error: could not create output folder: " << PathToUtf8(outputDir);
-        if (!fsError.empty()) std::cerr << " (" << fsError << ")";
-        std::cerr << "\n";
+        PrintError("Error: could not create output folder: " + PathToUtf8(outputDir) + Reason(fsError));
         return 12;
     }
 
@@ -708,7 +712,7 @@ int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
     int failures = 0;
     int lastResult = 0;
     std::string line;
-    while (std::getline(std::cin, line)) {
+    while (ReadLine(line)) {
         line = RayoMd::Text::Trim(line);
         if (line.empty()) continue;
         if (line == "quit" || line == "exit") break;
@@ -721,16 +725,16 @@ int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
         if (job.result != 0) {
             failures++;
             lastResult = job.result;
-            std::cerr << job.error << std::endl;
+            PrintError(job.error);
         } else {
             job.bytes = pdfBuffer.size();
         }
         if (report.IsOpen()) report.Write(RecordFor(job));
-        std::cout << (job.result == 0 ? "OK\t" : "ERR\t") << RayoMd::Text::FormatDouble(job.milliseconds) << "\t"
-            << job.outputPath.string() << "\n";
+        Print(stdout, std::string(job.result == 0 ? "OK\t" : "ERR\t") + RayoMd::Text::FormatDouble(job.milliseconds) +
+            "\t" + job.outputPath.string() + "\n");
     }
     if (!report.Close()) {
-        std::cerr << "Error: could not write the report file: " << options.report << std::endl;
+        PrintError("Error: could not write the report file: " + options.report);
         if (failures == 0) return 12;
     }
     return failures == 0 ? 0 : lastResult;
@@ -740,15 +744,13 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     if (iterations < 1) iterations = 1;
     std::string fsError;
     if (!EnsureDirectoryPortable(outputDir, fsError)) {
-        std::cerr << "Error: could not create benchmark output folder: " << PathToUtf8(outputDir);
-        if (!fsError.empty()) std::cerr << " (" << fsError << ")";
-        std::cerr << "\n";
+        PrintError("Error: could not create benchmark output folder: " + PathToUtf8(outputDir) + Reason(fsError));
         return 12;
     }
 
     std::string markdown;
     if (!ReadUtf8FilePortable(inputPath, markdown)) {
-        std::cerr << "Error: could not read input Markdown file: " << PathToUtf8(inputPath) << "\n";
+        PrintError("Error: could not read input Markdown file: " + PathToUtf8(inputPath));
         return 3;
     }
 
@@ -757,12 +759,12 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (!buildResult) {
         int code = 10 + static_cast<int>(buildResult.error);
-        std::cerr << "Error: native PDF benchmark export failed for " << PathToUtf8(inputPath)
-            << " (code " << code << ").\n";
+        PrintError("Error: native PDF benchmark export failed for " + PathToUtf8(inputPath) + " (code " +
+            std::to_string(code) + ").");
         return code;
     }
     if (!WriteBinaryFilePortable(outputDir / "sample.pdf", pdfBytes)) {
-        std::cerr << "Error: could not write benchmark sample PDF in " << PathToUtf8(outputDir) << "\n";
+        PrintError("Error: could not write benchmark sample PDF in " + PathToUtf8(outputDir));
         return 12;
     }
 
@@ -773,8 +775,8 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
         TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
     if (!buildResult) {
             int code = 10 + static_cast<int>(buildResult.error);
-            std::cerr << "Error: native PDF benchmark export failed for " << PathToUtf8(inputPath)
-                << " (code " << code << ").\n";
+            PrintError("Error: native PDF benchmark export failed for " + PathToUtf8(inputPath) + " (code " +
+                std::to_string(code) + ").");
             return code;
         }
         totalBytes += pdfBytes.size();
@@ -783,51 +785,47 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     double totalMs = std::chrono::duration<double, std::milli>(end - start).count();
     double avgMs = totalMs / (double)iterations;
 
-    std::ostringstream report;
-    report << "input_bytes=" << markdown.size() << "\n";
-    report << "iterations=" << iterations << "\n";
-    report << "total_ms=" << RayoMd::Text::FormatDouble(totalMs) << "\n";
-    report << "avg_ms=" << RayoMd::Text::FormatDouble(avgMs) << "\n";
-    report << "avg_pdf_bytes=" << (totalBytes / (size_t)iterations) << "\n";
-    report << "path=" << RayoMd::Text::RendererPathName(markdown) << "\n";
+    std::string report = "input_bytes=" + std::to_string(markdown.size()) + "\n";
+    report += "iterations=" + std::to_string(iterations) + "\n";
+    report += "total_ms=" + RayoMd::Text::FormatDouble(totalMs) + "\n";
+    report += "avg_ms=" + RayoMd::Text::FormatDouble(avgMs) + "\n";
+    report += "avg_pdf_bytes=" + std::to_string(totalBytes / (size_t)iterations) + "\n";
+    report += std::string("path=") + RayoMd::Text::RendererPathName(markdown) + "\n";
 
-    if (!WriteUtf8FilePortable(outputDir / "bench-results.txt", report.str())) {
-        std::cerr << "Error: could not write benchmark results in " << PathToUtf8(outputDir) << "\n";
+    if (!WriteUtf8FilePortable(outputDir / "bench-results.txt", report)) {
+        PrintError("Error: could not write benchmark results in " + PathToUtf8(outputDir));
         return 12;
     }
     return 0;
 }
 
 int RunDoctor() {
-    std::cout << "RayoMD doctor " << RAYOMD_VERSION << "\n";
-    std::cout << "platform="
+    std::string facts = std::string("RayoMD doctor ") + RAYOMD_VERSION + "\n";
 #ifdef _WIN32
-        << "windows\n";
+    facts += "platform=windows\n";
 #else
-        << "linux\n";
+    facts += "platform=linux\n";
 #endif
-    std::cout << "zlib="
 #ifdef RAYOMD_USE_ZLIB
-        << "enabled\n";
+    facts += "zlib=enabled\n";
 #else
-        << "disabled\n";
+    facts += "zlib=disabled\n";
 #endif
-    std::cout << "curl="
 #ifdef RAYOMD_USE_CURL
-        << "enabled\n";
+    facts += "curl=enabled\n";
 #else
-        << "disabled\n";
+    facts += "curl=disabled\n";
 #endif
-    std::cout << "platform_images="
 #ifdef _WIN32
-        << "winhttp,wic\n";
+    facts += "platform_images=winhttp,wic\n";
 #else
-        << "native";
+    facts += "platform_images=native";
 #ifdef RAYOMD_USE_CURL
-    std::cout << ",http";
+    facts += ",http";
 #endif
-    std::cout << "\n";
+    facts += "\n";
 #endif
+    Print(stdout, facts);
 
     TinyPdf::PdfOptions options;
     std::string pdfBytes;
@@ -836,7 +834,7 @@ int RunDoctor() {
     TinyPdf::BuildResult result = TinyPdf::BuildPdf(
         "# RayoMD Doctor\n\nUnicode: Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87.\n", options, pdfBytes);
     bool fontOk = result.Ok() && result.missingCharacters == 0;
-    std::cout << "unicode_font=" << (fontOk ? "ok" : "unavailable") << "\n";
+    Print(stdout, fontOk ? "unicode_font=ok\n" : "unicode_font=unavailable\n");
 
     std::error_code ec;
     fs::path tempDir = fs::temp_directory_path(ec);
@@ -853,56 +851,55 @@ int RunDoctor() {
         std::error_code removeError;
         fs::remove(smokePath, removeError);
     }
-    std::cout << "temp_output=" << (tempOk ? "ok" : "failed") << "\n";
-    std::cout << "smoke_export=" << (result.Ok() && tempOk ? "ok" : "failed") << "\n";
+    Print(stdout, tempOk ? "temp_output=ok\n" : "temp_output=failed\n");
+    Print(stdout, result.Ok() && tempOk ? "smoke_export=ok\n" : "smoke_export=failed\n");
     if (fontOk && tempOk) {
-        std::cout << "status=ok\n";
+        Print(stdout, "status=ok\n");
         return 0;
     }
-    std::cout << "status=failed\n";
+    Print(stdout, "status=failed\n");
     return 1;
 }
 void PrintUsage() {
-    std::cerr
-        << "RayoMD portable CLI " << RAYOMD_VERSION << "\n"
-        << "Usage:\n"
-        << "  rayomd --version\n"
-        << "  rayomd --doctor\n"
-        << "  rayomd --inspect-source <input.pdf>\n"
-        << "  rayomd --recover-source <input.pdf> <output.md>\n"
-        << "  rayomd --export <input.md> <output.pdf> [native] [style] [margin]\n"
-        << "  rayomd --book <SUMMARY.md | folder | files.md...> <output.pdf> [native] [style] [margin]\n"
-        << "  rayomd --stdin <output.pdf> [native] [style] [margin]\n"
-        << "  rayomd --batch <input-folder> <output-folder> [native] [style] [margin]\n"
-        << "  rayomd --stdin-batch <output-folder> [native] [style] [margin]\n"
-        << "  rayomd --serve <output-folder> [native] [style] [margin]\n"
-        << "  rayomd --bench <input.md> <output-folder> <iterations> [style] [margin]\n"
-        << "\n"
-        << "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
-        << "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
-        << "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source.\n"
-        << "Output flags: --compress (FlateDecode streams: smaller files, slower export), --pdfa (PDF/A-3b:\n"
-        << "  every font embedded, formulas as TeX source), --pdfua (PDF/UA-1, tagged for screen readers:\n"
-        << "  headings, lists, tables, figures with their alt text, links and notes; fonts and formulas as\n"
-        << "  with --pdfa; the language is the front matter's lang, else en), --theme=FILE (key = value\n"
-        << "  lines: font, logo, heading-color, link-color, accent-color, header-left/center/right,\n"
-        << "  footer-left/center/right with {title} {author} {subject} {date} {page} {pages} {logo},\n"
-        << "  cover), --no-highlight (code\n"
-        << "  blocks in one colour; by default fenced code in a language GitHub knows is coloured), --toc\n"
-        << "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
-        << "  --toc-depth=N (heading levels it lists, 1-6; default 3).\n"
-        << "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
-        << "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4).\n"
-        << "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
-        << "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
-        << "  line per document; - for standard output).\n"
-        << "Books: --book makes one PDF of the files a SUMMARY.md lists (mdBook, GitBook), of a folder's\n"
-        << "  Markdown files by name with README.md first, or of the files given: each from a new page, the\n"
-        << "  links between them kept, one outline, and with --toc one table of contents for all of them.\n";
+    Print(stderr, std::string("RayoMD portable CLI ") + RAYOMD_VERSION + "\n"
+        "Usage:\n"
+        "  rayomd --version\n"
+        "  rayomd --doctor\n"
+        "  rayomd --inspect-source <input.pdf>\n"
+        "  rayomd --recover-source <input.pdf> <output.md>\n"
+        "  rayomd --export <input.md> <output.pdf> [native] [style] [margin]\n"
+        "  rayomd --book <SUMMARY.md | folder | files.md...> <output.pdf> [native] [style] [margin]\n"
+        "  rayomd --stdin <output.pdf> [native] [style] [margin]\n"
+        "  rayomd --batch <input-folder> <output-folder> [native] [style] [margin]\n"
+        "  rayomd --stdin-batch <output-folder> [native] [style] [margin]\n"
+        "  rayomd --serve <output-folder> [native] [style] [margin]\n"
+        "  rayomd --bench <input.md> <output-folder> <iterations> [style] [margin]\n"
+        "\n"
+        "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
+        "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
+        "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source.\n"
+        "Output flags: --compress (FlateDecode streams: smaller files, slower export), --pdfa (PDF/A-3b:\n"
+        "  every font embedded, formulas as TeX source), --pdfua (PDF/UA-1, tagged for screen readers:\n"
+        "  headings, lists, tables, figures with their alt text, links and notes; fonts and formulas as\n"
+        "  with --pdfa; the language is the front matter's lang, else en), --theme=FILE (key = value\n"
+        "  lines: font, logo, heading-color, link-color, accent-color, header-left/center/right,\n"
+        "  footer-left/center/right with {title} {author} {subject} {date} {page} {pages} {logo},\n"
+        "  cover), --no-highlight (code\n"
+        "  blocks in one colour; by default fenced code in a language GitHub knows is coloured), --toc\n"
+        "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
+        "  --toc-depth=N (heading levels it lists, 1-6; default 3).\n"
+        "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
+        "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4).\n"
+        "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
+        "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
+        "  line per document; - for standard output).\n"
+        "Books: --book makes one PDF of the files a SUMMARY.md lists (mdBook, GitBook), of a folder's\n"
+        "  Markdown files by name with README.md first, or of the files given: each from a new page, the\n"
+        "  links between them kept, one outline, and with --toc one table of contents for all of them.\n");
 }
 
 int PrintArgumentError(const std::string& message) {
-    std::cerr << "Error: " << message << "\n\n";
+    Print(stderr, "Error: " + message + "\n\n");
     PrintUsage();
     return 2;
 }
@@ -919,7 +916,7 @@ int main(int argc, char** argv) {
     CliExportOptions options;
 
     if (command == "--version" || command == "-v") {
-        std::cout << "rayomd " << RAYOMD_VERSION << "\n";
+        Print(stdout, std::string("rayomd ") + RAYOMD_VERSION + "\n");
         return 0;
     }
 
@@ -976,7 +973,7 @@ int main(int argc, char** argv) {
         std::string error;
         if (!ParseExportOptions(argc, argv, 4, options, error)) return PrintArgumentError(error);
         if (options.engine != 0) {
-            std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
+            PrintError("Error: Pandoc mode is currently only wired into the Windows build.");
             return 20;
         }
 
@@ -998,7 +995,7 @@ int main(int argc, char** argv) {
         if (!ParseExportOptions(argc, argv, output + 1, options, error)) return PrintArgumentError(error);
         if (options.embedSource) return PrintArgumentError("--embed-source does not apply to --book: a book is not reversible.");
         if (options.engine != 0) {
-            std::cerr << "Error: Pandoc mode is currently only wired into the Windows build.\n";
+            PrintError("Error: Pandoc mode is currently only wired into the Windows build.");
             return 20;
         }
         return RunBookExport(std::vector<fs::path>(argv + 2, argv + output), argv[output], options);

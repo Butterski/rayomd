@@ -2,11 +2,11 @@
 
 #include "inline_markdown.h"
 #include "markdown_parser.h"
+#include "../common/file_io.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
-#include <fstream>
 #include <string_view>
 #include <system_error>
 
@@ -100,15 +100,9 @@ void AddItems(const std::vector<Block>& blocks, int depth, Summary& summary) {
 
 // A file of the book, of at most 128 MiB, as the command line reads one document.
 bool ReadFile(const fs::path& path, std::string& text) {
-    constexpr std::uintmax_t kMaxFileBytes = 128u * 1024u * 1024u;
+    constexpr size_t kMaxFileBytes = 128u * 1024u * 1024u;
     std::error_code ec;
-    if (!fs::is_regular_file(path, ec)) return false;
-    const std::uintmax_t size = fs::file_size(path, ec);
-    if (ec || size > kMaxFileBytes) return false;
-    std::ifstream file(path, std::ios::binary);
-    if (!file) return false;
-    text.assign((size_t)size, '\0');
-    return size == 0 || (bool)file.read(&text[0], (std::streamsize)size);
+    return fs::is_regular_file(path, ec) && RayoMd::File::ReadAll(path, kMaxFileBytes, text);
 }
 
 // mdBook's title: `title = "..."` in the book.toml beside SUMMARY.md's directory or in it.
