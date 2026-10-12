@@ -151,9 +151,10 @@ pinned CPU core. A one-shot export is a fresh `rayomd --export` process, start t
 of 60 runs).
 
 ```mermaid
+%%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#2ea44f"}}}}%%
 xychart-beta
     title "How much faster 4.0.0 exports than 3.2.0, in %"
-    x-axis ["ASCII note", "Polish note", "Formulas", "Chinese, fallback font", "1024x1024 PNG"]
+    x-axis ["ASCII note", "Polish note", "Formulas", "Chinese note", "PNG image"]
     y-axis "Faster by (%)" 0 --> 80
     bar [38, 48, 34, 65, 69]
 ```
