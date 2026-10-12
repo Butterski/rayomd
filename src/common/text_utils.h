@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,8 +15,22 @@ namespace RayoMd::Text {
 // Longest text WriteFixed2 produces: sign, 20 integer digits, point, two decimals.
 constexpr size_t kFixed2MaxChars = 24;
 
+namespace Detail {
+// "00" to "99": two digits a copy.
+inline constexpr char kDigitPairs[201] =
+    "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+    "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+    "8081828384858687888990919293949596979899";
+
+inline char* WritePair(char* out, unsigned value) {
+    std::memcpy(out, kDigitPairs + 2 * value, 2);
+    return out + 2;
+}
+} // namespace Detail
+
 // Writes `value` with at most two decimals, the format of every PDF operand, and
-// returns the end of the text. `out` must have room for kFixed2MaxChars characters.
+// returns the end of the text. `out` must have room for kFixed2MaxChars characters;
+// the byte after the end may be overwritten.
 inline char* WriteFixed2(char* out, double value) {
     const bool negative = std::signbit(value);
     const double hundredths = std::fabs(value) * 100.0;
@@ -29,28 +44,30 @@ inline char* WriteFixed2(char* out, double value) {
         scaled = static_cast<uint64_t>(std::llround(hundredths));
     }
     if (negative) *out++ = '-';
+    unsigned fraction;
     if (scaled < 1000000) {
-        // At most four integer digits: the usual operand, written without a division loop.
-        const unsigned whole = static_cast<unsigned>(scaled) / 100;
-        const unsigned fraction = static_cast<unsigned>(scaled) % 100;
-        if (whole >= 1000) *out++ = static_cast<char>('0' + whole / 1000);
-        if (whole >= 100) *out++ = static_cast<char>('0' + whole / 100 % 10);
-        if (whole >= 10) *out++ = static_cast<char>('0' + whole / 10 % 10);
-        *out++ = static_cast<char>('0' + whole % 10);
-        if (fraction == 0) return out;
-        *out++ = '.';
-        *out++ = static_cast<char>('0' + fraction / 10);
-        if (fraction % 10 != 0) *out++ = static_cast<char>('0' + fraction % 10);
-        return out;
+        // At most four integer digits, the usual operand: two digits a step.
+        const unsigned all = static_cast<unsigned>(scaled);
+        const unsigned whole = all / 100;
+        fraction = all - whole * 100;
+        if (whole >= 100) {
+            const unsigned high = whole / 100;
+            if (high >= 10) out = Detail::WritePair(out, high);
+            else *out++ = static_cast<char>('0' + high);
+            out = Detail::WritePair(out, whole - high * 100);
+        } else if (whole >= 10) {
+            out = Detail::WritePair(out, whole);
+        } else {
+            *out++ = static_cast<char>('0' + whole);
+        }
+    } else {
+        fraction = static_cast<unsigned>(scaled % 100);
+        out = std::to_chars(out, out + 20, scaled / 100).ptr;
     }
-    const uint64_t whole = scaled / 100;
-    const unsigned fraction = static_cast<unsigned>(scaled % 100);
-    out = std::to_chars(out, out + 20, whole).ptr;
     if (fraction == 0) return out;
-    *out++ = '.';
-    *out++ = static_cast<char>('0' + fraction / 10);
-    if (fraction % 10 != 0) *out++ = static_cast<char>('0' + fraction % 10);
-    return out;
+    *out = '.';
+    Detail::WritePair(out + 1, fraction);
+    return out + (Detail::kDigitPairs[2 * fraction + 1] == '0' ? 2 : 3);
 }
 
 inline void AppendFixed2(std::string& out, double value) {
