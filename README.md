@@ -6,7 +6,7 @@
   <a href="https://github.com/Butterski/rayomd/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/rayomd/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/rayomd/actions/workflows/codeql.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version: 3.2.0 MathTex" src="https://img.shields.io/badge/version-3.2.0%20MathTex-informational">
+  <img alt="Version: 4.0.0 MathTex" src="https://img.shields.io/badge/version-4.0.0%20MathTex-informational">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 </p>
@@ -89,13 +89,13 @@ for p95 values, ranges, hashes, fixture details, and reproduction commands. The
 [benchmark index](https://github.com/Butterski/rayomd/wiki/Benchmarks) keeps
 cross-tool, warm-path, reversible-PDF, and older release reports organized.
 
-On 2026-10-12, builds of 3.2.0 against 3.1.0 on Linux (DejaVu Sans, native storage, the
-nine watch-suite documents) matched within about 1 %: warm `--bench` +0.5 % with pinned
-alignment (+0.3 % instructions), a cold `tester.md` export per process 4.6 % faster, and a
-6-worker `--batch` of 360 documents in tmpfs 1.4 % slower. Without the new options the PDFs
-are the same except code-block tints, which no longer overlap the line above. The Linux
-executable grew from 683 KB to 1,010 KB with the features 3.2 adds.
-[`performance.md`](docs/development/performance.md) records what each change cost.
+On 2026-10-12, builds of 4.0.0 against 3.2.0 on Linux (DejaVu Sans, files on tmpfs, one CPU)
+wrote byte-identical PDFs for the nine watch-suite documents. Warm `--bench` builds ran 16 %
+faster (geometric mean, pinned; documents with formulas up to 25 %). One-shot exports, a
+fresh process each, ran 34 to 48 % faster for text documents and 69 % faster for a document
+with a 1024×1024 PNG. The Linux executable grew from 1,010 KB to 1,215 KB because it now
+carries its C++ runtime; the fully static edition (2,166 KB, no runtime dependency) starts
+another 0.3 ms sooner. [`performance.md`](docs/development/performance.md) records each change.
 
 ## Quick start
 
