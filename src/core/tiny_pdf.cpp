@@ -5084,13 +5084,11 @@ private:
         int math = -1;   // index into `math` when the span is a formula; text is empty then
     };
 
+    // A word of formula-bearing text: a view into the text of its span, which outlives it, and
+    // the span for its style and link; a formula has none.
     struct StyledWord {
-        std::wstring text;
-        std::string url;
-        bool bold = false;
-        bool italic = false;
-        bool strike = false;
-        bool code = false;
+        std::wstring_view text;
+        const StyledSpan* span = nullptr;
         int math = -1;
     };
 
@@ -5207,19 +5205,16 @@ private:
                 MathAppend(words).math = span.math;
                 continue;
             }
-            const size_t length = span.text.size();
+            const std::wstring_view text = span.text;
+            const size_t length = text.size();
             for (size_t start = 0; start < length;) {
-                while (start < length && IsWideSpace(span.text[start])) start++;
+                while (start < length && IsWideSpace(text[start])) start++;
                 size_t end = start;
-                while (end < length && !IsWideSpace(span.text[end])) end++;
+                while (end < length && !IsWideSpace(text[end])) end++;
                 if (end > start) {
                     StyledWord& word = MathAppend(words);
-                    word.text.assign(span.text, start, end - start);
-                    word.url = span.url;
-                    word.bold = span.bold;
-                    word.italic = span.italic;
-                    word.strike = span.strike;
-                    word.code = span.code;
+                    word.text = text.substr(start, end - start);
+                    word.span = &span;
                 }
                 start = end;
             }
@@ -5267,24 +5262,28 @@ private:
             widths[index] = word.math >= 0 ? math.Width(word.math) : TextWidth(font, word.text, size);
         }
         const std::string noUrl;
-        // Appends text to the line: merged into the previous span when the style is the
-        // same (never into a formula), as AppendStyledWord does for plain text.
-        auto appendText = [&](std::wstring text, const StyledWord& word, bool styled) {
-            const std::string& url = styled ? word.url : noUrl;
-            const bool bold = styled && word.bold;
-            const bool italic = styled && word.italic;
-            const bool strike = styled && word.strike;
-            const bool code = styled && word.code;
+        // Appends text to the line, after a space when `spaced`: merged into the previous span
+        // when the style is the same (never into a formula), as AppendStyledWord does for plain
+        // text. Unstyled text (a space before a formula or a struck word) has no link or style.
+        auto appendText = [&](std::wstring_view text, bool spaced, const StyledWord& word, bool styled) {
+            const std::string& url = styled ? word.span->url : noUrl;
+            const bool bold = styled && word.span->bold;
+            const bool italic = styled && word.span->italic;
+            const bool strike = styled && word.span->strike;
+            const bool code = styled && word.span->code;
             if (!line.empty()) {
                 StyledSpan& last = line.back();
                 if (last.math < 0 && last.bold == bold && last.italic == italic && last.strike == strike &&
                     last.code == code && last.url == url) {
-                    last.text += text;
+                    if (spaced) last.text.push_back(L' ');
+                    last.text.append(text.data(), text.size());
                     return;
                 }
             }
             StyledSpan& added = MathAppend(line);
-            added.text = std::move(text);
+            added.text.reserve(text.size() + (spaced ? 1 : 0));
+            if (spaced) added.text.push_back(L' ');
+            added.text.append(text.data(), text.size());
             added.url = url;
             added.bold = bold;
             added.italic = italic;
@@ -5324,7 +5323,7 @@ private:
             }
             if (word.math >= 0) {
                 if (needsSpace) {
-                    appendText(L" ", word, false);
+                    appendText(L" ", false, word, false);
                     lineWidth += spaceWidth;
                 }
                 MathAppend(line).math = word.math;
@@ -5340,7 +5339,7 @@ private:
                 for (wchar_t ch : word.text) {
                     double chWidth = CodepointWidth(font, (uint16_t)ch, scale);
                     if (!part.empty() && partWidth + chWidth > width) {
-                        appendText(std::move(part), word, true);
+                        appendText(part, false, word, true);
                         flush();
                         part.clear();
                         partWidth = 0.0;
@@ -5348,22 +5347,22 @@ private:
                     part.push_back(ch);
                     partWidth += chWidth;
                 }
-                appendText(std::move(part), word, true);
+                appendText(part, false, word, true);
                 lineWidth = partWidth;
                 continue;
             }
-            std::wstring textRun = word.text;
             double wordWidth = widths[index];
+            bool spaced = false;
             if (needsSpace) {
-                if (word.strike) {
-                    appendText(L" ", word, false);
+                if (word.span->strike) {
+                    appendText(L" ", false, word, false);
                     lineWidth += spaceWidth;
                 } else {
-                    textRun.insert(textRun.begin(), L' ');
+                    spaced = true;
                     wordWidth += spaceWidth;
                 }
             }
-            appendText(std::move(textRun), word, true);
+            appendText(word.text, spaced, word, true);
             lineWidth += wordWidth;
         }
 
