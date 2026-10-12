@@ -711,6 +711,9 @@ struct TtfFont {
         return cp < glyphForBmp.size() && glyphForBmp[cp] != 0;
     }
 
+    // The cache holds, by code point, the width of the glyph the code point is shown with: its
+    // own, or '?' for one the font lacks (CidForCodepoint). For a CID, which is either, that is
+    // the width of the CID's glyph, so both lookups share it.
     uint16_t WidthForCid(uint16_t cid) const {
         uint16_t cached = widthCache[cid].load(std::memory_order_relaxed);
         if (cached != 0) return cached;
@@ -719,6 +722,20 @@ struct TtfFont {
             ? (uint16_t)((advances[glyph] * 1000u + unitsPerEm / 2u) / unitsPerEm)
             : (uint16_t)500;
         widthCache[cid].store(width, std::memory_order_relaxed);
+        return width;
+    }
+
+    // The width, in 1/1000 em, of the glyph `cp` is shown with: one cache lookup on the
+    // per-character path of every Unicode document.
+    RAYOMD_HOT_INLINE uint16_t CodepointWidth(uint32_t cp) const {
+        const uint32_t key = cp <= 0xffff ? cp : '?';
+        const uint16_t cached = widthCache[key].load(std::memory_order_relaxed);
+        return cached != 0 ? cached : CacheCodepointWidth(key);
+    }
+
+    RAYOMD_COLD uint16_t CacheCodepointWidth(uint32_t key) const {
+        const uint16_t width = WidthForCid(GlyphFor(key) != 0 ? (uint16_t)key : (uint16_t)'?');
+        widthCache[key].store(width, std::memory_order_relaxed);
         return width;
     }
 
@@ -748,7 +765,7 @@ static uint16_t CidForCodepoint(const TtfFont& font, uint32_t cp) {
 }
 
 static double CodepointWidth(const TtfFont& font, uint32_t cp, double scale) {
-    return font.WidthForCid(CidForCodepoint(font, cp)) * scale;
+    return font.CodepointWidth(cp) * scale;
 }
 
 static double TextWidth(const TtfFont& font, std::wstring_view text, double size) {
