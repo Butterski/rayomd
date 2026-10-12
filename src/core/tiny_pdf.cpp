@@ -259,7 +259,7 @@ static int16_t ReadS16(const std::vector<uint8_t>& data, size_t off) {
     return (int16_t)ReadU16(data, off);
 }
 
-static uint32_t ReadU32(const std::vector<uint8_t>& data, size_t off) {
+static RAYOMD_HOT_INLINE uint32_t ReadU32(const std::vector<uint8_t>& data, size_t off) {
     if (off + 4 > data.size()) return 0;
     return ((uint32_t)data[off] << 24) | ((uint32_t)data[off + 1] << 16) |
         ((uint32_t)data[off + 2] << 8) | data[off + 3];
@@ -2470,82 +2470,72 @@ static bool BuildDecodedPngImageWithZlib(const PngInfo& png, PdfImage& image) {
     size_t pixels = (size_t)png.width * (size_t)png.height;
     if (pixels == 0 || pixels * 4 > kMaxDecodedImageBytes) return false;
 
-    std::string color;
-    std::string alpha;
-    bool hasAlpha = false;
+    // Colour and alpha are written through pointers into buffers sized once; `opaque` stays 255
+    // only while every alpha value is 255.
+    bool rgb = png.colorType == 6 || png.colorType == 3 || png.colorType == 2;
+    std::string color(pixels * (rgb ? 3 : 1), '\0');
+    std::string alpha(pixels, '\0');
+    uint8_t* c = reinterpret_cast<uint8_t*>(&color[0]);
+    uint8_t* al = reinterpret_cast<uint8_t*>(&alpha[0]);
+    const uint8_t* s = rows.data();
+    unsigned opaque = 255;
 
     if (png.colorType == 6) {
-        color.reserve(pixels * 3);
-        alpha.reserve(pixels);
-        for (size_t i = 0; i < pixels; i++) {
-            uint8_t r = rows[i * 4 + 0];
-            uint8_t g = rows[i * 4 + 1];
-            uint8_t b = rows[i * 4 + 2];
-            uint8_t a = rows[i * 4 + 3];
-            color.push_back((char)r);
-            color.push_back((char)g);
-            color.push_back((char)b);
-            alpha.push_back((char)a);
-            hasAlpha = hasAlpha || a != 255;
+        for (size_t i = 0; i < pixels; i++, s += 4, c += 3) {
+            c[0] = s[0];
+            c[1] = s[1];
+            c[2] = s[2];
+            al[i] = s[3];
+            opaque &= s[3];
         }
         image.colorSpace = "/DeviceRGB";
     } else if (png.colorType == 4) {
-        color.reserve(pixels);
-        alpha.reserve(pixels);
-        for (size_t i = 0; i < pixels; i++) {
-            uint8_t gray = rows[i * 2 + 0];
-            uint8_t a = rows[i * 2 + 1];
-            color.push_back((char)gray);
-            alpha.push_back((char)a);
-            hasAlpha = hasAlpha || a != 255;
+        for (size_t i = 0; i < pixels; i++, s += 2) {
+            c[i] = s[0];
+            al[i] = s[1];
+            opaque &= s[1];
         }
         image.colorSpace = "/DeviceGray";
     } else if (png.colorType == 3) {
         size_t entries = png.palette.size() / 3;
-        color.reserve(pixels * 3);
-        alpha.reserve(pixels);
-        for (size_t i = 0; i < pixels; i++) {
-            uint8_t index = rows[i];
+        const uint8_t* palette = reinterpret_cast<const uint8_t*>(png.palette.data());
+        const uint8_t* transparency = reinterpret_cast<const uint8_t*>(png.transparency.data());
+        size_t transparent = png.transparency.size();
+        for (size_t i = 0; i < pixels; i++, c += 3) {
+            size_t index = s[i];
             if (index >= entries) return false;
-            color.push_back(png.palette[index * 3 + 0]);
-            color.push_back(png.palette[index * 3 + 1]);
-            color.push_back(png.palette[index * 3 + 2]);
-            uint8_t a = index < png.transparency.size() ? png.transparency[index] : 255;
-            alpha.push_back((char)a);
-            hasAlpha = hasAlpha || a != 255;
+            c[0] = palette[index * 3 + 0];
+            c[1] = palette[index * 3 + 1];
+            c[2] = palette[index * 3 + 2];
+            uint8_t a = index < transparent ? transparency[index] : 255;
+            al[i] = a;
+            opaque &= a;
         }
         image.colorSpace = "/DeviceRGB";
     } else if (png.colorType == 2) {
         uint16_t tr = (uint16_t)((png.transparency[0] << 8) | png.transparency[1]);
         uint16_t tg = (uint16_t)((png.transparency[2] << 8) | png.transparency[3]);
         uint16_t tb = (uint16_t)((png.transparency[4] << 8) | png.transparency[5]);
-        color.reserve(pixels * 3);
-        alpha.reserve(pixels);
-        for (size_t i = 0; i < pixels; i++) {
-            uint8_t r = rows[i * 3 + 0];
-            uint8_t g = rows[i * 3 + 1];
-            uint8_t b = rows[i * 3 + 2];
-            color.push_back((char)r);
-            color.push_back((char)g);
-            color.push_back((char)b);
-            uint8_t a = (r == tr && g == tg && b == tb) ? 0 : 255;
-            alpha.push_back((char)a);
-            hasAlpha = hasAlpha || a != 255;
+        for (size_t i = 0; i < pixels; i++, s += 3, c += 3) {
+            c[0] = s[0];
+            c[1] = s[1];
+            c[2] = s[2];
+            uint8_t a = (s[0] == tr && s[1] == tg && s[2] == tb) ? 0 : 255;
+            al[i] = a;
+            opaque &= a;
         }
         image.colorSpace = "/DeviceRGB";
     } else {
         uint16_t transparent = (uint16_t)((png.transparency[0] << 8) | png.transparency[1]);
-        color.reserve(pixels);
-        alpha.reserve(pixels);
         for (size_t i = 0; i < pixels; i++) {
-            uint8_t gray = rows[i];
-            color.push_back((char)gray);
-            uint8_t a = gray == transparent ? 0 : 255;
-            alpha.push_back((char)a);
-            hasAlpha = hasAlpha || a != 255;
+            c[i] = s[i];
+            uint8_t a = s[i] == transparent ? 0 : 255;
+            al[i] = a;
+            opaque &= a;
         }
         image.colorSpace = "/DeviceGray";
     }
+    bool hasAlpha = opaque != 255;
 
     image.width = (int)png.width;
     image.height = (int)png.height;
