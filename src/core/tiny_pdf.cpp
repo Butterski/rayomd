@@ -26,6 +26,12 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <wincodec.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include <algorithm>
@@ -251,16 +257,20 @@ static bool IsSpace(char c) {
 static bool StartsWith(std::string_view value, std::string_view prefix) {
     return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
 }
-static uint16_t ReadU16(const std::vector<uint8_t>& data, size_t off) {
+// Big-endian reads that give 0 past the end, from a byte vector or the FileBytes of a font.
+template <class Bytes>
+static uint16_t ReadU16(const Bytes& data, size_t off) {
     if (off + 2 > data.size()) return 0;
     return (uint16_t)((data[off] << 8) | data[off + 1]);
 }
 
-static int16_t ReadS16(const std::vector<uint8_t>& data, size_t off) {
+template <class Bytes>
+static int16_t ReadS16(const Bytes& data, size_t off) {
     return (int16_t)ReadU16(data, off);
 }
 
-static RAYOMD_HOT_INLINE uint32_t ReadU32(const std::vector<uint8_t>& data, size_t off) {
+template <class Bytes>
+static RAYOMD_HOT_INLINE uint32_t ReadU32(const Bytes& data, size_t off) {
     if (off + 4 > data.size()) return 0;
     return ((uint32_t)data[off] << 24) | ((uint32_t)data[off + 1] << 16) |
         ((uint32_t)data[off + 2] << 8) | data[off + 3];
@@ -277,32 +287,126 @@ static bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& bytes) 
 }
 
 #ifdef _WIN32
-static bool ReadWholeFile(const std::wstring& path, std::vector<uint8_t>& bytes) {
-    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) return false;
-
-    LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(hFile, &size) || size.QuadPart <= 0 || size.QuadPart > 64LL * 1024LL * 1024LL) {
-        CloseHandle(hFile);
-        return false;
-    }
-
-    bytes.resize((size_t)size.QuadPart);
+static bool ReadFromHandle(HANDLE file, uint8_t* out, size_t size) {
     size_t offset = 0;
-    while (offset < bytes.size()) {
-        DWORD chunk = (DWORD)std::min<size_t>(bytes.size() - offset, 1024 * 1024);
+    while (offset < size) {
+        DWORD chunk = (DWORD)std::min<size_t>(size - offset, 1024 * 1024);
         DWORD read = 0;
-        if (!ReadFile(hFile, bytes.data() + offset, chunk, &read, nullptr) || read == 0) {
-            CloseHandle(hFile);
-            return false;
-        }
+        if (!ReadFile(file, out + offset, chunk, &read, nullptr) || read == 0) return false;
         offset += read;
     }
-
-    CloseHandle(hFile);
     return true;
 }
+
+// The size of the file `path` opened for reading, or INVALID_HANDLE_VALUE when it cannot be read
+// or is empty or past 64 MB.
+static HANDLE OpenWholeFile(const std::wstring& path, size_t& size) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return file;
+    LARGE_INTEGER length = {};
+    if (!GetFileSizeEx(file, &length) || length.QuadPart <= 0 || length.QuadPart > 64LL * 1024LL * 1024LL) {
+        CloseHandle(file);
+        return INVALID_HANDLE_VALUE;
+    }
+    size = (size_t)length.QuadPart;
+    return file;
+}
+
+static bool ReadWholeFile(const std::wstring& path, std::vector<uint8_t>& bytes) {
+    size_t size = 0;
+    HANDLE file = OpenWholeFile(path, size);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    bytes.resize(size);
+    bool read = ReadFromHandle(file, bytes.data(), size);
+    CloseHandle(file);
+    return read;
+}
 #endif
+
+// The bytes of a font file, read-only, at most 64 MB. Mapped where the system can (only the
+// tables and glyphs a document uses are then read from disk, as FreeType does on Unix), else
+// read into a buffer that is not zeroed first.
+class FileBytes {
+public:
+    FileBytes() = default;
+    FileBytes(const FileBytes&) = delete;
+    FileBytes& operator=(const FileBytes&) = delete;
+    ~FileBytes() { clear(); }
+
+    const uint8_t* data() const { return data_; }
+    size_t size() const { return size_; }
+    uint8_t operator[](size_t index) const { return data_[index]; }
+
+    void clear() {
+#ifndef _WIN32
+        if (mapped_) munmap(const_cast<uint8_t*>(data_), size_);
+#endif
+        owned_.reset();
+        data_ = nullptr;
+        size_ = 0;
+        mapped_ = false;
+    }
+
+#ifdef _WIN32
+    bool Load(const std::wstring& path) {
+        clear();
+        size_t size = 0;
+        HANDLE file = OpenWholeFile(path, size);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        std::unique_ptr<uint8_t[]> buffer(new (std::nothrow) uint8_t[size]);
+        bool read = buffer && ReadFromHandle(file, buffer.get(), size);
+        CloseHandle(file);
+        if (!read) return false;
+        Own(std::move(buffer), size);
+        return true;
+    }
+#else
+    bool Load(const std::string& path) {
+        clear();
+        int file = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (file < 0) return false;
+        struct stat info {};
+        if (fstat(file, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0 ||
+            info.st_size > 64LL * 1024LL * 1024LL) {
+            close(file);
+            return false;
+        }
+        size_t size = (size_t)info.st_size;
+        void* mapped = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, file, 0);
+        if (mapped != MAP_FAILED) {
+            close(file);
+            data_ = static_cast<const uint8_t*>(mapped);
+            size_ = size;
+            mapped_ = true;
+            return true;
+        }
+        std::unique_ptr<uint8_t[]> buffer(new (std::nothrow) uint8_t[size]);
+        size_t offset = 0;
+        while (buffer && offset < size) {
+            ssize_t read = ::read(file, buffer.get() + offset, size - offset);
+            if (read < 0 && errno == EINTR) continue;
+            if (read <= 0) break;
+            offset += (size_t)read;
+        }
+        close(file);
+        if (!buffer || offset != size) return false;
+        Own(std::move(buffer), size);
+        return true;
+    }
+#endif
+
+private:
+    void Own(std::unique_ptr<uint8_t[]> buffer, size_t size) {
+        owned_ = std::move(buffer);
+        data_ = owned_.get();
+        size_ = size;
+    }
+
+    const uint8_t* data_ = nullptr;
+    size_t size_ = 0;
+    bool mapped_ = false;
+    std::unique_ptr<uint8_t[]> owned_;
+};
 
 struct TtfFont {
     struct Table {
@@ -310,7 +414,7 @@ struct TtfFont {
         uint32_t length = 0;
     };
 
-    std::vector<uint8_t> bytes;
+    FileBytes bytes;
     std::map<std::string, Table> tables;
     std::vector<uint16_t> glyphForBmp;   // glyph index by BMP code point, 0 = no glyph
     std::vector<uint16_t> advances;
@@ -386,7 +490,7 @@ struct TtfFont {
         advances.clear();
         loca.clear();
         for (auto& width : widthCache) width.store(0, std::memory_order_relaxed);
-        loaded = ReadWholeFile(path, bytes) && Parse();
+        loaded = bytes.Load(path) && Parse();
         return loaded;
     }
 
