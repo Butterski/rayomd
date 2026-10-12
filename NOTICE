@@ -10,3 +10,15 @@ This product includes third-party software:
 Math font metrics are derived from the Adobe Core 14 AFM files, Copyright (c) 1985,
 1987, 1989, 1990, 1993, 1997 Adobe Systems Incorporated. All Rights Reserved. See the
 notice at the top of src/core/math_font_metrics.inc.
+
+The release binaries also contain libraries linked into them:
+
+- The GCC runtime libraries (libstdc++, libgcc), licensed under the GNU GPL version 3
+  with the GCC Runtime Library Exception, in the Windows and Linux executables.
+- zlib, licensed under the zlib License, in the Linux static edition
+  (rayomd-<version>-linux-x64-static).
+- The GNU C Library, licensed under the GNU LGPL version 2.1 or later, in the Linux
+  static edition. Its source is that of the glibc package of the Ubuntu release the
+  edition is built on (https://launchpad.net/ubuntu/+source/glibc). RayoMD's complete
+  source (https://github.com/Butterski/rayomd) lets the edition be relinked with a
+  modified C library: cmake -DRAYOMD_STATIC=ON.
