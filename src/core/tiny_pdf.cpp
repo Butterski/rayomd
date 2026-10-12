@@ -403,6 +403,18 @@ private:
 };
 
 struct TtfFont {
+    // A font lives on the heap, allocated zeroed by calloc (fresh pages come zeroed from the
+    // system, untouched until used), or in static storage, which starts zeroed: the 128 KB width
+    // cache is not cleared again. A value-initialized TtfFont() zeroed all of it, for each of
+    // the up to 11 fallback candidates a document without glyphs probes.
+    TtfFont() {}
+    static void* operator new(size_t size) {
+        if (void* zeroed = std::calloc(1, size)) return zeroed;
+        void* memory = ::operator new(size);
+        return std::memset(memory, 0, size);
+    }
+    static void operator delete(void* memory) noexcept { std::free(memory); }
+
     struct Table {
         uint32_t offset = 0;
         uint32_t length = 0;
@@ -413,7 +425,7 @@ struct TtfFont {
     std::vector<uint16_t> glyphForBmp;   // glyph index by BMP code point, 0 = no glyph
     std::vector<uint16_t> advances;
     std::vector<uint32_t> loca;
-    mutable std::array<std::atomic<uint16_t>, 65536> widthCache{};
+    mutable std::array<std::atomic<uint16_t>, 65536> widthCache;   // zero to begin with: see above
     uint16_t unitsPerEm = 1000;
     uint16_t glyphCount = 0;
     uint16_t metricCount = 0;
@@ -483,7 +495,10 @@ struct TtfFont {
         glyphForBmp.clear();
         advances.clear();
         loca.clear();
-        for (auto& width : widthCache) width.store(0, std::memory_order_relaxed);
+        // Widths are cached only from a loaded font.
+        if (loaded) {
+            for (auto& width : widthCache) width.store(0, std::memory_order_relaxed);
+        }
         loaded = bytes.Load(path) && Parse();
         return loaded;
     }
