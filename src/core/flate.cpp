@@ -464,7 +464,12 @@ uint32_t Adler32(const uint8_t* data, size_t size, uint32_t adler) {
     return b << 16 | a;
 }
 
-size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
+namespace {
+
+// With kShortMatches the 4-byte table is probed too, for matches of 4 to 7 bytes, as page text
+// has many; PNG-predicted image rows do not gain from them (ZlibCompressImage).
+template <bool kShortMatches>
+size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch) {
     const uint8_t* const in = reinterpret_cast<const uint8_t*>(input.data());
     const size_t size = input.size();
     out[0] = 0x78;   // deflate, 32 KB window
@@ -495,7 +500,9 @@ size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
         uint32_t* const bucket = longTable + 2 * (size_t)((sequence * kLongMultiplier) >> longShift);
         bucket[1] = bucket[0];
         bucket[0] = base + (uint32_t)at;
-        shortTable[((uint32_t)sequence * kShortMultiplier) >> shortShift] = base + (uint32_t)at;
+        if constexpr (kShortMatches) {
+            shortTable[((uint32_t)sequence * kShortMultiplier) >> shortShift] = base + (uint32_t)at;
+        }
     };
 
     size_t at = 0;
@@ -514,14 +521,17 @@ size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
             }
             const uint64_t sequence = Load64(in + at);
             uint32_t* const bucket = longTable + 2 * (size_t)((sequence * kLongMultiplier) >> longShift);
-            uint32_t* const slot = shortTable + (((uint32_t)sequence * kShortMultiplier) >> shortShift);
             const uint32_t first = bucket[0];
             const uint32_t second = bucket[1];
-            const uint32_t recent = *slot;
             const uint32_t here = base + (uint32_t)at;
             bucket[1] = first;
             bucket[0] = here;
-            *slot = here;
+            uint32_t recent = 0;
+            if constexpr (kShortMatches) {
+                uint32_t* const slot = shortTable + (((uint32_t)sequence * kShortMultiplier) >> shortShift);
+                recent = *slot;
+                *slot = here;
+            }
 
             const uint32_t limitLength = (uint32_t)std::min<size_t>(kMaxMatch, size - at);
             uint32_t best = 0;
@@ -537,11 +547,13 @@ size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
                     bestDistance = here - second;
                 }
             }
-            if (best < 8 && here - recent - 1 < kWindow) {
-                const uint32_t length = MatchLength(in + (recent - base), in + at, limitLength);
-                if (length > best) {
-                    best = length;
-                    bestDistance = here - recent;
+            if constexpr (kShortMatches) {
+                if (best < 8 && here - recent - 1 < kWindow) {
+                    const uint32_t length = MatchLength(in + (recent - base), in + at, limitLength);
+                    if (length > best) {
+                        best = length;
+                        bestDistance = here - recent;
+                    }
                 }
             }
             if (best >= kMinMatch) {
@@ -585,6 +597,16 @@ size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
     tail[2] = (uint8_t)(adler >> 8);
     tail[3] = (uint8_t)adler;
     return (size_t)(tail + 4 - out);
+}
+
+} // namespace
+
+size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
+    return CompressZlib<true>(input, out, scratch);
+}
+
+size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch) {
+    return CompressZlib<false>(input, out, scratch);
 }
 
 } // namespace RayoMd::Flate

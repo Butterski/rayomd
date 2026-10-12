@@ -37,6 +37,12 @@ constexpr size_t kMaxInput = (size_t(1) << 31) - 1;
 // ZlibBound(input.size()) - 8).
 size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch);
 
+// ZlibCompress for the rows of a PNG-predicted image (/Predictor 15): the same format, bounds and
+// scratch, but only the 8-byte table is searched. On filtered pixels the 4-byte table finds short
+// distant matches that cost as many bits as the literals they replace and, where they break up
+// runs of literals, up to six times the time (2026-10-13, docs/development/performance.md).
+size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch);
+
 // The Adler-32 checksum (RFC 1950) of `size` bytes, as zlib's adler32(adler, data, size): the
 // trailer of a zlib stream. Start with 1; pass the result on to continue over more bytes. SSE2
 // where the target has it.

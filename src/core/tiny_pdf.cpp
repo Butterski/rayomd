@@ -68,10 +68,7 @@
 #ifndef RAYOMD_VERSION
 #define RAYOMD_VERSION "0.0.0"
 #endif
-#ifdef RAYOMD_USE_ZLIB
-
-#include <zlib.h>
-#endif
+#include "libdeflate.h"
 
 #ifdef RAYOMD_USE_SIMDUTF
 #include "simdutf.h"
@@ -2407,135 +2404,91 @@ static bool BuildFastPngImage(const PngInfo& png, PdfImage& image) {
     return true;
 }
 
-#ifdef RAYOMD_USE_ZLIB
-// zlib streams are taken apart here: zlib inflates and deflates raw data, and RayoMD reads or
-// writes the 2-byte header and the Adler-32 trailer. zlib computes that checksum a byte at a time
-// (11 % of an RGBA image's export), RayoMd::Flate::Adler32 sixteen at a time.
+// A PNG with transparency is inflated whole by libdeflate's decompressor (third_party/libdeflate),
+// which checks no zlib framing: RayoMD reads the 2-byte header and the Adler-32 trailer. Its
+// colour and alpha are re-encoded by RayoMD's own encoder (flate.h).
 static uint32_t ReadBigEndian32(const uint8_t* p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
-// A zlib stream read in pieces, accepting what uncompress() accepts: a header without a preset
-// dictionary and with a window up to 32 KB, deflate data that ends right after the bytes read,
-// and their checksum.
-class ZlibReader {
-public:
-    ZlibReader() = default;
-    ZlibReader(const ZlibReader&) = delete;
-    ZlibReader& operator=(const ZlibReader&) = delete;
-    ~ZlibReader() {
-        if (ready_) inflateEnd(&stream_);
+// Inflates the zlib stream `data` into exactly `size` bytes at `out`, accepting what zlib's
+// uncompress() accepts: a header without a preset dictionary and with a window up to 32 KB,
+// deflate data that ends with the last byte of `out`, and their checksum.
+static bool InflateZlibStream(const std::string& data, uint8_t* out, size_t size) {
+    const uint8_t* in = reinterpret_cast<const uint8_t*>(data.data());
+    if (data.size() < 2 || (in[0] & 15) != 8 || (in[0] >> 4) > 7 || ((in[0] << 8) | in[1]) % 31 != 0 ||
+        (in[1] & 0x20)) {
+        return false;
     }
+    libdeflate_decompressor* const decompressor = libdeflate_alloc_decompressor();
+    if (!decompressor) return false;
+    size_t consumed = 0;
+    // Without a place for the actual size, output short of `size` fails as well as output past it.
+    const libdeflate_result result =
+        libdeflate_deflate_decompress_ex(decompressor, in + 2, data.size() - 2, out, size, &consumed, nullptr);
+    libdeflate_free_decompressor(decompressor);
+    return result == LIBDEFLATE_SUCCESS && data.size() - 2 - consumed >= 4 &&
+        ReadBigEndian32(in + 2 + consumed) == RayoMd::Flate::Adler32(out, size);
+}
 
-    bool Begin(const std::string& data) {
-        const uint8_t* in = reinterpret_cast<const uint8_t*>(data.data());
-        if (data.size() < 2 || (in[0] & 15) != 8 || (in[0] >> 4) > 7 || ((in[0] << 8) | in[1]) % 31 != 0 ||
-            (in[1] & 0x20)) {
-            return false;
+// `size` bytes of PNG-predicted rows as a zlib stream (ZlibCompressImage).
+static bool CompressImageRows(const uint8_t* rows, size_t size, std::string& stream) {
+    if (size > RayoMd::Flate::kMaxInput) return false;
+    // Not zeroed: the encoder writes only the output, and the pages it does not reach stay unused.
+    std::unique_ptr<uint8_t[]> out(new (std::nothrow) uint8_t[RayoMd::Flate::ZlibBound(size)]);
+    if (!out) return false;
+    const size_t written = RayoMd::Flate::ZlibCompressImage(
+        std::string_view(reinterpret_cast<const char*>(rows), size), out.get(), ThreadFlateWork().scratch);
+    stream.assign(reinterpret_cast<const char*>(out.get()), written);
+    return true;
+}
+
+// An RGBA row split into colour and alpha, sixteen pixels a step in SSE2: the alpha bytes packed
+// from the high byte of each pixel, the colour of each pair of pixels moved together in its 64-bit
+// lane and stored as eight bytes, of which the next store overwrites two. Each step stops short of
+// the row's last pixel, so nothing is written past the row. 3.6 times as fast as a byte at a time,
+// as fast as SSSE3 or AVX2 shuffles (2026-10-13). Intrinsic stores, not memcpy: _FORTIFY_SOURCE
+// sees the buffer's size and turns an 8-byte memcpy into a call of __memcpy_chk.
+static void SplitRgbaRow(const uint8_t* s, size_t width, uint8_t* c, uint8_t* al, unsigned& opaque) {
+    size_t i = 0;
+    unsigned all = opaque;
+#if FAST_MD_SSE2
+    const __m128i low = _mm_set1_epi64x(0xFFFFFF);
+    const __m128i high = _mm_set1_epi64x(0xFFFFFF000000);
+    __m128i alphas = _mm_set1_epi8(-1);
+    for (; i + 16 < width; i += 16, s += 64, c += 48) {
+        __m128i p[4];
+        for (int k = 0; k < 4; k++) p[k] = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 16 * k));
+        const __m128i a = _mm_packus_epi16(_mm_packs_epi32(_mm_srli_epi32(p[0], 24), _mm_srli_epi32(p[1], 24)),
+            _mm_packs_epi32(_mm_srli_epi32(p[2], 24), _mm_srli_epi32(p[3], 24)));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(al + i), a);
+        alphas = _mm_and_si128(alphas, a);
+        for (int k = 0; k < 4; k++) {
+            const __m128i pairs = _mm_or_si128(_mm_and_si128(p[k], low), _mm_and_si128(_mm_srli_epi64(p[k], 8), high));
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(c + 12 * k), pairs);
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(c + 12 * k + 6), _mm_unpackhi_epi64(pairs, pairs));
         }
-        if (inflateInit2(&stream_, -MAX_WBITS) != Z_OK) return false;
-        ready_ = true;
-        stream_.next_in = const_cast<Bytef*>(in + 2);
-        stream_.avail_in = (uInt)(data.size() - 2);
-        return true;
     }
-
-    // The next `size` bytes; false when the stream is broken or ends first.
-    bool Read(uint8_t* out, size_t size) {
-        stream_.next_out = out;
-        stream_.avail_out = (uInt)size;
-        while (stream_.avail_out != 0 && !ended_) {
-            const int result = inflate(&stream_, Z_NO_FLUSH);
-            if (result == Z_STREAM_END) ended_ = true;
-            else if (result != Z_OK) return false;
-        }
-        if (stream_.avail_out != 0) return false;
-        adler_ = RayoMd::Flate::Adler32(out, size, adler_);
-        return true;
+    if (_mm_movemask_epi8(_mm_cmpeq_epi8(alphas, _mm_set1_epi8(-1))) != 0xFFFF) all = 0;
+#endif
+    for (; i < width; i++, s += 4, c += 3) {
+        c[0] = s[0];
+        c[1] = s[1];
+        c[2] = s[2];
+        al[i] = s[3];
+        all &= s[3];
     }
+    opaque = all;
+}
 
-    // Whether the stream ends after the bytes read, with their checksum.
-    bool End() {
-        if (!ended_) {
-            uint8_t spare = 0;
-            stream_.next_out = &spare;
-            stream_.avail_out = 1;
-            if (inflate(&stream_, Z_NO_FLUSH) != Z_STREAM_END || stream_.avail_out != 1) return false;
-        }
-        return stream_.avail_in >= 4 && ReadBigEndian32(stream_.next_in) == adler_;
-    }
-
-private:
-    z_stream stream_{};
-    bool ready_ = false;
-    bool ended_ = false;
-    uint32_t adler_ = 1;
-};
-
-// A zlib stream written in pieces at Z_BEST_SPEED, compress2()'s bytes for the same input: its
-// header 78 01 (32 KB window, the fastest level), the deflate blocks, which do not depend on how
-// the input arrives, and the checksum.
-class ZlibWriter {
-public:
-    ZlibWriter() = default;
-    ZlibWriter(const ZlibWriter&) = delete;
-    ZlibWriter& operator=(const ZlibWriter&) = delete;
-    ~ZlibWriter() {
-        if (ready_) deflateEnd(&stream_);
-    }
-
-    // `size`: all the bytes that Write will be given.
-    bool Begin(size_t size) {
-        if (deflateInit2(&stream_, Z_BEST_SPEED, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) return false;
-        ready_ = true;
-        const size_t capacity = (size_t)deflateBound(&stream_, (uLong)size) + 6;
-        out_.reset(new (std::nothrow) uint8_t[capacity]);   // not zeroed: only the output is touched
-        if (!out_) return false;
-        out_[0] = 0x78;
-        out_[1] = 0x01;
-        stream_.next_out = out_.get() + 2;
-        stream_.avail_out = (uInt)(capacity - 6);
-        return true;
-    }
-
-    bool Write(const uint8_t* data, size_t size) {
-        adler_ = RayoMd::Flate::Adler32(data, size, adler_);
-        stream_.next_in = const_cast<Bytef*>(data);
-        stream_.avail_in = (uInt)size;
-        return deflate(&stream_, Z_NO_FLUSH) == Z_OK && stream_.avail_in == 0;
-    }
-
-    bool Finish(std::string& stream) {
-        if (deflate(&stream_, Z_FINISH) != Z_STREAM_END) return false;
-        uint8_t* tail = stream_.next_out;
-        tail[0] = (uint8_t)(adler_ >> 24);
-        tail[1] = (uint8_t)(adler_ >> 16);
-        tail[2] = (uint8_t)(adler_ >> 8);
-        tail[3] = (uint8_t)adler_;
-        stream.assign(reinterpret_cast<const char*>(out_.get()), (size_t)(tail + 4 - out_.get()));
-        return true;
-    }
-
-private:
-    z_stream stream_{};
-    bool ready_ = false;
-    uint32_t adler_ = 1;
-    std::unique_ptr<uint8_t[]> out_;
-};
-
-// Splits a decoded row of `width` pixels into colour (RGB or grey) and alpha; `opaque` keeps the
-// AND of the alpha values. False for a palette index past the palette.
+// Splits a decoded row of `width` pixels into colour (RGB or grey) and alpha; `opaque` stays 255
+// only while every alpha value is. False for a palette index past the palette.
 static bool SplitPngRow(const PngInfo& png, const uint8_t* s, size_t width, uint8_t* c, uint8_t* al,
     unsigned& opaque) {
     unsigned all = opaque;
     if (png.colorType == 6) {
-        for (size_t i = 0; i < width; i++, s += 4, c += 3) {
-            c[0] = s[0];
-            c[1] = s[1];
-            c[2] = s[2];
-            al[i] = s[3];
-            all &= s[3];
-        }
+        SplitRgbaRow(s, width, c, al, opaque);
+        return true;
     } else if (png.colorType == 4) {
         for (size_t i = 0; i < width; i++, s += 2) {
             c[i] = s[0];
@@ -2594,10 +2547,13 @@ static std::string BuildPngPredictorDecodeParms(size_t columns, size_t component
 }
 
 // A non-interlaced 8-bit PNG with transparency, decoded and re-encoded as /Predictor 15 streams
-// of colour and alpha one row at a time: a row is inflated, unfiltered, split, filtered again and
-// deflated before the next. Only the alpha plane is kept whole: its stream is written only when
-// some pixel is translucent. Nothing is zeroed but a row of zeros for the first row's neighbours.
-static bool BuildDecodedPngImageWithZlib(const PngInfo& png, PdfImage& image) {
+// of colour and alpha. Its rows are inflated whole, then each is unfiltered, split, and its colour
+// filtered again into the inflated rows' block behind the row being read: a colour row is no
+// longer than an inflated one but for a palette's, which takes a block of its own. The alpha rows,
+// each behind a byte for its filter, are filtered in place from the last up, and their stream is
+// written only when some pixel is translucent. Nothing is zeroed but a row of zeros for the first
+// row's neighbours.
+static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     if (png.interlace != 0 || png.bitDepth != 8) return false;
     if (png.width == 0 || png.height == 0) return false;
 
@@ -2630,39 +2586,40 @@ static bool BuildDecodedPngImageWithZlib(const PngInfo& png, PdfImage& image) {
     const bool rgb = png.colorType == 6 || png.colorType == 3 || png.colorType == 2;
     const size_t colorComponents = rgb ? 3 : 1;
     const size_t colorRow = width * colorComponents;
-    // One block for the inflated row, this and the previous decoded row, this and the previous
-    // colour row, a filtered row, and the alpha plane.
-    std::unique_ptr<uint8_t[]> scratch(new (std::nothrow) uint8_t[(rowBytes + 1) + 2 * rowBytes + 2 * colorRow +
-        (colorRow + 1) + pixels]);
-    if (!scratch) return false;
-    uint8_t* const inflated = scratch.get();
-    uint8_t* const decoded = inflated + rowBytes + 1;
+    const bool colorInPlace = colorRow <= rowBytes;
+    std::unique_ptr<uint8_t[]> inflated(new (std::nothrow) uint8_t[(rowBytes + 1) * height]);
+    std::unique_ptr<uint8_t[]> paletteColors(colorInPlace ? nullptr : new (std::nothrow) uint8_t[(colorRow + 1) * height]);
+    // This and the previous decoded row, this and the previous colour row, and the alpha rows.
+    std::unique_ptr<uint8_t[]> scratch(new (std::nothrow) uint8_t[2 * rowBytes + 2 * colorRow + (width + 1) * height]);
+    if (!inflated || (!colorInPlace && !paletteColors) || !scratch ||
+        !InflateZlibStream(png.idat, inflated.get(), (rowBytes + 1) * height)) {
+        return false;
+    }
+    uint8_t* const filteredColors = colorInPlace ? inflated.get() : paletteColors.get();
+    uint8_t* const decoded = scratch.get();
     uint8_t* const colors = decoded + 2 * rowBytes;
-    uint8_t* const filtered = colors + 2 * colorRow;
-    uint8_t* const alpha = filtered + colorRow + 1;
+    uint8_t* const alpha = colors + 2 * colorRow;
     const std::vector<uint8_t> zeros(std::max(rowBytes, colorRow), 0);
 
-    PdfImage result;
-    ZlibReader reader;
-    ZlibWriter colorWriter;
-    if (!reader.Begin(png.idat) || !colorWriter.Begin((colorRow + 1) * height)) return false;
     unsigned opaque = 255;
     for (size_t y = 0; y < height; y++) {
+        const uint8_t* const line = inflated.get() + y * (rowBytes + 1);
         uint8_t* const row = decoded + (y & 1) * rowBytes;
         const uint8_t* const rowUp = y ? decoded + ((y - 1) & 1) * rowBytes : zeros.data();
         uint8_t* const color = colors + (y & 1) * colorRow;
         const uint8_t* const colorUp = y ? colors + ((y - 1) & 1) * colorRow : zeros.data();
-        if (!reader.Read(inflated, rowBytes + 1) ||
-            !Internal::UnfilterPngRow(inflated[0], inflated + 1, rowUp, rowBytes, bpp, row) ||
-            !SplitPngRow(png, row, width, color, alpha + y * width, opaque)) {
+        if (!Internal::UnfilterPngRow(line[0], line + 1, rowUp, rowBytes, bpp, row) ||
+            !SplitPngRow(png, row, width, color, alpha + y * (width + 1) + 1, opaque)) {
             return false;
         }
+        // In place this overwrites only rows already read: it ends at (y + 1) * (colorRow + 1).
+        uint8_t* const filtered = filteredColors + y * (colorRow + 1);
         const int filter = Internal::ChoosePngFilter(color, colorUp, colorRow, colorComponents);
         filtered[0] = (uint8_t)filter;
         Internal::FilterPngRow(filter, color, colorUp, colorRow, colorComponents, filtered + 1);
-        if (!colorWriter.Write(filtered, colorRow + 1)) return false;
     }
-    if (!reader.End() || !colorWriter.Finish(result.stream)) return false;
+    PdfImage result;
+    if (!CompressImageRows(filteredColors, (colorRow + 1) * height, result.stream)) return false;
     result.colorSpace = rgb ? "/DeviceRGB" : "/DeviceGray";
     result.width = (int)png.width;
     result.height = (int)png.height;
@@ -2671,28 +2628,23 @@ static bool BuildDecodedPngImageWithZlib(const PngInfo& png, PdfImage& image) {
     result.decodeParms = BuildPngPredictorDecodeParms(png.width, colorComponents);
 
     if (opaque != 255) {
-        ZlibWriter alphaWriter;
-        if (!alphaWriter.Begin((width + 1) * height)) return false;
-        for (size_t y = 0; y < height; y++) {
-            const uint8_t* const row = alpha + y * width;
-            const uint8_t* const up = y ? row - width : zeros.data();
-            const int filter = Internal::ChoosePngFilter(row, up, width, 1);
-            filtered[0] = (uint8_t)filter;
-            Internal::FilterPngRow(filter, row, up, width, 1, filtered + 1);
-            if (!alphaWriter.Write(filtered, width + 1)) return false;
+        // Row y's residuals replace its values, which only row y + 1, already filtered, reads.
+        uint8_t* const residuals = decoded;
+        for (size_t y = height; y-- > 0;) {
+            uint8_t* const line = alpha + y * (width + 1);
+            const uint8_t* const up = y ? line - width : zeros.data();
+            const int filter = Internal::ChoosePngFilter(line + 1, up, width, 1);
+            Internal::FilterPngRow(filter, line + 1, up, width, 1, residuals);
+            line[0] = (uint8_t)filter;
+            std::memcpy(line + 1, residuals, width);
         }
-        if (!alphaWriter.Finish(result.maskStream)) return false;
+        if (!CompressImageRows(alpha, (width + 1) * height, result.maskStream)) return false;
         result.maskFilter = "/FlateDecode";
         result.maskDecodeParms = BuildPngPredictorDecodeParms(png.width, 1);
     }
     image = std::move(result);
     return true;
 }
-#else
-static bool BuildDecodedPngImageWithZlib(const PngInfo&, PdfImage&) {
-    return false;
-}
-#endif
 
 static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image);
 
@@ -2910,7 +2862,7 @@ static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image) {
     PngInfo png;
     if (!ParsePngChunks(bytes, png)) return false;
     if (BuildFastPngImage(png, image)) return true;
-    if (BuildDecodedPngImageWithZlib(png, image)) return true;
+    if (BuildDecodedPngImage(png, image)) return true;
     return BuildDecodedImageWithWic(bytes, image);
 }
 

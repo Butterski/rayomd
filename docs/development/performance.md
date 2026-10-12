@@ -1304,6 +1304,72 @@ Measured and not taken (see Measured opportunities): exact cell reservation in t
 an SSE2 scan of PDF literal strings, SSE2 runs of ASCII in UTF-8 decoding, and a static build
 against musl.
 
+## Image re-encoding, October 2026
+
+A PNG with transparency is the slowest thing RayoMD exports: 4.0 took 27 ms for the 1024x1024
+RGBA mascot, all but 1 ms of it decoding and re-encoding the image, 63 % of that in zlib. Every
+stage was measured against the alternatives, in process (`DecodeImageBytes` on the PNG's bytes,
+the image cache bypassed, 1,000 iterations, p50 and p95) and as cold `--export` processes
+(medians of 60), on 2026-10-13 with g++ 13.3 in Docker, Ryzen 5 PRO 4650GE, one pinned CPU.
+Seven RGBA images: the mascot, the README's screenshot, and five generated with different
+entropy and transparency (a noisy photo with an alpha ramp, soft shadows, sparse sprites, an
+opaque photo stored as RGBA, a 2048x2048 flat illustration with anti-aliased edges).
+
+The image is now inflated whole by libdeflate's decompressor (vendored, `third_party/libdeflate`)
+instead of zlib, its colour split from alpha sixteen pixels at a time in SSE2, and both planes
+compressed by RayoMD's own encoder in an image mode (`ZlibCompressImage`) instead of zlib's
+level 1. Every re-encoded stream changes and every test image shrinks; no pixel changes.
+
+| Image | 4.0 p50 / p95 | Now p50 / p95 | Speed-up | Streams 4.0 → now |
+| --- | ---: | ---: | ---: | ---: |
+| mascot, 1024x1024 | 23.72 / 24.00 ms | 10.10 / 10.27 ms | 2.35x | 301.6 → 238.6 KiB |
+| screenshot, 1086x753 | 8.24 / 8.33 ms | 4.77 / 4.95 ms | 1.73x | 69.9 → 61.6 KiB |
+| soft shadows, 1024x1024 | 18.88 / 19.01 ms | 10.19 / 10.38 ms | 1.85x | 218.6 → 159.2 KiB |
+| sparse sprites, 1024x1024 | 16.52 / 16.62 ms | 6.72 / 6.93 ms | 2.46x | 30.7 → 15.6 KiB |
+| opaque photo as RGBA, 1024x1024 | 73.63 / 75.37 ms | 17.82 / 18.03 ms | 4.13x | 1999.3 → 1896.2 KiB |
+| noisy photo, 1024x1024 | 93.51 / 94.06 ms | 21.55 / 21.74 ms | 4.34x | 2822.8 → 2798.4 KiB |
+| illustration, 2048x2048 | 58.70 / 59.05 ms | 29.17 / 29.37 ms | 2.01x | 252.3 → 143.0 KiB |
+
+Cold exports (files on the host's `/tmp`): the mascot alone 27.30 → 15.35 ms (-43.8 %),
+`tester.md` without its remote and missing images 28.17 → 16.26 ms (-42.3 %), the noisy photo
+106.96 → 36.27 ms, a short ASCII document 0.90 → 0.84 ms, as the executable no longer loads
+`libz.so`. Inflating whole raises an image's peak heap by 2.4 to 11.3 MiB (the mascot 6.1 → 8.5
+MiB): the filtered colour rows are written back into the inflated rows' buffer, behind the row
+being read, so no third plane is allocated. The Linux executable grows from 1,215,464 to
+1,227,776 bytes and needs only libc and libm; the Windows one grows by 19,968 bytes, and its
+transparent PNGs no longer go through WIC (decoded, re-encoded as PNGs, parsed again), which
+was not timed here.
+
+Stage by stage, mascot, 4.0 → now: inflate 7.5 → 1.3 ms, unfiltering and splitting 2.8 → 1.5,
+filter choice and filtering 2.7 → 2.6 (the same SSE2 code), compression 12.0 → 4.9 (colour 4.2,
+alpha 0.7). The 4.0 stages are those of the same pipeline staged, its streams byte for byte.
+
+Measured and not taken:
+
+| Alternative | Why it lost |
+| --- | --- |
+| zlib at levels 3, 6, 9 | up to 18 times the time of level 1 (mascot 32, 72 and 443 ms) for streams 0 to 61 % smaller; level 3 writes larger streams than RayoMD's encoder on all seven images. |
+| zlib-ng 2.3.3, level 1 | compression 2.9 times as fast as zlib's, but streams 16 to 72 % larger than zlib's level 1 (mascot 412 KiB). Level 3 is within -6 to +14 % of RayoMD's encoder in size at 1.7 to 8 times its time. |
+| libdeflate 1.26's compressor, levels 1 to 12 | level 1 is barely faster than zlib's (mascot 11.3 against 12.0 ms) for streams -4 to +12 % of RayoMD's; level 12 takes 0.2 to 5 s. |
+| ISA-L 2.31 (igzip), levels 0 to 3 | the fastest compressor (mascot 2.5 ms against 4.9), but streams 0 to 33 % larger than RayoMD's, and it is NASM assembly, not a small dependency to vendor. |
+| zlib-ng and ISA-L inflate | 2.1 and 2.3 ms on the mascot against libdeflate's 1.75. |
+| Wuffs v0.4 PNG decoder | 6.2 ms from PNG to colour and alpha planes on the mascot, against 4.6 for libdeflate with RayoMD's unfiltering and split (both splitting a byte at a time). |
+| fixed filters None, Sub, Up or Paeth | 6 to 20 % less time than choosing per row, but streams up to 2.7 times as large (soft shadows with None); the best, Up, is still 31 % larger on the sparse sprites. |
+| uncompressed streams | the mascot in 10.7 ms, as a 4 MiB PDF. |
+| SSSE3 or AVX2 RGBA split | 0.43 and 0.46 ms per megapixel against 0.45 for SSE2, which needs no CPU dispatch. |
+| the 4-byte table in image mode | `ZlibCompress` as it is for page text: 6.4 times the time on the opaque photo; streams as large on four images, larger on two, smaller only on the screenshot (61 against 62 KiB). |
+
+Checks: `verify_cli.py` decodes every image and soft mask of 60 generated PNGs (RGBA, grey and
+alpha, palette and tRNS, RGB and grey with a transparent colour, opaque RGBA; every row filter;
+widths 1 to 130 around the SSE2 steps) with Python's zlib and a textbook unfilter and compares
+every pixel, and fails on a build with two SSE2 loads swapped. Core check `CheckCompression`
+round-trips both encoder modes through libdeflate and an Adler-32 of its own. 1,279 hostile
+PNGs (flipped and truncated deflate data, bad checksums and headers, wrong sizes, bad filters
+and palette indices) fail or decode exactly as with 4.0, under AddressSanitizer and UBSan.
+Every PDF without such a PNG is byte-identical (108 corpus PDFs in three styles, with
+`--compress`, `--page-numbers` and `--toc`), and warm builds of text are within 0.01 % of their
+instructions.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1463,12 +1529,6 @@ artifact and then its text in its TD: two marked-content sequences a cell, and t
 table fixture runs 2.1 times as long as with `--pdfa`. Painting a row's borders first, in one
 artifact, then its cells' text would halve the sequences; it changes the order of RenderTable's
 loop, which untagged documents must not pay for.
-
-**zlib in image re-encoding.** After the 4.0 work, zlib's deflate and inflate are 63 % of a
-1024x1024 RGBA image's export, the filter choice 13.9 %, unfiltering 6.4 %, splitting colour
-from alpha 6.3 %, the Adler-32 3.4 % (2026-10-12). A faster compressor (libdeflate, zlib-ng's
-level 1) writes different streams, so the PDF bytes change; a faster decompressor would not,
-but adds a dependency.
 
 **CID hex text.** `WriteHexText` is still 11.7 to 15.9 % of a warm Unicode build after its
 pair table (2026-10-12): per character a glyph lookup and a bitset insertion, scattered loads

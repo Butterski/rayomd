@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ fonts-dejavu-core libcurl4-openssl-dev zlib1g-dev
+          sudo apt-get install -y cmake g++ fonts-dejavu-core libcurl4-openssl-dev
       - name: Configure
         run: cmake -S . -B build/linux -DCMAKE_BUILD_TYPE=Release -DRAYOMD_USE_CURL=OFF
       - name: Build

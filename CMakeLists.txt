@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" RAYOMD_VERSION LIMIT_COUNT 1)
-project(rayomd VERSION ${RAYOMD_VERSION} LANGUAGES CXX)
+project(rayomd VERSION ${RAYOMD_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,10 +13,10 @@ option(RAYOMD_USE_CURL "Use libcurl for HTTP/HTTPS image URLs on non-Windows" OF
 option(RAYOMD_ENABLE_LTO "Enable interprocedural optimization for measured release experiments" OFF)
 option(RAYOMD_ENABLE_PROFILING "Enable phase timing and allocation counters" OFF)
 option(RAYOMD_ENABLE_TSAN "Enable ThreadSanitizer on supported non-Windows builds" OFF)
-# A fully static Linux CLI, glibc and zlib linked in: no runtime dependency and a process that
-# starts about 0.3 ms sooner, for about 0.9 MB more executable. The release ships it beside the
-# default build. musl instead of glibc was 0.9 MB smaller but its allocator slowed exports.
-option(RAYOMD_STATIC "Link the Linux CLI fully statically, glibc and zlib included" OFF)
+# A fully static Linux CLI, glibc linked in: no runtime dependency and a process that starts
+# about 0.3 ms sooner, for about 0.9 MB more executable. The release ships it beside the default
+# build. musl instead of glibc was 0.9 MB smaller but its allocator slowed exports.
+option(RAYOMD_STATIC "Link the Linux CLI fully statically, glibc included" OFF)
 if(RAYOMD_STATIC AND (WIN32 OR APPLE))
     message(FATAL_ERROR "RAYOMD_STATIC is for Linux; Windows release builds are static already.")
 endif()
@@ -149,6 +149,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(src/core/flate.cpp src/core/highlight.cpp PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
 endif()
 
+# libdeflate's decompressor (third_party/libdeflate, v1.26, the files it needs and unchanged)
+# inflates the PNGs that RayoMD re-encodes, 1.2 to 6.2 times as fast as zlib on the test images
+# (2026-10-13, docs/development/performance.md). RayoMD's own encoder (src/core/flate.cpp) writes
+# every stream, so no other DEFLATE library is linked.
+add_library(rayomd_inflate STATIC
+    third_party/libdeflate/lib/deflate_decompress.c
+    third_party/libdeflate/lib/utils.c
+    third_party/libdeflate/lib/x86/cpu_features.c)
+target_include_directories(rayomd_inflate PUBLIC third_party/libdeflate)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(rayomd_inflate PRIVATE
+        $<$<CONFIG:Release>:-O2>
+        $<$<CONFIG:Release>:-ffunction-sections>
+        $<$<CONFIG:Release>:-fdata-sections>)
+endif()
+
 if(WIN32)
     enable_language(RC)
     add_executable(rayomd WIN32
@@ -208,11 +224,11 @@ if(WIN32)
     target_include_directories(rayomd PRIVATE include . third_party third_party/imgui)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_link_libraries(rayomd PRIVATE
-            dxgi windowscodecs Threads::Threads)
+            dxgi windowscodecs rayomd_inflate Threads::Threads)
     else()
         target_link_libraries(rayomd PRIVATE
             d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi
-            winhttp windowscodecs ws2_32 Threads::Threads)
+            winhttp windowscodecs ws2_32 rayomd_inflate Threads::Threads)
     endif()
     rayomd_simdutf(rayomd)
     rayomd_common_definitions(rayomd)
@@ -222,11 +238,6 @@ else()
     if(RAYOMD_USE_CURL)
         find_package(CURL REQUIRED)
     endif()
-    if(RAYOMD_STATIC)
-        set(CMAKE_FIND_LIBRARY_SUFFIXES .a)   # libz.a: FindZLIB takes ZLIB_USE_STATIC_LIBS from CMake 3.24 only
-    endif()
-    find_package(ZLIB QUIET)
-
     add_executable(rayomd
         src/core/tiny_pdf.cpp
         src/core/theme.cpp
@@ -251,14 +262,10 @@ else()
         src/cli/main_cli.cpp
     )
     target_include_directories(rayomd PRIVATE include)
-    target_link_libraries(rayomd PRIVATE Threads::Threads)
+    target_link_libraries(rayomd PRIVATE rayomd_inflate Threads::Threads)
     if(RAYOMD_USE_CURL)
         target_link_libraries(rayomd PRIVATE CURL::libcurl)
         target_compile_definitions(rayomd PRIVATE RAYOMD_USE_CURL=1)
-    endif()
-    if(ZLIB_FOUND)
-        target_link_libraries(rayomd PRIVATE ZLIB::ZLIB)
-        target_compile_definitions(rayomd PRIVATE RAYOMD_USE_ZLIB=1)
     endif()
     rayomd_simdutf(rayomd)
     rayomd_common_definitions(rayomd)
@@ -293,12 +300,9 @@ if(BUILD_TESTING)
         src/common/file_io.cpp)
     target_include_directories(rayomd-core-tests PRIVATE include)
     target_compile_definitions(rayomd-core-tests PRIVATE RAYOMD_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(rayomd-core-tests PRIVATE Threads::Threads)
+    target_link_libraries(rayomd-core-tests PRIVATE rayomd_inflate Threads::Threads)
     if(WIN32)
         target_link_libraries(rayomd-core-tests PRIVATE ole32 winhttp windowscodecs ws2_32)
-    elseif(ZLIB_FOUND)
-        target_link_libraries(rayomd-core-tests PRIVATE ZLIB::ZLIB)
-        target_compile_definitions(rayomd-core-tests PRIVATE RAYOMD_USE_ZLIB=1)
     endif()
     rayomd_release_flags(rayomd-core-tests)
     rayomd_experiments(rayomd-core-tests)

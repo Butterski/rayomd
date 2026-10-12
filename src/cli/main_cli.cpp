@@ -806,11 +806,6 @@ int RunDoctor() {
 #else
     facts += "platform=linux\n";
 #endif
-#ifdef RAYOMD_USE_ZLIB
-    facts += "zlib=enabled\n";
-#else
-    facts += "zlib=disabled\n";
-#endif
 #ifdef RAYOMD_USE_CURL
     facts += "curl=enabled\n";
 #else

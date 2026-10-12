@@ -122,7 +122,7 @@ rayomd.exe --export input.md output.pdf
 <details>
 <summary><b>Build from source</b></summary>
 
-A C++17 compiler and CMake; on Linux also `zlib1g-dev` and a TrueType font such as
+A C and C++17 compiler and CMake; on Linux also a TrueType font such as
 `fonts-dejavu-core`. On Windows add `-G "MinGW Makefiles"`.
 
 ```sh

@@ -139,7 +139,8 @@ Important image/link details:
 - URL images are controlled by `BuildOptions::enableUrlImages`.
 - Windows image support uses WinHTTP/WIC through the Win32 build.
 - Linux URL images use libcurl when `RAYOMD_USE_CURL` is defined.
-- PNG alpha support can use zlib when `RAYOMD_USE_ZLIB` is defined.
+- PNGs with transparency are inflated by the vendored libdeflate decompressor and
+  re-encoded by RayoMD's own encoder (`flate.cpp`), on every platform; no zlib.
 - Failed images should degrade to useful fallback text instead of failing the
   whole conversion.
 - An SVG image (a file or URL) is converted by `src/core/svg.cpp`, without a
@@ -246,8 +247,9 @@ Important image/link details:
   Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows.
 
 - `src/core/flate.h` and `src/core/flate.cpp`
-  The DEFLATE/zlib encoder behind `--compress`: greedy matching over two hash
-  tables, per-block stored/fixed/dynamic choice by exact bit count, SSE2 Adler-32.
+  The DEFLATE/zlib encoder behind `--compress` and every re-encoded image: greedy
+  matching over two hash tables (`ZlibCompressImage` searches only the 8-byte one),
+  per-block stored/fixed/dynamic choice by exact bit count, SSE2 Adler-32.
   Output depends only on the input. Its tables live per thread in
   `tiny_pdf.cpp` (`ThreadFlateWork`) and are never cleared between streams. Built
   at `-O2`: within 1 % of `-O3` at half the code.
@@ -302,6 +304,11 @@ Important image/link details:
 - `third_party/simdutf/`
   Optional vendored simdutf experiment. It is OFF by default because measured
   results were mixed or slower.
+
+- `third_party/libdeflate/`
+  libdeflate v1.26's decompressor, the files it needs and unchanged (MIT). It inflates
+  the PNGs RayoMD re-encodes, through `InflateZlibStream` in `tiny_pdf.cpp`; RayoMD
+  checks the zlib header and Adler-32 itself. Its compressor is not vendored.
 
 - `tester.md`
   Main hand-written smoke/regression document. It covers Unicode text, inline
@@ -359,8 +366,8 @@ cmake --build build/linux --config Release
 The default Linux build intentionally avoids a libcurl runtime dependency. Use
 `-DRAYOMD_USE_CURL=ON` only when producing a Linux build that should fetch
 HTTP/HTTPS images and can target a known distro/libcurl baseline. Release builds link
-libstdc++ and libgcc statically, so the binary needs only libc, libm and libz.
-`-DRAYOMD_STATIC=ON` links glibc and zlib in as well: the `-static` release asset, about
+libstdc++ and libgcc statically, so the binary needs only libc and libm.
+`-DRAYOMD_STATIC=ON` links glibc in as well: the `-static` release asset, about
 0.9 MB larger and 0.3 ms faster to start, with no runtime dependency.
 
 Cross-platform CLI verification (after building):
@@ -437,9 +444,10 @@ GitHub CI entry points:
   its 128 KB width cache relies on starting zeroed. Never put one on the stack. The cache
   is read by code point (`CodepointWidth`) and by CID (`WidthForCid`); both must keep the
   rule of `CidForCodepoint`.
-- PNG re-encoding streams rows through zlib with RayoMD writing the zlib header and
-  Adler-32 (`RayoMd::Flate::Adler32`); keep compress2's parameters (level 1, 32 KB window,
-  memory level 8) and no flushes, or the image streams change.
+- A PNG with transparency is inflated whole (libdeflate, to its exact size; RayoMD checks
+  the header and Adler-32), its filtered colour rows written back into that buffer behind
+  the row being read, and compressed with `ZlibCompressImage`. The encoder, its mode and the
+  filter heuristic all decide the image bytes; change them only on purpose.
 - `WriteFixed2` may write one byte past the end it returns, within the
   `kFixed2MaxChars` every caller must leave.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document

@@ -6,8 +6,10 @@ import argparse
 import json
 import os
 from pathlib import Path
+import random
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -284,6 +286,154 @@ def verify_compression(binary: Path, root: Path) -> None:
         raise AssertionError(f"--compress: {compressed} streams compressed, {len(plain)} -> {len(packed)} bytes")
 
 
+def paeth(a: int, b: int, c: int) -> int:
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    return b if pb <= pc else c
+
+
+def png_predict(row: bytes, prev: bytes, bpp: int, kind: int, sign: int) -> bytes:
+    """A PNG row filter (sign -1) or its inverse (sign 1), as the specification writes them."""
+    out = bytearray(len(row))
+    source = out if sign > 0 else row
+    for x in range(len(row)):
+        a = source[x - bpp] if x >= bpp else 0
+        b = prev[x]
+        c = prev[x - bpp] if x >= bpp else 0
+        predictor = (0, a, b, (a + b) // 2, paeth(a, b, c))[kind]
+        out[x] = (row[x] + sign * predictor) & 255
+    return bytes(out)
+
+
+def png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+
+def png_file(width: int, height: int, color_type: int, rows: list[bytes], extra: bytes) -> bytes:
+    """An 8-bit PNG of `rows`, each row under filter y % 5, with the chunks `extra` before its data."""
+    bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+    filtered = bytearray()
+    prev = bytes(len(rows[0]))
+    for y, row in enumerate(rows):
+        filtered.append(y % 5)
+        filtered += png_predict(row, prev, bpp, y % 5, -1)
+        prev = row
+    header = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + extra
+            + png_chunk(b"IDAT", zlib.compress(bytes(filtered), 9)) + png_chunk(b"IEND", b""))
+
+
+def pdf_image_planes(data: bytes) -> dict[int, tuple[bytes, bytes | None]]:
+    """By width: every image of a PDF but soft masks, as its colour bytes and those of its soft
+    mask, each inflated (zlib) and its /Predictor 15 rows unfiltered."""
+    objects = {}
+    at = 0
+    while match := re.compile(rb"(\d+) 0 obj\n").search(data, at):
+        start = match.end()
+        stream = data.find(b"\nstream\n", start)
+        end = data.find(b"\nendobj\n", start)
+        if stream == -1 or end < stream:
+            at = end
+            continue
+        dictionary = data[start:stream]
+        length = int(re.search(rb"/Length (\d+)", dictionary).group(1))
+        objects[int(match.group(1))] = (dictionary, data[stream + 8:stream + 8 + length])
+        at = stream + 8 + length
+
+    def plane(dictionary: bytes, payload: bytes) -> bytes:
+        width = int(re.search(rb"/Width (\d+)", dictionary).group(1))
+        height = int(re.search(rb"/Height (\d+)", dictionary).group(1))
+        colors = 3 if b"/DeviceRGB" in dictionary else 1
+        if b"/FlateDecode" not in dictionary or b"/Predictor 15" not in dictionary:
+            raise AssertionError(f"image not a /Predictor 15 Flate stream: {dictionary!r}")
+        rows = zlib.decompress(payload)
+        row_bytes = width * colors
+        if len(rows) != (row_bytes + 1) * height:
+            raise AssertionError(f"image rows of the wrong size: {dictionary!r}")
+        out = bytearray()
+        prev = bytes(row_bytes)
+        for y in range(height):
+            line = rows[y * (row_bytes + 1):(y + 1) * (row_bytes + 1)]
+            prev = png_predict(line[1:], prev, colors, line[0], 1)
+            out += prev
+        return bytes(out)
+
+    masks = {int(n) for dictionary, _ in objects.values() for n in re.findall(rb"/SMask (\d+) 0 R", dictionary)}
+    images = {}
+    for number, (dictionary, payload) in objects.items():
+        if b"/Subtype /Image" not in dictionary or number in masks:
+            continue
+        mask = re.search(rb"/SMask (\d+) 0 R", dictionary)
+        width = int(re.search(rb"/Width (\d+)", dictionary).group(1))
+        images[width] = (plane(dictionary, payload), plane(*objects[int(mask.group(1))]) if mask else None)
+    return images
+
+
+def verify_png_lossless(binary: Path, root: Path) -> None:
+    """PNGs with transparency are re-encoded without loss: inflated with Python's zlib and
+    unfiltered, a PDF image and its /SMask give back every source pixel's colour and alpha. Every
+    kind of PNG with alpha, every row filter in the source, and widths around the steps of the
+    RGBA split (16 pixels, then 2); an opaque RGBA image gets no soft mask."""
+    rng = random.Random(20261013)
+    widths = (1, 2, 3, 15, 16, 17, 18, 33, 47, 130)
+    palette = bytes(rng.randrange(256) for _ in range(3 * 40))
+    trns = bytes(rng.choice((0, 255, rng.randrange(256))) for _ in range(25))   # fewer entries than the palette
+    kinds = {"rgba": 6, "rgba-opaque": 6, "gray-alpha": 4, "palette": 3, "rgb-key": 2, "gray-key": 0}
+    for name, color_type in kinds.items():
+        folder = root / f"png-{name}"
+        folder.mkdir()
+        expected = {}
+        for width in widths:
+            height = 7
+            colors, alphas, rows = bytearray(), bytearray(), []
+            for y in range(height):
+                row = bytearray()
+                for x in range(width):
+                    value = (x * 7 + y * 13) & 255 if (x + y) % 3 else rng.randrange(256)
+                    alpha = 255 if name == "rgba-opaque" else rng.choice((0, 255, rng.randrange(256), (x * 9) & 255))
+                    if color_type == 6:
+                        pixel = bytes((value, rng.randrange(256), 255 - value))
+                        row += pixel + bytes((alpha,))
+                    elif color_type == 4:
+                        pixel = bytes((value,))
+                        row += pixel + bytes((alpha,))
+                    elif color_type == 3:
+                        index = value % 40
+                        row.append(index)
+                        pixel = palette[3 * index:3 * index + 3]
+                        alpha = trns[index] if index < len(trns) else 255
+                    elif color_type == 2:
+                        pixel = bytes((10, 20, 30)) if x % 4 == 1 else bytes((value, value ^ 85, 30))
+                        row += pixel
+                        alpha = 0 if pixel == bytes((10, 20, 30)) else 255
+                    else:
+                        pixel = bytes((77,)) if x % 4 == 1 else bytes((value if value != 77 else 78,))
+                        row += pixel
+                        alpha = 0 if pixel == bytes((77,)) else 255
+                    colors += pixel
+                    alphas.append(alpha)
+                rows.append(bytes(row))
+            extra = b""
+            if color_type == 3:
+                extra = png_chunk(b"PLTE", palette) + png_chunk(b"tRNS", trns)
+            elif color_type in (0, 2):
+                extra = png_chunk(b"tRNS", bytes((0, 10, 0, 20, 0, 30)) if color_type == 2 else bytes((0, 77)))
+            (folder / f"w{width}.png").write_bytes(png_file(width, height, color_type, rows, extra))
+            expected[width] = (bytes(colors), None if all(a == 255 for a in alphas) else bytes(alphas))
+        source = folder / "images.md"
+        source.write_text("".join(f"![w{width}](w{width}.png)\n\n" for width in widths), encoding="utf-8")
+        pdf = folder / "images.pdf"
+        run(binary, "--export", str(source), str(pdf))
+        images = pdf_image_planes(require_pdf(pdf))
+        for width, (colors, alphas) in expected.items():
+            if width not in images:
+                raise AssertionError(f"PNG {name} {width} px wide: no image in the PDF")
+            if images[width] != (colors, alphas):
+                raise AssertionError(f"PNG {name} {width} px wide: pixels changed in the PDF")
+
+
 def verify(binary: Path, keep: Path | None) -> None:
     binary = binary.resolve()
     if not binary.is_file():
@@ -321,6 +471,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         if b"--page-size must be" not in bad_size.stdout or bad_size_pdf.exists():
             raise AssertionError("an invalid --page-size was not rejected")
         verify_compression(binary, root)
+        verify_png_lossless(binary, root)
         verify_theme(binary, root)
         verify_pdfa(binary, root)
         verify_footnotes(binary, root)

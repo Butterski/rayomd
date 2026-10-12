@@ -66,8 +66,7 @@ jobs:
             cmake \
             g++ \
             fonts-dejavu-core \
-            libcurl4-openssl-dev \
-            zlib1g-dev
+            libcurl4-openssl-dev
 
       - name: Build default Linux CLI
         run: |

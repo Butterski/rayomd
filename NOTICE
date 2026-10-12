@@ -6,6 +6,28 @@ This product includes third-party software:
 - Dear ImGui v1.92.8, licensed under the MIT License. See third_party/imgui/LICENSE.txt.
 - simdutf, licensed under the Apache License 2.0 or the MIT License.
   See third_party/simdutf/LICENSE-APACHE and third_party/simdutf/LICENSE-MIT.
+- libdeflate v1.26 (its decompressor), licensed under the MIT License, in every
+  executable. See third_party/libdeflate/COPYING:
+
+    Copyright 2016 Eric Biggers
+    Copyright 2024 Google LLC
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy of
+    this software and associated documentation files (the "Software"), to deal in the
+    Software without restriction, including without limitation the rights to use, copy,
+    modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+    and to permit persons to whom the Software is furnished to do so, subject to the
+    following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+    INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+    PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+    HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+    CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+    OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Math font metrics are derived from the Adobe Core 14 AFM files, Copyright (c) 1985,
 1987, 1989, 1990, 1993, 1997 Adobe Systems Incorporated. All Rights Reserved. See the
@@ -15,8 +37,6 @@ The release binaries also contain libraries linked into them:
 
 - The GCC runtime libraries (libstdc++, libgcc), licensed under the GNU GPL version 3
   with the GCC Runtime Library Exception, in the Windows and Linux executables.
-- zlib, licensed under the zlib License, in the Linux static edition
-  (rayomd-<version>-linux-x64-static).
 - The GNU C Library, licensed under the GNU LGPL version 2.1 or later, in the Linux
   static edition. Its source is that of the glibc package of the Ubuntu release the
   edition is built on (https://launchpad.net/ubuntu/+source/glibc). RayoMD's complete

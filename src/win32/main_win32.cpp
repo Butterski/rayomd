@@ -1313,11 +1313,6 @@ int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
 int RunDoctor() {
     WriteStdoutLine(std::string("RayoMD doctor ") + RAYOMD_VERSION);
     WriteStdoutLine("platform=windows");
-#ifdef RAYOMD_USE_ZLIB
-    WriteStdoutLine("zlib=enabled");
-#else
-    WriteStdoutLine("zlib=disabled");
-#endif
     WriteStdoutLine("curl=disabled");
     WriteStdoutLine("platform_images=winhttp,wic");
 

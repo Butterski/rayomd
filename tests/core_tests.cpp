@@ -32,9 +32,7 @@
 #include <utility>
 #include <vector>
 
-#ifdef RAYOMD_USE_ZLIB
-#include <zlib.h>
-#endif
+#include "libdeflate.h"
 
 #ifndef RAYOMD_TEST_SOURCE_DIR
 #define RAYOMD_TEST_SOURCE_DIR "."
@@ -1623,14 +1621,29 @@ std::vector<std::pair<std::string, std::string>> PdfStreams(const std::string& p
     return streams;
 }
 
-#ifdef RAYOMD_USE_ZLIB
+// Whether the zlib stream `packed` holds exactly `expected`, checked as zlib's uncompress() would:
+// its header, its deflate data (libdeflate's decompressor) and, computed here a byte at a time,
+// its Adler-32 trailer.
 bool Inflates(std::string_view packed, const std::string& expected) {
-    std::string plain(expected.size() + 1, '\0');
-    uLongf size = plain.size();
-    return uncompress(reinterpret_cast<Bytef*>(&plain[0]), &size, reinterpret_cast<const Bytef*>(packed.data()),
-               packed.size()) == Z_OK && size == expected.size() && plain.compare(0, size, expected) == 0;
+    const auto* in = reinterpret_cast<const uint8_t*>(packed.data());
+    if (packed.size() < 6 || (in[0] & 15) != 8 || ((in[0] << 8) | in[1]) % 31 != 0 || (in[1] & 0x20)) return false;
+    std::string plain(expected.size(), '\0');
+    libdeflate_decompressor* const decompressor = libdeflate_alloc_decompressor();
+    size_t consumed = 0;
+    size_t size = 0;
+    const bool inflated = decompressor && libdeflate_deflate_decompress_ex(decompressor, in + 2, packed.size() - 2,
+        &plain[0], plain.size(), &consumed, &size) == LIBDEFLATE_SUCCESS;
+    libdeflate_free_decompressor(decompressor);
+    uint32_t a = 1;
+    uint32_t b = 0;
+    for (unsigned char ch : plain) {
+        a = (a + ch) % 65521;
+        b = (b + a) % 65521;
+    }
+    const uint8_t* const trailer = in + 2 + consumed;
+    return inflated && size == expected.size() && plain == expected && packed.size() == consumed + 6 &&
+        ((uint32_t)trailer[0] << 24 | (uint32_t)trailer[1] << 16 | (uint32_t)trailer[2] << 8 | trailer[3]) == (b << 16 | a);
 }
-#endif
 
 // --compress: every content stream, font program and CMap is FlateDecode where that makes it
 // smaller and inflates to what the uncompressed PDF has, the font keeping its own size as
@@ -1638,9 +1651,8 @@ bool Inflates(std::string_view packed, const std::string& expected) {
 // the thread compressed before, nor on other threads compressing at the same time, and the
 // reversible profile still recovers its source. In both renderers.
 bool CheckCompression() {
-#ifdef RAYOMD_USE_ZLIB
-    // The encoder alone, at the edges of its blocks, window and match lengths, on runs and on
-    // data it cannot compress, within the size it promises.
+    // The encoder alone, in both modes, at the edges of its blocks, window and match lengths, on
+    // runs and on data it cannot compress, within the size it promises.
     RayoMd::Flate::Scratch scratch;
     uint64_t seed = 88172645463325252ull;
     const auto next = [&]() {
@@ -1667,14 +1679,15 @@ bool CheckCompression() {
     for (size_t i = skewed.size(); i > 1; i--) std::swap(skewed[i - 1], skewed[next() % i]);
     inputs.push_back(std::move(skewed));
     for (const std::string& input : inputs) {
-        std::string packed(RayoMd::Flate::ZlibBound(input.size()), '\0');
-        packed.resize(RayoMd::Flate::ZlibCompress(input, reinterpret_cast<uint8_t*>(&packed[0]), scratch));
-        if (packed.size() > RayoMd::Flate::ZlibBound(input.size()) - 8 || !Inflates(packed, input)) {
-            std::cerr << "DEFLATE round trip failed for " << input.size() << " bytes" << std::endl;
-            return false;
+        for (const auto compress : { RayoMd::Flate::ZlibCompress, RayoMd::Flate::ZlibCompressImage }) {
+            std::string packed(RayoMd::Flate::ZlibBound(input.size()), '\0');
+            packed.resize(compress(input, reinterpret_cast<uint8_t*>(&packed[0]), scratch));
+            if (packed.size() > RayoMd::Flate::ZlibBound(input.size()) - 8 || !Inflates(packed, input)) {
+                std::cerr << "DEFLATE round trip failed for " << input.size() << " bytes" << std::endl;
+                return false;
+            }
         }
     }
-#endif
     std::string document = "# Packed\n\nA [link](#packed) and `code`.\n\n";
     for (int line = 0; line < 120; line++) document += "Line " + std::to_string(line) + " of words that repeat on every page.\n\n";
     const std::string unicode = "\xD0\x9C\xD0\xBE\xD1\x81\xD0\xBA\xD0\xB2\xD0\xB0 \xCE\x94\n\n" + document;
@@ -1707,9 +1720,7 @@ bool CheckCompression() {
             const size_t font = plainStreams[i].first.find("/Length1 ");
             ok = dictionary.find("/Filter /FlateDecode ") != std::string::npos && payload.size() < plainStreams[i].second.size() &&
                 (font == std::string::npos || dictionary.find(plainStreams[i].first.substr(font)) != std::string::npos);
-#ifdef RAYOMD_USE_ZLIB
             ok = ok && Inflates(payload, plainStreams[i].second);
-#endif
         }
         // At least every page but the last, and for a font its program and both CMaps.
         const size_t pages = CountOccurrences(plain, "/Type /Page ");
