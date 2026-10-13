@@ -418,6 +418,7 @@ struct ZlibReader::State {
                 bl -= TakenBits(entry);
             };
             constexpr uint64_t kRootMask = (1u << kLitLenRoot) - 1;
+            const uint64_t before = base;   // output before the window, constant here
             bool ok = true;
             refill();
             uint32_t entry = lit[bb & kRootMask];
@@ -451,12 +452,9 @@ struct ZlibReader::State {
                     continue;
                 }
                 const uint32_t kind = entry & kKindMask;
-                if (kind == kEnd) {
-                    mode = Mode::Header;
-                    break;
-                }
-                if (kind == kInvalid) {
-                    ok = false;
+                if (kind != kLength) {
+                    if (kind == kEnd) mode = Mode::Header;
+                    else ok = false;
                     break;
                 }
                 // At least 36 bits left for the distance's 15 and 13.
@@ -464,7 +462,7 @@ struct ZlibReader::State {
                 const uint32_t code = Lookup(dist, bb, kDistRoot);
                 const size_t back = ValuePlusExtra(code, bb);
                 consume(code);
-                if ((code & kKindMask) == kInvalid || back > base + o) {   // before the start of the output
+                if ((code & kKindMask) == kInvalid || back > before + o) {   // before the start of the output
                     ok = false;
                     break;
                 }
