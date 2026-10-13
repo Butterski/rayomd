@@ -1103,7 +1103,7 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
             pending.erase(0, pos + 1);
             if (!processLine(line)) {
                 report.Close();
-                return failures == 0 ? 0 : 20;
+                return failures == 0 ? 0 : 10 + GetNativePdfLastError();
             }
         }
     }
