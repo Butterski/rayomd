@@ -82,8 +82,8 @@
 
 namespace TinyPdf {
 
-// ForEachCodepoint sits on the per-glyph path of every Unicode document (text width,
-// CID strings). Keep it inlined into its callers whatever else comes to call them.
+// ForEachCodepoint sits on the per-glyph path of every Unicode document (text widths).
+// Keep it inlined into its callers whatever else comes to call them.
 // This file reaches GCC's inline-unit-growth limit at -O3, so which calls get inlined
 // shifts with any change to it; hot helpers and lambdas say so explicitly.
 // Rare paths (words wider than a line, table rows taller than a page, font discovery) are
@@ -1051,6 +1051,17 @@ static void AppendHex4(std::string& out, uint16_t value) {
     out.append(hex, 4);
 }
 
+// '(' 0x28, ')' 0x29, '\\' 0x5C and CR 0x0D: the bytes a literal string escapes, as 1 in a table.
+static constexpr std::array<uint8_t, 256> MakeLiteralEscapes() {
+    std::array<uint8_t, 256> escapes{};
+    escapes[0x28] = escapes[0x29] = escapes[0x5C] = escapes[0x0D] = 1;
+    return escapes;
+}
+static constexpr std::array<uint8_t, 256> kLiteralEscapes = MakeLiteralEscapes();
+static RAYOMD_HOT_INLINE bool NeedsLiteralEscape(uint8_t byte) {
+    return kLiteralEscapes[byte] != 0;
+}
+
 class UsedCidSet {
 public:
     void Add(uint16_t cid) {
@@ -1061,6 +1072,15 @@ public:
         values.push_back(cid);
         sorted = false;
     }
+
+    // Whether WriteCidText copies code unit `unit` as its CID without a lookup: the font has a
+    // glyph of its own for it, it is recorded, it is no high surrogate and neither byte needs
+    // escaping. A CID shown for a character the font lacks is the code point too, but drawn as '?'
+    // and counted as missing, so it is never plain.
+    RAYOMD_HOT_INLINE bool IsPlain(uint16_t unit) const {
+        return ((plain[unit >> 6] >> (unit & 63)) & 1) != 0;
+    }
+    void MarkPlain(uint16_t unit) { plain[unit >> 6] |= 1ull << (unit & 63); }
 
     const CidList& Values() const {
         if (!sorted) {
@@ -1076,6 +1096,7 @@ public:
 
 private:
     std::array<uint64_t, 1024> bits{};
+    std::array<uint64_t, 1024> plain{};
     mutable CidList values;
     mutable bool sorted = true;
 };
@@ -1089,21 +1110,9 @@ static size_t CidTextBytes(std::wstring_view text) {
     return 2 + text.size() * 4;
 }
 
-// '(' 0x28, ')' 0x29, '\\' 0x5C and CR 0x0D: the bytes a literal string escapes, as 1 in a table,
-// so that a CID takes one test of two loads.
-static constexpr std::array<uint8_t, 256> MakeLiteralEscapes() {
-    std::array<uint8_t, 256> escapes{};
-    escapes[0x28] = escapes[0x29] = escapes[0x5C] = escapes[0x0D] = 1;
-    return escapes;
-}
-static constexpr std::array<uint8_t, 256> kLiteralEscapes = MakeLiteralEscapes();
-static RAYOMD_HOT_INLINE bool NeedsLiteralEscape(uint8_t byte) {
-    return kLiteralEscapes[byte] != 0;
-}
-
-// A CID with a byte to escape: the parentheses and backslashes of the text itself, and the
-// characters whose high or low byte is one of those or CR (U+0D00..U+0DFF, U+2800..U+29FF,
-// U+5C00..U+5CFF, U+xx28 and the like). Out of line, as most CIDs need none.
+// A CID's two bytes, high first, with a backslash before a parenthesis or a backslash and CR as
+// "\r": the parentheses and backslashes of the text itself, and the characters whose high or low
+// byte is one of those or CR (U+0D00..U+0DFF, U+2800..U+29FF, U+5C00..U+5CFF, U+xx28 and the like).
 static char* WriteEscapedCid(char* out, uint16_t cid) {
     for (int shift = 8; shift >= 0; shift -= 8) {
         uint8_t byte = (uint8_t)(cid >> shift);
@@ -1116,30 +1125,61 @@ static char* WriteEscapedCid(char* out, uint16_t cid) {
     return out;
 }
 
+struct CidWritten {
+    char* out;
+    const wchar_t* at;
+};
+
+// WriteCidText for a code unit that is not plain: the code point at `at` (two units for a pair of
+// surrogates), shown as CidForCodepoint shows it, counted when the font lacks it, recorded, and
+// written with backslashes where its bytes need them. Marks the unit plain when it may be copied
+// from now on. Out of line: a document comes here once a character, and for parentheses.
+static RAYOMD_SHARED CidWritten WriteNewCid(char* out, const wchar_t* at, const wchar_t* end, const TtfFont& font,
+    UsedCidSet& usedCids) {
+    uint32_t cp = (uint16_t)*at++;
+    const bool high = cp >= 0xD800 && cp <= 0xDBFF;
+    if (high && at != end) {
+        const uint32_t lo = (uint16_t)*at;
+        if (lo >= 0xDC00 && lo <= 0xDFFF) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+            at++;
+        }
+    }
+    const bool own = cp <= 0xffff && font.HasGlyph(cp);
+    uint16_t cid = (uint16_t)cp;
+    if (!own) {
+        cid = CidForCodepoint(font, cp);
+        usedCids.missing += cp >= 0x20;
+    }
+    usedCids.Add(cid);
+    if (own && !high && !NeedsLiteralEscape((uint8_t)(cid >> 8)) && !NeedsLiteralEscape((uint8_t)cid)) {
+        usedCids.MarkPlain(cid);
+    }
+    return {WriteEscapedCid(out, cid), at};
+}
+
 static char* WriteCidText(char* out, const TtfFont& font, std::wstring_view text, UsedCidSet& usedCids) {
     *out++ = '(';
-    ForEachCodepoint(text, [&](uint32_t cp) {
-        uint16_t cid = (uint16_t)cp;
-        if (cp > 0xffff || !font.HasGlyph(cp)) {
-            cid = CidForCodepoint(font, cp);
-            usedCids.missing += cp >= 0x20;
-        }
-        usedCids.Add(cid);
-        // No high byte below 0x0D needs a backslash: Latin, Greek, Cyrillic and the scripts up to
-        // U+0CFF test their low byte only.
-        if (cid < 0x0D00 ? kLiteralEscapes[cid & 0xff] == 0 : (kLiteralEscapes[cid >> 8] | kLiteralEscapes[cid & 0xff]) == 0) {
+    const wchar_t* at = text.data();
+    const wchar_t* const end = at + text.size();
+    while (at != end) {
+        const uint16_t unit = (uint16_t)*at;
+        if (usedCids.IsPlain(unit)) {
             // High byte first, as one store.
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-            const uint16_t bytes = __builtin_bswap16(cid);
+            const uint16_t bytes = __builtin_bswap16(unit);
 #else
-            const uint16_t bytes = cid;
+            const uint16_t bytes = unit;
 #endif
             memcpy(out, &bytes, 2);
             out += 2;
+            at++;
         } else {
-            out = WriteEscapedCid(out, cid);
+            const CidWritten next = WriteNewCid(out, at, end, font, usedCids);
+            out = next.out;
+            at = next.at;
         }
-    });
+    }
     *out++ = ')';
     return out;
 }
