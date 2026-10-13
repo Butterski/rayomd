@@ -2830,9 +2830,10 @@ bool CheckLatinText() {
 
 // The PNG row filters against the textbook definitions (PNG specification, section 9): the
 // residuals of every filter, the encoder heuristic's choice (least sum of residual magnitudes as
-// signed bytes, the lowest filter on ties), the SSE2 code against its scalar reference, and
-// unfiltering back to the row. Rows of 1 to 4 bytes per pixel and every width around the 16-byte
-// vectors, with patterns that tie, saturate, or favour each filter.
+// signed bytes, the lowest filter on ties), the dispatched code (AVX2 where the CPU has it) and
+// the SSE2 code against the scalar reference, and unfiltering back to the row. Rows of 1 to 4
+// bytes per pixel and every width around the 16- and 32-byte vectors, with patterns that tie,
+// saturate, or favour each filter.
 bool CheckPngFilters() {
     using namespace TinyPdf::Internal;
     uint32_t seed = 20261013u;
@@ -2883,7 +2884,13 @@ bool CheckPngFilters() {
                     FilterPngRow(filter, row.data(), up.data(), rowBytes, bpp, filtered.data());
                     FilterPngRowScalar(filter, row.data(), up.data(), rowBytes, bpp, scalar.data());
                     bool unfiltered = UnfilterPngRow((uint8_t)filter, filtered.data(), up.data(), rowBytes, bpp, back.data());
-                    if (filtered != expected || scalar != expected || !unfiltered || back != row) {
+                    bool sse2 = true;
+#if RAYOMD_PNG_SSE2
+                    std::vector<uint8_t> sse2Filtered(rowBytes, 0);
+                    FilterPngRowSse2(filter, row.data(), up.data(), rowBytes, bpp, sse2Filtered.data());
+                    sse2 = sse2Filtered == expected;
+#endif
+                    if (filtered != expected || scalar != expected || !sse2 || !unfiltered || back != row) {
                         std::cerr << "PNG filter " << filter << " wrong: " << bpp << " bytes per pixel, " << rowBytes
                                   << " bytes, pattern " << pattern << std::endl;
                         return false;
@@ -2895,6 +2902,9 @@ bool CheckPngFilters() {
                 }
                 int chosen = ChoosePngFilter(row.data(), up.data(), rowBytes, bpp);
                 int reference = ChoosePngFilterScalar(row.data(), up.data(), rowBytes, bpp);
+#if RAYOMD_PNG_SSE2
+                if (ChoosePngFilterSse2(row.data(), up.data(), rowBytes, bpp) != best) reference = -1;
+#endif
                 if (chosen != best || reference != best) {
                     std::cerr << "PNG filter choice " << chosen << " / " << reference << ", expected " << best << ": "
                               << bpp << " bytes per pixel, " << rowBytes << " bytes, pattern " << pattern << std::endl;

@@ -1478,6 +1478,21 @@ shadows -6.3 %, the illustration -3.1 %; one CPU within 1 %. 48 such documents i
 -9.4 % with the default workers, -0.7 % with `--workers=12`, 458 → 325 ms with `--workers=1`.
 ThreadSanitizer finds nothing in the core tests, single exports and a four-worker batch.
 
+**AVX2 filter choice.** With decoding now the longer path, choosing and applying the row filters
+was its largest kernel left: 1.8 ms on the mascot's colour, 0.6 on its alpha. Both now run 32
+bytes a step in AVX2 where the CPU has it, compiled with GCC's `target("avx2")` and chosen once by
+`__builtin_cpu_supports`, so the build stays baseline x86-64; the SSE2 code serves the other CPUs
+and MSVC. On the mascot's rows: colour 1.789 → 0.868 ms, alpha 0.581 → 0.345 ms, the same filters
+and bytes. Keeping the four candidate residual rows while scoring and copying the best, instead
+of filtering again, was slower (0.934 and 0.377 ms): the stores cost more than the second pass.
+In process, p50, one CPU: the illustration 29.82 → 24.52 ms (-17.8 %), the mascot 9.91 → 8.67
+(-12.5 %), the sprites -14.6 %, the screenshot -14.4 %; two CPUs: the illustration 25.15 →
+19.74 (-21.5 %), soft shadows -17.0 %, the mascot 6.00 → 5.65 (its colour's compression on the
+other thread is now the longer path). Cold, one CPU: the mascot 13.49 → 12.27 ms (-9.0 %),
+`tester.md` 14.44 → 13.27, the illustration -14.2 %; two CPUs: the mascot 9.25 → 8.76, the
+illustration 27.57 → 23.06. The core test checks the dispatched and the SSE2 code against the
+scalar reference and fails on a build with Paeth's blend swapped.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

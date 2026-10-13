@@ -253,9 +253,10 @@ Important image/link details:
 
 - `src/core/png_filter.cpp`
   PNG row filters: undoing them when a PNG is decoded, choosing and applying them when
-  its pixels are re-encoded for a PDF. SSE2 on x86-64, with the scalar functions kept
-  as the reference and the fallback; core check 99 compares both with the textbook
-  filters.
+  its pixels are re-encoded for a PDF. Choosing and applying in AVX2 where the CPU has it
+  (GCC/Clang `target("avx2")`, chosen once), else SSE2 on x86-64, with the scalar
+  functions kept as the reference and the fallback; core check 99 compares the dispatched,
+  the SSE2 and the scalar code with the textbook filters.
 
 - `src/common/file_io.cpp`
   Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows.
