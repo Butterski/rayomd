@@ -57,7 +57,7 @@ converted. Batches run on up to 64 threads.
 <td width="33%" valign="top">
 
 ### Small
-A **635 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
+A **643 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
 runtime to install.
 
 </td>
@@ -211,11 +211,11 @@ mean of the nine watch-suite documents, pinned; documents with formulas up to 25
 byte for byte those of 3.2.0 on a corpus of 3,353 PDFs. The fully static Linux edition starts
 another 0.3 ms sooner: a short ASCII note in 0.68 ms.
 
-| Release asset | 4.0.0 | 4.1.0 |
-|---|---:|---:|
-| `rayomd-<version>-linux-x64.tar.gz` | 604 KB | 635 KB |
-| `rayomd-<version>-linux-x64-static.tar.gz` | 1,039 KB | 1,027 KB |
-| `rayomd-<version>-windows-x64.zip` (GUI and CLI) | 1,444 KB | 1,474 KB |
+| Release asset | 4.0.0 | 4.1.0 | 4.2.0 |
+|---|---:|---:|---:|
+| `rayomd-<version>-linux-x64.tar.gz` | 604 KB | 635 KB | 643 KB |
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,039 KB | 1,027 KB | 1,039 KB |
+| `rayomd-<version>-windows-x64.zip` (GUI and CLI) | 1,444 KB | 1,474 KB | 1,480 KB |
 
 4.1.0 adds libdeflate's decompressor (MIT) and drops zlib, which the static edition linked in;
 4.2.0 replaces libdeflate with RayoMD's own decoder.
@@ -255,21 +255,21 @@ xychart-beta
     title "tester.md with its PNG, in ms (lower is better)"
     x-axis ["RayoMD", "glu", "Pandoc + Typst", "md-to-pdf", "Pandoc + XeLaTeX"]
     y-axis "Milliseconds" 0 --> 2800
-    bar [9.7, 86, 148, 1745, 2652]
+    bar [7.5, 86, 148, 1745, 2652]
 ```
 
 | Tool | Time |
 |---|---:|
-| **RayoMD** 4.1.0 | **9.7 ms** |
-| glu | 86.5 ms (8.9×) |
-| Pandoc + Typst | 148.5 ms (15×) |
-| md-to-pdf | 1,744.8 ms (180×) |
-| Pandoc + XeLaTeX | 2,651.8 ms (273×) |
+| **RayoMD** 4.2.0 | **7.5 ms** |
+| glu | 86.5 ms (12×) |
+| Pandoc + Typst | 148.5 ms (20×) |
+| md-to-pdf | 1,744.8 ms (233×) |
+| Pandoc + XeLaTeX | 2,651.8 ms (354×) |
 
-RayoMD 4.1.0 was measured on 2026-10-13 in the same container with `--no-image-cache`, so it
-converts the PNG every run, as the other tools do; 4.0.0 took 30.9 ms that day (27.9 ms on
-2026-10-12), and 4.1.0 takes 2.6 ms once the image is in its cache. Without images 4.1.0 is as
-fast as 4.0.0 (1.37 against 1.34 ms that day).
+RayoMD 4.2.0 was measured on 2026-10-13 in the same container with `--no-image-cache`, so it
+converts the PNG every run, as the other tools do; beside it 4.1.0 took 9.5 ms (4.0.0 took
+30.9 ms that day, 27.9 ms on 2026-10-12), and 4.2.0 takes 2.8 ms once the image is in its
+cache. Without images 4.2.0 is as fast as 4.1.0 (1.62 against 1.61 ms).
 
 > [!NOTE]
 > Both documents are `tester.md` without the five lines that test fallbacks: the remote and
