@@ -1514,6 +1514,29 @@ the mascot 6.1 → 8.5 MiB, the illustration 21.0 → 36.3 MiB. Every image deco
 source pixels. The mascot's stages, one CPU, 4.0.0 → now: inflate 7.5 → 1.3 ms, unfiltering and
 splitting 2.8 → 1.5, filter choice and filtering 2.7 → 1.2, compression 12.0 → 4.9.
 
+**Memory.** A new image costs more memory than in 4.0.0, which inflated, unfiltered and
+compressed a row at a time and kept only the alpha plane whole. Now the inflated rows are kept
+whole (4 bytes a pixel plus one a row for RGBA; the filtered colour rows go back into them),
+beside the alpha rows (1 byte a pixel); the first image buffers of a process are rounded up to
+2 MB pages on Linux; and on two CPUs the colour thread has encoder tables of its own. Peak RSS
+of a cold export, one CPU, 4.0.0 → new image → image kept (2026-10-13, `/usr/bin/time`):
+
+| Export | 4.0.0 | New image | Image kept |
+| --- | ---: | ---: | ---: |
+| short ASCII document | 2,992 KiB | 2,832 KiB | 2,916 KiB |
+| the mascot alone | 5,472 KiB | 11,484 KiB | 3,808 KiB |
+| `tester.md`, local images | 6,064 KiB | 12,132 KiB | 4,540 KiB |
+| screenshot | 4,220 KiB | 8,404 KiB | 3,128 KiB |
+| illustration, 2048x2048 | 8,356 KiB | 28,592 KiB | 3,388 KiB |
+| noisy photo | 16,784 KiB | 22,752 KiB | 15,064 KiB |
+| 48 mascot documents, `--batch`, six workers (12 CPUs) | 36,168 KiB | 61,416 KiB | |
+| the same, `--workers=1` | 20,888 KiB | 22,196 KiB | |
+
+Two CPUs add up to 776 KiB (`tester.md`; the illustration 236 KiB). At the size limit,
+`kMaxDecodedImageBytes`, an RGBA image of about 24 million pixels has 96 MiB of inflated rows
+and 24 MiB of alpha rows where 4.0.0 kept the 24 MiB alpha plane alone. A kept image needs no
+decode buffer, so it takes less memory than 4.0.0 did.
+
 Every pipeline measured on the mascot, in process, one CPU unless noted, fastest first:
 
 | Pipeline | p50 | Streams | Status |
