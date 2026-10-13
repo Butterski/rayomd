@@ -1493,10 +1493,66 @@ other thread is now the longer path). Cold, one CPU: the mascot 13.49 → 12.27 
 illustration 27.57 → 23.06. The core test checks the dispatched and the SSE2 code against the
 scalar reference and fails on a build with Paeth's blend swapped.
 
+**Where it ended.** From PNG to finished PDF, cold `--export`, p50, 4.0.0 against `9db72df`
+(2026-10-13, one or two pinned CPUs, 43 runs). A new image is converted; a kept one comes from
+the persistent cache, as a logo or a diagram does from its second export on:
+
+| Document | 4.0.0 | New image, 1 CPU | New image, 2 CPUs | Kept image, 1 CPU |
+| --- | ---: | ---: | ---: | ---: |
+| the mascot alone | 27.31 ms | 12.32 ms (2.2x) | 8.70 ms (3.1x) | 2.18 ms (12.5x) |
+| `tester.md`, local images | 28.08 ms | 13.20 ms (2.1x) | 9.53 ms (2.9x) | 3.02 ms (9.3x) |
+| screenshot | 10.37 ms | 6.54 ms (1.6x) | 5.31 ms (2.0x) | 1.23 ms (8.4x) |
+| soft shadows | 22.06 ms | 12.15 ms (1.8x) | 9.55 ms (2.3x) | 1.81 ms (12.2x) |
+| illustration, 2048x2048 | 63.39 ms | 27.84 ms (2.3x) | 23.12 ms (2.7x) | 1.65 ms (38x) |
+| noisy photo | 106.20 ms | 32.72 ms (3.2x) | 29.11 ms (3.6x) | 14.18 ms (7.5x) |
+| short ASCII, no image | 0.90 ms | 0.85 ms | 0.75 ms | |
+
+In process, the image alone (`DecodeImageBytes`, 1,000 runs, p50 / p95), one CPU: the mascot
+23.72 / 24.00 → 8.66 / 8.80 ms, the illustration 58.70 → 24.47, the noisy photo 93.51 → 20.34;
+two CPUs: 5.66 / 5.85, 19.70 and 17.01 ms. Allocations per image 13 to 23 → 8 to 13; peak heap
+the mascot 6.1 → 8.5 MiB, the illustration 21.0 → 36.3 MiB. Every image decodes back to its
+source pixels. The mascot's stages, one CPU, 4.0.0 → now: inflate 7.5 → 1.3 ms, unfiltering and
+splitting 2.8 → 1.5, filter choice and filtering 2.7 → 1.2, compression 12.0 → 4.9.
+
+Every pipeline measured on the mascot, in process, one CPU unless noted, fastest first:
+
+| Pipeline | p50 | Streams | Status |
+| --- | ---: | ---: | --- |
+| kept image (cold, whole export) | 2.18 ms | 238.6 KiB | kept: the cache |
+| libdeflate inflate, RayoMD image mode, SSE2 split, AVX2 filters, colour on a second thread (2 CPUs) | 5.66 ms | 238.6 KiB | kept |
+| the same, one CPU | 8.66 ms | 238.6 KiB | kept |
+| libdeflate inflate, ISA-L level 1, alpha on a second thread (1 CPU, scalar split) | 10.1 ms | 277.1 KiB | rejected: larger, NASM dependency |
+| libdeflate inflate, RayoMD image mode, SSE2 split (13537ab) | 10.10 ms | 238.6 KiB | superseded |
+| uncompressed streams | 10.72 ms | 4096 KiB | rejected: 17 times the size |
+| libdeflate inflate, RayoMD text mode | 12.8 ms | 246.4 KiB | superseded by the image mode |
+| zlib inflate, ISA-L levels 0 to 2 | 15.2 to 15.5 ms | 277 to 325 KiB | rejected |
+| zlib inflate, zlib-ng level 1 | 16.98 ms | 412.4 KiB | rejected: 73 % larger |
+| zlib inflate, RayoMD text mode | 18.42 ms | 246.4 KiB | superseded |
+| Wuffs decoder, zlib level 1 | 20.77 ms | 301.6 KiB | rejected |
+| zlib inflate, zlib-ng level 3 | 21.41 ms | 257.3 KiB | rejected |
+| 4.0.0: zlib inflate, zlib level 1 | 23.72 ms | 301.6 KiB | baseline |
+| zlib inflate, libdeflate level 1 | 24.16 ms | 260.3 KiB | rejected |
+| zlib inflate, ISA-L level 3 | 26.76 ms | 277.4 KiB | rejected |
+| zlib inflate, zlib level 3 | 32.11 ms | 286.1 KiB | rejected |
+| zlib inflate, libdeflate levels 3 to 12 | 34.1 ms to 0.91 s | 213 to 251 KiB | rejected |
+| zlib inflate, zlib-ng level 6 | 38.40 ms | 244.3 KiB | rejected |
+| zlib inflate, zlib level 6 | 72.41 ms | 245.2 KiB | rejected |
+| zlib inflate, zlib-ng and zlib level 9 | 230 and 443 ms | 234 KiB | rejected |
+
+Fixed filters, SSSE3 and AVX2 splits, the 4-byte table in image mode, fused filter scoring, huge
+pages for the compressor's output and for every buffer of a long process are in the paragraphs
+above, with why each lost.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
 they were not taken yet. Add to this list when a change turns one up.
+
+**RayoMD's encoder against ISA-L.** After the image work, compressing the colour is the longest
+stage of a new image: 4.2 ms of the mascot's 8.7 on one CPU, where ISA-L's level 1 takes 2.5 ms
+for streams 16 % larger (2026-10-13). ISA-L's speed is hand-written assembly over a single
+hash probe; a C version of its parse in the image mode would have to keep RayoMD's stream sizes
+to be worth taking.
 
 **Plain code blocks without a vector per line.** `RenderCode` wraps each line with
 `WrapAsciiLiteral` or `WrapCodeLine`, which return a vector of strings: two
