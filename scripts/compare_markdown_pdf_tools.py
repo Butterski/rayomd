@@ -14,6 +14,8 @@ import platform
 import shutil
 import statistics
 import subprocess
+import tempfile
+import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -154,35 +156,56 @@ def valid_pdf(path: Path) -> int:
     return len(data)
 
 
+def run_with_watchdog(command: list[str], timeout: int, cwd: Path | None) -> tuple[int | None, float, str]:
+    """Runs `command` and returns (exit code or None on timeout, milliseconds, stderr tail).
+
+    The timeout is a timer thread that kills the process, and the wait has none: a wait with a
+    timeout polls, which added about 1.1 ms to a 1.5 ms process on one pinned CPU (Python 3.14)."""
+    expired = threading.Event()
+    running: list[subprocess.Popen] = []
+
+    def expire() -> None:
+        expired.set()
+        if running:
+            running[0].kill()
+
+    with tempfile.TemporaryFile() as stderr:
+        timer = threading.Timer(timeout, expire)
+        timer.start()
+        try:
+            started = time.perf_counter()
+            proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=stderr, cwd=cwd)
+            running.append(proc)
+            if expired.is_set():
+                proc.kill()
+            returncode = proc.wait()
+            elapsed = (time.perf_counter() - started) * 1000
+        finally:
+            timer.cancel()
+        stderr.seek(0)
+        tail = stderr.read()[-4000:].decode("utf-8", "replace")
+    return (None if expired.is_set() else returncode), elapsed, tail
+
+
 def measure(name: str, command: list[str], output: Path, runs: int, timeout: int, warmups: int, preflight_timeout: int,
     cwd: Path | None = None) -> dict[str, object]:
     times: list[float] = []
     sizes: list[int] = []
     for index in range(warmups + runs):
         output.unlink(missing_ok=True)
-        started = time.perf_counter()
         attempt_timeout = preflight_timeout if index < warmups else timeout
-        try:
-            proc = subprocess.run(
-                command,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=attempt_timeout,
-                cwd=cwd,
-            )
-        except subprocess.TimeoutExpired as error:
+        returncode, elapsed, stderr = run_with_watchdog(command, attempt_timeout, cwd)
+        if returncode is None:
             output.unlink(missing_ok=True)
             return {
                 "status": "timeout",
                 "timeout_seconds": attempt_timeout,
                 "attempt": index + 1,
-                "stderr": (error.stderr or "")[-4000:] if isinstance(error.stderr, str) else "",
+                "stderr": stderr,
             }
-        elapsed = (time.perf_counter() - started) * 1000
-        if proc.returncode:
+        if returncode:
             output.unlink(missing_ok=True)
-            return {"status": "error", "returncode": proc.returncode, "stderr": proc.stderr[-4000:]}
+            return {"status": "error", "returncode": returncode, "stderr": stderr}
         try:
             size = valid_pdf(output)
         except (OSError, RuntimeError) as error:
