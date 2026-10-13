@@ -113,6 +113,37 @@ A/A spread up to 1.5 % unaligned, 1.2 % aligned. Fresh exports (perfstat, 300 ru
 not kept: SIMD word ends and branch-free word sums, an operand cache (*Tried and rejected*);
 the word loop's mispredictions remain (*Measured opportunities*).
 
+Then four changes to the Unicode renderer's text path (measured the same way, plus a 100 KB
+generated Unicode document and a differential fuzzer of 6,000 Unicode documents per change:
+Polish, Greek, Cyrillic, CJK, emoji, combining marks, characters DejaVu Sans lacks, NBSP and
+other spaces, surrogate-range code points, invalid UTF-8, CIDs whose bytes need escaping; each
+exported plain, `--pdfa`, `--pdfua`, with a theme and a random page width, plus batches):
+
+- **Plain CIDs copied as they are** (`UsedCidSet::IsPlain`): a code unit the font has a glyph
+  for, already recorded, no high surrogate and no byte to escape is one bit test and a store in
+  `WriteCidText`; everything else goes to `WriteNewCid` (README: 29 → 10 instructions a
+  character). 8 KB more per renderer (2 to 3 more page faults on a fresh export).
+- **Unicode run text copied a line at a time** (`PendingWide`, `QueueWide`), as the ASCII path.
+- **A word measured while its end is found** (`ScanWideWord`): one pass, the same sum in the
+  same order as `TextWidth`, no call per word.
+- **A paragraph decoded in one pass** (`WriteUtf8Wide`): the wide buffer is sized once and keeps
+  its size; `basic_string::append(first, last)` had made a temporary string, a malloc and a free,
+  for most spans.
+
+| fixture (against Phase 2a) | time | time, aligned | instructions |
+| --- | ---: | ---: | ---: |
+| README.md (Unicode) | -13.2 % | -11.5 % | -17.6 % |
+| polish.md | -7.6 % | -7.0 % | -7.9 % |
+| tester-noimg.md | -4.5 % | -3.8 % | -5.5 % |
+| 100 KB generated Unicode | -4.5 % | -3.6 % | -7.0 % |
+| code-heavy.md, table-heavy.md | -7.9 %, -5.8 % | -6.1 %, -2.3 % | -13.3 %, -6.6 % |
+| essay, native_math, notes (ASCII) | +0.1, -0.6, -0.9 % | +1.7, +1.5, +1.3 % | 0.0, -0.1, 0.0 % |
+| geometric mean | -5.1 % | -3.4 % | -6.6 % |
+
+A/A spread up to 1.5 %; the ASCII fixtures keep their instructions, so their aligned change is
+placement. Fresh exports (perfstat, 300 runs): README 1.44 → 1.37 ms, 5.48 → 4.59 M
+instructions; polish 0.58 ms both, 0.688 → 0.671 M, 110 → 113 faults; notes and essay unchanged.
+
 ## Maintained workflows
 
 ```sh
@@ -381,6 +412,10 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
 - A paragraph is asked once whether its text needs escaping in a PDF literal
   (`HasLiteralSpecial`, SSE2; the plain-text path reuses the classes
   `NeedsInlineParse` summed); its runs are then copied as they are.
+- Unicode text: `WriteCidText` copies a plain CID (`UsedCidSet::IsPlain`) without a lookup;
+  anything that changes which CID, escape or missing count a code unit gets belongs in
+  `WriteNewCid`, which decides when a unit becomes plain. Word widths come from `ScanWideWord`,
+  which must keep `TextWidth`'s sum and order.
 - Paragraphs are parsed and wrapped as flat runs: one reused text buffer per
   paragraph, plain lines as views into the source. Table cell and link-text
   buffers are reused from row to row and table to table.
@@ -522,6 +557,13 @@ and a bound test per byte) mispredicts once per word: about 40 % of the essay's
 branch misses. Removing that took more instructions than it saved (see *Tried and
 rejected*); a cheaper branch-free sum of a word's advances would be needed.
 
+**The Unicode word loop.** `ScanWideWord` is about 18 instructions a character, bound by its
+chain of `addsd`; `WrapStyledInline` spends about 120 more a word (run bookkeeping, line
+decisions) and 19 % of README's branch misses. Inlined into `WrapStyledInline` through
+`WrapWideWords` (paragraphs without inline syntax), GCC keeps the sum on the stack, a store and
+a load in the chain; see *Tried and rejected* for what did not fix it. Headings still wrap
+through `WrapText` (a vector and strings per heading, under 1 % of README).
+
 **Keeping the header row's wrapped cells.** A table that breaks wraps its header
 row again (about 0.3 % of the table fixture's 1.7 %); keeping them needs a second
 set of cell buffers in the hot loop. **Inserting the TOC block** moves every later
@@ -565,6 +607,12 @@ Text and layout:
   scan once per paragraph instead, a flag for all its runs, is kept: essay -4.8 %).
 - SSE2 runs of ASCII in UTF-8 decoding: single fixtures -0.5 %, `unicode_96kb.md`
   +0.53 %, as simdutf did.
+- `ScanWideWord` out of line, the sum in a register: README +2.2 % instructions, +3.0 % time
+  aligned. `WrapWideWords` out of line (+0.2 % instructions) and the width cache filled outside
+  the word loop (+0.3 %): the sum stayed on the stack. A two- and three-byte fast path in
+  `WriteUtf8Units`: -0.1 to -0.2 % instructions on Unicode fixtures, not kept (2026-10-13).
+- One 8 KB bitset for plain and used CIDs: a CID shown for a character the font lacks is its
+  code point too (drawn as '?'), so the used set needs a bit of its own for every CID.
 - A static build against musl: short ASCII 41 % faster, `single_01.md` 45 % and a
   PNG 8 % slower (musl's allocator). glibc's static build is the `-static` asset.
 - Highlighting at `-Os` (1.5 times slower lexers for 12 KB) and the highlighted
