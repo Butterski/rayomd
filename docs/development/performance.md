@@ -81,6 +81,38 @@ the 1 MB output buffer and the font mapping to `exit`. Open decisions measured i
 breakdown: the static binary as the default asset, `-no-pie`, and skipping libgcc's frame
 registration in GCC 13 static builds (30 µs).
 
+## Warm text, Phase 2
+
+Measured on 2026-10-13 (g++ 13.3, CPU 3; `ab --instructions` over the warm fixtures, 11
+rounds, and alignment-pinned builds of both sides; whole-PDF identity over the harness corpus
+and a differential fuzzer of 5,000 to 6,000 random inline paragraphs per change, three option
+sets each plus batches). Four changes to the standard-font paragraph path, each keeping every
+PDF byte:
+
+- **Run text copied a line at a time** (`AppendAsciiRunText`): a word that follows the pending
+  bytes in the parsed text joins them, so a line is one `memcpy` instead of one per word.
+- **`TailWriter` without zero-fill** (see *Buffers and the content stream*).
+- **One escape test per paragraph** (`HasLiteralSpecial`): runs of a paragraph without ( ) \ or
+  control bytes skip `WriteEscapedLiteral`'s per-byte class test (essay: 4.0 M of 73 M
+  instructions over 21 builds → 0.16 M).
+- **The run buffer only grows**: no zero-fill of twice each paragraph.
+
+| fixture | time | time, aligned | instructions |
+| --- | ---: | ---: | ---: |
+| essay.md | -9.6 % | -7.8 % | -6.7 % |
+| native_math.md | -1.7 % | -1.2 % | -2.1 % |
+| notes.md | -2.9 % | -0.4 % | -1.9 % |
+| README.md (Unicode) | -0.6 % | -0.5 % | -1.4 % |
+| table-heavy.md | +0.3 % | -0.7 % | -1.4 % |
+| code-heavy.md | +0.6 % | -0.1 % | -1.1 % |
+| polish.md, tester-noimg.md | +0.7 %, +0.1 % | -1.8 %, -0.1 % | -0.5 %, -0.6 % |
+| geometric mean | -1.7 % | -1.6 % | -2.0 % |
+
+A/A spread up to 1.5 % unaligned, 1.2 % aligned. Fresh exports (perfstat, 300 runs): essay
+1.06 → 1.03 ms, 3.717 → 3.480 M instructions; notes 0.49 ms, 0.439 → 0.435 M. Measured and
+not kept: SIMD word ends and branch-free word sums, an operand cache (*Tried and rejected*);
+the word loop's mispredictions remain (*Measured opportunities*).
+
 ## Maintained workflows
 
 ```sh
@@ -339,11 +371,16 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
   is assembled in place around it in `BuildInto`: no string per page and no second
   copy (7 to 15 % of a warm build on Windows when it was one). The move of every
   page's content to its final place is the one copy left.
-- Operators are written through `TailWriter`, a pointer into a tail reserved once
-  per operation by an upper bound; numbers are formatted from digit-pair tables
-  (`WriteFixed2`), not library calls. `TailWriter`'s growth
-  zero-fills; writing a whole outline through one `TailWriter` evicted L1 with
-  that fill, so outline entries go through a scratch buffer that stays in L1.
+- Operators are written through `TailWriter`: an operation whose upper bound fits
+  1 KB writes into a thread-local buffer and appends what it wrote (no zero-fill);
+  a larger bound, a nested writer and Windows (MinGW's `thread_local` is a call)
+  reserve the bound in the string, which zero-fills it. Numbers are formatted from
+  digit-pair tables (`WriteFixed2`), not library calls. Writing a whole outline
+  through one zero-filled tail evicted L1, so outline entries go through a scratch
+  buffer that stays in L1.
+- A paragraph is asked once whether its text needs escaping in a PDF literal
+  (`HasLiteralSpecial`, SSE2; the plain-text path reuses the classes
+  `NeedsInlineParse` summed); its runs are then copied as they are.
 - Paragraphs are parsed and wrapped as flat runs: one reused text buffer per
   paragraph, plain lines as views into the source. Table cell and link-text
   buffers are reused from row to row and table to table.
@@ -480,10 +517,10 @@ them, at a change of `RenderTable`'s loop that untagged documents must not pay f
 Placing content where it ends up needs another object order, which changes the
 bytes.
 
-**Growth without zero-filling in `TailWriter`.** `std::string::resize` zero-fills
-the upper bound each operation reserves: `_M_replace_aux` is 0.8 to 3.6 % of a warm
-build. C++23's `resize_and_overwrite` skips it; in C++17 it takes a buffer type of
-its own.
+**The ASCII word loop.** `WrapAsciiInline`'s byte loop (a table load, a zero test
+and a bound test per byte) mispredicts once per word: about 40 % of the essay's
+branch misses. Removing that took more instructions than it saved (see *Tried and
+rejected*); a cheaper branch-free sum of a word's advances would be needed.
 
 **Keeping the header row's wrapped cells.** A table that breaks wraps its header
 row again (about 0.3 % of the table fixture's 1.7 %); keeping them needs a second
@@ -511,13 +548,21 @@ Text and layout:
 - Two-byte CID strings with four compares a byte (+4.5 % instructions) or two
   loads and a byte-wise store (+0.6 %).
 - A branchless `WriteFixed2` (+1.84 % instructions, +0.72 % time) and
-  `WriteFixed2` forced inline (+1.19 %, +1.81 %).
+  `WriteFixed2` forced inline (+1.19 %, +1.81 %). Copying a repeated operand (the
+  font size, the baseline) from a cache instead of formatting it: -1.5 % essay
+  instructions, +0.4 to +1.5 % cycles (the hit test mispredicts).
+- Word ends in `WrapAsciiInline` and `WrapAsciiWords` found with SSE2 and the
+  advances summed with four accumulators: +9 % instructions, +7 % cycles on the
+  essay (the tail switch mispredicts). Words of up to 8 bytes summed without a
+  length branch (16 bytes compared, the rest blanked to spaces): -29 % branch
+  misses, +11 % instructions, cycles even, L1i misses x2.7.
 - Keeping the default font alive at exit: 1 to 2 % less CPU, no faster by the
   clock. Loading the cmap block by block: 10 of 156 faults, a test per glyph
   lookup, atomics for shared fonts.
 - Exact cell reservation in table rows: `table_96kb.md` -0.57 % instructions,
   others +0.10 to +0.29 %.
-- An SSE2 scan of PDF literal strings: -0.07 %; most strings are short.
+- An SSE2 scan of PDF literal strings: -0.07 %; most strings are short (the same
+  scan once per paragraph instead, a flag for all its runs, is kept: essay -4.8 %).
 - SSE2 runs of ASCII in UTF-8 decoding: single fixtures -0.5 %, `unicode_96kb.md`
   +0.53 %, as simdutf did.
 - A static build against musl: short ASCII 41 % faster, `single_01.md` 45 % and a
