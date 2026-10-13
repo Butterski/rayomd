@@ -2,6 +2,7 @@
 #include "../src/common/batch_report.h"
 #include "../src/core/flate.h"
 #include "../src/core/image_encoder.h"
+#include "../src/core/inflate.h"
 #include "../src/common/text_utils.h"
 #include "../src/core/export_options.h"
 #include "../src/core/inline_markdown.h"
@@ -1724,9 +1725,10 @@ bool CheckCompression() {
             }
         }
     }
-    // Image planes compressed by helper threads while their bytes arrive, up to 300,000 at a time,
-    // are the bytes of each plane compressed whole, however many helpers; an abandoned plane gets
-    // no stream, and an encoder left with bytes unpublished stops.
+    // Image planes written a piece at a time, up to 300,000 bytes, side by side, straight into the
+    // segment buffers or copied, and compressed by helper threads meanwhile, are the bytes of each
+    // plane compressed whole, however many helpers; an abandoned plane gets no stream, and an
+    // encoder left half written stops.
     const std::string& alphaRows = inputs.back();
     std::string wholeAlpha(RayoMd::Flate::ZlibImageBound(alphaRows.size()), '\0');
     wholeAlpha.resize(RayoMd::Flate::ZlibCompressImage(alphaRows, reinterpret_cast<uint8_t*>(&wholeAlpha[0]), scratch));
@@ -1734,30 +1736,32 @@ bool CheckCompression() {
         std::string whole(RayoMd::Flate::ZlibImageBound(input.size()), '\0');
         whole.resize(RayoMd::Flate::ZlibCompressImage(input, reinterpret_cast<uint8_t*>(&whole[0]), scratch));
         for (const unsigned helpers : { 0u, 1u, 3u }) {
-            for (const int ending : { 0, 1, 2 }) {   // finished, alpha abandoned, left unpublished
-                std::string arriving(input.size(), '\0');
-                std::string arrivingAlpha(alphaRows.size(), '\0');
-                const uint8_t* const planes[2] = { reinterpret_cast<const uint8_t*>(arriving.data()),
-                    reinterpret_cast<const uint8_t*>(arrivingAlpha.data()) };
-                const size_t sizes[2] = { arriving.size(), arrivingAlpha.size() };
-                TinyPdf::Internal::ImagePlanesEncoder encoder(planes, sizes, 2, helpers);
-                const size_t end = ending == 2 ? input.size() / 2 : input.size();
-                for (size_t at = 0; at < end;) {
-                    const size_t piece = std::min<size_t>(end - at, next() % 300000 + 1);
-                    std::memcpy(&arriving[at], input.data() + at, piece);
-                    at += piece;
-                    encoder.Publish(0, at);
+            for (const int ending : { 0, 1, 2 }) {   // finished, alpha abandoned, left half written
+                const std::string* const planes[2] = { &input, &alphaRows };
+                const size_t sizes[2] = { input.size(), alphaRows.size() };
+                TinyPdf::Internal::ImagePlanesEncoder encoder(sizes, 2, helpers);
+                size_t at[2] = {};
+                const size_t ends[2] = { ending == 2 ? input.size() / 2 : input.size(), ending == 1 ? 0 : alphaRows.size() };
+                bool written = true;
+                while (written && (at[0] < ends[0] || at[1] < ends[1])) {
+                    for (size_t plane = 0; plane < 2 && written; plane++) {
+                        const size_t piece = std::min<size_t>(ends[plane] - at[plane], next() % 300000 + 1);
+                        if (piece == 0) continue;
+                        const char* const bytes = planes[plane]->data() + at[plane];
+                        if (uint8_t* const reserved = encoder.Reserve(plane, piece)) {
+                            std::memcpy(reserved, bytes, piece);
+                            encoder.Commit(plane, piece);
+                        } else {
+                            written = encoder.Append(plane, reinterpret_cast<const uint8_t*>(bytes), piece);
+                        }
+                        at[plane] += piece;
+                    }
                     if (helpers == 0) encoder.EncodeReady();
                 }
                 if (ending == 2) continue;   // the destructor abandons both planes
-                if (ending == 1) {
-                    encoder.Abandon(1);
-                } else {
-                    std::memcpy(&arrivingAlpha[0], alphaRows.data(), alphaRows.size());
-                    encoder.Publish(1, alphaRows.size());
-                }
+                if (ending == 1) encoder.Abandon(1);
                 std::string streams[2];
-                if (!encoder.Finish(streams) || streams[0] != whole ||
+                if (!written || !encoder.Finish(streams) || streams[0] != whole ||
                     streams[1] != (ending == 1 ? std::string() : wholeAlpha)) {
                     std::cerr << "Image planes of " << input.size() << " bytes differ with " << helpers << " helpers"
                               << std::endl;
@@ -1765,6 +1769,103 @@ bool CheckCompression() {
                 }
             }
         }
+    }
+    // RayoMD's inflater gives back every input of both modes, taken in pieces of any size.
+    const auto inflateInPieces = [&](const std::string& packed, size_t size, std::string& out) {
+        RayoMd::Inflate::ZlibReader reader;
+        const size_t largest = next() % 70000 + 1;
+        if (!reader.Start(reinterpret_cast<const uint8_t*>(packed.data()), packed.size(), size, largest)) return false;
+        out.clear();
+        while (out.size() < size) {
+            const size_t piece = std::min<size_t>(size - out.size(), next() % largest + 1);
+            const uint8_t* const taken = reader.Take(piece);
+            if (!taken) return false;
+            out.append(reinterpret_cast<const char*>(taken), piece);
+        }
+        return reader.Finish();
+    };
+    for (const std::string& input : inputs) {
+        for (const Compress compress : modes) {
+            const size_t bound = compress == modes[0] ? RayoMd::Flate::ZlibBound(input.size())
+                                                      : RayoMd::Flate::ZlibImageBound(input.size());
+            std::string packed(bound, '\0');
+            packed.resize(compress(input, reinterpret_cast<uint8_t*>(&packed[0]), scratch));
+            std::string out;
+            if (!inflateInPieces(packed, input.size(), out) || out != input) {
+                std::cerr << "RayoMD's inflater fails on " << input.size() << " bytes" << std::endl;
+                return false;
+            }
+        }
+    }
+    // It refuses what zlib refuses: a stored block whose length and its complement disagree, a
+    // reserved block type, a distance before the start of the output, a wrong checksum, a stream
+    // cut short, and output longer or shorter than the image.
+    const std::string stored("\x78\x01\x01\x05\x00\xFA\xFF" "hello" "\x06\x2C\x02\x15", 16);
+    std::string out;
+    if (!inflateInPieces(stored, 5, out) || out != "hello") {
+        std::cerr << "RayoMD's inflater fails on a stored block" << std::endl;
+        return false;
+    }
+    std::string badComplement = stored;
+    badComplement[5] = '\xFB';
+    std::string badChecksum = stored;
+    badChecksum[15] = '\x16';
+    const std::pair<std::string, size_t> refused[] = { { badComplement, 5 }, { std::string("\x78\x01\x07\x00", 4), 1 },
+        { std::string("\x78\x01\x03\x02\x00\x00\x00\x00\x00", 9), 3 }, { badChecksum, 5 }, { stored.substr(0, 14), 5 },
+        { stored, 4 }, { stored, 6 } };
+    for (const auto& [stream, size] : refused) {
+        if (inflateInPieces(stream, size, out)) {
+            std::cerr << "RayoMD's inflater accepts a stream zlib refuses" << std::endl;
+            return false;
+        }
+    }
+    // On streams of both modes with up to four bytes flipped, set, cut, inserted or removed, it
+    // accepts exactly what libdeflate accepts, with the same bytes; libdeflate agreed with zlib's
+    // uncompress() on 100,000 such streams (2026-10-13).
+    std::vector<std::pair<std::string, size_t>> seeds;
+    for (const std::string& input : inputs) {
+        if (input.size() > 70000) continue;
+        for (const Compress compress : modes) {
+            std::string packed(RayoMd::Flate::ZlibImageBound(input.size()) + RayoMd::Flate::ZlibBound(input.size()), '\0');
+            packed.resize(compress(input, reinterpret_cast<uint8_t*>(&packed[0]), scratch));
+            seeds.emplace_back(std::move(packed), input.size());
+        }
+    }
+    libdeflate_decompressor* const reference = libdeflate_alloc_decompressor();
+    bool agreed = reference != nullptr;
+    for (int mutation = 0; mutation < 6000 && agreed; mutation++) {
+        auto [stream, size] = seeds[next() % seeds.size()];
+        for (int edit = 0, edits = (int)(next() % 4) + 1; edit < edits && !stream.empty(); edit++) {
+            const size_t at = next() % stream.size();
+            switch (next() % 6) {
+            case 0:
+            case 1: stream[at] = (char)(stream[at] ^ (1 << (next() % 8))); break;
+            case 2: stream[at] = (char)next(); break;
+            case 3: stream.resize(at); break;
+            case 4: stream.insert(at, 1, (char)next()); break;
+            default: stream.erase(at, next() % 8 + 1); break;
+            }
+        }
+        if (stream.size() >= 2 && next() % 4) stream.replace(0, 2, "\x78\x5E");   // reach the deflate data
+        // libdeflate's raw decompressor in zlib's framing: header, exactly `size` bytes, checksum.
+        const auto* const in = reinterpret_cast<const uint8_t*>(stream.data());
+        std::string theirs(size, '\0');
+        size_t used = 0;
+        size_t got = 0;
+        bool accepted = stream.size() >= 2 && (in[0] & 15) == 8 && (in[0] >> 4) <= 7 && ((in[0] << 8) | in[1]) % 31 == 0 &&
+            !(in[1] & 0x20) && libdeflate_deflate_decompress_ex(reference, in + 2, stream.size() - 2, &theirs[0], size,
+                &used, &got) == LIBDEFLATE_SUCCESS && got == size && stream.size() - 2 - used >= 4;
+        if (accepted) {
+            const uint8_t* const trailer = in + 2 + used;
+            accepted = ((uint32_t)trailer[0] << 24 | (uint32_t)trailer[1] << 16 | (uint32_t)trailer[2] << 8 | trailer[3]) ==
+                RayoMd::Flate::Adler32(reinterpret_cast<const uint8_t*>(theirs.data()), size);
+        }
+        agreed = inflateInPieces(stream, size, out) == accepted && (!accepted || out == theirs);
+    }
+    libdeflate_free_decompressor(reference);
+    if (!agreed) {
+        std::cerr << "RayoMD's inflater and libdeflate disagree on a mutated stream" << std::endl;
+        return false;
     }
     for (const uint32_t first : { 1u, 0x12345678u, 0xFFF0FFF0u }) {
         for (const std::string& input : inputs) {

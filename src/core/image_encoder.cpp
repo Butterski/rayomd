@@ -12,6 +12,10 @@
 #include <thread>
 #include <vector>
 
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
+
 namespace TinyPdf::Internal {
 namespace {
 
@@ -19,16 +23,22 @@ constexpr size_t kAbandoned = ~size_t(0);
 constexpr unsigned kMaxHelpers = 3;
 // A segment's first block and what it reads past it (flate.cpp: kBlockStart, kMaxMatch, a hash).
 constexpr size_t kFirstBlock = 65278 + 258 + 8;
+constexpr size_t kHistory = RayoMd::Flate::kImageSegmentHistory;
+// The largest segment (ImageSegmentSize) and the history before it.
+constexpr size_t kBufferBytes = (size_t(1) << 20) + kHistory;
 
 struct FreeBuffer {
     void operator()(uint8_t* buffer) const { std::free(buffer); }
 };
+using Buffer = std::unique_ptr<uint8_t[], FreeBuffer>;
 
 struct Segment {
     size_t plane = 0;
-    size_t start = 0;   // in the plane
+    size_t start = 0;            // in the plane
     size_t size = 0;
-    size_t slot = 0;    // where its blocks are written in the plane's output
+    size_t history = 0;          // the plane's bytes before `start` that its buffer begins with
+    size_t slot = 0;             // where its blocks are written in the plane's output
+    uint8_t* input = nullptr;    // its buffer, from when the decoder reaches it until it is compressed
     size_t written = 0;
     uint32_t adler = 1;
 };
@@ -42,10 +52,9 @@ RayoMd::Flate::Scratch& ThreadScratch() {
 } // namespace
 
 struct ImagePlanesEncoder::State {
-    const uint8_t* planes[kMaxPlanes] = {};
     size_t sizes[kMaxPlanes] = {};
     size_t count = 0;
-    std::unique_ptr<uint8_t[], FreeBuffer> out[kMaxPlanes];
+    Buffer out[kMaxPlanes];
     std::atomic<size_t> ready[kMaxPlanes];
     // In the order their bytes arrive: the planes' rows are written side by side, so a segment
     // ending at a smaller share of its plane comes first.
@@ -53,13 +62,31 @@ struct ImagePlanesEncoder::State {
     std::unique_ptr<std::atomic<bool>[]> claimed;
     std::atomic<size_t> claimedCount{ 0 };
 
-    // A helper with no segment to take sleeps until the decoder publishes the first block of one,
-    // abandons a plane, or the last segment is taken.
+    // The decoder's own: for each plane, its segments in order, the one being written, the bytes
+    // written, and the last bytes of the segment before, which begin the next one's buffer.
+    std::vector<size_t> planeSegments[kMaxPlanes];
+    size_t writing[kMaxPlanes] = {};
+    size_t position[kMaxPlanes] = {};
+    uint8_t tail[kMaxPlanes][kHistory];
+    size_t wakeStart[kMaxPlanes] = {};   // the start of the plane's next segment to wake helpers for
+    bool failed = false;
+
+    // Segment buffers: those allocated one by one or carved from `region`, and those free; at
+    // most `bufferLimit`, one being written for each plane, one for each helper, and one more, so
+    // that a full one is always there to free.
+    std::vector<Buffer> buffers;
+    Buffer region;
+    size_t carved = 0;
+    std::vector<uint8_t*> spare;
+    size_t bufferLimit = 0;
+
+    // A helper with no segment to take sleeps until the decoder writes the first block of one,
+    // abandons a plane, or the last segment is taken; a decoder with no free buffer sleeps until
+    // one is freed.
     std::mutex mutex;
     std::condition_variable changed;
     std::atomic<unsigned> sleepers{ 0 };
     std::atomic<unsigned> running{ 0 };   // helpers in Work
-    size_t wakeStart[kMaxPlanes] = {};    // the decoder's own: the start of the plane's next segment to wake for
 
     // The bytes a segment needs before it is taken: all of them for the thread that writes them,
     // else its first block, as a helper compresses each block once its bytes are there.
@@ -96,19 +123,26 @@ struct ImagePlanesEncoder::State {
         return false;
     }
 
+    void Release(Segment& segment) {
+        if (!segment.input) return;
+        std::lock_guard<std::mutex> lock(mutex);
+        spare.push_back(segment.input);
+        segment.input = nullptr;
+        changed.notify_all();
+    }
+
     void Encode(Segment& segment, bool streamed) {
-        if (ready[segment.plane].load(std::memory_order_acquire) == kAbandoned || !out[segment.plane]) return;
-        const uint8_t* const data = planes[segment.plane] + segment.start;
-        const size_t history = std::min(segment.start, RayoMd::Flate::kImageSegmentHistory);
-        const bool last = segment.start + segment.size == sizes[segment.plane];
-        RayoMd::Flate::InputProgress progress;
-        progress.written = &ready[segment.plane];
-        progress.offset = segment.start - history;
-        segment.written = RayoMd::Flate::DeflateImageSegment(data - history, history, segment.size, last,
-            out[segment.plane].get() + segment.slot, ThreadScratch(), streamed ? &progress : nullptr);
-        // Abandoned while it was compressed: no stream is made of it.
-        if (segment.written == 0) return;
-        segment.adler = RayoMd::Flate::Adler32(data, segment.size);
+        if (ready[segment.plane].load(std::memory_order_acquire) != kAbandoned && out[segment.plane]) {
+            const bool last = segment.start + segment.size == sizes[segment.plane];
+            RayoMd::Flate::InputProgress progress;
+            progress.written = &ready[segment.plane];
+            progress.offset = segment.start - segment.history;
+            segment.written = RayoMd::Flate::DeflateImageSegment(segment.input, segment.history, segment.size, last,
+                out[segment.plane].get() + segment.slot, ThreadScratch(), streamed ? &progress : nullptr);
+            // Abandoned while it was compressed: no stream is made of it.
+            if (segment.written != 0) segment.adler = RayoMd::Flate::Adler32(segment.input + segment.history, segment.size);
+        }
+        Release(segment);
     }
 
     // Takes segments as their first blocks arrive until all are taken.
@@ -123,6 +157,88 @@ struct ImagePlanesEncoder::State {
             changed.wait(lock, [&]() { return CanClaim(); });
             sleepers.fetch_sub(1);
         }
+    }
+
+    // A new segment buffer. The first encoders of a process carve theirs from one region on 2 MB
+    // pages where Linux offers them (transparent huge pages in "madvise" or "always" mode): a
+    // fresh process faults the mascot's buffers in twice instead of about 640 times. Later ones
+    // take the allocator's memory, which a long process has already mapped.
+    uint8_t* NewBuffer() {
+#ifdef __linux__
+        constexpr size_t kHugePage = size_t(2) << 20;
+        static std::atomic<int> hugeEncodersLeft{ 4 };
+        if (carved == 0 && buffers.empty() && hugeEncodersLeft.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            const size_t bytes = (bufferLimit * kBufferBytes + kHugePage - 1) & ~(kHugePage - 1);
+            region.reset(static_cast<uint8_t*>(std::aligned_alloc(kHugePage, bytes)));
+            if (region) madvise(region.get(), bytes, MADV_HUGEPAGE);
+        }
+        if (region) return region.get() + kBufferBytes * carved++;
+#endif
+        buffers.emplace_back(static_cast<uint8_t*>(std::malloc(kBufferBytes)));
+        return buffers.back().get();
+    }
+
+    // A free segment buffer: a spare one, a new one while fewer than the limit exist, else one
+    // freed by compressing a written segment here or by waiting for a helper. Null when it cannot
+    // be allocated.
+    uint8_t* AcquireBuffer() {
+        for (;;) {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (!spare.empty()) {
+                    uint8_t* const buffer = spare.back();
+                    spare.pop_back();
+                    return buffer;
+                }
+                if (buffers.size() + carved < bufferLimit) return NewBuffer();
+            }
+            if (Segment* const segment = Claim(false)) {
+                Encode(*segment, false);
+                continue;
+            }
+            std::unique_lock<std::mutex> lock(mutex);
+            changed.wait(lock, [&]() { return !spare.empty(); });
+        }
+    }
+
+    // The segment that the plane's next byte goes to, with its buffer; null on a failed allocation.
+    Segment* Writing(size_t plane) {
+        Segment& segment = segments[planeSegments[plane][writing[plane]]];
+        if (!segment.input) {
+            uint8_t* const buffer = failed ? nullptr : AcquireBuffer();
+            if (!buffer) {
+                failed = true;
+                return nullptr;
+            }
+            std::memcpy(buffer, tail[plane], segment.history);
+            segment.input = buffer;   // the helpers read it after the bytes it holds are published
+        }
+        return &segment;
+    }
+
+    // The plane's next `bytes` bytes are in its segment's buffer: they are published, and the end
+    // of a segment is kept for the next one.
+    void Advance(size_t plane, size_t bytes) {
+        Segment& segment = segments[planeSegments[plane][writing[plane]]];
+        size_t& at = position[plane];
+        at += bytes;
+        if (at == segment.start + segment.size) {
+            if (writing[plane] + 1 < planeSegments[plane].size()) {
+                const Segment& next = segments[planeSegments[plane][writing[plane] + 1]];
+                std::memcpy(tail[plane], segment.input + segment.history + segment.size - next.history, next.history);
+            }
+            writing[plane]++;
+        }
+        ready[plane].store(at);   // sequentially consistent with the sleepers' count
+        size_t& start = wakeStart[plane];
+        bool crossed = false;
+        while (start < sizes[plane]) {
+            const size_t size = RayoMd::Flate::ImageSegmentSize(sizes[plane] - start);
+            if (at < ClaimAt(start, size, true)) break;
+            start += size;
+            crossed = true;
+        }
+        if (crossed && sleepers.load() > 0) Wake();
     }
 
     void LeaveHelpers();
@@ -188,13 +304,10 @@ void ImagePlanesEncoder::State::LeaveHelpers() {
     changed.wait(lock, [&]() { return running.load() == 0; });
 }
 
-ImagePlanesEncoder::ImagePlanesEncoder(const uint8_t* const* planes, const size_t* sizes, size_t count,
-    unsigned helpers)
-    : state_(new State) {
+ImagePlanesEncoder::ImagePlanesEncoder(const size_t* sizes, size_t count, unsigned helpers) : state_(new State) {
     State& state = *state_;
     state.count = count;
     for (size_t plane = 0; plane < count; plane++) {
-        state.planes[plane] = planes[plane];
         state.sizes[plane] = sizes[plane];
         state.ready[plane].store(0, std::memory_order_relaxed);
         size_t start = 0;
@@ -204,6 +317,7 @@ ImagePlanesEncoder::ImagePlanesEncoder(const uint8_t* const* planes, const size_
             segment.plane = plane;
             segment.start = start;
             segment.size = RayoMd::Flate::ImageSegmentSize(sizes[plane] - start);
+            segment.history = std::min(start, kHistory);
             segment.slot = slot;
             start += segment.size;
             slot += RayoMd::Flate::ImageSegmentBound(segment.size);   // its slack too, as threads write side by side
@@ -215,9 +329,13 @@ ImagePlanesEncoder::ImagePlanesEncoder(const uint8_t* const* planes, const size_
         // Below 2^31 each, so the products fit.
         return (uint64_t)(a.start + a.size) * state.sizes[b.plane] < (uint64_t)(b.start + b.size) * state.sizes[a.plane];
     });
+    for (size_t index = 0; index < state.segments.size(); index++) {
+        state.planeSegments[state.segments[index].plane].push_back(index);   // in plane order, as sorting kept it
+    }
     state.claimed.reset(new std::atomic<bool>[state.segments.size()]);
     for (size_t index = 0; index < state.segments.size(); index++) state.claimed[index].store(false, std::memory_order_relaxed);
     helpers = (unsigned)std::min<size_t>(std::min(helpers, kMaxHelpers), state.segments.size());
+    state.bufferLimit = count + helpers + 1;
     if (helpers > 0) HelperPool::Get().Request(&state, helpers);
 }
 
@@ -230,19 +348,31 @@ ImagePlanesEncoder::~ImagePlanesEncoder() {
     state.LeaveHelpers();
 }
 
-void ImagePlanesEncoder::Publish(size_t plane, size_t bytes) {
+uint8_t* ImagePlanesEncoder::Reserve(size_t plane, size_t bytes) {
     State& state = *state_;
-    state.ready[plane].store(bytes);   // sequentially consistent with the sleepers' count
-    size_t& start = state.wakeStart[plane];
-    const size_t size = state.sizes[plane];
-    bool crossed = false;
-    while (start < size) {
-        const size_t segment = RayoMd::Flate::ImageSegmentSize(size - start);
-        if (bytes < State::ClaimAt(start, segment, true)) break;
-        start += segment;
-        crossed = true;
+    const size_t at = state.position[plane];
+    if (bytes == 0 || at + bytes > state.sizes[plane]) return nullptr;
+    Segment* const segment = state.Writing(plane);
+    if (!segment || at + bytes > segment->start + segment->size) return nullptr;
+    return segment->input + segment->history + (at - segment->start);
+}
+
+void ImagePlanesEncoder::Commit(size_t plane, size_t bytes) { state_->Advance(plane, bytes); }
+
+bool ImagePlanesEncoder::Append(size_t plane, const uint8_t* bytes, size_t count) {
+    State& state = *state_;
+    if (state.position[plane] + count > state.sizes[plane]) return false;
+    while (count > 0) {
+        Segment* const segment = state.Writing(plane);
+        if (!segment) return false;
+        const size_t at = state.position[plane];
+        const size_t piece = std::min(count, segment->start + segment->size - at);
+        std::memcpy(segment->input + segment->history + (at - segment->start), bytes, piece);
+        state.Advance(plane, piece);
+        bytes += piece;
+        count -= piece;
     }
-    if (crossed && state.sleepers.load() > 0) state.Wake();
+    return true;
 }
 
 void ImagePlanesEncoder::Abandon(size_t plane) {
@@ -258,6 +388,7 @@ bool ImagePlanesEncoder::Finish(std::string* streams) {
     State& state = *state_;
     state.Work();
     state.LeaveHelpers();
+    if (state.failed) return false;
     for (size_t plane = 0; plane < state.count; plane++) {
         streams[plane].clear();
         if (state.ready[plane].load(std::memory_order_acquire) == kAbandoned) continue;
@@ -268,8 +399,8 @@ bool ImagePlanesEncoder::Finish(std::string* streams) {
         out[1] = 0x5E;
         size_t at = 2;
         uint32_t adler = 1;
-        for (const Segment& segment : state.segments) {
-            if (segment.plane != plane) continue;
+        for (const size_t index : state.planeSegments[plane]) {
+            const Segment& segment = state.segments[index];
             std::memmove(out + at, out + segment.slot, segment.written);
             at += segment.written;
             adler = segment.start == 0 ? segment.adler : RayoMd::Flate::Adler32Combine(adler, segment.adler, segment.size);

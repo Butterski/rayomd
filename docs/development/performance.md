@@ -1600,6 +1600,76 @@ four CPUs; under ASan and UBSan the 1,279 hostile PNGs decode as before. The poo
 variables and the segment code add 16,384 bytes to a local Linux release build (1,272,832 →
 1,289,216).
 
+**RayoMD's own inflater, and no plane held whole** (2026-10-13). A new image no longer inflates
+into a buffer of its whole size. `ZlibReader` (`src/core/inflate.cpp`) hands out a row at a time
+from a window of the last 32 KB and a chunk of at least 256 KB, and the decoder filters each
+plane's row straight into the buffer of the encoder segment it belongs to. A segment's buffer is
+reused once the segment is compressed, and while as many buffers as planes plus helpers plus one
+are full, the decoder compresses one itself or waits for a helper. The first four encoders of a
+process carve their buffers from 2 MB pages: on the mascot that cut a fresh process's page faults
+from 1,357 to 719 (4.1.0: 838).
+
+The inflater: two-level decode tables (11 and 8 root bits), a fast loop that looks up the next
+code before its refill, so that the refill is off the chain of lookups, up to three literals a
+refill, lengths and distances that take their code and extra bits at once, 16-byte SSE2 copies.
+It accepts exactly what zlib's `uncompress()` accepts for an output of known size: against zlib
+1.3 (Ubuntu 24.04), 1,080 valid streams (zlib levels 0 to 9, its five strategies, windows of 8
+to 15 bits, flushes half way, and both RayoMD modes, up to 1.5 MB) and 2 million mutated ones
+gave the same answer and bytes, under ASan and UBSan (an earlier version, 1.8 million more). The
+core test holds it to libdeflate on 6,000 mutated streams (libdeflate agreed with zlib on 100,000)
+and fails on an inflater that skips the checksum for one byte in 256. Against libdeflate 1.26, in
+process, one CPU, a row at a time against the whole image, best of 15:
+
+| Image | libdeflate | RayoMD |
+| --- | ---: | ---: |
+| illustration, 2048x2048 | 2.67 ms | 1.65 ms (-38 %) |
+| the mascot | 1.14 ms | 1.15 ms (+1 %) |
+| opaque photo as RGBA | 6.25 ms | 7.58 ms (+21 %) |
+| noisy photo | 9.06 ms | 9.74 ms (+8 %) |
+| screenshot | 1.43 ms | 0.94 ms (-34 %) |
+| soft shadows | 0.99 ms | 1.21 ms (+22 %) |
+| sparse sprites | 0.43 ms | 0.29 ms (-32 %) |
+| all seven | 21.97 ms | 22.56 ms (+2.7 %) |
+
+All seven took 13.9 % longer than libdeflate's when each refill came before its lookup. At `-O2`
+the inflater is 1.5 % slower than at `-O3` for half the code (8.9 KB), so it builds at `-O2`.
+Adler-32 now runs in AVX2 where the CPU has it, 32 bytes a step: 15.6 → 20.2 GB/s on 16 MiB, the
+same sums. libdeflate stays only as the tests' reference; the Linux executable is 1,289,192 bytes
+in a local release build.
+
+Cold, p50 of 40, against 4.1.0:
+
+| Document | 1 CPU | 2 CPUs | 4 CPUs |
+| --- | ---: | ---: | ---: |
+| the mascot | 12.27 → 11.55 ms (-5.9 %) | 8.69 → 7.66 (-11.9 %) | 8.69 → 7.23 (-16.8 %) |
+| `tester.md`, local images | 13.17 → 12.50 (-5.1 %) | 9.54 → 8.54 (-10.5 %) | 9.54 → 8.10 (-15.1 %) |
+| screenshot | 6.45 → 5.49 (-14.9 %) | 5.25 → 3.78 (-28.0 %) | 5.36 → 4.43 (-17.3 %) |
+| noisy photo | 33.30 → 33.71 (+1.2 %) | 29.53 → 26.55 (-10.1 %) | 29.52 → 27.03 (-8.4 %) |
+| illustration, 2048x2048 | 27.70 → 25.40 (-8.3 %) | 22.96 → 20.23 (-11.9 %) | 22.99 → 19.27 (-16.2 %) |
+
+The noisy photo is mostly literals, where the inflater is still slower than libdeflate. In
+process, p50 of 300, one CPU: the mascot 8.67 → 8.39 ms, the screenshot 3.97 → 3.27, the
+illustration 34.41 → 22.37 (4.1.0 faulted its 16 MB buffers in again once its 2 MB pages were
+used up), the noisy photo 20.48 → 21.14; two CPUs: 5.63 → 4.64, 3.17 → 1.90, 19.71 → 17.16,
+17.04 → 14.83. `--batch` of 48 mascot documents: -2.3 % on one CPU, -3.6 % on two, -5.9 % on
+four; of 21 mixed ones -10.6 % on one CPU and within 4 % either way, run to run, on two and four.
+Peak RSS of a cold export:
+
+| Export | 4.1.0, 1 CPU | Now, 1 CPU | 4.1.0, 4 CPUs | Now, 4 CPUs |
+| --- | ---: | ---: | ---: | ---: |
+| the mascot | 11,496 KiB | 9,040 KiB | 12,176 KiB | 12,900 KiB |
+| `tester.md`, local images | 12,008 KiB | 9,632 KiB | 12,876 KiB | 13,280 KiB |
+| screenshot | 8,404 KiB | 6,080 KiB | 8,484 KiB | 9,212 KiB |
+| illustration, 2048x2048 | 28,468 KiB | 8,668 KiB | 28,796 KiB | 11,976 KiB |
+| noisy photo | 22,804 KiB | 20,320 KiB | 23,536 KiB | 21,572 KiB |
+
+On four CPUs three helpers' buffers and encoder tables cost up to 0.7 MiB more on the mascot.
+The noisy photo's memory is now mostly its own PNG and its 2.8 MB stream. At the size limit an
+image no longer needs 120 MiB of decode buffers: a window, a few rows and at most six 1 MiB
+segment buffers. TSan finds nothing in the core tests, five single exports and two batches on
+four CPUs; under ASan and UBSan the 1,279 hostile PNGs decode as before; the corpus differs
+from 4.1.0 only in image streams, with the same pixels.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1614,6 +1684,12 @@ probe instead of two is 12.8 % faster but the illustration's colour grows 19 %; 
 and inserting less inside matches is 6.7 % faster and soft shadows' colour grows 10 %. Flushing
 the bit writer only when full cost 15 % more time, and one table for literal codes and lengths
 6.9 %. Helper threads (above) now hide much of the compression on more than one CPU.
+
+**The inflater on literals.** RayoMD's inflater is 8 to 22 % slower than libdeflate on streams of
+mostly literals or short matches (the noisy and opaque photos, soft shadows; 2026-10-13), which
+leaves the noisy photo 1.2 % slower on one CPU than with libdeflate in 4.1.0. libdeflate keeps
+`bitsleft` as a byte with garbage above it and subtracts whole entries, which saves an AND on
+each code, and its BMI2 build extracts bits with `bzhi`; both would need measuring here.
 
 **Plain code blocks without a vector per line.** `RenderCode` wraps each line with
 `WrapAsciiLiteral` or `WrapCodeLine`, which return a vector of strings: two

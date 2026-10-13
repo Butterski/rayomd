@@ -148,16 +148,17 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/tagged.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
-    # RayoMD's streams at half the code. The highlighter's lexers read every byte of a code
-    # block: 1.5 times as fast at -O2 as at -Os.
-    set_source_files_properties(src/core/flate.cpp src/core/highlight.cpp PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
+    # RayoMD's streams at half the code; the inflater, 1.5 % slower than -O3 at 8.9 KB of code
+    # against 17.7. The highlighter's lexers read every byte of a code block: 1.5 times as fast at
+    # -O2 as at -Os.
+    set_source_files_properties(src/core/flate.cpp src/core/inflate.cpp src/core/highlight.cpp
+        PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
 endif()
 
-# libdeflate's decompressor (third_party/libdeflate, v1.26, the files it needs and unchanged)
-# inflates the PNGs that RayoMD re-encodes, 1.2 to 6.2 times as fast as zlib on the test images
-# (2026-10-13, docs/development/performance.md). RayoMD's own encoder (src/core/flate.cpp) writes
-# every stream, so no other DEFLATE library is linked.
-add_library(rayomd_inflate STATIC
+# libdeflate's decompressor (third_party/libdeflate, v1.26, the files it needs and unchanged) is
+# the tests' independent reference for RayoMD's own inflater (src/core/inflate.cpp) and encoder
+# (src/core/flate.cpp); no product links it.
+add_library(rayomd_inflate STATIC EXCLUDE_FROM_ALL
     third_party/libdeflate/lib/deflate_decompress.c
     third_party/libdeflate/lib/utils.c
     third_party/libdeflate/lib/x86/cpu_features.c)
@@ -179,6 +180,7 @@ if(WIN32)
         src/core/flate.cpp
         src/core/image_cache.cpp
         src/core/image_encoder.cpp
+        src/core/inflate.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
@@ -230,11 +232,11 @@ if(WIN32)
     target_include_directories(rayomd PRIVATE include . third_party third_party/imgui)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_link_libraries(rayomd PRIVATE
-            dxgi windowscodecs rayomd_inflate Threads::Threads)
+            dxgi windowscodecs Threads::Threads)
     else()
         target_link_libraries(rayomd PRIVATE
             d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi
-            winhttp windowscodecs ws2_32 rayomd_inflate Threads::Threads)
+            winhttp windowscodecs ws2_32 Threads::Threads)
     endif()
     rayomd_simdutf(rayomd)
     rayomd_common_definitions(rayomd)
@@ -252,6 +254,7 @@ else()
         src/core/flate.cpp
         src/core/image_cache.cpp
         src/core/image_encoder.cpp
+        src/core/inflate.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp
         src/core/markdown_parser.cpp
@@ -270,7 +273,7 @@ else()
         src/cli/main_cli.cpp
     )
     target_include_directories(rayomd PRIVATE include)
-    target_link_libraries(rayomd PRIVATE rayomd_inflate Threads::Threads)
+    target_link_libraries(rayomd PRIVATE Threads::Threads)
     if(RAYOMD_USE_CURL)
         target_link_libraries(rayomd PRIVATE CURL::libcurl)
         target_compile_definitions(rayomd PRIVATE RAYOMD_USE_CURL=1)
@@ -293,6 +296,7 @@ if(BUILD_TESTING)
         src/core/flate.cpp
         src/core/image_cache.cpp
         src/core/image_encoder.cpp
+        src/core/inflate.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/export_options.cpp
         src/core/inline_markdown.cpp

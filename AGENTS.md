@@ -139,8 +139,8 @@ Important image/link details:
 - URL images are controlled by `BuildOptions::enableUrlImages`.
 - Windows image support uses WinHTTP/WIC through the Win32 build.
 - Linux URL images use libcurl when `RAYOMD_USE_CURL` is defined.
-- PNGs with transparency are inflated by the vendored libdeflate decompressor and
-  re-encoded by RayoMD's own encoder (`flate.cpp`), on every platform; no zlib.
+- PNGs with transparency are inflated by RayoMD's own inflater (`inflate.cpp`) and
+  re-encoded by its own encoder (`flate.cpp`), on every platform; no zlib or libdeflate.
 - Such a PNG of 32,768 pixels or more is kept between processes in
   `PdfOptions::imageCacheDirectory`, a file per SHA-256 of the PNG (SHA-NI where the
   CPU has it). The library default is off; the CLI and the Windows app use the user
@@ -261,10 +261,16 @@ Important image/link details:
 - `src/common/file_io.cpp`
   Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows.
 
+- `src/core/inflate.h` and `src/core/inflate.cpp`
+  RayoMD's zlib/DEFLATE decoder (`ZlibReader`): resumable output a piece at a time
+  through a window, two-level decode tables, a fast loop that looks up the next code
+  before its refill. It accepts exactly what zlib's `uncompress()` accepts for an output
+  of known size; the core tests hold it to libdeflate on mutated streams.
+
 - `src/core/flate.h` and `src/core/flate.cpp`
   The DEFLATE/zlib encoder behind `--compress` and every re-encoded image: greedy
   matching over two hash tables, per-block stored/fixed/dynamic choice by exact bit
-  count, SSE2 Adler-32. Image rows go through `DeflateImageSegment` (the 8-byte table
+  count, SSE2 or AVX2 Adler-32. Image rows go through `DeflateImageSegment` (the 8-byte table
   only, segments of `ImageSegmentSize` with `kImageSegmentHistory` bytes of history,
   optionally waiting for input another thread is still writing); `ZlibCompressImage` is
   the same stream made on one thread. Output depends only on the input. Its tables live
@@ -328,9 +334,9 @@ Important image/link details:
   results were mixed or slower.
 
 - `third_party/libdeflate/`
-  libdeflate v1.26's decompressor, the files it needs and unchanged (MIT). It inflates
-  the PNGs RayoMD re-encodes, through `InflateZlibStream` in `tiny_pdf.cpp`; RayoMD
-  checks the zlib header and Adler-32 itself. Its compressor is not vendored.
+  libdeflate v1.26's decompressor, the files it needs and unchanged (MIT): the core
+  tests' independent reference for RayoMD's inflater and encoder. No executable links
+  it (`EXCLUDE_FROM_ALL`). Its compressor is not vendored.
 
 - `tester.md`
   Main hand-written smoke/regression document. It covers Unicode text, inline
@@ -466,16 +472,17 @@ GitHub CI entry points:
   its 128 KB width cache relies on starting zeroed. Never put one on the stack. The cache
   is read by code point (`CodepointWidth`) and by CID (`WidthForCid`); both must keep the
   rule of `CidForCodepoint`.
-- A PNG with transparency is inflated whole (libdeflate, to its exact size; RayoMD checks
-  the header and Adler-32), its filtered colour rows written back into that buffer behind
-  the row being read, and compressed in segments by `ImagePlanesEncoder`. The encoder, its
-  segment schedule and history, and the filter heuristic all decide the image bytes;
-  change them only on purpose. Each row is published with release order after it is
-  written; on a decode error the encoder's destructor abandons the planes and waits for its
-  helpers. From `kImageThreadPixels`, helpers join in for each usable CPU (the affinity
-  mask) that no other decode of the process holds, so a busy batch asks for none. Its
-  decode buffers come from `AllocateImageBuffer`: on Linux the first ones of a process are
-  2 MB-aligned with `MADV_HUGEPAGE`, which saves most of a fresh process's page faults.
+- A PNG with transparency is decoded a row at a time: `ZlibReader` hands out each row
+  from a window of the last 32 KB and a chunk, and the filtered colour and alpha rows go
+  straight into `ImagePlanesEncoder`'s segment buffers, which are reused once compressed,
+  so no plane is held whole. The encoder, its segment schedule and history, and the filter
+  heuristic all decide the image bytes; change them only on purpose. A segment's bytes are
+  published with release order after they are written; on a decode error the encoder's
+  destructor abandons the planes and waits for its helpers. From `kImageThreadPixels`,
+  helpers join in for each usable CPU (the affinity mask) that no other decode of the
+  process holds, so a busy batch asks for none. The first encoders of a process carve
+  their buffers from 2 MB pages (`MADV_HUGEPAGE` on Linux), which saves most of a fresh
+  process's page faults.
 - `WriteFixed2` may write one byte past the end it returns, within the
   `kFixed2MaxChars` every caller must leave.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document
