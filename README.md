@@ -9,7 +9,7 @@
 **Markdown to PDF in milliseconds, from a single small executable.**<br>
 No browser. No LaTeX. No Pandoc. No runtime.
 
-<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.3.0 MathTex" src="https://img.shields.io/badge/version-4.3.0%20MathTex-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.3.1 MathTex" src="https://img.shields.io/badge/version-4.3.1%20MathTex-informational?style=for-the-badge"></a>
 <a href="https://github.com/Butterski/rayomd/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Butterski/rayomd/total?style=for-the-badge&color=2ea44f"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 
@@ -39,7 +39,9 @@ No browser. No LaTeX. No Pandoc. No runtime.
 > export up to 12 % faster, and documents of plain code blocks export **34 to 42 % faster** in a
 > warm process. Since 4.2, RayoMD decodes PNGs with its own inflater, a row at a
 > time, on up to four cores, in **70 % less memory** than 4.1.0 for a large one. Text and pixels
-> are unchanged. See [the numbers](#performance).
+> are unchanged. 4.3.1 loads and subsets the TrueType font with less work, so a fresh export of
+> a Unicode document runs **up to 8 % faster** than in 4.3.0, with the same bytes. See
+> [the numbers](#performance).
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. Windows gets a
 compact Dear ImGui app with command-line modes, Linux a small CLI, and both share one exporter
@@ -101,9 +103,9 @@ veraPDF.
 <summary><b>Linux</b>: download and run</summary>
 
 ```sh
-curl -LO https://github.com/Butterski/rayomd/releases/download/v4.3.0/rayomd-4.3.0-linux-x64-static.tar.gz
-tar -xzf rayomd-4.3.0-linux-x64-static.tar.gz
-./rayomd-4.3.0-linux-x64-static/rayomd --export input.md output.pdf
+curl -LO https://github.com/Butterski/rayomd/releases/download/v4.3.1/rayomd-4.3.1-linux-x64-static.tar.gz
+tar -xzf rayomd-4.3.1-linux-x64-static.tar.gz
+./rayomd-4.3.1-linux-x64-static/rayomd --export input.md output.pdf
 ```
 
 </details>
@@ -111,7 +113,7 @@ tar -xzf rayomd-4.3.0-linux-x64-static.tar.gz
 <details>
 <summary><b>Windows</b>: the app and the CLI in one <code>rayomd.exe</code></summary>
 
-Download `rayomd-4.3.0-windows-x64.zip` from
+Download `rayomd-4.3.1-windows-x64.zip` from
 [Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
 without arguments opens the app: edit or drop a file, pick a style and margins, and press
 `Ctrl+E` to export. With arguments it is the same CLI as on Linux:
@@ -168,6 +170,18 @@ per line. One-shot export against 4.2.2 (median of 41):
 Documents in ASCII or Windows-1252 Latin keep the standard fonts and their exact bytes. Text
 extracts and renders the same: 650 PDFs under five option sets pass `qpdf --check` and give
 Poppler the same text and pixels as with 4.2.2.
+
+4.3.1 reads the TrueType font's tables directly, keeps its glyph table in memory that starts
+zeroed, and writes the font subset once, straight into the PDF. One-shot export against
+4.3.0, the same PDF bytes:
+
+| Document | 4.3.0 | 4.3.1 |
+|---|---:|---:|
+| Short note in Polish | 1.40 ms | **1.28 ms** |
+| `tester.md`, no images | 1.89 ms | **1.75 ms** |
+| 35 KB of C++ in code blocks, Polish comments | 2.07 ms | **1.91 ms** |
+| [`performance.md`](docs/development/performance.md) | 4.86 ms | **4.69 ms** |
+| Short note in ASCII (standard fonts) | 0.96 ms | 0.95 ms |
 
 ### Images, 4.2
 
