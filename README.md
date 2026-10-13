@@ -9,7 +9,7 @@
 **Markdown to PDF in milliseconds, from a single small executable.**<br>
 No browser. No LaTeX. No Pandoc. No runtime.
 
-<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.1.0 MathTex" src="https://img.shields.io/badge/version-4.1.0%20MathTex-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.2.0 MathTex" src="https://img.shields.io/badge/version-4.2.0%20MathTex-informational?style=for-the-badge"></a>
 <a href="https://github.com/Butterski/rayomd/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Butterski/rayomd/total?style=for-the-badge&color=2ea44f"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 
@@ -34,9 +34,10 @@ No browser. No LaTeX. No Pandoc. No runtime.
 </div>
 
 > [!TIP]
-> **New in 4.1:** PNG images convert **1.6 to 3.6 times faster** than in 4.0.0, with every pixel
-> unchanged and smaller files; an image RayoMD has converted before takes about **2 ms**, from
-> its new image cache. zlib is no longer needed. See [the numbers](#performance).
+> **New in 4.2:** a new PNG converts **up to 14 % faster** than in 4.1.0 on one core and **10 to
+> 28 % faster** on two, and a large one needs **70 % less memory** (a 2048×2048 image 27.8 →
+> 8.4 MiB): RayoMD now decodes PNGs with its own inflater, a row at a time, and compresses them
+> on up to four cores at once. Every pixel is still unchanged. See [the numbers](#performance).
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. Windows gets a
 compact Dear ImGui app with command-line modes, Linux a small CLI, and both share one exporter
@@ -49,7 +50,7 @@ you can also embed through the [C++ API](https://github.com/Butterski/rayomd/wik
 <td width="33%" valign="top">
 
 ### Fast
-A short note in about **1 ms**, start to exit; a 1024×1024 PNG in 9 to 12 ms, 2 ms once
+A short note in about **1 ms**, start to exit; a 1024×1024 PNG in 8 to 12 ms, 2 ms once
 converted. Batches run on up to 64 threads.
 
 </td>
@@ -98,9 +99,9 @@ veraPDF.
 <summary><b>Linux</b>: download and run</summary>
 
 ```sh
-curl -LO https://github.com/Butterski/rayomd/releases/download/v4.1.0/rayomd-4.1.0-linux-x64-static.tar.gz
-tar -xzf rayomd-4.1.0-linux-x64-static.tar.gz
-./rayomd-4.1.0-linux-x64-static/rayomd --export input.md output.pdf
+curl -LO https://github.com/Butterski/rayomd/releases/download/v4.2.0/rayomd-4.2.0-linux-x64-static.tar.gz
+tar -xzf rayomd-4.2.0-linux-x64-static.tar.gz
+./rayomd-4.2.0-linux-x64-static/rayomd --export input.md output.pdf
 ```
 
 </details>
@@ -108,7 +109,7 @@ tar -xzf rayomd-4.1.0-linux-x64-static.tar.gz
 <details>
 <summary><b>Windows</b>: the app and the CLI in one <code>rayomd.exe</code></summary>
 
-Download `rayomd-4.1.0-windows-x64.zip` from
+Download `rayomd-4.2.0-windows-x64.zip` from
 [Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
 without arguments opens the app: edit or drop a file, pick a style and margins, and press
 `Ctrl+E` to export. With arguments it is the same CLI as on Linux:
@@ -149,49 +150,54 @@ Every feature below works the same from both command lines and the
 Measured on 2026-10-13: Linux x86-64, g++ 13.3, one pinned CPU core unless said. A one-shot
 export is a fresh `rayomd --export` process, start to exit (median of 40 runs).
 
-### Images, 4.1
+### Images, 4.2
 
 ```mermaid
 %%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#2ea44f"}}}}%%
 xychart-beta
     title "One 1024×1024 RGBA PNG, one-shot export, in ms"
-    x-axis ["3.2.0", "4.0.0", "4.1.0", "4.1.0, 2 cores", "4.1.0, seen before"]
+    x-axis ["3.2.0", "4.0.0", "4.1.0", "4.2.0", "4.2.0, 2 cores", "4.2.0, seen before"]
     y-axis "Milliseconds" 0 --> 90
-    bar [87.6, 27.3, 12.3, 8.7, 2.2]
+    bar [87.6, 27.3, 12.3, 11.6, 7.7, 2.2]
 ```
 
-| Document | 4.0.0 | 4.1.0 | 4.1.0, 2 cores | 4.1.0, image seen before |
-|---|---:|---:|---:|---:|
-| One 1024×1024 RGBA PNG | 27.3 ms | **12.3 ms** | **8.7 ms** | **2.2 ms** |
-| `tester.md` with that PNG | 28.1 ms | **13.2 ms** | **9.5 ms** | **3.0 ms** |
-| One 2048×2048 RGBA illustration | 63.4 ms | **27.8 ms** | **23.1 ms** | **1.7 ms** |
-| One noisy 1024×1024 RGBA photo | 106.2 ms | **32.7 ms** | **29.1 ms** | **14.2 ms** |
+| Document | 4.0.0 | 4.1.0 | 4.2.0 | 4.2.0, 2 cores | 4.2.0, image seen before |
+|---|---:|---:|---:|---:|---:|
+| One 1024×1024 RGBA PNG | 27.3 ms | 12.3 ms | **11.6 ms** | **7.7 ms** | **2.2 ms** |
+| `tester.md` with that PNG | 28.1 ms | 13.1 ms | **12.5 ms** | **8.6 ms** | **3.0 ms** |
+| One 2048×2048 RGBA illustration | 63.4 ms | 27.7 ms | **25.5 ms** | **20.3 ms** | **1.7 ms** |
+| One noisy 1024×1024 RGBA photo | 106.2 ms | 32.7 ms | 33.2 ms | **25.8 ms** | **14.1 ms** |
 
-A PNG with transparency is now inflated by libdeflate's decompressor (vendored), its colour and
-alpha re-encoded by RayoMD's own encoder, filters chosen in AVX2 where the CPU has it, and the
-colour compressed on a second core while the rest is still decoded. Every pixel is unchanged
-and the image streams are 1 to 49 % smaller (the 1024×1024 PNG 302 → 239 KiB). From 32,768
-pixels a converted image is kept in the user cache directory, so its next export, in any
-process, skips the work: the last column. `--no-image-cache` turns that off. Documents without
-such a PNG give the same PDF bytes as 4.0.0, as fast.
+A PNG with transparency is inflated by RayoMD's own decoder a row at a time, each row is
+unfiltered, split into colour and alpha, filtered again (in AVX2 where the CPU has it) straight
+into compression segments, and on more than one core helper threads compress the segments
+while decoding goes on. The decoder accepts exactly what zlib does; it is faster than
+libdeflate's on three of the seven test images, within 1 % on a fourth and up to 22 % slower on
+the others, which leaves the noisy photo 1.6 % slower than 4.1.0 on one core. Every pixel is
+unchanged and the streams are within 0.3 % of 4.1.0's. From 32,768 pixels a converted image is
+kept in the user cache directory, so its next export, in any process, skips the work: the last
+column. `--no-image-cache` turns that off. Documents without such a PNG give the same PDF bytes
+as 4.0.0, as fast.
 
-**Memory.** Converting a new image now takes more memory: it is decoded whole, about 4 bytes a
-pixel, where 4.0.0 decoded a row at a time, and on Linux the first image buffers of a process
-sit on 2 MB pages. Peak memory of a one-shot export (RSS):
+**Memory.** A new image is no longer decoded whole: the decoder keeps the last 32 KB and a
+chunk, and at most six 1 MiB compression segments are filled at once. Peak memory of a one-shot
+export, one core (RSS):
 
-| Export | 4.0.0 | 4.1.0, new image | 4.1.0, image seen before |
+| Export | 4.1.0, new image | 4.2.0, new image | 4.2.0, image seen before |
 |---|---:|---:|---:|
-| Short note, no image | 2.9 MiB | 2.8 MiB | 2.8 MiB |
-| One 1024×1024 RGBA PNG | 5.3 MiB | 11.2 MiB | 3.7 MiB |
-| One 2048×2048 RGBA illustration | 8.2 MiB | 27.9 MiB | 3.3 MiB |
-| 48 documents with a 1024×1024 PNG each, `--batch`, six workers | 35.3 MiB | 60.0 MiB | |
+| Short note, no image | 2.7 MiB | 2.8 MiB | 2.8 MiB |
+| One 1024×1024 RGBA PNG | 11.2 MiB | **8.8 MiB** | 3.8 MiB |
+| One 2048×2048 RGBA illustration | 27.8 MiB | **8.4 MiB** | 3.3 MiB |
+| One noisy 1024×1024 RGBA photo | 22.3 MiB | **19.9 MiB** | 14.8 MiB |
+| 48 documents with a 1024×1024 PNG each, `--batch`, six workers | 58.5 MiB | 60.3 MiB | |
 
-On two cores the second thread adds up to 0.8 MiB. The buffers are freed once the image is
-converted.
+On four cores the helper threads and their buffers add up to 3.8 MiB (the 1024×1024 PNG
+12.6 MiB, 4.1.0 11.9 MiB there). A batch keeps every document's streams, which dominate its
+memory. The noisy photo's memory is mostly its own PNG and its 2.8 MB stream.
 
 ### Text, 4.0
 
-4.0.0 against 3.2.0 (2026-10-12); 4.1.0 renders text as fast and with the same bytes.
+4.0.0 against 3.2.0 (2026-10-12); 4.1.0 and 4.2.0 render text as fast and with the same bytes.
 
 | Document | 3.2.0 | 4.0.0 | Faster by |
 |---|---:|---:|---:|
@@ -211,7 +217,8 @@ another 0.3 ms sooner: a short ASCII note in 0.68 ms.
 | `rayomd-<version>-linux-x64-static.tar.gz` | 1,039 KB | 1,027 KB |
 | `rayomd-<version>-windows-x64.zip` (GUI and CLI) | 1,444 KB | 1,474 KB |
 
-4.1.0 adds libdeflate's decompressor (MIT) and drops zlib, which the static edition linked in.
+4.1.0 adds libdeflate's decompressor (MIT) and drops zlib, which the static edition linked in;
+4.2.0 replaces libdeflate with RayoMD's own decoder.
 
 ### Against other tools
 
@@ -282,10 +289,10 @@ comparisons with other tools, and their caveats.
 ## The 4.x goal: hot code in faster forms
 
 RayoMD 4.0 moved the code where the time goes into lower-level, faster forms, one measured
-change at a time, and 4.1 continues it for images: plain C-style loops over raw buffers where
-library containers allocated and copied, SSE2 and AVX2 instructions where one operation can
-work on 16 or 32 bytes, a second core where work can overlap, and a statically linked runtime
-where process start dominated.
+change at a time, and 4.1 and 4.2 continue it for images: plain C-style loops over raw buffers
+where library containers allocated and copied, SSE2 and AVX2 instructions where one operation
+can work on 16 or 32 bytes, more cores where work can overlap, data streamed a row at a time
+instead of held whole, and a statically linked runtime where process start dominated.
 
 ```mermaid
 flowchart LR
@@ -297,6 +304,10 @@ flowchart LR
     D -- yes --> E["Committed and recorded<br/>in performance.md"]
 ```
 
+- **Images (4.2).** RayoMD's own inflater, a row at a time, instead of libdeflate's whole-image
+  one; rows filtered straight into compression segments that up to four cores compress at once,
+  in an order that does not change the bytes; AVX2 Adler-32. Encoders with one hash probe or
+  fewer insertions were faster but up to 19 % larger on some image, and lost.
 - **Images (4.1).** libdeflate's decompressor instead of zlib, RayoMD's own encoder with an image
   mode, colour split from alpha in SSE2, filters chosen in AVX2, the colour compressed on a
   second core while decoding goes on, SHA-NI hashing, and a persistent cache of converted
