@@ -560,8 +560,20 @@ renderer on embedded TrueType faces with their own advances, which changes how
 | 200 | +242 KB | -2.9 % | -3.2 % | -5.1 % | -3.6 % |
 
 Not adopted: +5 to +40 % of the executable for 1 to 3 %, and the cliff only moves.
-Try first: the two renderers in translation units of their own, each with its own
-budget.
+
+The two renderers in translation units of their own do not help either (prototyped
+2026-10-13): `StandardRenderer` with its ASCII wrapping, theme text and builder (2,290 lines) and
+the Unicode `Renderer` with the subset fonts, fallback fonts, tagged hooks and builder (3,080),
+the rest — `TtfFont`, `TailWriter`, `PdfObjects`, images and SVG hosts, math, links, headings,
+the `RenderBlocks`/`RenderWithFootnotes`/`RenderBook` templates, theme, cover, contents and
+page-number helpers, 5,500 lines — in a header of `static` functions that each unit compiles as
+far as it uses them. Each unit gets a budget of its own but not a larger one, a share of its own
+size, and still stops at it (470 and 563 calls kept out of line for the unit's growth, 935 in the
+one file). Same bytes; warm instructions +0.05 %, time +1.0 % (aligned -0.9 %: placement);
+fresh README +30 µs CPU, notes +6 µs; +70 KB of code, the shared functions both units keep a copy
+of. A split also has to keep one instance of state that the shared code holds in function-local
+statics (image-decoding counter, root cache, `--compress` work, curl's init), and `TailWriter`'s
+scratch becomes an `inline thread_local`, defined once for all units.
 
 **Byte classes scanned a byte at a time.** The parser's ordinary-byte runs take SSE2 now (Phase
 2); left are `NeedsInlineParse` (3 % of the essay's instructions) and `ContainsByteClass` (table
