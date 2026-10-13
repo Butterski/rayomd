@@ -173,22 +173,25 @@ static std::wstring Utf8ToWide(std::string_view str) {
     return Utf8ToWideFallback(str);
 }
 
-// Appends Utf8ToWide(str) to `out`, written straight into `out`, so a caller that reuses the
-// string converts without allocating.
-static void AppendUtf8ToWide(std::wstring& out, std::string_view str) {
-    if (str.empty()) return;
+// Writes Utf8ToWide(str) at `out`, which has room for one code unit per byte, and returns the end.
+static RAYOMD_HOT_INLINE wchar_t* WriteUtf8Wide(wchar_t* out, std::string_view str) {
+    // ASCII, the usual case for a span or a table cell, needs no decoder.
     if (IsAllAscii(str)) {
-        out.append(str.begin(), str.end());
-        return;
+        for (const char ch : str) *out++ = (wchar_t)(unsigned char)ch;
+        return out;
     }
-    const size_t base = out.size();
-    out.resize(base + str.size());
 #if defined(_WIN32)
-    int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), &out[base], (int)str.size());
-    out.resize(base + (len > 0 ? (size_t)len : 0));
+    const int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), out, (int)str.size());
+    return out + (len > 0 ? len : 0);
 #else
-    out.resize((size_t)(WriteUtf8Units(&out[base], str) - out.data()));
+    return WriteUtf8Units(out, str);
 #endif
+}
+
+// Makes `out` Utf8ToWide(str) without clearing it first: resizing fills only what it grows by.
+static void AssignUtf8ToWide(std::wstring& out, std::string_view str) {
+    out.resize(str.size());
+    out.resize((size_t)(WriteUtf8Wide(&out[0], str) - out.data()));
 }
 
 #ifdef _WIN32
@@ -5895,9 +5898,10 @@ private:
         }
         if (!Internal::NeedsInlineParse(text)) {
             // No inline syntax: every line is one unstyled run, also when it is empty.
-            out.wide.clear();
-            if (text.find('\xE2') == std::string_view::npos) AppendUtf8ToWide(out.wide, text);
-            else AppendUtf8ToWide(out.wide, NormalizeSymbols(std::string(text)));
+            // The wide buffer keeps its size from paragraph to paragraph, so that resizing it
+            // fills only what it grows by.
+            if (text.find('\xE2') == std::string_view::npos) AssignUtf8ToWide(out.wide, text);
+            else AssignUtf8ToWide(out.wide, NormalizeSymbols(std::string(text)));
             WrapWideWords(font, std::wstring_view(out.wide), width, size, [&](std::wstring_view line) {
                 out.runs.emplace_back();
                 StyledRun& run = out.runs.back();
@@ -5911,12 +5915,17 @@ private:
 
         Internal::ParseInlineRuns(text, out.parsed);
         const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
-        out.wide.clear();
+        size_t bytes = 0;
+        for (const Internal::InlineRun& span : parsed) bytes += span.end - span.begin;
+        out.wide.resize(bytes);     // room for one code unit a byte
+        wchar_t* const wideBegin = &out.wide[0];
+        wchar_t* wideEnd = wideBegin;
         out.wideEnds.clear();
         for (const Internal::InlineRun& span : parsed) {
-            AppendUtf8ToWide(out.wide, out.parsed.Text(span));
-            out.wideEnds.push_back(static_cast<uint32_t>(out.wide.size()));
+            wideEnd = WriteUtf8Wide(wideEnd, out.parsed.Text(span));
+            out.wideEnds.push_back(static_cast<uint32_t>(wideEnd - wideBegin));
         }
+        out.wide.resize(static_cast<size_t>(wideEnd - wideBegin));
         const std::wstring_view source = out.wide;
         PendingWide pending;        // text of out.wide that comes next in out.text, not copied yet
         size_t lineStart = 0;       // index of the first run of the line being filled
