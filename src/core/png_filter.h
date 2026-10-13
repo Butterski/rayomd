@@ -36,4 +36,11 @@ void FilterPngRowSse2(int filter, const uint8_t* row, const uint8_t* up, size_t 
 bool UnfilterPngRow(uint8_t filter, const uint8_t* raw, const uint8_t* up, size_t rowBytes, size_t bpp,
     uint8_t* row);
 
+// Undoes the filters of two consecutive rows: `rawA` holds row A's residuals under `filterA`,
+// `rawB` row B's under `filterB`, `up` the row above A. Two Paeth rows of 3 or 4 bytes a pixel are
+// decoded side by side in AVX2, which halves the chain of dependent steps. False for a filter
+// past 4.
+bool UnfilterPngRows(uint8_t filterA, const uint8_t* rawA, uint8_t filterB, const uint8_t* rawB, const uint8_t* up,
+    size_t rowBytes, size_t bpp, uint8_t* rowA, uint8_t* rowB);
+
 } // namespace TinyPdf::Internal

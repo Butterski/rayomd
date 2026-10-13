@@ -2600,16 +2600,17 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     const size_t colorRow = width * colorComponents;
     RayoMd::Inflate::ZlibReader reader;
     if (!reader.Start(reinterpret_cast<const uint8_t*>(png.idat.data()), png.idat.size(), (rowBytes + 1) * height,
-            rowBytes + 1)) {
+            2 * (rowBytes + 1))) {
         return false;
     }
-    // This and the previous decoded row, colour row and alpha row, and a filtered row that spans
+    // The previous decoded row and the two being decoded (two Paeth rows unfilter together,
+    // png_filter.h), this and the previous colour row and alpha row, and a filtered row that spans
     // two segments.
     const size_t spillBytes = std::max(colorRow, width) + 1;
-    std::unique_ptr<uint8_t[]> rows(new (std::nothrow) uint8_t[2 * rowBytes + 2 * colorRow + 2 * width + spillBytes]);
+    std::unique_ptr<uint8_t[]> rows(new (std::nothrow) uint8_t[3 * rowBytes + 2 * colorRow + 2 * width + spillBytes]);
     if (!rows) return false;
     uint8_t* const decoded = rows.get();
-    uint8_t* const colors = decoded + 2 * rowBytes;
+    uint8_t* const colors = decoded + 3 * rowBytes;
     uint8_t* const alphas = colors + 2 * colorRow;
     uint8_t* const spill = alphas + 2 * width;
     const std::vector<uint8_t> zeros(std::max(rowBytes, colorRow), 0);
@@ -2639,28 +2640,48 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     };
 
     unsigned opaque = 255;
-    for (size_t y = 0; y < height; y++) {
-        const uint8_t* const line = reader.Take(rowBytes + 1);
-        uint8_t* const row = decoded + (y & 1) * rowBytes;
-        const uint8_t* const rowUp = y ? decoded + ((y - 1) & 1) * rowBytes : zeros.data();
-        uint8_t* const color = colors + (y & 1) * colorRow;
-        const uint8_t* const colorUp = y ? colors + ((y - 1) & 1) * colorRow : zeros.data();
-        uint8_t* const alpha = alphas + (y & 1) * width;
-        const bool wasOpaque = opaque == 255;
-        if (!line || !Internal::UnfilterPngRow(line[0], line + 1, rowUp, rowBytes, bpp, row) ||
-            !SplitPngRow(png, row, width, color, alpha, opaque) ||
-            !writeRow(0, color, colorUp, colorRow, colorComponents)) {
-            return false;   // the encoder abandons both planes
-        }
-        if (opaque != 255) {
-            if (wasOpaque) {
-                for (size_t earlier = 0; earlier < y; earlier++) {
-                    if (!writeRow(1, opaqueRow.data(), earlier ? opaqueRow.data() : zeros.data(), width, 1)) return false;
-                }
+    for (size_t y = 0; y < height;) {
+        // Only two Paeth rows gain from going together: after a Paeth row the next one is taken
+        // too, and given back when it is not one (it may be the next Paeth row's partner).
+        size_t count = 1;
+        const uint8_t* lines = reader.Take(rowBytes + 1);
+        if (lines && lines[0] == 4 && height - y >= 2) {
+            reader.Unread(rowBytes + 1);
+            lines = reader.Take(2 * (rowBytes + 1));
+            count = 2;
+            if (lines && lines[rowBytes + 1] != 4) {
+                reader.Unread(rowBytes + 1);
+                count = 1;
             }
-            if (!writeRow(1, alpha, y ? alphas + ((y - 1) & 1) * width : zeros.data(), width, 1)) return false;
         }
-        if (helpers == 0) encoder.EncodeReady();
+        if (!lines) return false;
+        uint8_t* const first = decoded + (y % 3) * rowBytes;
+        const uint8_t* const firstUp = y ? decoded + ((y + 2) % 3) * rowBytes : zeros.data();
+        const bool unfiltered = count == 2
+            ? Internal::UnfilterPngRows(lines[0], lines + 1, lines[rowBytes + 1], lines + rowBytes + 2, firstUp, rowBytes,
+                  bpp, first, decoded + ((y + 1) % 3) * rowBytes)
+            : Internal::UnfilterPngRow(lines[0], lines + 1, firstUp, rowBytes, bpp, first);
+        if (!unfiltered) return false;   // the encoder abandons both planes
+        for (const size_t end = y + count; y < end; y++) {
+            const uint8_t* const row = decoded + (y % 3) * rowBytes;
+            uint8_t* const color = colors + (y & 1) * colorRow;
+            const uint8_t* const colorUp = y ? colors + ((y - 1) & 1) * colorRow : zeros.data();
+            uint8_t* const alpha = alphas + (y & 1) * width;
+            const bool wasOpaque = opaque == 255;
+            if (!SplitPngRow(png, row, width, color, alpha, opaque) ||
+                !writeRow(0, color, colorUp, colorRow, colorComponents)) {
+                return false;
+            }
+            if (opaque != 255) {
+                if (wasOpaque) {
+                    for (size_t earlier = 0; earlier < y; earlier++) {
+                        if (!writeRow(1, opaqueRow.data(), earlier ? opaqueRow.data() : zeros.data(), width, 1)) return false;
+                    }
+                }
+                if (!writeRow(1, alpha, y ? alphas + ((y - 1) & 1) * width : zeros.data(), width, 1)) return false;
+            }
+            if (helpers == 0) encoder.EncodeReady();
+        }
     }
     if (!reader.Finish()) return false;
     if (opaque == 255) encoder.Abandon(1);

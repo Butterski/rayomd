@@ -588,6 +588,8 @@ const uint8_t* ZlibReader::Take(size_t bytes) {
     return taken;
 }
 
+void ZlibReader::Unread(size_t bytes) { state_->read -= bytes; }
+
 bool ZlibReader::Finish() {
     State& state = *state_;
     if (state.mode == State::Mode::Error || state.base + state.read != state.outputSize) return false;

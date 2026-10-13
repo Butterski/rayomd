@@ -3068,6 +3068,32 @@ bool CheckPngFilters() {
             }
         }
     }
+    // Two rows unfiltered together give both rows back, for every pair of filters: two Paeth rows
+    // of 3 or 4 bytes a pixel take the paired AVX2 code where the CPU has it.
+    for (size_t bpp = 1; bpp <= 4; bpp++) {
+        for (size_t pixels : { 1, 2, 3, 5, 17, 64, 333 }) {
+            const size_t rowBytes = pixels * bpp;
+            std::vector<uint8_t> above(rowBytes), first(rowBytes), second(rowBytes);
+            for (size_t x = 0; x < rowBytes; x++) {
+                above[x] = next();
+                first[x] = (uint8_t)(x % 7 < 4 ? above[x] + next() % 9 : next());
+                second[x] = (uint8_t)(x % 5 < 3 ? first[x] - next() % 9 : next());
+            }
+            for (int filterA = 0; filterA < 5; filterA++) {
+                for (int filterB = 0; filterB < 5; filterB++) {
+                    std::vector<uint8_t> rawA(rowBytes), rawB(rowBytes), backA(rowBytes, 0), backB(rowBytes, 0);
+                    FilterPngRowScalar(filterA, first.data(), above.data(), rowBytes, bpp, rawA.data());
+                    FilterPngRowScalar(filterB, second.data(), first.data(), rowBytes, bpp, rawB.data());
+                    if (!UnfilterPngRows((uint8_t)filterA, rawA.data(), (uint8_t)filterB, rawB.data(), above.data(), rowBytes,
+                            bpp, backA.data(), backB.data()) || backA != first || backB != second) {
+                        std::cerr << "PNG rows unfiltered together wrong: filters " << filterA << " and " << filterB
+                                  << ", " << bpp << " bytes per pixel, " << pixels << " pixels" << std::endl;
+                        return false;
+                    }
+                }
+            }
+        }
+    }
     uint8_t one = 1, out = 0;
     if (UnfilterPngRow(5, &one, &one, 1, 1, &out)) {
         std::cerr << "PNG filter 5 accepted" << std::endl;

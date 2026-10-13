@@ -1679,6 +1679,43 @@ documents' streams, which the batch keeps. Single exports ask for what they did,
 two and four pinned CPUs ran -5.1 and -8.7 % (48 mascots), -4.0 and +2.0 % (21 mixed) against
 4.1.0; unpinned, +2.6 and -3.9 %, within the batches' run-to-run spread of about 4 %.
 
+**Paeth rows unfiltered in pairs.** Unfiltering Paeth is one chain of dependent pixels, so its
+latency bounded it, not its width. Two Paeth rows now go together: one AVX2 register holds row
+A's pixel k and row B's pixel k-1, whose upper neighbour is A's pixel k-1, just computed, so the
+two chains run side by side; the predictor picks with `abs` and `blendv` on 16-bit lanes. After a
+Paeth row the decoder takes the next row too and gives it back (`ZlibReader::Unread`) when it is
+not Paeth: pairing every row slowed the screenshot, whose rows are all None. Sub with four bytes
+per pixel is a prefix sum over sixteen bytes. On 2048 RGBA rows of 2048 pixels, Paeth took 12.83
+ms one pixel at a time on SSE2, 9.05 with the AVX2 blend and 6.67 in pairs; Sub 1.41 → 1.02 ms
+per 8 MiB. AVX2 Sub and Average one pixel at a time were slower than SSE2 (2.93 against 2.63 ms,
+5.30 against 5.12). Filter scoring and filtering compute Paeth on 32 bytes without widening
+(|a + b - 2c| from byte differences; equal to the scalar predictor on all 2^24 inputs), and a
+residual's cost is `vpabsb` summed by `vpsadbw`: 2 to 4 % on the mascot and the illustration.
+The inflater's fast loop keeps the output position before the window in a register and tests
+end-of-block and invalid codes in one branch: against libdeflate on the test images, +3.9 % →
+within 1 % in total, the opaque photo +24 → +10 %, soft shadows +22 → +18 %. The PDFs are the same
+bytes as 4.2.0's (corpus, 108 documents). Cold `--export`, p50 of 40, against 4.2.0 built from
+its tag (2026-10-13, pinned CPUs):
+
+| Document | 1 CPU | 2 CPUs | 4 CPUs |
+| --- | --- | --- | --- |
+| the mascot | 11.49 → 11.05 ms (-3.8 %) | 7.71 → 7.16 (-7.1 %) | 7.19 → 6.97 (-3.0 %) |
+| `tester.md`, local images | 12.40 → 11.94 (-3.8 %) | 8.59 → 8.01 (-6.7 %) | 8.04 → 7.83 (-2.6 %) |
+| screenshot | 5.48 → 5.52 (+0.8 %) | 3.81 → 3.95 (+3.6 %) | 4.41 → 4.43 (+0.5 %) |
+| noisy photo | 33.75 → 32.58 (-3.5 %) | 26.73 → 25.34 (-5.2 %) | 26.58 → 25.35 (-4.7 %) |
+| illustration, 2048x2048 | 25.02 → 20.44 (-18.3 %) | 20.24 → 14.27 (-29.5 %) | 19.03 → 14.35 (-24.6 %) |
+
+`--batch` without the image cache, 48 mascot documents: -6.2, -5.4 and -5.1 % on one, two and four
+CPUs; 21 mixed ones -7.2, -6.5 and -6.2 %. The screenshot's loss on two CPUs is a race, not
+work. Its first colour segment is a full 1 MiB; when the decoder finishes it before the helper
+has compressed its end, the next segment takes a third buffer, which lies in the region's second
+2 MB page, and that page is zeroed whole. The faster decoder wins that race more often, so 4.2.0
+faulted 1.0 huge pages per export and this code 1.8; the screenshot's code path is the same as
+before. On 4 CPUs the same race makes peak RSS bimodal, about 10.2 or 12.7 MiB on the mascot:
+4.2.0 stayed low in 7 of 21 runs, this code in none. The maximum is unchanged, as the buffer
+limit is. A third buffer would cost as much on 4 KiB pages (about 175 faults for its 0.7 MB),
+and waiting for the helper instead would stall the decoder on images that compress slowly.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1692,13 +1729,15 @@ to be worth taking. The cheap ways lose size on some image (the test planes, one
 probe instead of two is 12.8 % faster but the illustration's colour grows 19 %; skipping sooner
 and inserting less inside matches is 6.7 % faster and soft shadows' colour grows 10 %. Flushing
 the bit writer only when full cost 15 % more time, and one table for literal codes and lengths
-6.9 %. Helper threads (above) now hide much of the compression on more than one CPU.
+6.9 %. Three literals a flush, prefetching the next bucket, comparing matches sixteen bytes at a
+time and rejecting the second probe early were each within 0.4 % (2026-10-13). Helper threads
+(above) now hide much of the compression on more than one CPU.
 
-**The inflater on literals.** RayoMD's inflater is 8 to 22 % slower than libdeflate on streams of
-mostly literals or short matches (the noisy and opaque photos, soft shadows; 2026-10-13), which
-leaves the noisy photo 1.2 % slower on one CPU than with libdeflate in 4.1.0. libdeflate keeps
-`bitsleft` as a byte with garbage above it and subtracts whole entries, which saves an AND on
-each code, and its BMI2 build extracts bits with `bzhi`; both would need measuring here.
+**The inflater on literals.** RayoMD's inflater is 10 % slower than libdeflate on the opaque
+photo and 18 % on soft shadows, streams of mostly literals or short matches, and within 1 % over
+all the test images (2026-10-13). libdeflate keeps `bitsleft` as a byte with garbage above it and
+subtracts whole entries, which saves an AND on each code; that would need measuring here. A BMI2
+build of the inflater (`bzhi`, `shrx`) gained nothing.
 
 **Plain code blocks without a vector per line.** `RenderCode` wraps each line with
 `WrapAsciiLiteral` or `WrapCodeLine`, which return a vector of strings: two

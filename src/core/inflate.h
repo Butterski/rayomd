@@ -31,6 +31,9 @@ public:
     // when the stream is malformed or ends short of them.
     const uint8_t* Take(size_t bytes);
 
+    // Hands the last `bytes` bytes of the latest Take out again with the next one.
+    void Unread(size_t bytes);
+
     // After all the output was taken: true when the deflate data ends there and is followed by
     // its Adler-32.
     bool Finish();
