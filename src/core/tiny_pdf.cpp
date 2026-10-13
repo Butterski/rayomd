@@ -7655,6 +7655,38 @@ static char* WriteEscapedLiteral(char* out, std::string_view text) {
     return out;
 }
 
+// Whether `text` holds a byte WriteEscapedLiteral does not copy as it is (kByteLiteralSpecial:
+// ( ) \ and the control bytes 0..31 and 127). Asked once per paragraph, whose runs then skip
+// that test; in SSE2, 16 bytes at a time.
+static bool HasLiteralSpecial(std::string_view text) {
+    const char* at = text.data();
+    const char* const end = at + text.size();
+#ifdef FAST_MD_SSE2
+    const __m128i control = _mm_set1_epi8(31);
+    const __m128i del = _mm_set1_epi8(127);
+    const __m128i one = _mm_set1_epi8(1);
+    const __m128i parenthesis = _mm_set1_epi8(')');     // '(' | 1 is ')'
+    const __m128i backslash = _mm_set1_epi8('\\');
+    __m128i seen = _mm_setzero_si128();
+    for (; end - at >= 16; at += 16) {
+        const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(at));
+        seen = _mm_or_si128(seen, _mm_or_si128(
+            _mm_or_si128(_mm_cmpeq_epi8(_mm_min_epu8(chunk, control), chunk), _mm_cmpeq_epi8(chunk, del)),
+            _mm_or_si128(_mm_cmpeq_epi8(_mm_or_si128(chunk, one), parenthesis), _mm_cmpeq_epi8(chunk, backslash))));
+    }
+    if (_mm_movemask_epi8(seen) != 0) return true;
+#endif
+    return RayoMd::Text::ContainsByteClass(std::string_view(at, static_cast<size_t>(end - at)),
+        RayoMd::Text::kByteLiteralSpecial);
+}
+
+// WriteEscapedLiteral for text known to need no escape (HasLiteralSpecial was false): a copy.
+static char* WriteLiteral(char* out, std::string_view text, bool plain) {
+    if (!plain) return WriteEscapedLiteral(out, text);
+    if (!text.empty()) memcpy(out, text.data(), text.size());
+    return out + text.size();
+}
+
 // True for text without a byte >= 0x80, which the standard renderer takes as it is. Other
 // text reaches it transcoded to WinAnsiEncoding, or takes the Unicode renderer.
 static bool IsPlainAsciiDocument(const std::string& s) {
@@ -8559,6 +8591,7 @@ private:
         std::string text;
         std::vector<AsciiRun> runs;
         std::vector<uint32_t> lineEnds;     // one past the last run of each line
+        bool plain = false;                 // no byte of the parsed text needs escaping (HasLiteralSpecial)
 
         std::string_view Text(const AsciiRun& run) const {
             return std::string_view(text.data() + run.begin, run.end - run.begin);
@@ -8586,7 +8619,7 @@ private:
             const bool code = (run.style & kStyleCode) != 0;
             if (code) CodeBackground(x, top, spanWidth, lh, runs.Text(run), size, colors.codeFill);
             const char* color = run.url.empty() ? (code ? colors.code : colors.text) : linkColor;
-            Text(x, baseline, size, runs.Text(run), StyleFontName(run.style), color);
+            Text(x, baseline, size, runs.Text(run), StyleFontName(run.style), color, runs.plain);
             if (run.style & kStyleStrike) StrikeThrough(x, baseline, spanWidth, size, runs.Text(run), run.style, color);
             AddLink(x, baseline, spanWidth, size, run.url);
             x += spanWidth;
@@ -8702,6 +8735,7 @@ private:
         out.segments.clear();
         out.runs.clear();
         out.lineEnds.clear();
+        out.plain = !HasLiteralSpecial(out.parsed.text);
         const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
         for (size_t first = 0; first < parsed.size();) {
             const uint8_t style = static_cast<uint8_t>(SpanStyle(parsed[first]) | baseStyle);
@@ -9003,7 +9037,9 @@ private:
         y -= h + 10.0;
     }
 
-    void Text(double x, double baseline, double size, std::string_view text, const char* fontName, const char* color = "0.08 0.08 0.08") {
+    // `plain`: the text holds no byte WriteEscapedLiteral would change (HasLiteralSpecial).
+    void Text(double x, double baseline, double size, std::string_view text, const char* fontName,
+        const char* color = "0.08 0.08 0.08", bool plain = false) {
         if (text.empty()) return;
         const size_t colorSize = strlen(color);
         const size_t fontSize = strlen(fontName);
@@ -9019,7 +9055,7 @@ private:
         out.Lit(" ");
         out.Fixed(baseline);
         out.Lit(" Tm (");
-        out.cursor = WriteEscapedLiteral(out.cursor, text);
+        out.cursor = WriteLiteral(out.cursor, text, plain);
         out.Lit(") Tj ET Q\n");
     }
 
@@ -9121,7 +9157,8 @@ private:
     }
 
     void RenderParagraph(const std::string& text, double x, double width) {
-        if (Internal::NeedsInlineParse(text, RayoMd::Text::kByteLineFeed)) {
+        unsigned char seen = 0;
+        if (Internal::NeedsInlineParse(text, RayoMd::Text::kByteLineFeed, &seen)) {
             if (math.Active()) math.Clear();
             if (WrapAsciiRuns(text, width, bodySize, paragraphRuns)) {
                 const double lh = bodySize * 1.35;
@@ -9162,8 +9199,14 @@ private:
             return;
         }
 
+        // Without ( ) \ or control bytes (and without the symbols ForEachWrappedAsciiLine rewrites)
+        // no line needs escaping; NeedsInlineParse saw every byte.
+        const bool plain = (seen & (RayoMd::Text::kByteLiteralSpecial | RayoMd::Text::kByteSymbolLead)) == 0;
         ForEachWrappedAsciiLine(text, width, bodySize, StandardTextFont::Regular, [&](std::string_view line, double) {
-            DrawTextLine(x, bodySize, line);
+            const double lh = bodySize * 1.35;
+            Ensure(lh);
+            Text(x, y - bodySize, bodySize, line, "F1", "0.08 0.08 0.08", plain);
+            y -= lh;
         });
         y -= 5.0;
     }

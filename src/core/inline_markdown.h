@@ -90,8 +90,9 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
 // Whether `text` needs the inline parser: inline syntax (or a byte of `classes`), or the "://"
 // or '@' of a bare URL or email address. One pass, which stops at the first inline syntax; only
 // text with a ':' or '@' and no syntax is searched again. The classes seen are summed before the
-// test: fewer instructions than testing each block first, mostly in short table cells.
-inline bool NeedsInlineParse(std::string_view text, unsigned char classes = 0) {
+// test: fewer instructions than testing each block first, mostly in short table cells. When it
+// returns false, `seenOut` (if given) gets the classes of all of `text`.
+inline bool NeedsInlineParse(std::string_view text, unsigned char classes = 0, unsigned char* seenOut = nullptr) {
     const unsigned syntax = RayoMd::Text::kByteInlineSyntax | classes;
     const unsigned char* at = reinterpret_cast<const unsigned char*>(text.data());
     size_t left = text.size();
@@ -104,6 +105,7 @@ inline bool NeedsInlineParse(std::string_view text, unsigned char classes = 0) {
     }
     for (; left > 0; at++, left--) seen |= byteClasses[*at];
     if (seen & syntax) return true;
+    if (seenOut != nullptr) *seenOut = seen;
     return (seen & RayoMd::Text::kByteAutolinkLead) &&
         (text.find("://") != std::string_view::npos || text.find('@') != std::string_view::npos);
 }
