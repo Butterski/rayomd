@@ -262,11 +262,11 @@ Important image/link details:
 
 - `src/core/flate.h` and `src/core/flate.cpp`
   The DEFLATE/zlib encoder behind `--compress` and every re-encoded image: greedy
-  matching over two hash tables (`ZlibCompressImage` searches only the 8-byte one),
-  per-block stored/fixed/dynamic choice by exact bit count, SSE2 Adler-32.
-  Output depends only on the input. Its tables live per thread in
-  `tiny_pdf.cpp` (`ThreadFlateWork`) and are never cleared between streams. Built
-  at `-O2`: within 1 % of `-O3` at half the code.
+  matching over two hash tables (`ZlibCompressImage` searches only the 8-byte one, and
+  can start on input another thread is still writing), per-block stored/fixed/dynamic
+  choice by exact bit count, SSE2 Adler-32. Output depends only on the input. Its tables
+  live per thread in `tiny_pdf.cpp` (`ThreadFlateWork`) and are never cleared between
+  streams. Built at `-O2`: within 1 % of `-O3` at half the code.
 
 - `src/core/theme.h` and `src/core/theme.cpp`
   The layout of a theme's header, footer and cover page (placeholders, ellipses,
@@ -462,10 +462,12 @@ GitHub CI entry points:
   the header and Adler-32), its filtered colour rows written back into that buffer behind
   the row being read, and compressed with `ZlibCompressImage`. The encoder, its mode and the
   filter heuristic all decide the image bytes; change them only on purpose. From
-  `kAlphaThreadPixels` the alpha is encoded on a second thread when the process's affinity
-  allows more than one CPU; until the join the threads write disjoint buffers and share
-  only data neither writes. Its decode buffers come from `AllocateImageBuffer`: on Linux
-  2 MB-aligned with `MADV_HUGEPAGE`, which saves most of a fresh process's page faults.
+  `kImageThreadPixels`, when the process's affinity allows more than one CPU, a second
+  thread compresses the colour rows as they are filtered (`InputProgress`: each row is
+  published with release order after it is written, and abandoned on a decode error before
+  the join); the alpha follows on this thread. Its decode buffers come from
+  `AllocateImageBuffer`: on Linux the first ones of a process are 2 MB-aligned with
+  `MADV_HUGEPAGE`, which saves most of a fresh process's page faults.
 - `WriteFixed2` may write one byte past the end it returns, within the
   `kFixed2MaxChars` every caller must leave.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document

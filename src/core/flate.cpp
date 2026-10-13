@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstring>
+#include <thread>
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
 #include <emmintrin.h>
@@ -467,9 +468,10 @@ uint32_t Adler32(const uint8_t* data, size_t size, uint32_t adler) {
 namespace {
 
 // With kShortMatches the 4-byte table is probed too, for matches of 4 to 7 bytes, as page text
-// has many; PNG-predicted image rows do not gain from them (ZlibCompressImage).
+// has many; PNG-predicted image rows do not gain from them (ZlibCompressImage). With `progress`,
+// each block waits until its bytes and the longest match past them are written.
 template <bool kShortMatches>
-size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch) {
+size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch, const InputProgress* progress) {
     const uint8_t* const in = reinterpret_cast<const uint8_t*>(input.data());
     const size_t size = input.size();
     out[0] = 0x78;   // deflate, 32 KB window
@@ -509,6 +511,16 @@ size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch) {
     do {
         const size_t blockStart = at;
         const size_t limit = std::min(size, blockStart + kBlockStart);
+        if (progress) {
+            // A token starting before `limit` reads at most kMaxMatch bytes, its hash 8.
+            const size_t needed = std::min(size, limit + kMaxMatch + 8);
+            size_t written = progress->written.load(std::memory_order_acquire);
+            while (written < needed) {
+                std::this_thread::yield();
+                written = progress->written.load(std::memory_order_acquire);
+            }
+            if (written == InputProgress::kAbandoned) return 0;
+        }
         uint32_t litFreq[kLitLenSymbols] = {};
         uint32_t distanceFreq[kDistanceSymbols] = {};
         size_t count = 0;
@@ -602,11 +614,11 @@ size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch) {
 } // namespace
 
 size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
-    return CompressZlib<true>(input, out, scratch);
+    return CompressZlib<true>(input, out, scratch, nullptr);
 }
 
-size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch) {
-    return CompressZlib<false>(input, out, scratch);
+size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch, const InputProgress* progress) {
+    return CompressZlib<false>(input, out, scratch, progress);
 }
 
 } // namespace RayoMd::Flate

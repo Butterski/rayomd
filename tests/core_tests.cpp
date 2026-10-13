@@ -1678,12 +1678,49 @@ bool CheckCompression() {
     }
     for (size_t i = skewed.size(); i > 1; i--) std::swap(skewed[i - 1], skewed[next() % i]);
     inputs.push_back(std::move(skewed));
+    using Compress = size_t (*)(std::string_view, uint8_t*, RayoMd::Flate::Scratch&);
+    const Compress modes[] = { RayoMd::Flate::ZlibCompress, [](std::string_view in, uint8_t* out, RayoMd::Flate::Scratch& work) {
+        return RayoMd::Flate::ZlibCompressImage(in, out, work);
+    } };
     for (const std::string& input : inputs) {
-        for (const auto compress : { RayoMd::Flate::ZlibCompress, RayoMd::Flate::ZlibCompressImage }) {
+        for (const Compress compress : modes) {
             std::string packed(RayoMd::Flate::ZlibBound(input.size()), '\0');
             packed.resize(compress(input, reinterpret_cast<uint8_t*>(&packed[0]), scratch));
             if (packed.size() > RayoMd::Flate::ZlibBound(input.size()) - 8 || !Inflates(packed, input)) {
                 std::cerr << "DEFLATE round trip failed for " << input.size() << " bytes" << std::endl;
+                return false;
+            }
+        }
+    }
+    // The image mode on input that another thread is still writing, pieces of up to 70,000 bytes
+    // at a time, writes the bytes it writes for the whole input at once; on input abandoned half
+    // way it stops and returns 0.
+    for (const std::string& input : inputs) {
+        std::string whole(RayoMd::Flate::ZlibBound(input.size()), '\0');
+        whole.resize(RayoMd::Flate::ZlibCompressImage(input, reinterpret_cast<uint8_t*>(&whole[0]), scratch));
+        for (const bool abandon : { false, true }) {
+            std::string arriving(input.size(), '\0');
+            std::string streamed(RayoMd::Flate::ZlibBound(input.size()), '\0');
+            RayoMd::Flate::InputProgress progress;
+            RayoMd::Flate::Scratch threadScratch;
+            size_t streamedSize = 1;
+            std::thread encoder([&]() {
+                streamedSize = RayoMd::Flate::ZlibCompressImage(arriving, reinterpret_cast<uint8_t*>(&streamed[0]),
+                    threadScratch, &progress);
+            });
+            const size_t end = abandon ? input.size() / 2 : input.size();
+            for (size_t at = 0; at < end;) {
+                const size_t piece = std::min<size_t>(end - at, next() % 70000 + 1);
+                std::memcpy(&arriving[at], input.data() + at, piece);
+                at += piece;
+                progress.written.store(at, std::memory_order_release);
+            }
+            if (abandon) progress.written.store(RayoMd::Flate::InputProgress::kAbandoned, std::memory_order_release);
+            encoder.join();
+            streamed.resize(abandon ? 0 : streamedSize);
+            // The last block needs the whole input, so only empty input is done without it.
+            if (abandon ? streamedSize != 0 && !input.empty() : streamed != whole) {
+                std::cerr << "DEFLATE of arriving input differs for " << input.size() << " bytes" << std::endl;
                 return false;
             }
         }

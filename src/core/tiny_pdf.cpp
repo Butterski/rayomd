@@ -1484,8 +1484,8 @@ static void SetPayloadStream(PdfObjects& pdf, int id, std::string_view data, boo
 
 constexpr size_t kMaxImageBytes = 32u * 1024u * 1024u;
 constexpr size_t kMaxDecodedImageBytes = 96u * 1024u * 1024u;
-// From this many pixels a translucent PNG's alpha is encoded on a thread of its own.
-constexpr size_t kAlphaThreadPixels = size_t(1) << 18;
+// From this many pixels a re-encoded PNG's colour is compressed on a second thread as it is decoded.
+constexpr size_t kImageThreadPixels = size_t(1) << 18;
 
 // The CPUs this process may run on: its affinity mask, which taskset or a container narrows,
 // where std::thread::hardware_concurrency counts the machine's.
@@ -2482,8 +2482,10 @@ static ImageBuffer AllocateImageBuffer(size_t size) {
     return ImageBuffer(static_cast<uint8_t*>(std::malloc(size)));
 }
 
-// `size` bytes of PNG-predicted rows as a zlib stream (ZlibCompressImage).
-static bool CompressImageRows(const uint8_t* rows, size_t size, std::string& stream) {
+// `size` bytes of PNG-predicted rows as a zlib stream (ZlibCompressImage); with `progress`, rows
+// another thread is still writing.
+static bool CompressImageRows(const uint8_t* rows, size_t size, std::string& stream,
+    const RayoMd::Flate::InputProgress* progress = nullptr) {
     if (size > RayoMd::Flate::kMaxInput) return false;
     // Ordinary pages: the encoder writes only the output, mostly a fraction of the bound, and the
     // pages it does not reach stay unused (on huge pages a 1024x1024 image took 1.7 MB more memory
@@ -2491,7 +2493,8 @@ static bool CompressImageRows(const uint8_t* rows, size_t size, std::string& str
     ImageBuffer out(static_cast<uint8_t*>(std::malloc(RayoMd::Flate::ZlibBound(size))));
     if (!out) return false;
     const size_t written = RayoMd::Flate::ZlibCompressImage(
-        std::string_view(reinterpret_cast<const char*>(rows), size), out.get(), ThreadFlateWork().scratch);
+        std::string_view(reinterpret_cast<const char*>(rows), size), out.get(), ThreadFlateWork().scratch, progress);
+    if (written == 0) return false;
     stream.assign(reinterpret_cast<const char*>(out.get()), written);
     return true;
 }
@@ -2649,6 +2652,10 @@ static void DescribeReencodedPng(const PngInfo& png, PdfImage& image) {
 // each behind a byte for its filter, are filtered in place from the last up, and their stream is
 // written only when some pixel is translucent. Nothing is zeroed but a row of zeros for the first
 // row's neighbours.
+//
+// From kImageThreadPixels, when the process may run on another CPU, the colour rows are compressed
+// on a second thread as they are filtered, and the alpha rows, once all are there, on this one.
+// Each stream is still compressed whole, so the bytes are the same.
 static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     size_t rowBytes = 0;
     size_t bpp = 0;
@@ -2674,7 +2681,18 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     uint8_t* const alpha = colors + 2 * colorRow;
     const std::vector<uint8_t> zeros(std::max(rowBytes, colorRow), 0);
 
+    PdfImage result;
+    static const unsigned cpus = UsableCpus();
+    RayoMd::Flate::InputProgress progress;
+    bool colorOk = false;
+    std::thread colorThread;
+    if (width * height >= kImageThreadPixels && cpus > 1) {
+        colorThread = std::thread([&]() {
+            colorOk = CompressImageRows(filteredColors, (colorRow + 1) * height, result.stream, &progress);
+        });
+    }
     unsigned opaque = 255;
+    bool decodedOk = true;
     for (size_t y = 0; y < height; y++) {
         const uint8_t* const line = inflated.get() + y * (rowBytes + 1);
         uint8_t* const row = decoded + (y & 1) * rowBytes;
@@ -2683,20 +2701,23 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
         const uint8_t* const colorUp = y ? colors + ((y - 1) & 1) * colorRow : zeros.data();
         if (!Internal::UnfilterPngRow(line[0], line + 1, rowUp, rowBytes, bpp, row) ||
             !SplitPngRow(png, row, width, color, alpha + y * (width + 1) + 1, opaque)) {
-            return false;
+            decodedOk = false;
+            break;
         }
         // In place this overwrites only rows already read: it ends at (y + 1) * (colorRow + 1).
         uint8_t* const filtered = filteredColors + y * (colorRow + 1);
         const int filter = Internal::ChoosePngFilter(color, colorUp, colorRow, colorComponents);
         filtered[0] = (uint8_t)filter;
         Internal::FilterPngRow(filter, color, colorUp, colorRow, colorComponents, filtered + 1);
+        progress.written.store((y + 1) * (colorRow + 1), std::memory_order_release);
     }
-    // The alpha rows are filtered and compressed beside the colour when the image is translucent,
-    // large enough and the machine has another CPU.
-    PdfImage result;
-    const bool translucent = opaque != 255;
+    if (!decodedOk) {
+        progress.written.store(RayoMd::Flate::InputProgress::kAbandoned, std::memory_order_release);
+        if (colorThread.joinable()) colorThread.join();
+        return false;
+    }
     bool alphaOk = true;
-    const auto encodeAlpha = [&]() {
+    if (opaque != 255) {
         // Row y's residuals replace its values, which only row y + 1, already filtered, reads.
         uint8_t* const residuals = decoded;
         for (size_t y = height; y-- > 0;) {
@@ -2708,15 +2729,9 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
             std::memcpy(line + 1, residuals, width);
         }
         alphaOk = CompressImageRows(alpha, (width + 1) * height, result.maskStream);
-    };
-    std::thread alphaThread;
-    static const unsigned cpus = UsableCpus();
-    if (translucent && width * height >= kAlphaThreadPixels && cpus > 1) {
-        alphaThread = std::thread(encodeAlpha);
     }
-    const bool colorOk = CompressImageRows(filteredColors, (colorRow + 1) * height, result.stream);
-    if (alphaThread.joinable()) alphaThread.join();
-    else if (translucent) encodeAlpha();
+    if (colorThread.joinable()) colorThread.join();
+    else colorOk = CompressImageRows(filteredColors, (colorRow + 1) * height, result.stream);
     if (!colorOk || !alphaOk) return false;
     DescribeReencodedPng(png, result);
     image = std::move(result);

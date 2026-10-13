@@ -1450,6 +1450,34 @@ memory the allocator has already mapped, and on huge pages 48 images in one `--b
 112.9 → 119.3, `--workers=1` 472.4 → 488.9). With the budget: 119.5, 113.9 and 472.8 ms, and
 the cold exports above unchanged (the mascot 13.65 ms, the illustration 32.54).
 
+**Colour compressed as it is decoded.** The encoder's image mode can start before its input is
+complete (`InputProgress`): before each 64 KB block it waits until the block and the longest
+match past it, 266 bytes, are written. From 262,144 pixels, on a process that may use another
+CPU, a second thread now compresses the colour rows while this one unfilters, splits and
+filters the next, then filters and compresses the alpha. That replaces the alpha thread above,
+which overlapped only the alpha. The bytes are the same: each stream is still compressed whole,
+and a core test compresses input written by another thread, pieces of up to 70,000 bytes at a
+time, to the bytes of the whole input, and stops on input abandoned half way. In process, two
+CPUs, p50, against the alpha thread:
+
+| Image | Alpha thread | Now |
+| --- | ---: | ---: |
+| the mascot | 8.71 ms | 5.99 ms (-31 %) |
+| screenshot | 4.74 ms | 3.59 ms (-24 %) |
+| opaque photo as RGBA | 17.90 ms | 14.71 ms (-18 %) |
+| noisy photo | 20.64 ms | 16.99 ms (-18 %) |
+| sparse sprites | 6.32 ms | 5.74 ms (-9 %) |
+| soft shadows | 8.32 ms | 7.71 ms (-7 %) |
+| illustration, 2048x2048 | 25.02 ms | 25.12 ms |
+
+The illustration's decoding (10.7 ms of unfiltering, 6.5 of filter choice) is longer than its
+colour's compression, and its alpha (4.3 ms) now follows the decoding on this thread instead of
+running beside it, so it ends where it did. Cold, two CPUs: the mascot 12.18 → 9.19 ms (-24.5 %),
+`tester.md` 13.05 → 10.09 (-22.7 %), the screenshot -19.6 %, the noisy photo -11.3 %, soft
+shadows -6.3 %, the illustration -3.1 %; one CPU within 1 %. 48 such documents in one `--batch`:
+-9.4 % with the default workers, -0.7 % with `--workers=12`, 458 → 325 ms with `--workers=1`.
+ThreadSanitizer finds nothing in the core tests, single exports and a four-worker batch.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

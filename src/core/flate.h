@@ -7,6 +7,7 @@
 // count. Output depends only on the input.
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -37,11 +38,22 @@ constexpr size_t kMaxInput = (size_t(1) << 31) - 1;
 // ZlibBound(input.size()) - 8).
 size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch);
 
+// How many of an input's first bytes another thread has written, for ZlibCompressImage to start
+// before the input is complete: the writer stores the count with release order after the bytes,
+// or kAbandoned, which makes the encoder stop and return 0.
+struct InputProgress {
+    static constexpr size_t kAbandoned = ~size_t(0);
+    std::atomic<size_t> written{ 0 };
+};
+
 // ZlibCompress for the rows of a PNG-predicted image (/Predictor 15): the same format, bounds and
 // scratch, but only the 8-byte table is searched. On filtered pixels the 4-byte table finds short
 // distant matches that cost as many bits as the literals they replace and, where they break up
-// runs of literals, up to six times the time (2026-10-13, docs/development/performance.md).
-size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch);
+// runs of literals, up to six times the time (2026-10-13, docs/development/performance.md). With
+// `progress`, each 64 KB block waits until its bytes, and the longest match past them, are
+// written; the output is the same as for the whole input at once.
+size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch,
+    const InputProgress* progress = nullptr);
 
 // The Adler-32 checksum (RFC 1950) of `size` bytes, as zlib's adler32(adler, data, size): the
 // trailer of a zlib stream. Start with 1; pass the result on to continue over more bytes. SSE2
