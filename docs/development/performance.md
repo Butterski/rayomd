@@ -41,6 +41,45 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Phases 1 and 2 against 4.3.1
+
+All of the work below, measured together on 2026-10-13: the 4.3.1 code and the final code
+built side by side with g++ 13.3 (Release, as CI), CPU 3, every binary re-read into the page
+cache first. The 2,875 PDFs of the byte check (359 documents under eight option sets, a book
+and two batches) are identical, for the dynamic and the static build.
+
+Fresh `--export`, `perf stat` of 300 runs, output on tmpfs:
+
+| Document | Dynamic 4.3.1 | Dynamic now | Static 4.3.1 | Static now | Faults, dynamic |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Short ASCII note | 0.60 ms | **0.49 ms** (-18 %) | 0.33 ms | **0.30 ms** (-9 %) | 98 → 83 |
+| Short Polish note | 0.77 ms | **0.56 ms** (-27 %) | 0.52 ms | **0.38 ms** (-27 %) | 154 → 113 |
+| Essay, 10,000 words | 1.24 ms | **0.98 ms** (-21 %) | 0.95 ms | **0.78 ms** (-18 %) | 187 → 172 |
+| `tester.md`, no images | 1.17 ms | **0.92 ms** (-21 %) | 0.88 ms | **0.71 ms** (-19 %) | 189 → 146 |
+| README (Unicode, 28 KB) | 1.71 ms | **1.32 ms** (-23 %) | 1.41 ms | **1.09 ms** (-23 %) | 258 → 216 |
+| One 1024x1024 PNG | 10.53 ms | 10.27 ms (-2 %) | 10.19 ms | 9.86 ms (-3 %) | 729 → 715 |
+
+Overwriting an existing PDF on ext4 (interleaved `perf stat`, 300 runs), CPU and wall time:
+the short ASCII note 700 → 497 µs and 1,095 → 852 µs, the Polish note 863 → 567 µs and
+1,285 → 942 µs, the README 1,763 → 1,296 µs and 2,240 → 1,729 µs.
+
+Warm builds (`tools/benchmark.py ab`, 11 rounds, A/A within 0.8 %):
+
+| Fixture | Time | Instructions |
+| --- | ---: | ---: |
+| README (Unicode) | -19.6 % | -23.2 % |
+| Polish note | -22.5 % | -20.1 % |
+| Essay | -17.5 % | -15.5 % |
+| Short ASCII note | -11.3 % | -11.2 % |
+| `native_math.md` | -10.1 % | -8.7 % |
+| `tester.md`, no images | -9.7 % | -9.8 % |
+| Code-heavy (31 languages) | -8.1 % | -15.6 % |
+| Table-heavy | -4.1 % | -8.9 % |
+| Geometric mean | **-13.1 %** | **-14.3 %** |
+
+The dynamic binary grew from 1,293,160 to 1,321,904 bytes (exact rounding, the SSE2 scans,
+the kept buffers) and no longer needs `libm.so`; the static one from 2,174,600 to 2,199,216.
+
 ## Fresh exports, Phase 1
 
 Measured on 2026-10-13 (g++ 13.3, glibc 2.39, CPU 3, `perf stat` of 200 `--export` runs of each
