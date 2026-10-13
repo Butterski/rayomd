@@ -1566,6 +1566,40 @@ Fixed filters, SSSE3 and AVX2 splits, the 4-byte table in image mode, fused filt
 pages for the compressor's output and for every buffer of a long process are in the paragraphs
 above, with why each lost.
 
+**Segments compressed by helper threads** (2026-10-13, after 4.1.0). Each plane's filtered rows
+are now compressed in segments that any thread can take (`ImagePlanesEncoder`,
+`DeflateImageSegment`): 1 MiB while more than 2 MiB are left, then halves down to 128 KiB so that
+the last one is short, each with 2 KiB of history before it and ending on a byte with an empty
+stored block. The stream is the same however many threads compress it, and a core test checks
+it against one thread for 0, 1 and 3 helpers. A process-wide pool of up to three helpers takes a
+segment once its first block is published and follows the decoder block by block; with no
+helper the decoding thread compresses each segment as soon as its rows are complete, while they
+are still in its cache. A helper is asked for each usable CPU that no other decode of the
+process holds, so a batch whose workers keep the CPUs busy asks for none. On the test planes the
+segments cost 1.7 % of the encoder's time and 0.02 % of the size of one segment a plane (8 KiB of
+history: 4.7 % and 0.01 %; none: 0.9 % and 0.03 %); the screenshot's small alpha plane grows
+2 %. Cold, p50 of 40, against 4.1.0:
+
+| Document | 1 CPU | 2 CPUs | 4 CPUs |
+| --- | ---: | ---: | ---: |
+| the mascot | 12.25 → 12.27 ms | 8.70 → 8.47 (-2.6 %) | 8.66 → 8.10 (-6.5 %) |
+| `tester.md`, local images | 13.14 → 13.18 | 9.51 → 9.36 (-1.7 %) | 9.49 → 8.97 (-5.5 %) |
+| screenshot | 6.45 → 6.21 (-3.8 %) | 5.28 → 5.18 (-1.8 %) | 5.22 → 5.14 (-1.5 %) |
+| noisy photo | 33.27 → 33.72 (+1.4 %) | 29.58 → 28.16 (-4.8 %) | 29.64 → 26.88 (-9.3 %) |
+| illustration, 2048x2048 | 27.71 → 27.82 | 22.99 → 21.09 (-8.2 %) | 22.98 → 21.13 (-8.1 %) |
+
+`--batch` of 48 mascot documents and of 21 mixed ones: within 4 % of 4.1.0 either way, run to run.
+Peak RSS grows 0.2 to 0.5 MiB on one CPU (the segments' output buffer) and 1.2 to 1.5 MiB on
+four (three helpers' encoder tables). Three designs lost on the way. Filtering in the helpers
+too, from whole decoded planes, added a pass over the rows and a 1 MiB buffer per thread to
+fault in: the mascot +3.4 % in process on one CPU. Taking a segment only once all its rows were
+there left the helpers idle: the mascot's second 1 MiB arrived two thirds into decoding and took
+2.3 ms to compress, so four CPUs gained nothing. Helpers for every CPU in a batch made it 1 to
+4 % slower. ThreadSanitizer finds nothing in the core tests, single exports and two batches on
+four CPUs; under ASan and UBSan the 1,279 hostile PNGs decode as before. The pool, its condition
+variables and the segment code add 16,384 bytes to a local Linux release build (1,272,832 →
+1,289,216).
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1575,7 +1609,11 @@ they were not taken yet. Add to this list when a change turns one up.
 stage of a new image: 4.2 ms of the mascot's 8.7 on one CPU, where ISA-L's level 1 takes 2.5 ms
 for streams 16 % larger (2026-10-13). ISA-L's speed is hand-written assembly over a single
 hash probe; a C version of its parse in the image mode would have to keep RayoMD's stream sizes
-to be worth taking.
+to be worth taking. The cheap ways lose size on some image (the test planes, one thread): one
+probe instead of two is 12.8 % faster but the illustration's colour grows 19 %; skipping sooner
+and inserting less inside matches is 6.7 % faster and soft shadows' colour grows 10 %. Flushing
+the bit writer only when full cost 15 % more time, and one table for literal codes and lengths
+6.9 %. Helper threads (above) now hide much of the compression on more than one CPU.
 
 **Plain code blocks without a vector per line.** `RenderCode` wraps each line with
 `WrapAsciiLiteral` or `WrapCodeLine`, which return a vector of strings: two

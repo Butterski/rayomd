@@ -1,6 +1,7 @@
 #include "rayomd/tiny_pdf.h"
 #include "../src/common/batch_report.h"
 #include "../src/core/flate.h"
+#include "../src/core/image_encoder.h"
 #include "../src/common/text_utils.h"
 #include "../src/core/export_options.h"
 #include "../src/core/inline_markdown.h"
@@ -1678,49 +1679,102 @@ bool CheckCompression() {
     }
     for (size_t i = skewed.size(); i > 1; i--) std::swap(skewed[i - 1], skewed[next() % i]);
     inputs.push_back(std::move(skewed));
+    // Image rows of several segments, repeating with a period longer than a segment's history.
+    std::string rows(size_t(2300000), '\0');
+    for (size_t i = 0; i < rows.size(); i++) rows[i] = (char)(i % 20000 < 9000 ? i % 251 : next() % 7);
+    inputs.push_back(std::move(rows));
     using Compress = size_t (*)(std::string_view, uint8_t*, RayoMd::Flate::Scratch&);
     const Compress modes[] = { RayoMd::Flate::ZlibCompress, [](std::string_view in, uint8_t* out, RayoMd::Flate::Scratch& work) {
         return RayoMd::Flate::ZlibCompressImage(in, out, work);
     } };
     for (const std::string& input : inputs) {
         for (const Compress compress : modes) {
-            std::string packed(RayoMd::Flate::ZlibBound(input.size()), '\0');
+            const size_t bound = compress == modes[0] ? RayoMd::Flate::ZlibBound(input.size())
+                                                      : RayoMd::Flate::ZlibImageBound(input.size());
+            std::string packed(bound, '\0');
             packed.resize(compress(input, reinterpret_cast<uint8_t*>(&packed[0]), scratch));
-            if (packed.size() > RayoMd::Flate::ZlibBound(input.size()) - 8 || !Inflates(packed, input)) {
+            if (packed.size() > bound - 8 || !Inflates(packed, input)) {
                 std::cerr << "DEFLATE round trip failed for " << input.size() << " bytes" << std::endl;
                 return false;
             }
         }
     }
-    // The image mode on input that another thread is still writing, pieces of up to 70,000 bytes
-    // at a time, writes the bytes it writes for the whole input at once; on input abandoned half
-    // way it stops and returns 0.
+    // Segments of any sizes, each ending at any bit, put together make a valid stream.
     for (const std::string& input : inputs) {
-        std::string whole(RayoMd::Flate::ZlibBound(input.size()), '\0');
-        whole.resize(RayoMd::Flate::ZlibCompressImage(input, reinterpret_cast<uint8_t*>(&whole[0]), scratch));
-        for (const bool abandon : { false, true }) {
-            std::string arriving(input.size(), '\0');
-            std::string streamed(RayoMd::Flate::ZlibBound(input.size()), '\0');
-            RayoMd::Flate::InputProgress progress;
-            RayoMd::Flate::Scratch threadScratch;
-            size_t streamedSize = 1;
-            std::thread encoder([&]() {
-                streamedSize = RayoMd::Flate::ZlibCompressImage(arriving, reinterpret_cast<uint8_t*>(&streamed[0]),
-                    threadScratch, &progress);
-            });
-            const size_t end = abandon ? input.size() / 2 : input.size();
-            for (size_t at = 0; at < end;) {
-                const size_t piece = std::min<size_t>(end - at, next() % 70000 + 1);
-                std::memcpy(&arriving[at], input.data() + at, piece);
-                at += piece;
-                progress.written.store(at, std::memory_order_release);
+        if (input.size() > 300000) continue;
+        for (int trial = 0; trial < 8; trial++) {
+            std::string packed("\x78\x5E", 2);
+            for (size_t start = 0;;) {
+                const size_t size = std::min<size_t>(input.size() - start, next() % 9000);
+                const size_t history = std::min(start, RayoMd::Flate::kImageSegmentHistory);
+                const bool last = start + size == input.size();
+                std::string segment(RayoMd::Flate::ImageSegmentBound(size), '\0');
+                segment.resize(RayoMd::Flate::DeflateImageSegment(
+                    reinterpret_cast<const uint8_t*>(input.data()) + start - history, history, size, last,
+                    reinterpret_cast<uint8_t*>(&segment[0]), scratch));
+                packed += segment;
+                start += size;
+                if (last) break;
             }
-            if (abandon) progress.written.store(RayoMd::Flate::InputProgress::kAbandoned, std::memory_order_release);
-            encoder.join();
-            streamed.resize(abandon ? 0 : streamedSize);
-            // The last block needs the whole input, so only empty input is done without it.
-            if (abandon ? streamedSize != 0 && !input.empty() : streamed != whole) {
-                std::cerr << "DEFLATE of arriving input differs for " << input.size() << " bytes" << std::endl;
+            const uint32_t adler = RayoMd::Flate::Adler32(reinterpret_cast<const uint8_t*>(input.data()), input.size());
+            for (int shift = 24; shift >= 0; shift -= 8) packed.push_back((char)(adler >> shift));
+            if (!Inflates(packed, input)) {
+                std::cerr << "DEFLATE segments of " << input.size() << " bytes do not inflate" << std::endl;
+                return false;
+            }
+        }
+    }
+    // Image planes compressed by helper threads while their bytes arrive, up to 300,000 at a time,
+    // are the bytes of each plane compressed whole, however many helpers; an abandoned plane gets
+    // no stream, and an encoder left with bytes unpublished stops.
+    const std::string& alphaRows = inputs.back();
+    std::string wholeAlpha(RayoMd::Flate::ZlibImageBound(alphaRows.size()), '\0');
+    wholeAlpha.resize(RayoMd::Flate::ZlibCompressImage(alphaRows, reinterpret_cast<uint8_t*>(&wholeAlpha[0]), scratch));
+    for (const std::string& input : inputs) {
+        std::string whole(RayoMd::Flate::ZlibImageBound(input.size()), '\0');
+        whole.resize(RayoMd::Flate::ZlibCompressImage(input, reinterpret_cast<uint8_t*>(&whole[0]), scratch));
+        for (const unsigned helpers : { 0u, 1u, 3u }) {
+            for (const int ending : { 0, 1, 2 }) {   // finished, alpha abandoned, left unpublished
+                std::string arriving(input.size(), '\0');
+                std::string arrivingAlpha(alphaRows.size(), '\0');
+                const uint8_t* const planes[2] = { reinterpret_cast<const uint8_t*>(arriving.data()),
+                    reinterpret_cast<const uint8_t*>(arrivingAlpha.data()) };
+                const size_t sizes[2] = { arriving.size(), arrivingAlpha.size() };
+                TinyPdf::Internal::ImagePlanesEncoder encoder(planes, sizes, 2, helpers);
+                const size_t end = ending == 2 ? input.size() / 2 : input.size();
+                for (size_t at = 0; at < end;) {
+                    const size_t piece = std::min<size_t>(end - at, next() % 300000 + 1);
+                    std::memcpy(&arriving[at], input.data() + at, piece);
+                    at += piece;
+                    encoder.Publish(0, at);
+                    if (helpers == 0) encoder.EncodeReady();
+                }
+                if (ending == 2) continue;   // the destructor abandons both planes
+                if (ending == 1) {
+                    encoder.Abandon(1);
+                } else {
+                    std::memcpy(&arrivingAlpha[0], alphaRows.data(), alphaRows.size());
+                    encoder.Publish(1, alphaRows.size());
+                }
+                std::string streams[2];
+                if (!encoder.Finish(streams) || streams[0] != whole ||
+                    streams[1] != (ending == 1 ? std::string() : wholeAlpha)) {
+                    std::cerr << "Image planes of " << input.size() << " bytes differ with " << helpers << " helpers"
+                              << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+    for (const uint32_t first : { 1u, 0x12345678u, 0xFFF0FFF0u }) {
+        for (const std::string& input : inputs) {
+            const uint8_t* const data = reinterpret_cast<const uint8_t*>(input.data());
+            const size_t split = input.size() / 3;
+            const uint32_t head = RayoMd::Flate::Adler32(data, split, first);
+            const uint32_t tail = RayoMd::Flate::Adler32(data + split, input.size() - split);
+            if (RayoMd::Flate::Adler32Combine(head, tail, input.size() - split) !=
+                RayoMd::Flate::Adler32(data + split, input.size() - split, head)) {
+                std::cerr << "Adler32Combine differs for " << input.size() << " bytes" << std::endl;
                 return false;
             }
         }

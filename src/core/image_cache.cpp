@@ -29,7 +29,7 @@ namespace fs = std::filesystem;
 // The last two digits are the encoding's generation: raise them with any change to the bytes
 // BuildDecodedPngImage writes (the encoder, its image mode, the filter choice), so that no build
 // reads another's streams under the same version.
-constexpr char kMagic[8] = { 'R', 'M', 'D', 'I', 'M', 'G', '0', '1' };
+constexpr char kMagic[8] = { 'R', 'M', 'D', 'I', 'M', 'G', '0', '2' };
 constexpr uintmax_t kDirectoryBytes = uintmax_t(256) * 1024 * 1024;
 
 // The magic, the version's length and text, then width, height, components and the lengths of

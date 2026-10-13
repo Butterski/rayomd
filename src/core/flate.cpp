@@ -467,23 +467,13 @@ uint32_t Adler32(const uint8_t* data, size_t size, uint32_t adler) {
 
 namespace {
 
-// With kShortMatches the 4-byte table is probed too, for matches of 4 to 7 bytes, as page text
-// has many; PNG-predicted image rows do not gain from them (ZlibCompressImage). With `progress`,
-// each block waits until its bytes and the longest match past them are written.
-template <bool kShortMatches>
-size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch, const InputProgress* progress) {
-    const uint8_t* const in = reinterpret_cast<const uint8_t*>(input.data());
-    const size_t size = input.size();
-    out[0] = 0x78;   // deflate, 32 KB window
-    out[1] = 0x5E;   // FLEVEL 1, and (0x785E % 31) == 0
-    BitWriter writer{ out + 2 };
-
-    // Tables sized to the input, 2^bits buckets of two, so a small stream touches little of them.
-    unsigned bits = 10;
+// Tables sized to `size` input bytes, 2^bits buckets of two, so a small stream touches little of
+// them. The tables are kept from call to call. Their positions count from scratch.base, which
+// each call moves a window past the end of its input, so no entry of an earlier call is ever
+// within reach: they are cleared only when the count would overflow. Returns the call's base.
+uint32_t PrepareTables(size_t size, Scratch& scratch, unsigned& bits) {
+    bits = 10;
     while (bits < 15 && (size_t(1) << bits) < size) bits++;
-    // The tables are kept from call to call. Their positions count from scratch.base, which each
-    // call moves a window past the end of its input, so no entry of an earlier call is ever within
-    // reach: they are cleared only when the count would overflow.
     if (scratch.longTable.empty() || scratch.base > kBaseLimit) {
         scratch.longTable.assign(size_t(2) << 15, 0);
         scratch.shortTable.assign(size_t(1) << 14, 0);
@@ -493,6 +483,27 @@ size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch, cons
     scratch.base += (uint32_t)size + kWindow;
     const size_t tokenRoom = std::min(size, kBlockStart);
     if (scratch.tokens.size() < tokenRoom) scratch.tokens.resize(tokenRoom);
+    return base;
+}
+
+void PutAdler(uint8_t* tail, uint32_t adler) {
+    tail[0] = (uint8_t)(adler >> 24);
+    tail[1] = (uint8_t)(adler >> 16);
+    tail[2] = (uint8_t)(adler >> 8);
+    tail[3] = (uint8_t)adler;
+}
+
+} // namespace
+
+size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
+    const uint8_t* const in = reinterpret_cast<const uint8_t*>(input.data());
+    const size_t size = input.size();
+    out[0] = 0x78;   // deflate, 32 KB window
+    out[1] = 0x5E;   // FLEVEL 1, and (0x785E % 31) == 0
+    BitWriter writer{ out + 2 };
+
+    unsigned bits = 10;
+    const uint32_t base = PrepareTables(size, scratch, bits);
     uint32_t* const longTable = scratch.longTable.data();
     uint32_t* const shortTable = scratch.shortTable.data();
     uint32_t* const tokens = scratch.tokens.data();
@@ -502,25 +513,13 @@ size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch, cons
         uint32_t* const bucket = longTable + 2 * (size_t)((sequence * kLongMultiplier) >> longShift);
         bucket[1] = bucket[0];
         bucket[0] = base + (uint32_t)at;
-        if constexpr (kShortMatches) {
-            shortTable[((uint32_t)sequence * kShortMultiplier) >> shortShift] = base + (uint32_t)at;
-        }
+        shortTable[((uint32_t)sequence * kShortMultiplier) >> shortShift] = base + (uint32_t)at;
     };
 
     size_t at = 0;
     do {
         const size_t blockStart = at;
         const size_t limit = std::min(size, blockStart + kBlockStart);
-        if (progress) {
-            // A token starting before `limit` reads at most kMaxMatch bytes, its hash 8.
-            const size_t needed = std::min(size, limit + kMaxMatch + 8);
-            size_t written = progress->written.load(std::memory_order_acquire);
-            while (written < needed) {
-                std::this_thread::yield();
-                written = progress->written.load(std::memory_order_acquire);
-            }
-            if (written == InputProgress::kAbandoned) return 0;
-        }
         uint32_t litFreq[kLitLenSymbols] = {};
         uint32_t distanceFreq[kDistanceSymbols] = {};
         size_t count = 0;
@@ -533,17 +532,14 @@ size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch, cons
             }
             const uint64_t sequence = Load64(in + at);
             uint32_t* const bucket = longTable + 2 * (size_t)((sequence * kLongMultiplier) >> longShift);
+            uint32_t* const slot = shortTable + (((uint32_t)sequence * kShortMultiplier) >> shortShift);
             const uint32_t first = bucket[0];
             const uint32_t second = bucket[1];
+            const uint32_t recent = *slot;
             const uint32_t here = base + (uint32_t)at;
             bucket[1] = first;
             bucket[0] = here;
-            uint32_t recent = 0;
-            if constexpr (kShortMatches) {
-                uint32_t* const slot = shortTable + (((uint32_t)sequence * kShortMultiplier) >> shortShift);
-                recent = *slot;
-                *slot = here;
-            }
+            *slot = here;
 
             const uint32_t limitLength = (uint32_t)std::min<size_t>(kMaxMatch, size - at);
             uint32_t best = 0;
@@ -559,13 +555,11 @@ size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch, cons
                     bestDistance = here - second;
                 }
             }
-            if constexpr (kShortMatches) {
-                if (best < 8 && here - recent - 1 < kWindow) {
-                    const uint32_t length = MatchLength(in + (recent - base), in + at, limitLength);
-                    if (length > best) {
-                        best = length;
-                        bestDistance = here - recent;
-                    }
+            if (best < 8 && here - recent - 1 < kWindow) {
+                const uint32_t length = MatchLength(in + (recent - base), in + at, limitLength);
+                if (length > best) {
+                    best = length;
+                    bestDistance = here - recent;
                 }
             }
             if (best >= kMinMatch) {
@@ -602,23 +596,148 @@ size_t CompressZlib(std::string_view input, uint8_t* out, Scratch& scratch, cons
         writer.Put(0, 8 - writer.count);
         writer.Flush();
     }
-    uint8_t* const tail = writer.out;
-    const uint32_t adler = Adler32(in, size);
-    tail[0] = (uint8_t)(adler >> 24);
-    tail[1] = (uint8_t)(adler >> 16);
-    tail[2] = (uint8_t)(adler >> 8);
-    tail[3] = (uint8_t)adler;
-    return (size_t)(tail + 4 - out);
+    PutAdler(writer.out, Adler32(in, size));
+    return (size_t)(writer.out + 4 - out);
 }
 
-} // namespace
+size_t DeflateImageSegment(const uint8_t* data, size_t history, size_t size, bool last, uint8_t* out,
+    Scratch& scratch, const InputProgress* progress) {
+    // Waits until another thread has written the first `needed` bytes from data; false when it gives up.
+    const auto await = [&](size_t needed) {
+        if (!progress) return true;
+        for (;;) {
+            const size_t written = progress->written->load(std::memory_order_acquire);
+            if (written == InputProgress::kAbandoned) return false;
+            if (written >= progress->offset + needed) return true;
+            std::this_thread::yield();
+        }
+    };
+    // Positions count from data: the history first, then the segment, which ends at `end`.
+    const uint8_t* const in = data;
+    const size_t end = history + size;
+    BitWriter writer{ out };
+    unsigned bits = 10;
+    const uint32_t base = PrepareTables(end, scratch, bits);
+    uint32_t* const longTable = scratch.longTable.data();
+    uint32_t* const tokens = scratch.tokens.data();
+    const unsigned longShift = 64 - bits;
+    const auto insert = [&](size_t at, uint64_t sequence) {
+        uint32_t* const bucket = longTable + 2 * (size_t)((sequence * kLongMultiplier) >> longShift);
+        bucket[1] = bucket[0];
+        bucket[0] = base + (uint32_t)at;
+    };
+    if (!await(std::min(end, history + 8))) return 0;
+    for (size_t at = 0; at < history && at + 8 <= end; at++) insert(at, Load64(in + at));
 
-size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
-    return CompressZlib<true>(input, out, scratch, nullptr);
+    size_t at = history;
+    do {
+        const size_t blockStart = at;
+        const size_t limit = std::min(end, blockStart + kBlockStart);
+        // A block reads up to a longest match past its last token, and 8 bytes to hash it.
+        if (!await(std::min(end, limit + kMaxMatch + 8))) return 0;
+        uint32_t litFreq[kLitLenSymbols] = {};
+        uint32_t distanceFreq[kDistanceSymbols] = {};
+        size_t count = 0;
+        size_t literals = 0;   // since the last match
+        while (at < limit) {
+            if (at + 8 > end) {
+                tokens[count++] = in[at];
+                litFreq[in[at++]]++;
+                continue;
+            }
+            const uint64_t sequence = Load64(in + at);
+            uint32_t* const bucket = longTable + 2 * (size_t)((sequence * kLongMultiplier) >> longShift);
+            const uint32_t first = bucket[0];
+            const uint32_t second = bucket[1];
+            const uint32_t here = base + (uint32_t)at;
+            bucket[1] = first;
+            bucket[0] = here;
+
+            // A match never runs past the segment, so the next one starts where this one ends.
+            const uint32_t limitLength = (uint32_t)std::min<size_t>(kMaxMatch, end - at);
+            uint32_t best = 0;
+            uint32_t bestDistance = 0;
+            if (here - first - 1 < kWindow) {
+                best = MatchLength(in + (first - base), in + at, limitLength);
+                bestDistance = here - first;
+            }
+            if (here - second - 1 < kWindow) {
+                const uint32_t length = MatchLength(in + (second - base), in + at, limitLength);
+                if (length > best) {
+                    best = length;
+                    bestDistance = here - second;
+                }
+            }
+            if (best >= kMinMatch) {
+                tokens[count++] = best << 16 | (bestDistance - 1);
+                litFreq[257 + kLengthSymbol[best]]++;
+                distanceFreq[DistanceSymbol(bestDistance - 1)]++;
+                const size_t matchEnd = at + best;
+                const size_t insertEnd = std::min(matchEnd, end - 7);   // a position needs 8 bytes to hash
+                if (best <= kInsertAll) {
+                    for (size_t inside = at + 1; inside < insertEnd; inside++) insert(inside, Load64(in + inside));
+                } else {
+                    const size_t headEnd = std::min(at + 1 + kInsertEdge, insertEnd);
+                    for (size_t inside = at + 1; inside < headEnd; inside++) insert(inside, Load64(in + inside));
+                    for (size_t inside = std::max(headEnd, matchEnd - kInsertEdge); inside < insertEnd; inside++) {
+                        insert(inside, Load64(in + inside));
+                    }
+                }
+                at = matchEnd;
+                literals = 0;
+            } else {
+                tokens[count++] = in[at];
+                litFreq[in[at++]]++;
+                for (size_t skip = ++literals >> kSkipShift; skip > 0 && at < limit; skip--) {
+                    tokens[count++] = in[at];
+                    litFreq[in[at++]]++;
+                }
+            }
+        }
+        litFreq[256] = 1;   // end of block
+        EmitBlock(writer, in + blockStart, at - blockStart, tokens, count, litFreq, distanceFreq, last && at >= end);
+    } while (at < end);
+
+    if (!last) {   // an empty stored block, BFINAL 0: the segment ends on a byte
+        writer.Put(0, 3);
+        writer.Put(0, (8 - (writer.count & 7)) & 7);
+        writer.Put(0xFFFF0000u, 32);   // LEN 0, NLEN 0xFFFF
+    } else if (writer.count > 0) {
+        writer.Put(0, 8 - writer.count);
+    }
+    writer.Flush();
+    return (size_t)(writer.out - out);
 }
 
-size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch, const InputProgress* progress) {
-    return CompressZlib<false>(input, out, scratch, progress);
+size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch) {
+    const uint8_t* const in = reinterpret_cast<const uint8_t*>(input.data());
+    const size_t size = input.size();
+    out[0] = 0x78;
+    out[1] = 0x5E;
+    uint8_t* at = out + 2;
+    size_t start = 0;
+    do {
+        const size_t segment = ImageSegmentSize(size - start);
+        const size_t history = std::min(start, kImageSegmentHistory);
+        at += DeflateImageSegment(in + start - history, history, segment, start + segment == size, at, scratch);
+        start += segment;
+    } while (start < size);
+    PutAdler(at, Adler32(in, size));
+    return (size_t)(at + 4 - out);
+}
+
+uint32_t Adler32Combine(uint32_t first, uint32_t second, size_t secondSize) {
+    constexpr uint32_t kBase = 65521;
+    const uint32_t remainder = (uint32_t)(secondSize % kBase);
+    uint32_t a = first & 0xFFFF;
+    uint32_t b = (uint32_t)(((uint64_t)remainder * a) % kBase);
+    a += (second & 0xFFFF) + kBase - 1;
+    b += (first >> 16) + (second >> 16) + kBase - remainder;
+    if (a >= kBase) a -= kBase;
+    if (a >= kBase) a -= kBase;
+    if (b >= 2 * kBase) b -= 2 * kBase;
+    if (b >= kBase) b -= kBase;
+    return b << 16 | a;
 }
 
 } // namespace RayoMd::Flate

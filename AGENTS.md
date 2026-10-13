@@ -263,11 +263,18 @@ Important image/link details:
 
 - `src/core/flate.h` and `src/core/flate.cpp`
   The DEFLATE/zlib encoder behind `--compress` and every re-encoded image: greedy
-  matching over two hash tables (`ZlibCompressImage` searches only the 8-byte one, and
-  can start on input another thread is still writing), per-block stored/fixed/dynamic
-  choice by exact bit count, SSE2 Adler-32. Output depends only on the input. Its tables
-  live per thread in `tiny_pdf.cpp` (`ThreadFlateWork`) and are never cleared between
-  streams. Built at `-O2`: within 1 % of `-O3` at half the code.
+  matching over two hash tables, per-block stored/fixed/dynamic choice by exact bit
+  count, SSE2 Adler-32. Image rows go through `DeflateImageSegment` (the 8-byte table
+  only, segments of `ImageSegmentSize` with `kImageSegmentHistory` bytes of history,
+  optionally waiting for input another thread is still writing); `ZlibCompressImage` is
+  the same stream made on one thread. Output depends only on the input. Its tables live
+  per thread and are never cleared between streams. Built at `-O2`: within 1 % of `-O3`
+  at half the code.
+
+- `src/core/image_encoder.h` and `src/core/image_encoder.cpp`
+  `ImagePlanesEncoder`: the colour and alpha planes of a re-encoded PNG compressed in
+  segments while they are decoded, by a process-wide pool of up to three helper threads
+  and the decoding thread; the bytes do not depend on how many threads take part.
 
 - `src/core/theme.h` and `src/core/theme.cpp`
   The layout of a theme's header, footer and cover page (placeholders, ellipses,
@@ -461,14 +468,14 @@ GitHub CI entry points:
   rule of `CidForCodepoint`.
 - A PNG with transparency is inflated whole (libdeflate, to its exact size; RayoMD checks
   the header and Adler-32), its filtered colour rows written back into that buffer behind
-  the row being read, and compressed with `ZlibCompressImage`. The encoder, its mode and the
-  filter heuristic all decide the image bytes; change them only on purpose. From
-  `kImageThreadPixels`, when the process's affinity allows more than one CPU, a second
-  thread compresses the colour rows as they are filtered (`InputProgress`: each row is
-  published with release order after it is written, and abandoned on a decode error before
-  the join); the alpha follows on this thread. Its decode buffers come from
-  `AllocateImageBuffer`: on Linux the first ones of a process are 2 MB-aligned with
-  `MADV_HUGEPAGE`, which saves most of a fresh process's page faults.
+  the row being read, and compressed in segments by `ImagePlanesEncoder`. The encoder, its
+  segment schedule and history, and the filter heuristic all decide the image bytes;
+  change them only on purpose. Each row is published with release order after it is
+  written; on a decode error the encoder's destructor abandons the planes and waits for its
+  helpers. From `kImageThreadPixels`, helpers join in for each usable CPU (the affinity
+  mask) that no other decode of the process holds, so a busy batch asks for none. Its
+  decode buffers come from `AllocateImageBuffer`: on Linux the first ones of a process are
+  2 MB-aligned with `MADV_HUGEPAGE`, which saves most of a fresh process's page faults.
 - `WriteFixed2` may write one byte past the end it returns, within the
   `kFixed2MaxChars` every caller must leave.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document

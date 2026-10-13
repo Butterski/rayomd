@@ -8,6 +8,7 @@
 #include "../common/text_utils.h"
 #include "book.h"
 #include "image_cache.h"
+#include "image_encoder.h"
 #include "contents.h"
 #include "markdown_parser.h"
 #include "highlight.h"
@@ -1484,7 +1485,7 @@ static void SetPayloadStream(PdfObjects& pdf, int id, std::string_view data, boo
 
 constexpr size_t kMaxImageBytes = 32u * 1024u * 1024u;
 constexpr size_t kMaxDecodedImageBytes = 96u * 1024u * 1024u;
-// From this many pixels a re-encoded PNG's colour is compressed on a second thread as it is decoded.
+// From this many pixels a re-encoded PNG's rows are compressed by helper threads as it is decoded.
 constexpr size_t kImageThreadPixels = size_t(1) << 18;
 
 // The CPUs this process may run on: its affinity mask, which taskset or a container narrows,
@@ -2482,23 +2483,6 @@ static ImageBuffer AllocateImageBuffer(size_t size) {
     return ImageBuffer(static_cast<uint8_t*>(std::malloc(size)));
 }
 
-// `size` bytes of PNG-predicted rows as a zlib stream (ZlibCompressImage); with `progress`, rows
-// another thread is still writing.
-static bool CompressImageRows(const uint8_t* rows, size_t size, std::string& stream,
-    const RayoMd::Flate::InputProgress* progress = nullptr) {
-    if (size > RayoMd::Flate::kMaxInput) return false;
-    // Ordinary pages: the encoder writes only the output, mostly a fraction of the bound, and the
-    // pages it does not reach stay unused (on huge pages a 1024x1024 image took 1.7 MB more memory
-    // and 1 % more time).
-    ImageBuffer out(static_cast<uint8_t*>(std::malloc(RayoMd::Flate::ZlibBound(size))));
-    if (!out) return false;
-    const size_t written = RayoMd::Flate::ZlibCompressImage(
-        std::string_view(reinterpret_cast<const char*>(rows), size), out.get(), ThreadFlateWork().scratch, progress);
-    if (written == 0) return false;
-    stream.assign(reinterpret_cast<const char*>(out.get()), written);
-    return true;
-}
-
 // An RGBA row split into colour and alpha, sixteen pixels a step in SSE2: the alpha bytes packed
 // from the high byte of each pixel, the colour of each pair of pixels moved together in its 64-bit
 // lane and stored as eight bytes, of which the next store overwrites two. Each step stops short of
@@ -2648,14 +2632,16 @@ static void DescribeReencodedPng(const PngInfo& png, PdfImage& image) {
 // A PNG that DecodedPngRows accepts, decoded and re-encoded as /Predictor 15 streams of colour
 // and alpha. Its rows are inflated whole, then each is unfiltered, split, and its colour
 // filtered again into the inflated rows' block behind the row being read: a colour row is no
-// longer than an inflated one but for a palette's, which takes a block of its own. The alpha rows,
-// each behind a byte for its filter, are filtered in place from the last up, and their stream is
-// written only when some pixel is translucent. Nothing is zeroed but a row of zeros for the first
-// row's neighbours.
+// longer than an inflated one but for a palette's, which takes a block of its own. Each alpha row
+// is filtered into a block of its own, but while every pixel so far is opaque the rows wait:
+// they are all 255, so they are filtered from a row of 255s once a translucent pixel shows, and
+// an opaque image filters none and writes no alpha stream. Nothing is zeroed but a row of zeros
+// for the first row's neighbours and that row of 255s.
 //
-// From kImageThreadPixels, when the process may run on another CPU, the colour rows are compressed
-// on a second thread as they are filtered, and the alpha rows, once all are there, on this one.
-// Each stream is still compressed whole, so the bytes are the same.
+// The filtered rows are compressed in segments (image_encoder.h) as they are published: from
+// kImageThreadPixels, by helper threads while this one decodes, one for each CPU the process may
+// run on that no other decode of this process holds (so a batch whose workers already keep the
+// CPUs busy asks for none), else by this one between rows.
 static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     size_t rowBytes = 0;
     size_t bpp = 0;
@@ -2669,8 +2655,8 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     const bool colorInPlace = colorRow <= rowBytes;
     ImageBuffer inflated = AllocateImageBuffer((rowBytes + 1) * height);
     ImageBuffer paletteColors = colorInPlace ? ImageBuffer() : AllocateImageBuffer((colorRow + 1) * height);
-    // This and the previous decoded row, this and the previous colour row, and the alpha rows.
-    ImageBuffer scratch = AllocateImageBuffer(2 * rowBytes + 2 * colorRow + (width + 1) * height);
+    // This and the previous decoded row, colour row and alpha row, and the filtered alpha rows.
+    ImageBuffer scratch = AllocateImageBuffer(2 * rowBytes + 2 * colorRow + 2 * width + (width + 1) * height);
     if (!inflated || (!colorInPlace && !paletteColors) || !scratch ||
         !InflateZlibStream(png.idat, inflated.get(), (rowBytes + 1) * height)) {
         return false;
@@ -2678,61 +2664,64 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     uint8_t* const filteredColors = colorInPlace ? inflated.get() : paletteColors.get();
     uint8_t* const decoded = scratch.get();
     uint8_t* const colors = decoded + 2 * rowBytes;
-    uint8_t* const alpha = colors + 2 * colorRow;
+    uint8_t* const alphas = colors + 2 * colorRow;
+    uint8_t* const filteredAlphas = alphas + 2 * width;
     const std::vector<uint8_t> zeros(std::max(rowBytes, colorRow), 0);
+    const std::vector<uint8_t> opaqueRow(width, 255);
 
-    PdfImage result;
     static const unsigned cpus = UsableCpus();
-    RayoMd::Flate::InputProgress progress;
-    bool colorOk = false;
-    std::thread colorThread;
-    if (width * height >= kImageThreadPixels && cpus > 1) {
-        colorThread = std::thread([&]() {
-            colorOk = CompressImageRows(filteredColors, (colorRow + 1) * height, result.stream, &progress);
-        });
-    }
+    static std::atomic<unsigned> decoding{ 0 };
+    const unsigned decodes = ++decoding;
+    struct Leave {
+        ~Leave() { decoding--; }
+    } leave;
+    const uint8_t* const planes[2] = { filteredColors, filteredAlphas };
+    const size_t sizes[2] = { (colorRow + 1) * height, (width + 1) * height };
+    const unsigned helpers = width * height >= kImageThreadPixels && cpus > decodes ? cpus - decodes : 0;
+    Internal::ImagePlanesEncoder encoder(planes, sizes, 2, helpers);
+    const auto filterAlpha = [&](size_t y, const uint8_t* row, const uint8_t* up) {
+        uint8_t* const filtered = filteredAlphas + y * (width + 1);
+        const int filter = Internal::ChoosePngFilter(row, up, width, 1);
+        filtered[0] = (uint8_t)filter;
+        Internal::FilterPngRow(filter, row, up, width, 1, filtered + 1);
+    };
+
     unsigned opaque = 255;
-    bool decodedOk = true;
     for (size_t y = 0; y < height; y++) {
         const uint8_t* const line = inflated.get() + y * (rowBytes + 1);
         uint8_t* const row = decoded + (y & 1) * rowBytes;
         const uint8_t* const rowUp = y ? decoded + ((y - 1) & 1) * rowBytes : zeros.data();
         uint8_t* const color = colors + (y & 1) * colorRow;
         const uint8_t* const colorUp = y ? colors + ((y - 1) & 1) * colorRow : zeros.data();
+        uint8_t* const alpha = alphas + (y & 1) * width;
+        const bool wasOpaque = opaque == 255;
         if (!Internal::UnfilterPngRow(line[0], line + 1, rowUp, rowBytes, bpp, row) ||
-            !SplitPngRow(png, row, width, color, alpha + y * (width + 1) + 1, opaque)) {
-            decodedOk = false;
-            break;
+            !SplitPngRow(png, row, width, color, alpha, opaque)) {
+            return false;   // the encoder abandons both planes
         }
         // In place this overwrites only rows already read: it ends at (y + 1) * (colorRow + 1).
         uint8_t* const filtered = filteredColors + y * (colorRow + 1);
         const int filter = Internal::ChoosePngFilter(color, colorUp, colorRow, colorComponents);
         filtered[0] = (uint8_t)filter;
         Internal::FilterPngRow(filter, color, colorUp, colorRow, colorComponents, filtered + 1);
-        progress.written.store((y + 1) * (colorRow + 1), std::memory_order_release);
-    }
-    if (!decodedOk) {
-        progress.written.store(RayoMd::Flate::InputProgress::kAbandoned, std::memory_order_release);
-        if (colorThread.joinable()) colorThread.join();
-        return false;
-    }
-    bool alphaOk = true;
-    if (opaque != 255) {
-        // Row y's residuals replace its values, which only row y + 1, already filtered, reads.
-        uint8_t* const residuals = decoded;
-        for (size_t y = height; y-- > 0;) {
-            uint8_t* const line = alpha + y * (width + 1);
-            const uint8_t* const up = y ? line - width : zeros.data();
-            const int filter = Internal::ChoosePngFilter(line + 1, up, width, 1);
-            Internal::FilterPngRow(filter, line + 1, up, width, 1, residuals);
-            line[0] = (uint8_t)filter;
-            std::memcpy(line + 1, residuals, width);
+        encoder.Publish(0, (y + 1) * (colorRow + 1));
+        if (opaque != 255) {
+            if (wasOpaque) {
+                for (size_t earlier = 0; earlier < y; earlier++) {
+                    filterAlpha(earlier, opaqueRow.data(), earlier ? opaqueRow.data() : zeros.data());
+                }
+            }
+            filterAlpha(y, alpha, y ? alphas + ((y - 1) & 1) * width : zeros.data());
+            encoder.Publish(1, (y + 1) * (width + 1));
         }
-        alphaOk = CompressImageRows(alpha, (width + 1) * height, result.maskStream);
+        if (helpers == 0) encoder.EncodeReady();
     }
-    if (colorThread.joinable()) colorThread.join();
-    else colorOk = CompressImageRows(filteredColors, (colorRow + 1) * height, result.stream);
-    if (!colorOk || !alphaOk) return false;
+    if (opaque == 255) encoder.Abandon(1);
+    PdfImage result;
+    std::string streams[2];
+    if (!encoder.Finish(streams)) return false;
+    result.stream = std::move(streams[0]);
+    result.maskStream = std::move(streams[1]);
     DescribeReencodedPng(png, result);
     image = std::move(result);
     return true;
