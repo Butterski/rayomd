@@ -8566,22 +8566,41 @@ private:
     // Appends `length` bytes of parsed text at `from`, `units` wide, in link and style state
     // `url` and `style`, to the line whose first run is `lineStart`, after a space `spaceUnits`
     // wide unless that is 0. The text joins the last run of the line when the state is the
-    // same. All of it comes by value: a byte written through `cursor` might alias `out`.
-    static RAYOMD_HOT_INLINE void AppendAsciiRunText(AsciiRuns& out, char* textBegin, char*& cursor, size_t lineStart,
-        uint8_t style, std::string_view url, const char* from, size_t length, uint32_t units, uint32_t spaceUnits) {
+    // same. Buffer starts come by value: a byte written through `cursor` might alias `out`.
+    // The bytes are copied late: what was copied ends at `cursor`, and `pendingLength` bytes of
+    // parsed text at `pending` come next. Text that goes on where the pending bytes end in the
+    // parsed text (a word one space after the one before, a word across spans) joins them, so
+    // a line takes a copy or two instead of a call per word; FlushAsciiRunText copies the rest.
+    static RAYOMD_HOT_INLINE void AppendAsciiRunText(AsciiRuns& out, char* textBegin, char*& cursor,
+        const char*& pending, size_t& pendingLength, size_t lineStart, uint8_t style, std::string_view url,
+        const char* from, size_t length, uint32_t units, uint32_t spaceUnits) {
         AsciiRun* run = out.runs.size() != lineStart ? &out.runs.back() : nullptr;
+        const size_t offset = static_cast<size_t>(cursor - textBegin) + pendingLength;
         if (!run || run->style != style || !SameText(run->url, url)) {
             out.runs.emplace_back();
             run = &out.runs.back();
-            run->begin = static_cast<uint32_t>(cursor - textBegin);
+            run->begin = static_cast<uint32_t>(offset);
             run->style = style;
             run->url = url;
         }
-        if (spaceUnits != 0) *cursor++ = ' ';
-        memcpy(cursor, from, length);
-        cursor += length;
+        const size_t spaced = spaceUnits != 0 ? 1 : 0;
+        if (pending + pendingLength == from - spaced && (spaced == 0 || from[-1] == ' ')) {
+            pendingLength += spaced + length;
+        } else {
+            memcpy(cursor, pending, pendingLength);
+            cursor += pendingLength;
+            if (spaced != 0) *cursor++ = ' ';
+            pending = from;
+            pendingLength = length;
+        }
         run->widthUnits += units + spaceUnits;
-        run->end = static_cast<uint32_t>(cursor - textBegin);
+        run->end = static_cast<uint32_t>(offset + spaced + length);
+    }
+
+    static RAYOMD_HOT_INLINE void FlushAsciiRunText(char*& cursor, const char* pending, size_t& pendingLength) {
+        memcpy(cursor, pending, pendingLength);
+        cursor += pendingLength;
+        pendingLength = 0;
     }
 
     // A word wider than a whole line, cut by character where the line is full; the last part
@@ -8590,6 +8609,8 @@ private:
         size_t firstSegment, size_t wordStart, size_t wordEnd, uint64_t maxUnits) {
         char* const textBegin = &out.text[0];
         const char* const source = out.parsed.text.data();
+        const char* pending = source;
+        size_t pendingLength = 0;
         for (size_t piece = firstSegment, begin = wordStart; begin < wordEnd; piece++) {
             const AsciiSegment& current = out.segments[piece];
             const uint16_t* advances = StyleAdvances(current.style).byte;
@@ -8600,8 +8621,8 @@ private:
                 const unsigned charUnits = advances[static_cast<unsigned char>(source[ch])];
                 if (lineUnits + partUnits + charUnits > maxUnits && (ch > partStart || out.runs.size() != lineStart)) {
                     if (ch > partStart) {
-                        AppendAsciiRunText(out, textBegin, cursor, lineStart, current.style, current.url, source + partStart,
-                            ch - partStart, partUnits, 0);
+                        AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, current.style,
+                            current.url, source + partStart, ch - partStart, partUnits, 0);
                     }
                     out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
                     lineStart = out.runs.size();
@@ -8612,12 +8633,13 @@ private:
                 partUnits += charUnits;
             }
             if (end > partStart) {
-                AppendAsciiRunText(out, textBegin, cursor, lineStart, current.style, current.url, source + partStart,
-                    end - partStart, partUnits, 0);
+                AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, current.style, current.url,
+                    source + partStart, end - partStart, partUnits, 0);
                 lineUnits += partUnits;
             }
             begin = end;
         }
+        FlushAsciiRunText(cursor, pending, pendingLength);
     }
 
     // Wraps `text` into `out` with the line breaks and span boundaries of WrapAsciiLinks. A word
@@ -8660,6 +8682,8 @@ private:
         char* const textBegin = &out.text[0];
         char* cursor = textBegin;
         const char* const source = out.parsed.text.data();
+        const char* pending = source;       // parsed text to copy at `cursor`, `pendingLength` bytes
+        size_t pendingLength = 0;
         size_t lineStart = 0;       // index of the first run of the line being filled
         uint64_t lineUnits = 0;
         const uint64_t maxUnits = MaxUnits(width, size);
@@ -8723,20 +8747,22 @@ private:
                     spaceUnits = 0;
                 }
                 if (wordUnits > maxUnits) {
+                    FlushAsciiRunText(cursor, pending, pendingLength);
                     PlaceWideAsciiWord(out, cursor, lineStart, lineUnits, segment, wordStart, wordEnd, maxUnits);
                 } else {
                     lineUnits += spaceUnits + wordUnits;
                     if (lastSegment == segment) {
-                        AppendAsciiRunText(out, textBegin, cursor, lineStart, style, url, source + wordStart,
-                            wordEnd - wordStart, static_cast<uint32_t>(wordUnits), spaceUnits);
+                        AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, style, url,
+                            source + wordStart, wordEnd - wordStart, static_cast<uint32_t>(wordUnits), spaceUnits);
                     } else {
                         // In one piece per segment the word touches.
                         for (size_t piece = segment, begin = wordStart; begin < wordEnd; piece++) {
                             const AsciiSegment& part = out.segments[piece];
                             const size_t end = std::min<size_t>(wordEnd, part.end);
                             if (end == begin) continue;
-                            AppendAsciiRunText(out, textBegin, cursor, lineStart, part.style, part.url, source + begin,
-                                end - begin, static_cast<uint32_t>(AsciiUnits(part, source, begin, end)), spaceUnits);
+                            AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, part.style,
+                                part.url, source + begin, end - begin,
+                                static_cast<uint32_t>(AsciiUnits(part, source, begin, end)), spaceUnits);
                             spaceUnits = 0;
                             begin = end;
                         }
@@ -8749,6 +8775,7 @@ private:
             }
         }
 
+        FlushAsciiRunText(cursor, pending, pendingLength);
         out.text.resize(static_cast<size_t>(cursor - textBegin));
         if (out.runs.size() != lineStart) out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
         if (out.lineEnds.empty()) out.lineEnds.push_back(0);
