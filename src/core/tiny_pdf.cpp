@@ -1148,14 +1148,18 @@ static void SetU32(std::string& out, size_t off, uint32_t v) {
     out[off + 3] = (char)(v & 0xff);
 }
 
+// The TrueType checksum: the sum of the big-endian words of `data`, the last one padded with
+// zeros. Whole words are read four bytes at a time.
 static uint32_t ChecksumBytes(const char* data, size_t size) {
     uint32_t sum = 0;
-    for (size_t i = 0; i < size; i += 4) {
+    size_t i = 0;
+    for (; i + 4 <= size; i += 4) {
+        sum += (uint32_t)(unsigned char)data[i] << 24 | (uint32_t)(unsigned char)data[i + 1] << 16 |
+            (uint32_t)(unsigned char)data[i + 2] << 8 | (uint32_t)(unsigned char)data[i + 3];
+    }
+    if (i < size) {
         uint32_t word = 0;
-        word |= (uint32_t)(unsigned char)data[i] << 24;
-        if (i + 1 < size) word |= (uint32_t)(unsigned char)data[i + 1] << 16;
-        if (i + 2 < size) word |= (uint32_t)(unsigned char)data[i + 2] << 8;
-        if (i + 3 < size) word |= (uint32_t)(unsigned char)data[i + 3];
+        for (int shift = 24; i < size; i++, shift -= 8) word |= (uint32_t)(unsigned char)data[i] << shift;
         sum += word;
     }
     return sum;
@@ -7272,8 +7276,10 @@ static bool BuildSubsetFontBytes(const TtfFont& font, const std::vector<uint16_t
     uint16_t searchRange = maxPower * 16;
     uint16_t rangeShift = numTables * 16 - searchRange;
 
+    size_t tableBytes = 0;
+    for (const SubsetTable& table : tables) tableBytes += (table.data.size() + 3) & ~(size_t)3;
     out.clear();
-    out.reserve(12 + (size_t)numTables * 16 + glyfData.size() + locaData.size() + 96 * numTables);
+    out.reserve(12 + (size_t)numTables * 16 + tableBytes);
     AppendU32(out, font.sfntVersion);
     AppendU16(out, numTables);
     AppendU16(out, searchRange);
