@@ -27,7 +27,8 @@ bool SeekTo(std::FILE* file, long long offset);
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content);
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint8_t>& content);
 
-// Creates or replaces `path` with `content`.
+// Creates or replaces `path` with `content`. On POSIX systems an existing file is overwritten in
+// place and then cut to size (no O_TRUNC; see file_io.cpp).
 bool WriteAll(const std::filesystem::path& path, std::string_view content);
 
 // What the file at a path is now: its size, its last write, its last status change (POSIX) or

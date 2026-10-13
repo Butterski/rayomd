@@ -9,7 +9,10 @@
 #endif
 #include <windows.h>
 #else
+#include <cerrno>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace RayoMd::File {
@@ -65,11 +68,41 @@ bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint
 }
 
 bool WriteAll(const std::filesystem::path& path, std::string_view content) {
+#ifdef _WIN32
     std::FILE* file = Open(path, "wb");
     if (!file) return false;
     bool written = content.empty() || std::fwrite(content.data(), 1, content.size(), file) == content.size();
     if (std::fclose(file) != 0) written = false;
     return written;
+#else
+    // Overwrites an existing file in place and cuts it to the new size afterwards, instead of
+    // fopen("wb")'s O_TRUNC: truncating an ext4 file to zero frees its blocks, and its close then
+    // starts writeback (auto_da_alloc), about 0.1 ms per export onto an existing PDF. The cost: no
+    // such flush, so a crash can leave old and new bytes mixed, as any in-place overwrite can.
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0666);
+    if (fd < 0) return false;
+    struct stat st;
+    bool written = ::fstat(fd, &st) == 0;
+    const char* data = content.data();
+    size_t left = content.size();
+    while (written && left != 0) {
+        const ssize_t count = ::write(fd, data, left);
+        if (count > 0) {
+            data += count;
+            left -= (size_t)count;
+        } else if (count == 0 || errno != EINTR) {
+            written = false;
+        }
+    }
+    // Only a regular file that was longer has old bytes left past the end; pipes and devices
+    // cannot be truncated.
+    if (written && S_ISREG(st.st_mode) && st.st_size > (off_t)content.size() &&
+        ::ftruncate(fd, (off_t)content.size()) != 0) {
+        written = false;
+    }
+    if (::close(fd) != 0) written = false;
+    return written;
+#endif
 }
 
 Stamp StampOf(const std::filesystem::path& path) {

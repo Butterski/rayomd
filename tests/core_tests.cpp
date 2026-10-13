@@ -1,5 +1,6 @@
 #include "rayomd/tiny_pdf.h"
 #include "../src/common/batch_report.h"
+#include "../src/common/file_io.h"
 #include "../src/core/flate.h"
 #include "../src/core/image_encoder.h"
 #include "../src/core/inflate.h"
@@ -2595,6 +2596,24 @@ bool CheckCidStrings() {
     return true;
 }
 
+// WriteAll overwrites an existing file in place on POSIX systems: a shorter content must cut off
+// the old tail, a longer one replace it all, and an empty one leave an empty file.
+bool CheckWriteAll() {
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "rayomd-test-write-all.bin";
+    const std::string longer(70000, 'L'), shorter = "short";
+    for (const std::string* content : {&longer, &shorter, &longer, static_cast<const std::string*>(nullptr), &shorter}) {
+        const std::string_view bytes = content ? std::string_view(*content) : std::string_view();
+        std::string back;
+        if (!RayoMd::File::WriteAll(path, bytes) || !RayoMd::File::ReadAll(path, 1 << 20, back) || back != bytes) {
+            std::cerr << "WriteAll did not replace the file with " << bytes.size() << " bytes" << std::endl;
+            return false;
+        }
+    }
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    return true;
+}
+
 // A process keeps decoded images and failed paths for later documents (--serve, --batch, the app):
 // an image file created, replaced or removed in between must be read again.
 bool CheckChangedImageFiles() {
@@ -3217,6 +3236,7 @@ int main() {
     if (!CheckPngFilters()) return 99;
     if (!CheckChangedImageFiles()) return 100;
     if (!CheckCidStrings()) return 101;
+    if (!CheckWriteAll()) return 102;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
