@@ -258,7 +258,23 @@ Important image/link details:
   the SSE2 and the scalar code with the textbook filters.
 
 - `src/common/file_io.cpp`
-  Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows.
+  Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows. On POSIX,
+  `WriteAll` overwrites an existing file in place and cuts it to size (no `O_TRUNC`): truncating
+  an ext4 file to zero made its close start writeback, 0.1 ms per export. Keep it so; the cost
+  is that a crash can leave old and new bytes mixed.
+
+- `src/common/exact_math.h` and `src/common/exact_math.cpp`
+  `ceil`, `floor`, `trunc`, `lround`, `llround`, `sqrt` and `fmod` without libm, bit for bit as
+  glibc's (the core tests compare them), so the dynamic Linux build needs no `libm.so`. Use them,
+  never `<cmath>`'s or other libm calls, in RayoMD's code: one direct call puts libm back into
+  every process (`readelf -d build/linux/rayomd` must list libc only). `svg.cpp`'s `atan2`,
+  `sincos` and `tan` are loaded from libm.so.6 on first use; a new transcendental function goes
+  there too.
+
+- `src/hot.ld` and `scripts/hot_sections.py`
+  The order in which GNU ld places the code fresh exports run (Release, Linux, dynamic and
+  static). Generated, never edited by hand; regenerate with the script (its docstring has the
+  commands) after larger changes to the code every export runs. Stale names are harmless.
 
 - `src/core/inflate.h` and `src/core/inflate.cpp`
   RayoMD's zlib/DEFLATE decoder (`ZlibReader`): resumable output a piece at a time
@@ -387,7 +403,7 @@ cmake --build build/linux --config Release
 The default Linux build intentionally avoids a libcurl runtime dependency. Use
 `-DRAYOMD_USE_CURL=ON` only when producing a Linux build that should fetch
 HTTP/HTTPS images and can target a known distro/libcurl baseline. Release builds link
-libstdc++ and libgcc statically, so the binary needs only libc and libm.
+libstdc++ and libgcc statically and do without libm (`exact_math.h`), so the binary needs only libc.
 `-DRAYOMD_STATIC=ON` links glibc in as well: the `-static` release asset, about
 0.9 MB larger and 0.3 ms faster to start, with no runtime dependency.
 

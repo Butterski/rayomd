@@ -41,6 +41,46 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Fresh exports, Phase 1
+
+Measured on 2026-10-13 (g++ 13.3, glibc 2.39, CPU 3, `perf stat` of 200 `--export` runs of each
+binary after its file was re-read into the page cache; output on tmpfs unless said). Four
+changes, each keeping every PDF byte:
+
+- **The PDF is written in place** (`RayoMd::File::WriteAll`, POSIX): `open` without `O_TRUNC`,
+  one write loop, `ftruncate` only for a regular file that was longer. Truncating an existing
+  ext4 file to zero freed its blocks and made `close` start writeback (`auto_da_alloc`); without
+  it an export onto an existing PDF is 0.12 to 0.19 ms faster. Tradeoff: no such flush, so a
+  crash can leave old and new bytes mixed, as any in-place overwrite can.
+- **TrueType one-shot work**: `post` copies its 32-byte header only, `hmtx` and `loca` are read
+  in place, `TtfFont`'s scalars lie before its 128 KB arrays, and a subset not cached yet is
+  written by `BuildInto` straight into the file (`PdfObjects::SetStreamWriter`): polish -28
+  faults, -60 µs.
+- **No `libm.so`** in the dynamic build (`exact_math.h`; SVG loads glibc's trigonometry with
+  `dlopen` on first use): -10 faults, -0.07 ms for every export; a document with SVG transforms
+  or arcs pays 0.04 ms for the `dlopen`.
+- **Function ordering** (`src/hot.ld`, `scripts/hot_sections.py`): 3 to 4 fewer faults, 7 to
+  19 µs.
+
+| document | 4.3.1 dynamic | now dynamic | 4.3.1 static | now static |
+| --- | ---: | ---: | ---: | ---: |
+| notes.md | 0.60 ms, 98 faults | 0.49 ms, 85 | 0.33 ms, 52 | 0.31 ms, 52 |
+| polish.md | 0.76 ms, 154 | 0.57 ms, 109 | 0.51 ms, 110 | 0.39 ms, 76 |
+| essay.md | 1.24 ms, 187 | 1.06 ms, 171 | 0.95 ms, 140 | 0.85 ms, 137 |
+| tester-noimg.md | 1.18 ms, 189 | 0.95 ms, 143 | 0.88 ms, 143 | 0.74 ms, 111 |
+| README.md | 1.69 ms, 257 | 1.43 ms, 213 | 1.40 ms, 216 | 1.20 ms, 185 |
+| image.md | 10.47 ms, 729 | 10.36 ms, 716 | 10.14 ms, 682 | 9.98 ms, 680 |
+| notes.md, existing ext4 output | 0.69 ms | 0.50 ms | 0.45 ms | 0.34 ms |
+| README.md, existing ext4 output | 1.75 ms | 1.42 ms | 1.49 ms | 1.24 ms |
+
+Warm builds (`ab --instructions`) stay within their spread: instructions -0.5 % (the libm
+change; `WriteFixed2` converts numbers from 2^52 directly instead of calling `llround`).
+Not done: the lazy cmap (see *Tried and rejected*: `HasGlyph` runs per painted character and
+would need a test and atomics for shared fonts), reading the input with `read()` and leaving
+the 1 MB output buffer and the font mapping to `exit`. Open decisions measured in the Phase 1
+breakdown: the static binary as the default asset, `-no-pie`, and skipping libgcc's frame
+registration in GCC 13 static builds (30 µs).
+
 ## Maintained workflows
 
 ```sh
