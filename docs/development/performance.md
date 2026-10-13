@@ -1692,10 +1692,11 @@ per 8 MiB. AVX2 Sub and Average one pixel at a time were slower than SSE2 (2.93 
 (|a + b - 2c| from byte differences; equal to the scalar predictor on all 2^24 inputs), and a
 residual's cost is `vpabsb` summed by `vpsadbw`: 2 to 4 % on the mascot and the illustration.
 The inflater's fast loop keeps the output position before the window in a register and tests
-end-of-block and invalid codes in one branch: against libdeflate on the test images, +3.9 % →
-within 1 % in total, the opaque photo +24 → +10 %, soft shadows +22 → +18 %. The PDFs are the same
-bytes as 4.2.0's (corpus, 108 documents). Cold `--export`, p50 of 40, against 4.2.0 built from
-its tag (2026-10-13, pinned CPUs):
+end-of-block and invalid codes in one branch: against libdeflate on the test images (`-O2`, as
+built), +4.0 → +2.7 % in total, the opaque photo +23.8 → +20.4 %, soft shadows +21.5 → +19.5 %,
+the noisy photo unchanged at +8.8 %. The PDFs are the same bytes as 4.2.0's (corpus, 108
+documents). Cold `--export`, p50 of 40, against 4.2.0 built from its tag (2026-10-13, pinned
+CPUs):
 
 | Document | 1 CPU | 2 CPUs | 4 CPUs |
 | --- | --- | --- | --- |
@@ -1733,11 +1734,12 @@ the bit writer only when full cost 15 % more time, and one table for literal cod
 time and rejecting the second probe early were each within 0.4 % (2026-10-13). Helper threads
 (above) now hide much of the compression on more than one CPU.
 
-**The inflater on literals.** RayoMD's inflater is 10 % slower than libdeflate on the opaque
-photo and 18 % on soft shadows, streams of mostly literals or short matches, and within 1 % over
-all the test images (2026-10-13). libdeflate keeps `bitsleft` as a byte with garbage above it and
-subtracts whole entries, which saves an AND on each code; that would need measuring here. A BMI2
-build of the inflater (`bzhi`, `shrx`) gained nothing.
+**The inflater on literals.** RayoMD's inflater is 20 % slower than libdeflate on the opaque
+photo and soft shadows, 9 % on the noisy photo, streams of mostly literals or short matches, and
+2.7 % over all the test images (2026-10-13, `-O2`). A BMI2 build of the inflater (`bzhi`,
+`shrx`) gained nothing, and neither did libdeflate's `bitsleft` with garbage above its low byte,
+which subtracts whole entries and saves an AND on each code: the total the same, the opaque photo
+-0.7 %, the illustration 2 to 6 % slower.
 
 **Plain code blocks without a vector per line.** `RenderCode` wraps each line with
 `WrapAsciiLiteral` or `WrapCodeLine`, which return a vector of strings: two
