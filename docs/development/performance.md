@@ -1749,6 +1749,24 @@ and every function but the two `RenderCode`s kept its size; built with `-falign-
 -falign-loops=32` the suite is +0.01 % (A/A -0.42 %) and `performance.md` -0.90 %. That is
 placement, which any change to `tiny_pdf.cpp` moves.
 
+**Two-byte CID strings.** The Unicode renderer wrote text as hex strings, four digits a CID;
+it now writes literal strings of two bytes a CID (the code point, high byte first). `(`, `)`
+and `\` take a backslash, CR is written as `\r`, which a reader would otherwise take for LF;
+NUL and LF stand for themselves. One table lookup tests a CID below U+0D00 (no high byte
+there needs a backslash), two the others, and an escape-free CID is one 16-bit store. Text
+bytes halve: `performance.md` 711,291 → 526,833 bytes (-26 %), README 252,185 → 206,091,
+`unicode_96kb.md` 927,993 → 779,145; with `--compress` -9 % and -4 %. Fresh `--export`, one
+pinned CPU, median of 41: `performance.md` 4.70 → 4.52 ms (-3.8 %), `unicode_96kb.md` 5.17 →
+5.01 ms (-3.0 %). Warm, against the build before (`tools/benchmark.py ab`, seven rounds):
+-1.10 % instructions (Unicode documents -0.7 to -2.3 %), time +0.12 % (A/A -0.17 %). Testing
+each byte with four compares cost +4.5 % instructions on the Unicode watch documents and two
+loads with a byte-wise store still +0.6 %; a parenthesis is a mispredicted branch (668 in
+`performance.md`, 713 more misses an export). 650 PDFs of 130 documents (generated text full of
+escapes, Braille and U+29xx arrows, plus the repository's Markdown) under five option sets
+(plain, `--pdfua`, `--pdfa`, `--compress`, `--page-numbers --toc`) pass `qpdf --check`, and
+Poppler 22.12 extracts the same text and renders the same pixels at 40 dpi as from the hex
+strings.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
@@ -1783,12 +1801,12 @@ translation units only (`tiny_pdf.cpp`, `inline_markdown.cpp`,
 against the executable size.
 
 **PDF/A text in single-byte codes.** Under `--pdfa` an ASCII or Latin document
-leaves the standard fonts for the Unicode renderer, whose CID text takes four hex
-digits a glyph: 2026-10-09, `baseline.md` +72 % time and +85 % size, a 96 KiB
-ASCII document +32 % and +54 %. A TrueType font embedded as a simple font in
-WinAnsiEncoding would keep the standard renderer's one-byte literal strings; the
-price is a second embedding path (simple-font widths, a `cmap` subtable PDF/A
-accepts) next to the CID one.
+leaves the standard fonts for the Unicode renderer, whose CID text takes two bytes
+a glyph: 2026-10-13, `baseline.md` +59 % time and +57 % size, `ascii_96kb.md` +26 %
+and +25 % (four hex digits a glyph until then: +72 % and +85 %, +32 % and +54 % on
+2026-10-09). A TrueType font embedded as a simple font in WinAnsiEncoding would
+write one byte a glyph; the price is a second embedding path (simple-font widths, a
+`cmap` subtable PDF/A accepts) next to the CID one.
 
 **A larger inlining budget for `tiny_pdf.cpp`.** The file sits at GCC's
 `inline-unit-growth` limit, so edits move which hot calls stay inlined.
@@ -1879,13 +1897,6 @@ without branches (an out-of-window candidate made to fail) and taking the
 longest with conditional moves would leave one unpredictable branch per
 position, match or literal. Single large exports could also compress their
 pages on several threads; batches already use every core.
-
-**Two-byte CID strings.** The Unicode renderer writes text as hex strings, four digits a
-character (`WriteHexText`): 16.9 % of the instructions of a `unicode_96kb.md` build and
-22.7 % of the kubernetes documentation's (callgrind, 2026-10-09). Literal strings of two
-bytes a CID would halve those bytes of every content stream; a byte that is `(`, `)`, `\`
-or CR needs a backslash before it (a reader takes a CR in a literal string for LF). It
-changes every Unicode PDF; weigh the escape test per byte against the shorter output.
 
 **Hot functions grouped in `.text.hot`.** Pinned alignment (`-falign-functions=64
 -falign-loops=32`) takes alignment out of a comparison, not which instruction-cache sets

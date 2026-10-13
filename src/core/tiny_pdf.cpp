@@ -86,7 +86,7 @@
 namespace TinyPdf {
 
 // ForEachCodepoint sits on the per-glyph path of every Unicode document (text width,
-// hex strings). Keep it inlined into its callers whatever else comes to call them.
+// CID strings). Keep it inlined into its callers whatever else comes to call them.
 // This file reaches GCC's inline-unit-growth limit at -O3, so which calls get inlined
 // shifts with any change to it; hot helpers and lambdas say so explicitly.
 // Rare paths (words wider than a line, table rows taller than a page, font discovery) are
@@ -1052,14 +1052,44 @@ private:
     mutable bool sorted = true;
 };
 
-// Writes the hex string "<....>" of `text` (four digits per CID) and records the CIDs.
-// `out` must have room for HexTextBytes(text) characters; returns the end.
-static size_t HexTextBytes(std::wstring_view text) {
+// Writes the literal string "(..)" of `text`, two bytes a CID, high byte first, and records the
+// CIDs. A parenthesis or a backslash takes a backslash before it and a CR is written as "\r", as a
+// reader takes a CR in a literal string for LF; every other byte, NUL and LF too, stands for
+// itself. Half the bytes of a hex string, and no digits to make. `out` must have room for
+// CidTextBytes(text) characters, four a code unit at worst; returns the end.
+static size_t CidTextBytes(std::wstring_view text) {
     return 2 + text.size() * 4;
 }
 
-static char* WriteHexText(char* out, const TtfFont& font, std::wstring_view text, UsedCidSet& usedCids) {
-    *out++ = '<';
+// '(' 0x28, ')' 0x29, '\\' 0x5C and CR 0x0D: the bytes a literal string escapes, as 1 in a table,
+// so that a CID takes one test of two loads.
+static constexpr std::array<uint8_t, 256> MakeLiteralEscapes() {
+    std::array<uint8_t, 256> escapes{};
+    escapes[0x28] = escapes[0x29] = escapes[0x5C] = escapes[0x0D] = 1;
+    return escapes;
+}
+static constexpr std::array<uint8_t, 256> kLiteralEscapes = MakeLiteralEscapes();
+static RAYOMD_HOT_INLINE bool NeedsLiteralEscape(uint8_t byte) {
+    return kLiteralEscapes[byte] != 0;
+}
+
+// A CID with a byte to escape: the parentheses and backslashes of the text itself, and the
+// characters whose high or low byte is one of those or CR (U+0D00..U+0DFF, U+2800..U+29FF,
+// U+5C00..U+5CFF, U+xx28 and the like). Out of line, as most CIDs need none.
+static char* WriteEscapedCid(char* out, uint16_t cid) {
+    for (int shift = 8; shift >= 0; shift -= 8) {
+        uint8_t byte = (uint8_t)(cid >> shift);
+        if (NeedsLiteralEscape(byte)) {
+            *out++ = '\\';
+            if (byte == 0x0D) byte = 'r';
+        }
+        *out++ = (char)byte;
+    }
+    return out;
+}
+
+static char* WriteCidText(char* out, const TtfFont& font, std::wstring_view text, UsedCidSet& usedCids) {
+    *out++ = '(';
     ForEachCodepoint(text, [&](uint32_t cp) {
         uint16_t cid = (uint16_t)cp;
         if (cp > 0xffff || !font.HasGlyph(cp)) {
@@ -1067,15 +1097,28 @@ static char* WriteHexText(char* out, const TtfFont& font, std::wstring_view text
             usedCids.missing += cp >= 0x20;
         }
         usedCids.Add(cid);
-        out = WriteHex4(out, cid);
+        // No high byte below 0x0D needs a backslash: Latin, Greek, Cyrillic and the scripts up to
+        // U+0CFF test their low byte only.
+        if (cid < 0x0D00 ? kLiteralEscapes[cid & 0xff] == 0 : (kLiteralEscapes[cid >> 8] | kLiteralEscapes[cid & 0xff]) == 0) {
+            // High byte first, as one store.
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            const uint16_t bytes = __builtin_bswap16(cid);
+#else
+            const uint16_t bytes = cid;
+#endif
+            memcpy(out, &bytes, 2);
+            out += 2;
+        } else {
+            out = WriteEscapedCid(out, cid);
+        }
     });
-    *out++ = '>';
+    *out++ = ')';
     return out;
 }
 
-static std::string HexText(const TtfFont& font, const std::wstring& text, UsedCidSet& usedCids) {
-    std::string out(HexTextBytes(text), '\0');
-    out.resize((size_t)(WriteHexText(&out[0], font, text, usedCids) - out.data()));
+static std::string CidText(const TtfFont& font, const std::wstring& text, UsedCidSet& usedCids) {
+    std::string out(CidTextBytes(text), '\0');
+    out.resize((size_t)(WriteCidText(&out[0], font, text, usedCids) - out.data()));
     return out;
 }
 
@@ -3266,8 +3309,8 @@ public:
     void AppendText(std::string& out, std::string_view text, bool) override {
         const std::wstring wide = Utf8ToWide(text);
         const size_t start = out.size();
-        out.resize(start + HexTextBytes(wide));
-        out.resize((size_t)(WriteHexText(&out[start], font, wide, cids) - out.data()));
+        out.resize(start + CidTextBytes(wide));
+        out.resize((size_t)(WriteCidText(&out[start], font, wide, cids) - out.data()));
     }
 
     bool HasBoldFace() const override { return false; }
@@ -5127,7 +5170,7 @@ private:
         content += " ";
         AppendF(content, baseline);
         content += " Tm ";
-        content += HexText(self->font, Utf8ToWide(utf8), self->usedCids);
+        content += CidText(self->font, Utf8ToWide(utf8), self->usedCids);
         content += " Tj ET Q\n";
     }
 
@@ -5974,8 +6017,8 @@ private:
             return;
         }
         const size_t colorSize = strlen(color);
-        const size_t hexBytes = HexTextBytes(line);
-        TailWriter w(content, 96 + colorSize * 2 + kOperandBytes * 9 + hexBytes * 2);
+        const size_t textBytes = CidTextBytes(line);
+        TailWriter w(content, 96 + colorSize * 2 + kOperandBytes * 9 + textBytes * 2);
         w.Lit("q ");
         w.Bytes(color, colorSize);
         w.Lit(" rg BT /F1 ");
@@ -5988,9 +6031,9 @@ private:
         w.Lit(" ");
         w.Fixed(baseline);
         w.Lit(" Tm ");
-        const char* hex = w.cursor;
-        w.cursor = WriteHexText(w.cursor, font, line, usedCids);
-        const size_t hexSize = (size_t)(w.cursor - hex);
+        const char* shown = w.cursor;
+        w.cursor = WriteCidText(w.cursor, font, line, usedCids);
+        const size_t shownSize = (size_t)(w.cursor - shown);
         w.Lit(" Tj");
         if (fauxBold) {
             w.Lit(" 1 0 ");
@@ -6001,7 +6044,7 @@ private:
             w.Lit(" ");
             w.Fixed(baseline);
             w.Lit(" Tm ");
-            w.Bytes(hex, hexSize);
+            w.Bytes(shown, shownSize);
             w.Lit(" Tj");
         }
         w.Lit(" ET");
@@ -6119,7 +6162,7 @@ private:
     RAYOMD_COLD void PaintStrokedBold(double x, double baseline, double size, std::wstring_view line, const char* color,
         bool italic, bool strike) {
         const size_t colorSize = strlen(color);
-        TailWriter w(content, 112 + colorSize * 2 + kOperandBytes * 8 + HexTextBytes(line));
+        TailWriter w(content, 112 + colorSize * 2 + kOperandBytes * 8 + CidTextBytes(line));
         w.Lit("q ");
         w.Bytes(color, colorSize);
         w.Lit(" rg ");
@@ -6134,7 +6177,7 @@ private:
         w.Lit(" ");
         w.Fixed(baseline);
         w.Lit(" Tm ");
-        w.cursor = WriteHexText(w.cursor, font, line, usedCids);
+        w.cursor = WriteCidText(w.cursor, font, line, usedCids);
         w.Lit(" Tj ET");
         if (strike && !line.empty()) {
             const double width = TextWidth(font, line, size);
@@ -6752,7 +6795,7 @@ private:
                 w.Bytes(color, strlen(color));
                 w.Lit(" rg ");
             }
-            w.cursor = WriteHexText(w.cursor, font, text.substr(begin, run.end - begin), usedCids);
+            w.cursor = WriteCidText(w.cursor, font, text.substr(begin, run.end - begin), usedCids);
             w.Lit(" Tj ");
             begin = run.end;
         }
@@ -6822,7 +6865,7 @@ private:
     // added after each character (Tc), and `bold` draws it twice, a little apart, as PaintText does.
     RAYOMD_COLD void AppendOverlayText(std::string& out, double x, double baseline, std::wstring_view text,
         const char* color, bool bold, double spacing) {
-        TailWriter w(out, 128 + kOperandBytes * 6 + HexTextBytes(text) * 2);
+        TailWriter w(out, 128 + kOperandBytes * 6 + CidTextBytes(text) * 2);
         w.Lit("q ");
         w.Bytes(color, strlen(color));
         w.Lit(" rg BT /F1 ");
@@ -6837,9 +6880,9 @@ private:
         w.Lit(" ");
         w.Fixed(baseline);
         w.Lit(" Tm ");
-        const char* hex = w.cursor;
-        w.cursor = WriteHexText(w.cursor, font, text, usedCids);
-        const size_t hexSize = (size_t)(w.cursor - hex);
+        const char* shown = w.cursor;
+        w.cursor = WriteCidText(w.cursor, font, text, usedCids);
+        const size_t shownSize = (size_t)(w.cursor - shown);
         w.Lit(" Tj");
         if (bold) {
             w.Lit(" 1 0 0 1 ");
@@ -6847,7 +6890,7 @@ private:
             w.Lit(" ");
             w.Fixed(baseline);
             w.Lit(" Tm ");
-            w.Bytes(hex, hexSize);
+            w.Bytes(shown, shownSize);
             w.Lit(" Tj");
         }
         w.Lit(" ET Q\n");
@@ -9571,18 +9614,18 @@ public:
         AppendF(out, baseline);
         out += " Tm ";
         const size_t at = out.size();
-        out.resize(at + HexTextBytes(text));
-        out.resize((size_t)(WriteHexText(&out[at], font, text, cids) - out.data()));
-        const size_t hexBytes = out.size() - at;
+        out.resize(at + CidTextBytes(text));
+        out.resize((size_t)(WriteCidText(&out[at], font, text, cids) - out.data()));
+        const size_t textBytes = out.size() - at;
         out += " Tj";
         if (bold) {
-            out.reserve(out.size() + hexBytes + 64);   // the copy below reads `out` itself
+            out.reserve(out.size() + textBytes + 64);   // the copy below reads `out` itself
             out += " 1 0 0 1 ";
             AppendF(out, x + size * 0.025);
             out += " ";
             AppendF(out, baseline);
             out += " Tm ";
-            out.append(out.data() + at, hexBytes);
+            out.append(out.data() + at, textBytes);
             out += " Tj";
         }
         out += " ET\n";

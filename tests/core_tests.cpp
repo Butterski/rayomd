@@ -2300,20 +2300,20 @@ bool CheckCodeTiles() {
     return true;
 }
 
-// The text of the run strings of the first line drawn in `color`: the literal strings "(...)"
-// (standard renderer) or hex strings "<...>" of CIDs, which are code points (Unicode renderer), up
-// to the end of its text object.
-std::string CodeLineText(const std::string& pdf, std::string_view color) {
-    std::string text;
+// The text of the run strings of the first line drawn in `color`, up to the end of its text
+// object: its literal strings unescaped, two bytes a character when `cids` (the Unicode renderer's
+// CIDs, which are code points; ASCII ones here), else one (the standard renderer).
+std::string CodeLineText(const std::string& pdf, std::string_view color, bool cids) {
+    std::string bytes;
     const size_t start = pdf.find(std::string(color) + " rg BT");
     const size_t end = start == std::string::npos ? start : pdf.find(" ET", start);
     for (size_t at = start; end != std::string::npos && at < end; at++) {
-        if (pdf[at] == '(') {
-            for (at++; pdf[at] != ')'; at++) text.push_back(pdf[at] == '\\' ? pdf[++at] : pdf[at]);
-        } else if (pdf[at] == '<') {
-            for (at++; pdf[at] != '>'; at += 4) text.push_back((char)std::stoi(pdf.substr(at, 4), nullptr, 16));
-        }
+        if (pdf[at] != '(') continue;
+        for (at++; pdf[at] != ')'; at++) bytes.push_back(pdf[at] == '\\' ? pdf[++at] : pdf[at]);
     }
+    if (!cids) return bytes;
+    std::string text;
+    for (size_t at = 1; at < bytes.size(); at += 2) text.push_back(bytes[at]);
     return text;
 }
 
@@ -2380,9 +2380,9 @@ bool CheckHighlighting() {
         options.highlightCode = false;
         if (!built || !TinyPdf::BuildPdf(text, options, plain).Ok() || CountOccurrences(colored, ".812 .133 .18 rg") != 2 ||
             colored.find(".349 .388 .431 rg") == std::string::npos ||
-            CodeLineText(colored, ".812 .133 .18") != "def f(x): return 'a'  # note" ||
+            CodeLineText(colored, ".812 .133 .18", text != block) != "def f(x): return 'a'  # note" ||
             plain.find(".812 .133 .18 rg") != std::string::npos ||
-            CodeLineText(plain, "0.12 0.12 0.12") != "def f(x): return 'a'  # note") {
+            CodeLineText(plain, "0.12 0.12 0.12", text != block) != "def f(x): return 'a'  # note") {
             std::cerr << "highlighted code mismatch (" << (text == block ? "standard" : "Unicode") << " renderer)" << std::endl;
             return false;
         }
@@ -2558,8 +2558,8 @@ bool CheckSvg() {
         if (!result.Ok() || result.failedImages != 0 || CountOccurrences(pdf, "/Subtype /Form") != 1 ||
             pdf.find("/Subtype /Image") != std::string::npos || pdf.find("/Matrix [0.00666667 0 0 0.01333333 0 0]") == std::string::npos ||
             pdf.find("/Shading << /Sh1") == std::string::npos || pdf.find("/ExtGState << /GS1") == std::string::npos ||
-            pdf.find(standard ? "(Sales) Tj" : "<00530061006C00650073> Tj") == std::string::npos ||
-            pdf.find(standard ? "(-1) Tj" : "<22120031> Tj") == std::string::npos) {
+            pdf.find(standard ? "(Sales) Tj" : std::string("(\0S\0a\0l\0e\0s) Tj", 15)) == std::string::npos ||
+            pdf.find(standard ? "(-1) Tj" : std::string("(\x22\x12\0" "1) Tj", 9)) == std::string::npos) {
             std::cerr << "SVG image mismatch (" << (standard ? "standard" : "Unicode") << " renderer)" << std::endl;
             return false;
         }
@@ -2572,6 +2572,24 @@ bool CheckSvg() {
         pdf.find("0.89 0.024 0.075 rg\n0 15 7.5 -7.5 re") == std::string::npos ||
         pdf.find("0.114 0.443 0.722 rg\n9 15") == std::string::npos || pdf.find("1 0.929 0 rg\n18 15") == std::string::npos) {
         std::cerr << "SVG style sheet or fallback mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// The Unicode renderer writes text as literal strings of two-byte CIDs (the code points): a byte
+// that is a parenthesis or a backslash takes a backslash, and a CR is written as \r, which a
+// reader would otherwise take for LF. 'č' (U+010D) has CR for its low byte.
+bool CheckCidStrings() {
+    std::string pdf;
+    if (!Build("Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87 (a) b\\\\c \xC4\x8D\n", pdf) || pdf.find("/Type0") == std::string::npos) {
+        std::cerr << "CID string document did not build with a TrueType font" << std::endl;
+        return false;
+    }
+    // "Zażółć (a) b\c č": ż U+017C, ó U+00F3, ł U+0142, ć U+0107; nothing else in the content.
+    static const char expected[] = " Tm (\0Z\0a\x01|\0\xF3\x01" "B\x01\x07\0 \0\\(\0a\0\\)\0 \0b\0\\\\\0c\0 \x01\\r) Tj ET";
+    if (pdf.find(std::string(expected, sizeof(expected) - 1)) == std::string::npos) {
+        std::cerr << "CID string escapes mismatch" << std::endl;
         return false;
     }
     return true;
@@ -2660,7 +2678,7 @@ bool CheckTaggedPdf() {
         CountOccurrences(pdf, "/Scope /Column") != 2 || CountOccurrences(pdf, "/S /TD ") != 120 ||
         CountOccurrences(pdf, "/S /Figure ") != 1 || pdf.find("/Alt (RayoMD)") == npos ||
         CountOccurrences(pdf, " Do Q") != 2 || pdf.find("/S /Note ") == npos || pdf.find("/IDTree ") == npos ||
-        pdf.find("/S /Reference ") == npos || CountOccurrences(pdf, "0062006F006C0064") != 1) {
+        pdf.find("/S /Reference ") == npos || CountOccurrences(pdf, std::string("\0b\0o\0l\0d", 8)) != 1) {
         std::cerr << "tagged PDF mismatch" << std::endl;
         return false;
     }
@@ -2799,7 +2817,7 @@ bool CheckInvalidUtf8() {
         "---\ntitle: Bad \xFF title\n---\n\n# Head \xC3 ing\n\nhello \xC3\x28 world \xE2\x82\n\n"
         "[li\xFFnk](https://example.com) after\n\n| x\xE0 | y |\n|---|---|\n| 1 | 2\xF0\x9F |\n";
     std::string pdf;
-    if (!Build(document, pdf) || pdf.find("0077006F0072006C0064") == std::string::npos ||   // "world"
+    if (!Build(document, pdf) || pdf.find(std::string("\0w\0o\0r\0l\0d", 10)) == std::string::npos ||   // "world"
         pdf.find("/Type0") == std::string::npos || pdf.compare(pdf.size() - 6, 6, "%%EOF\n") != 0) {
         std::cerr << "invalid UTF-8 mismatch" << std::endl;
         return false;
@@ -3198,6 +3216,7 @@ int main() {
     if (!CheckTaggedPdf()) return 98;
     if (!CheckPngFilters()) return 99;
     if (!CheckChangedImageFiles()) return 100;
+    if (!CheckCidStrings()) return 101;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
