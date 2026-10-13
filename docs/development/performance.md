@@ -115,9 +115,9 @@ changes, each keeping every PDF byte:
 Warm builds (`ab --instructions`) stay within their spread: instructions -0.5 % (the libm
 change; `WriteFixed2` converts numbers from 2^52 directly instead of calling `llround`).
 Not done: the lazy cmap (see *Tried and rejected*: `HasGlyph` runs per painted character and
-would need a test and atomics for shared fonts). Open decisions measured in the Phase 1
-breakdown: the static binary as the default asset, `-no-pie`, and skipping libgcc's frame
-registration in GCC 13 static builds (30 µs).
+would need a test and atomics for shared fonts), and `-no-pie` (see *Tried and rejected*).
+Open decisions measured in the Phase 1 breakdown: the static binary as the default asset, and
+skipping libgcc's frame registration in GCC 13 static builds (30 µs).
 
 Later trims of the one-shot CLI (dynamic, `perf stat` in 40 to 60 interleaved rounds of 50
 exports onto an existing tmpfs or ext4 PDF, against an identical copy as control):
@@ -799,6 +799,10 @@ Images and compression:
   every CPU in a batch (1 to 4 % slower).
 - Image cache keys by path, size and time (misses edits that keep both) or a
   non-cryptographic hash (collisions to order).
+- `-no-pie` for the dynamic build (2026-10-13): 21 to 45 µs less per fresh export (no
+  relative relocations), 17 to 48 µs with `-z noseparate-code`, but the executable loses
+  address randomisation, and RayoMD reads untrusted Markdown, SVG and PNG input. Not taken;
+  the static edition is the fast-start option.
 
 ## Keeping the release light
 
