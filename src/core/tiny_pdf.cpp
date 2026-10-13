@@ -945,6 +945,13 @@ static void AppendSize(std::string& out, size_t value) {
     if (result.ec == std::errc()) out.append(buf, (size_t)(result.ptr - buf));
 }
 
+// Appends a string literal, its length known when compiled: `out += "..."` reached
+// basic_string::append(const char*) out of line, with a strlen for every piece.
+template <size_t N>
+static RAYOMD_HOT_INLINE void AppendLit(std::string& out, const char (&text)[N]) {
+    out.append(text, N - 1);
+}
+
 // Buffers each thread keeps from one export to the next (batch workers, --serve, --bench), so that
 // a short document does not grow its containers from nothing every time: an owner swaps the kept
 // one in when it starts, with its capacity and what it last held, and swaps it back when it ends.
@@ -980,6 +987,21 @@ private:
         static thread_local T slot;
         return slot;
     }
+};
+
+// A buffer kept by the thread (KeptBuffer) for the scope of one owner, emptied when it starts.
+template <typename T, int Tag>
+class KeptLocal {
+public:
+    KeptLocal() {
+        KeptBuffer<T, Tag>::Take(value);
+        value.clear();
+    }
+    ~KeptLocal() { KeptBuffer<T, Tag>::Give(value, KeptBytes(value)); }
+    KeptLocal(const KeptLocal&) = delete;
+    KeptLocal& operator=(const KeptLocal&) = delete;
+
+    T value;
 };
 
 // Lets one drawing operation write its operators through a raw pointer, then appends them to a
@@ -1356,15 +1378,15 @@ static uint32_t ChecksumBytes(const char* data, size_t size) {
     return sum;
 }
 
-// The key of the font objects of a document: the font, then the CIDs it shows.
+// The key of the font objects of a document: the font, then the CIDs it shows, high byte first.
 static std::string MakeCidKey(const TtfFont& font, const CidList& used) {
-    std::string key;
-    key.reserve(sizeof(&font) + used.size() * 2);
     const TtfFont* const identity = &font;
-    key.append(reinterpret_cast<const char*>(&identity), sizeof(identity));
+    std::string key(sizeof(identity) + used.size() * 2, '\0');
+    memcpy(&key[0], &identity, sizeof(identity));
+    char* out = &key[sizeof(identity)];
     for (uint16_t cid : used) {
-        key.push_back((char)((cid >> 8) & 0xff));
-        key.push_back((char)(cid & 0xff));
+        *out++ = (char)((cid >> 8) & 0xff);
+        *out++ = (char)(cid & 0xff);
     }
     return key;
 }
@@ -1613,11 +1635,11 @@ private:
     static std::string StreamHead(const std::string& dict, size_t length) {
         std::string head;
         head.reserve(dict.size() + 48);
-        head += "<< ";
+        AppendLit(head, "<< ");
         head += dict;
-        head += " /Length ";
+        AppendLit(head, " /Length ");
         AppendSize(head, length);
-        head += " >>\nstream\n";
+        AppendLit(head, " >>\nstream\n");
         return head;
     }
 
@@ -1745,14 +1767,15 @@ RAYOMD_COLD static bool CompressPayload(std::string_view data, std::string& stor
 // it smaller.
 static void SetPayloadStream(PdfObjects& pdf, int id, std::string_view data, bool compress, std::string& storage) {
     std::string head;
+    head.reserve(48);
     if (compress && CompressPayload(data, storage)) {
         data = storage;
-        head = "<< /Filter /FlateDecode /Length ";
+        AppendLit(head, "<< /Filter /FlateDecode /Length ");
     } else {
-        head = "<< /Length ";
+        AppendLit(head, "<< /Length ");
     }
     AppendSize(head, data.size());
-    head += " >>\nstream\n";
+    AppendLit(head, " >>\nstream\n");
     pdf.SetStreamView(id, std::move(head), data);
 }
 
@@ -3852,7 +3875,9 @@ RAYOMD_COLD static void AddOutline(PdfObjects& pdf, std::string& catalog, const 
         size_t end = 0;                     // of its text in `storage`
     };
     const size_t count = headings.size();
-    std::vector<Entry> entries(count);
+    KeptLocal<std::vector<Entry>, 0> keptEntries;     // kept from export to export, as the scratch
+    std::vector<Entry>& entries = keptEntries.value;
+    entries.assign(count, Entry());
     Entry root;
     // The entries that enclose the next one, by rising level: levels 1 to 6 nest six deep.
     size_t open[6];
@@ -3887,7 +3912,9 @@ RAYOMD_COLD static void AddOutline(PdfObjects& pdf, std::string& catalog, const 
     const auto number = [](char* out, size_t value) { return std::to_chars(out, out + 20, value).ptr; };
     storage.reserve(storage.size() + bytes);
     const size_t rootStart = storage.size();
-    std::string scratch(kRootBytes, '\0');
+    KeptLocal<std::string, 2> keptScratch;
+    std::string& scratch = keptScratch.value;
+    scratch.resize(kRootBytes);
     char* out = lit(&scratch[0], "<< /Type /Outlines /First ");
     out = number(out, id(root.first));
     out = lit(out, " 0 R /Last ");
@@ -3942,9 +3969,9 @@ RAYOMD_COLD static void AddOutline(PdfObjects& pdf, std::string& catalog, const 
         pdf.AddView(text.substr(start, entry.end - start));
         start = entry.end;
     }
-    catalog += " /Outlines ";
+    AppendLit(catalog, " /Outlines ");
     AppendInt(catalog, rootId);
-    catalog += " 0 R";
+    AppendLit(catalog, " 0 R");
 }
 
 // ---- Document metadata from the YAML front matter ---------------------------------------------
@@ -4148,9 +4175,14 @@ RAYOMD_COLD static DocumentMetadata FrontMatterMetadata(std::string_view markdow
 // and viewers show the file name instead. Heading text is WinAnsi with `winAnsi`.
 RAYOMD_COLD static std::string InfoDictionary(const char* producer, const DocumentMetadata& metadata,
     const std::vector<HeadingMark>& headings, bool winAnsi) {
-    std::string info = "<< /Producer (";
+    // Room for every field at once: each takes at most its key, four bytes a byte and six more.
+    const size_t title = !metadata.title.empty() ? metadata.title.size()
+        : !headings.empty() ? headings.front().text.size() : 0;
+    std::string info;
+    info.reserve(192 + (title + metadata.author.size() + metadata.subject.size() + metadata.keywords.size()) * 4);
+    AppendLit(info, "<< /Producer (");
     info += producer;
-    info += ") /Creator (RayoMD)";
+    AppendLit(info, ") /Creator (RayoMD)");
     const auto field = [&info](std::string_view key, std::string_view value, bool valueWinAnsi) {
         if (value.empty()) return;
         const size_t at = info.size();
@@ -4167,7 +4199,7 @@ RAYOMD_COLD static std::string InfoDictionary(const char* producer, const Docume
     field(" /Author ", metadata.author, false);
     field(" /Subject ", metadata.subject, false);
     field(" /Keywords ", metadata.keywords, false);
-    info += " >>";
+    AppendLit(info, " >>");
     return info;
 }
 
@@ -4175,9 +4207,9 @@ RAYOMD_COLD static std::string InfoDictionary(const char* producer, const Docume
 // use. A language tag needs no escaping.
 static void AppendLanguage(std::string& catalog, const DocumentMetadata& metadata) {
     if (metadata.lang.empty()) return;
-    catalog += " /Lang (";
+    AppendLit(catalog, " /Lang (");
     catalog += metadata.lang;
-    catalog += ")";
+    AppendLit(catalog, ")");
 }
 
 // PDF/A-3b and PDF/UA-1: the XMP metadata, which holds the reversible profile's properties when
@@ -4546,17 +4578,17 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
             std::string annot;
             annot.reserve(link.url.size() + 192);
             AppendLinkAnnotationStart(annot, link, print);
-            annot += " /A << /S /URI /URI (";
+            AppendLit(annot, " /A << /S /URI /URI (");
             AppendUriLiteral(annot, link.url, winAnsiTargets);
             if constexpr (Tagged) {
                 const int id = pdf.Reserve();
-                annot += ") >>";
+                AppendLit(annot, ") >>");
                 annot += TaggedAnnotationEntries(*tags, element, id);
-                annot += " >>";
+                AppendLit(annot, " >>");
                 pdf.Set(id, std::move(annot));
                 ids.push_back(id);
             } else {
-                annot += ") >> >>";
+                AppendLit(annot, ") >> >>");
                 ids.push_back(pdf.Add(std::move(annot)));
             }
         }
@@ -4573,25 +4605,25 @@ RAYOMD_COLD static void AddInternalLinks(PdfObjects& pdf, const std::vector<Inte
         std::string annot;
         annot.reserve(176);
         AppendLinkAnnotationStart(annot, *internal.link, print);
-        annot += " /Dest [";
+        AppendLit(annot, " /Dest [");
         AppendInt(annot, pageIds[std::min(internal.page, pageIds.size() - 1)]);
-        annot += " 0 R /XYZ null ";
+        AppendLit(annot, " 0 R /XYZ null ");
         AppendF(annot, internal.top);
-        annot += " null]";
+        AppendLit(annot, " null]");
         if (tags != nullptr) annot += tags->AnnotationEntries(internal.id);
-        annot += " >>";
+        AppendLit(annot, " >>");
         pdf.Set(internal.id, std::move(annot));
     }
 }
 
 static void AppendPageAnnotations(std::string& page, const std::vector<int>& annotationIds) {
     if (annotationIds.empty()) return;
-    page += " /Annots [";
+    AppendLit(page, " /Annots [");
     for (int id : annotationIds) {
         AppendInt(page, id);
-        page += " 0 R ";
+        AppendLit(page, " 0 R ");
     }
-    page += "]";
+    AppendLit(page, "]");
 }
 
 // ---- Native math integration (shared by both renderers) ----------------------
@@ -5281,6 +5313,7 @@ public:
         // These are reused from paragraph to paragraph as they are, so also from the last export.
         KeptBuffer<StyledRuns>::Take(paragraphRuns);
         KeptBuffer<std::vector<StyledRuns>>::Take(tableCells);
+        KeptBuffer<std::wstring>::Take(headingText);
         NewPage();
     }
     ~Renderer() {
@@ -5291,6 +5324,7 @@ public:
         size_t cellBytes = KeptBytes(tableCells);
         for (const StyledRuns& cell : tableCells) cellBytes += cell.Bytes();
         KeptBuffer<std::vector<StyledRuns>>::Give(tableCells, cellBytes);
+        KeptBuffer<std::wstring>::Give(headingText, KeptBytes(headingText));
     }
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
@@ -5407,6 +5441,8 @@ private:
     std::string codeText;
     std::vector<uint8_t> codeClasses;
     std::vector<CodeRun> codeRuns;
+    // A heading's text as wide text (RenderHeading), kept from heading to heading.
+    std::wstring headingText;
     // The table of contents' entries, and where each ended (RenderContents).
     const std::vector<Internal::ContentsEntry>* contents = nullptr;
     std::vector<ContentsLine> contentsLines;
@@ -6692,8 +6728,8 @@ private:
             return;
         }
         MarkHeading(level, block.text, size * 1.35);
-        std::wstring text = Utf8ToWide(block.text);
-        for (const auto& line : WrapText(font, text, pageW - margin * 2.0, size)) {
+        AssignUtf8ToWide(headingText, block.text);
+        for (const auto& line : WrapText(font, headingText, pageW - margin * 2.0, size)) {
             DrawTextLine(margin, size, line, headingColor);
         }
         y -= level <= 2 ? 8.0 : 5.0;
@@ -10214,44 +10250,44 @@ constexpr const char* kCoverPageLabels = " /PageLabels << /Nums [0 << /P (Cover)
 static std::string PagesDictionary(const std::vector<int>& pageIds, int coverId) {
     std::string pages;
     pages.reserve(48 + pageIds.size() * 8);
-    pages += "<< /Type /Pages /Kids [";
+    AppendLit(pages, "<< /Type /Pages /Kids [");
     if (coverId != 0) {
         AppendInt(pages, coverId);
-        pages += " 0 R ";
+        AppendLit(pages, " 0 R ");
     }
     for (int id : pageIds) {
         AppendInt(pages, id);
-        pages += " 0 R ";
+        AppendLit(pages, " 0 R ");
     }
-    pages += "] /Count ";
+    AppendLit(pages, "] /Count ");
     AppendSize(pages, pageIds.size() + (coverId != 0));
-    pages += " >>";
+    AppendLit(pages, " >>");
     return pages;
 }
 
 // A page's /Contents: its own stream, and those of the page number, or the theme's header and
 // footer, and of the table of contents' page numbers, when there are.
 static void AppendContents(std::string& page, int contentId, int numberId, int contentsId) {
-    page += " /Contents ";
+    AppendLit(page, " /Contents ");
     if (numberId == 0 && contentsId == 0) {
         AppendInt(page, contentId);
-        page += " 0 R";
+        AppendLit(page, " 0 R");
         return;
     }
-    page += "[";
+    AppendLit(page, "[");
     AppendInt(page, contentId);
-    page += " 0 R";
+    AppendLit(page, " 0 R");
     if (numberId != 0) {
-        page += " ";
+        AppendLit(page, " ");
         AppendInt(page, numberId);
-        page += " 0 R";
+        AppendLit(page, " 0 R");
     }
     if (contentsId != 0) {
-        page += " ";
+        AppendLit(page, " ");
         AppendInt(page, contentsId);
-        page += " 0 R";
+        AppendLit(page, " 0 R");
     }
-    page += "]";
+    AppendLit(page, "]");
 }
 
 // The heading of each entry of the table of contents, an index into the renderer's `headings`, or
@@ -10420,36 +10456,36 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
         std::string page;
         page.reserve(192);
-        page += "<< /Type /Page /Parent ";
+        AppendLit(page, "<< /Type /Page /Parent ");
         AppendInt(page, pagesId);
-        page += " 0 R /MediaBox [0 0 ";
+        AppendLit(page, " 0 R /MediaBox [0 0 ");
         AppendF(page, renderer.PageWidth());
-        page += " ";
+        AppendLit(page, " ");
         AppendF(page, renderer.PageHeight());
-        page += "] /Resources << /Font << /F1 ";
+        AppendLit(page, "] /Resources << /Font << /F1 ");
         AppendInt(page, fontRegularId);
-        page += " 0 R /F2 ";
+        AppendLit(page, " 0 R /F2 ");
         AppendInt(page, fontBoldId);
-        page += " 0 R /F3 ";
+        AppendLit(page, " 0 R /F3 ");
         AppendInt(page, fontMonoId);
-        page += " 0 R";
+        AppendLit(page, " 0 R");
         if (fontObliqueId != 0) {
-            page += " /F4 ";
+            AppendLit(page, " /F4 ");
             AppendInt(page, fontObliqueId);
-            page += " 0 R";
+            AppendLit(page, " 0 R");
         }
         if (fontBoldObliqueId != 0) {
-            page += " /F5 ";
+            AppendLit(page, " /F5 ");
             AppendInt(page, fontBoldObliqueId);
-            page += " 0 R";
+            AppendLit(page, " 0 R");
         }
         AppendMathFontResources(page, mathFontIds);
-        page += " >>";
+        AppendLit(page, " >>");
         AppendXObjectResources(page, imageObjectIds);
-        page += " >>";
+        AppendLit(page, " >>");
         AppendContents(page, contentId, numberId, contentsId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
-        page += " >>";
+        AppendLit(page, " >>");
         pageIds.push_back(pdf.Add(std::move(page)));
     }
 
@@ -10467,15 +10503,15 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
 
     std::string catalog;
     catalog.reserve(options.embedSource ? 256 : 64);
-    catalog += "<< /Type /Catalog /Pages ";
+    AppendLit(catalog, "<< /Type /Catalog /Pages ");
     AppendInt(catalog, pagesId);
-    catalog += " 0 R";
+    AppendLit(catalog, " 0 R");
     AppendLanguage(catalog, metadata);
     if (coverId != 0) catalog += kCoverPageLabels;
-    std::string outline;
-    AddOutline(pdf, catalog, headings, pageIds, winAnsi, outline);
+    KeptLocal<std::string, 1> outline;      // kept from export to export; must outlive BuildInto
+    AddOutline(pdf, catalog, headings, pageIds, winAnsi, outline.value);
     if (options.embedSource) AddReversibleSource(pdf, catalog, source);
-    catalog += " >>";
+    AppendLit(catalog, " >>");
     int catalogId = pdf.Add(std::move(catalog));
     int infoId = pdf.Add(InfoDictionary("RayoMD Native Standard PDF", metadata, headings, winAnsi));
 
@@ -10777,46 +10813,46 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
 
     std::string desc;
     desc.reserve(224);
-    desc += "<< /Type /FontDescriptor /FontName /RayoMDSegoe /Flags 32 /FontBBox [";
+    AppendLit(desc, "<< /Type /FontDescriptor /FontName /RayoMDSegoe /Flags 32 /FontBBox [");
     AppendInt(desc, font.Metric(font.xMin));
-    desc += " ";
+    AppendLit(desc, " ");
     AppendInt(desc, font.Metric(font.yMin));
-    desc += " ";
+    AppendLit(desc, " ");
     AppendInt(desc, font.Metric(font.xMax));
-    desc += " ";
+    AppendLit(desc, " ");
     AppendInt(desc, font.Metric(font.yMax));
-    desc += "] /ItalicAngle 0 /Ascent ";
+    AppendLit(desc, "] /ItalicAngle 0 /Ascent ");
     AppendInt(desc, font.Metric(font.ascent));
-    desc += " /Descent ";
+    AppendLit(desc, " /Descent ");
     AppendInt(desc, font.Metric(font.descent));
-    desc += " /CapHeight ";
+    AppendLit(desc, " /CapHeight ");
     AppendInt(desc, (int)(font.Metric(font.ascent) * 0.72));
-    desc += " /StemV 80 /FontFile2 ";
+    AppendLit(desc, " /StemV 80 /FontFile2 ");
     AppendInt(desc, fontFileId);
-    desc += " 0 R >>";
+    AppendLit(desc, " 0 R >>");
     pdf.Set(descriptorId, std::move(desc));
 
     std::string cidFont;
     cidFont.reserve(256);
-    cidFont += "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /RayoMDSegoe"
+    AppendLit(cidFont, "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /RayoMDSegoe"
         " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
-        " /FontDescriptor ";
+        " /FontDescriptor ");
     AppendInt(cidFont, descriptorId);
-    cidFont += " 0 R /CIDToGIDMap ";
+    AppendLit(cidFont, " 0 R /CIDToGIDMap ");
     AppendInt(cidFont, cidMapId);
-    cidFont += " 0 R /DW 500 /W ";
+    AppendLit(cidFont, " 0 R /DW 500 /W ");
     cidFont += *MakeWidths(font, used, cidKey);
-    cidFont += " >>";
+    AppendLit(cidFont, " >>");
     pdf.Set(cidFontId, std::move(cidFont));
 
     std::string type0;
     type0.reserve(160);
-    type0 += "<< /Type /Font /Subtype /Type0 /BaseFont /RayoMDSegoe"
-        " /Encoding /Identity-H /DescendantFonts [";
+    AppendLit(type0, "<< /Type /Font /Subtype /Type0 /BaseFont /RayoMDSegoe"
+        " /Encoding /Identity-H /DescendantFonts [");
     AppendInt(type0, cidFontId);
-    type0 += " 0 R] /ToUnicode ";
+    AppendLit(type0, " 0 R] /ToUnicode ");
     AppendInt(type0, toUnicodeId);
-    type0 += " 0 R >>";
+    AppendLit(type0, " 0 R >>");
     pdf.Set(type0FontId, std::move(type0));
 
     // Helvetica for the page numbers; a theme's header and footer, and PDF/A's numbers, use the document's font.
@@ -10837,28 +10873,28 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
         std::string page;
         page.reserve(160);
-        page += "<< /Type /Page /Parent ";
+        AppendLit(page, "<< /Type /Page /Parent ");
         AppendInt(page, pagesId);
-        page += " 0 R /MediaBox [0 0 ";
+        AppendLit(page, " 0 R /MediaBox [0 0 ");
         AppendF(page, renderer.PageWidth());
-        page += " ";
+        AppendLit(page, " ");
         AppendF(page, renderer.PageHeight());
-        page += "] /Resources << /Font << /F1 ";
+        AppendLit(page, "] /Resources << /Font << /F1 ");
         AppendInt(page, type0FontId);
-        page += " 0 R";
+        AppendLit(page, " 0 R");
         if (numberFontId != 0) {
-            page += " /FN ";
+            AppendLit(page, " /FN ");
             AppendInt(page, numberFontId);
-            page += " 0 R";
+            AppendLit(page, " 0 R");
         }
         AppendMathFontResources(page, mathFontIds);
-        page += " >>";
+        AppendLit(page, " >>");
         AppendXObjectResources(page, imageObjectIds);
-        page += " >>";
+        AppendLit(page, " >>");
         AppendContents(page, contentId, numberId, contentsId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
         if (tags) AppendTaggedPage(page, pageIndex);
-        page += " >>";
+        AppendLit(page, " >>");
         pageIds.push_back(pdf.Add(std::move(page)));
     }
 
@@ -10875,21 +10911,21 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
 
     std::string catalog;
     catalog.reserve(options.embedSource || options.pdfa || options.pdfua ? 512 : 64);
-    catalog += "<< /Type /Catalog /Pages ";
+    AppendLit(catalog, "<< /Type /Catalog /Pages ");
     AppendInt(catalog, pagesId);
-    catalog += " 0 R";
+    AppendLit(catalog, " 0 R");
     if (tags) TaggedDocumentDefaults(metadata, headings, options.sourcePath);
     AppendLanguage(catalog, metadata);
     if (coverId != 0) catalog += kCoverPageLabels;
-    std::string outline;
-    AddOutline(pdf, catalog, headings, pageIds, false, outline);
+    KeptLocal<std::string, 1> outline;      // kept from export to export; must outlive BuildInto
+    AddOutline(pdf, catalog, headings, pageIds, false, outline.value);
     const char* const producer = "RayoMD Native Tiny PDF";
     if (options.pdfa || tags) {
         AddArchivalCatalogEntries(pdf, catalog, metadata, headings, producer,
             options.embedSource ? std::string_view(markdown) : std::string_view(), options.pdfa, structTreeRoot);
     }
     if (options.embedSource) AddReversibleSource(pdf, catalog, markdown, !options.pdfa && !tags);
-    catalog += " >>";
+    AppendLit(catalog, " >>");
     int catalogId = pdf.Add(std::move(catalog));
     const std::vector<HeadingMark> noHeadings;      // PDF/A and PDF/UA: `metadata` has the title
     int infoId = pdf.Add(InfoDictionary(producer, metadata, options.pdfa || tags ? noHeadings : headings, false));
@@ -10983,7 +11019,8 @@ RAYOMD_COLD static void TranscodeBook(BookSource& source, bool lossy) {
 // text takes (ChooseFonts); `missingCharacters` gets how many characters they could not show.
 static bool BuildDocument(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes,
     BuildResult& stats, uint32_t& missingCharacters, BookSource* book) {
-    std::string winAnsi;
+    KeptLocal<std::string, 3> keptWinAnsi;  // the transcoded text, kept from export to export
+    std::string& winAnsi = keptWinAnsi.value;
     switch (ChooseFonts(markdown, options, winAnsi)) {
     case TextFonts::Ascii:
         return BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes, stats, book);
