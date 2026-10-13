@@ -213,11 +213,11 @@ mean of the nine watch-suite documents, pinned; documents with formulas up to 25
 byte for byte those of 3.2.0 on a corpus of 3,353 PDFs. The fully static Linux edition starts
 another 0.3 ms sooner: a short ASCII note in 0.68 ms.
 
-| Release asset | 4.0.0 | 4.1.0 | 4.2.0 |
-|---|---:|---:|---:|
-| `rayomd-<version>-linux-x64.tar.gz` | 604 KB | 635 KB | 643 KB |
-| `rayomd-<version>-linux-x64-static.tar.gz` | 1,039 KB | 1,027 KB | 1,039 KB |
-| `rayomd-<version>-windows-x64.zip` (GUI and CLI) | 1,444 KB | 1,474 KB | 1,480 KB |
+| Release asset | 4.0.0 | 4.1.0 | 4.2.0 | 4.2.1 |
+|---|---:|---:|---:|---:|
+| `rayomd-<version>-linux-x64.tar.gz` | 604 KB | 635 KB | 643 KB | 645 KB |
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,039 KB | 1,027 KB | 1,039 KB | 1,042 KB |
+| `rayomd-<version>-windows-x64.zip` (GUI and CLI) | 1,444 KB | 1,474 KB | 1,480 KB | 1,482 KB |
 
 4.1.0 adds libdeflate's decompressor (MIT) and drops zlib, which the static edition linked in;
 4.2.0 replaces libdeflate with RayoMD's own decoder.

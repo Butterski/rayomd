@@ -1716,8 +1716,9 @@ has compressed its end, the next segment takes a third buffer, which lies in the
 faulted 1.0 huge pages per export and this code 1.8; the screenshot's code path is the same as
 before. On 4 CPUs the same race makes peak RSS bimodal, about 10.2 or 12.7 MiB on the mascot:
 4.2.0 stayed low in 7 of 21 runs, this code in none. The maximum is unchanged, as the buffer
-limit is. A third buffer would cost as much on 4 KiB pages (about 175 faults for its 0.7 MB),
-and waiting for the helper instead would stall the decoder on images that compress slowly.
+limit is. On 4 KiB pages a third buffer would take about 175 faults for its 0.7 MB instead (an
+estimate, not measured), and waiting for the helper would stall the decoder on images that
+compress slowly.
 
 ## Measured opportunities
 
