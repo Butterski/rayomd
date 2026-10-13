@@ -5769,6 +5769,55 @@ private:
             span.italic, span.strike, out.parsed.Url(span), span.code);
     }
 
+    // Wide text of a paragraph that comes next in out.text but is not copied yet:
+    // out.wide[from, from + length).
+    struct PendingWide {
+        size_t from = 0;
+        size_t length = 0;
+    };
+
+    // Puts out.wide[from, from + length), after a space when `spaced`, at the end of out.text, late:
+    // text that goes on where the pending text ends in out.wide (a word one space after the one
+    // before, a word across runs) joins it, so a line takes a copy or two instead of one a word.
+    // FlushPendingWide copies the rest.
+    static RAYOMD_HOT_INLINE void QueueWide(StyledRuns& out, PendingWide& pending, size_t from, size_t length,
+        bool spaced) {
+        const size_t gap = spaced ? 1 : 0;
+        if (pending.from + pending.length == from - gap && (!spaced || out.wide[from - 1] == L' ')) {
+            pending.length += gap + length;
+            return;
+        }
+        out.text.append(out.wide.data() + pending.from, pending.length);
+        if (spaced) out.text.push_back(L' ');
+        pending.from = from;
+        pending.length = length;
+    }
+
+    static RAYOMD_HOT_INLINE void FlushPendingWide(StyledRuns& out, PendingWide& pending) {
+        out.text.append(out.wide.data() + pending.from, pending.length);
+        pending.length = 0;
+    }
+
+    // AppendStyledRunText for out.wide[from, from + length) through QueueWide: run offsets count
+    // the pending text.
+    static RAYOMD_HOT_INLINE void AppendStyledWide(StyledRuns& out, PendingWide& pending, size_t lineStart, size_t from,
+        size_t length, bool spaced, bool bold, bool italic, bool strike, std::string_view url, bool code) {
+        StyledRun* run = out.runs.size() != lineStart ? &out.runs.back() : nullptr;
+        if (!run || run->bold != bold || run->italic != italic || run->strike != strike || run->code != code ||
+            !SameText(run->url, url)) {
+            out.runs.emplace_back();
+            run = &out.runs.back();
+            run->begin = static_cast<uint32_t>(out.text.size() + pending.length);
+            run->url = url;
+            run->bold = bold;
+            run->italic = italic;
+            run->strike = strike;
+            run->code = code;
+        }
+        QueueWide(out, pending, from, length, spaced);
+        run->end = static_cast<uint32_t>(out.text.size() + pending.length);
+    }
+
     // A word wider than a whole line, cut by character where the line is full; the last part
     // stays open for the words after it. The line is empty when this is called.
     RAYOMD_COLD void PlaceWideStyledWord(StyledRuns& out, size_t& lineStart, double& lineWidth, size_t firstRun,
@@ -5849,6 +5898,7 @@ private:
             out.wideEnds.push_back(static_cast<uint32_t>(out.wide.size()));
         }
         const std::wstring_view source = out.wide;
+        PendingWide pending;        // text of out.wide that comes next in out.text, not copied yet
         size_t lineStart = 0;       // index of the first run of the line being filled
         double lineWidth = 0.0;
         const double spaceWidth = TextWidth(font, L" ", size);
@@ -5905,12 +5955,14 @@ private:
                     joinLast = false;
                 }
                 if (wordWidth > width) {
+                    FlushPendingWide(out, pending);
                     PlaceWideStyledWord(out, lineStart, lineWidth, index, wordStart, wordEnd, width, size);
                     joinLast = false;
                 } else {
                     bool spaced = false;
                     if (needsSpace) {
                         if (span.strike) {
+                            FlushPendingWide(out, pending);
                             AppendStyledRunText(out, lineStart, std::wstring_view(L" ", 1), false, false, false, false,
                                 std::string_view(), false);
                             lineWidth += spaceWidth;
@@ -5925,17 +5977,18 @@ private:
                         for (size_t piece = index, begin = wordStart; begin < wordEnd; piece++) {
                             const size_t end = std::min<size_t>(wordEnd, out.wideEnds[piece]);
                             if (end == begin) continue;
-                            AppendStyledPiece(out, lineStart, piece, begin, end, spaced);
+                            const Internal::InlineRun& part = parsed[piece];
+                            AppendStyledWide(out, pending, lineStart, begin, end - begin, spaced, part.bold, part.italic,
+                                part.strike, out.parsed.Url(part), part.code);
                             spaced = false;
                             begin = end;
                         }
                     } else if (joinLast) {
-                        if (spaced) out.text.push_back(L' ');
-                        out.text.append(word.data(), word.size());
-                        out.runs.back().end = static_cast<uint32_t>(out.text.size());
+                        QueueWide(out, pending, wordStart, wordEnd - wordStart, spaced);
+                        out.runs.back().end = static_cast<uint32_t>(out.text.size() + pending.length);
                     } else {
-                        AppendStyledRunText(out, lineStart, word, spaced, span.bold, span.italic, span.strike, url,
-                            span.code);
+                        AppendStyledWide(out, pending, lineStart, wordStart, wordEnd - wordStart, spaced, span.bold,
+                            span.italic, span.strike, url, span.code);
                         // A struck word gets an unstyled space run before it, so it never joins.
                         joinLast = !span.strike;
                     }
@@ -5947,6 +6000,7 @@ private:
             }
         }
 
+        FlushPendingWide(out, pending);
         if (out.runs.size() != lineStart) out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
         if (out.lineEnds.empty()) out.lineEnds.push_back(0);
         return true;
