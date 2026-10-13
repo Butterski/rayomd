@@ -34,9 +34,9 @@ No browser. No LaTeX. No Pandoc. No runtime.
 </div>
 
 > [!TIP]
-> **New in 4.4:** a one-shot export takes **up to 27 % less CPU** than in 4.3 (fewer page faults,
-> no `libm.so`, the PDF overwritten in place), and exports in a running process are **13 %
-> faster** on average, up to 22 % for Unicode text. Every PDF is byte for byte the same.
+> **New in 4.4:** a one-shot export takes **17 to 28 % less CPU** than in 4.3 (fewer page faults,
+> no `libm.so`, the PDF overwritten in place), and exports in a running process are **12 %
+> faster** on average, up to 23 % for Unicode text. Every PDF is byte for byte the same.
 > See [the numbers](#performance).
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. Windows gets a
@@ -50,14 +50,14 @@ you can also embed through the [C++ API](https://github.com/Butterski/rayomd/wik
 <td width="33%" valign="top">
 
 ### Fast
-A short note in about **1 ms**, start to exit; a 1024×1024 PNG in 7 to 11 ms, 2 ms once
+A short note in under **1 ms**, start to exit; a 1024×1024 PNG in 7 to 11 ms, 2 ms once
 converted. Batches run on up to 64 threads.
 
 </td>
 <td width="33%" valign="top">
 
 ### Small
-A **645 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
+A **670 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
 runtime to install.
 
 </td>
@@ -135,12 +135,12 @@ cmake --build build --config Release
 
 </details>
 
-| Package | Size, 4.3.1 | For |
+| Package | Size, 4.4.0 | For |
 |---|---:|---|
-| `rayomd-<version>-windows-x64.zip` | 1,482 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
-| `rayomd-<version>-linux-x64.tar.gz` | 645 KB | Linux: needs only glibc |
-| `rayomd-<version>-linux-x64-static.tar.gz` | 1,042 KB | Linux with no dependency at all, the fastest start |
-| `rayomd-<version>-linux-x64-curl.tar.gz` | 647 KB | Linux with HTTP/HTTPS images through libcurl |
+| `rayomd-<version>-windows-x64.zip` | 1,486 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
+| `rayomd-<version>-linux-x64.tar.gz` | 670 KB | Linux: needs only glibc |
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,072 KB | Linux with no dependency at all, the fastest start |
+| `rayomd-<version>-linux-x64-curl.tar.gz` | 672 KB | Linux with HTTP/HTTPS images through libcurl |
 
 Every feature below works the same from both command lines and the
 [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
@@ -161,25 +161,25 @@ xychart-beta
     title "tester.md without images, in ms (lower is better)"
     x-axis ["RayoMD", "glu", "Qt 6", "Pandoc + Typst", "Pandoc + WeasyPrint", "md-to-pdf", "Pandoc + XeLaTeX"]
     y-axis "Milliseconds" 0 --> 2200
-    bar [1.5, 54, 69, 346, 968, 1805, 2097]
+    bar [1.2, 54, 69, 346, 968, 1805, 2097]
 ```
 
 | Tool | Version | Without images | With a 1024×1024 PNG | Peak memory | Installed size¹ | Formulas |
 |---|---|---:|---:|---:|---:|---|
-| **RayoMD** | 4.3.1 | **1.5 ms** | **7.8 ms** | **3.9 MiB** | **1.2 MiB** | typeset |
-| glu | 0.0.46 | 54 ms (37×) | 85 ms (11×) | 33 MiB | 25 MiB | TeX source |
-| Qt 6 `QTextDocument` + `QPrinter` | 6.12.0 | 69 ms (47×) | 112 ms (14×) | 39 MiB | 373 MiB | TeX source |
-| Pandoc + Typst | 3.11, Typst 0.15.1 | 346 ms (234×) | 376 ms (49×) | 239 MiB² | 0.65 GiB | typeset |
-| Pandoc + WeasyPrint | 3.11, WeasyPrint 70.0 | 968 ms (654×) | 1,238 ms (160×) | 241 MiB² | 0.9 GiB | MathML text and TeX |
-| md-to-pdf | 5.2.5, Chromium 154 | 1,805 ms (1,220×) | 1,903 ms (246×) | 205 MiB² | 1.0 GiB | TeX source |
-| Pandoc + XeLaTeX | 3.11, TeX Live 2026 | 2,097 ms (1,417×) | 3,351 ms (432×) | 340 MiB² | 1.4 GiB | typeset |
+| **RayoMD** | 4.4.0 | **1.2 ms** | **7.5 ms** | **3.4 MiB** | **1.2 MiB** | typeset |
+| glu | 0.0.46 | 54 ms (45×) | 85 ms (11×) | 33 MiB | 25 MiB | TeX source |
+| Qt 6 `QTextDocument` + `QPrinter` | 6.12.0 | 69 ms (57×) | 112 ms (15×) | 39 MiB | 373 MiB | TeX source |
+| Pandoc + Typst | 3.11, Typst 0.15.1 | 346 ms (286×) | 376 ms (50×) | 239 MiB² | 0.65 GiB | typeset |
+| Pandoc + WeasyPrint | 3.11, WeasyPrint 70.0 | 968 ms (800×) | 1,238 ms (166×) | 241 MiB² | 0.9 GiB | MathML text and TeX |
+| md-to-pdf | 5.2.5, Chromium 154 | 1,805 ms (1,492×) | 1,903 ms (255×) | 205 MiB² | 1.0 GiB | TeX source |
+| Pandoc + XeLaTeX | 3.11, TeX Live 2026 | 2,097 ms (1,733×) | 3,351 ms (449×) | 340 MiB² | 1.4 GiB | typeset |
 
 ¹ Approximate: the tool's packages and their dependencies beyond a base Arch Linux image. Qt
 comes with any Qt desktop. ² The largest single process; these tools run several.
 
-On one core RayoMD takes the same 1.5 ms (11.3 ms with the PNG, which it re-encodes on up to
-four cores) and the others 64 ms to 2.2 s. In a running process (`--serve`, `--batch`,
-`--bench`) each further export takes **0.21 ms**.
+On one core RayoMD takes 1.25 ms (11.0 ms with the PNG, which it re-encodes on up to four cores)
+and the others 64 ms to 2.2 s. In a running process (`--serve`, `--batch`, `--bench`) each
+further export takes **0.20 ms**.
 
 > [!NOTE]
 > The documents are `tester.md` without the five lines that test fallbacks: the remote and
@@ -196,21 +196,23 @@ four cores) and the others 64 ms to 2.2 s. In a running process (`--serve`, `--b
 
 The big steps only: 4.0 rewrote the text path in lower-level code and linked the C++ runtime in;
 4.1 and 4.2 replaced zlib with RayoMD's own PNG decoder and encoder, a row at a time and on up
-to four cores; 4.3 writes Unicode text in two bytes a character and loads the font with less
-work. One-shot export, one pinned core, median of 40:
+to four cores; 4.3 writes Unicode text in two bytes a character; 4.4 cuts what a fresh process
+costs around the export (page faults, `libm.so`, the output write) and the work per word and
+per allocation in the export itself. One-shot export onto an existing PDF, one pinned core,
+median of 40:
 
-| Document | 3.2.0 | 4.0.0 | 4.3.1 |
+| Document | 3.2.0 | 4.0.0 | 4.4.0 |
 |---|---:|---:|---:|
-| Short note, ASCII | 1.74 ms | 1.04 ms | **1.00 ms** |
-| Short note, Polish | 2.73 ms | 1.38 ms | **1.19 ms** |
-| Essay, 10,000 words | 2.43 ms | 1.75 ms | **1.68 ms** |
-| `tester.md`, no images | 3.19 ms | 1.83 ms | **1.64 ms** |
-| README of 4.3.1 (Unicode text) | 3.80 ms, 270 KB | 2.41 ms, 270 KB | **2.16 ms**, 221 KB |
-| One 1024×1024 RGBA PNG | 92.9 ms | 27.5 ms | **11.0 ms**, 7.4 on four cores |
+| Short note, ASCII | 1.72 ms | 1.01 ms | **0.70 ms** |
+| Short note, Polish | 2.67 ms | 1.33 ms | **0.78 ms** |
+| Essay, 10,000 words | 2.40 ms | 1.67 ms | **1.22 ms** |
+| `tester.md`, no images | 3.14 ms | 1.79 ms | **1.16 ms** |
+| README of 4.3.1 (Unicode text) | 3.80 ms, 270 KB | 2.40 ms, 270 KB | **1.62 ms**, 221 KB |
+| One 1024×1024 RGBA PNG | 92.7 ms | 27.4 ms | **10.6 ms** |
 
 From 32,768 pixels a converted image is kept in the user cache directory, so its next export, in
 any process, takes about 2 ms; `--no-image-cache` turns that off. Text and pixels are the same
-from release to release; the fully static Linux edition starts another 0.3 ms sooner.
+from release to release; the fully static Linux edition starts another 0.2 to 0.3 ms sooner.
 
 Every change is profiled on a real export, rewritten, and kept only if a pinned A/B shows it
 faster and the PDF bytes (for a re-encoded image, the pixels) stay the same, unless changing
