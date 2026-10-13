@@ -1767,6 +1767,39 @@ escapes, Braille and U+29xx arrows, plus the repository's Markdown) under five o
 Poppler 22.12 extracts the same text and renders the same pixels at 40 dpi as from the hex
 strings.
 
+## Fresh Unicode exports, October 2026
+
+A fresh export of a short note in Polish took 1.00 ms of CPU against 0.64 for the same note in
+ASCII (2026-10-13, one pinned CPU, `perf stat` over 100 runs): the difference is the TrueType
+font, found, read, subset and written. Most of a fresh export is the kernel's: starting the
+process, faulting pages in, the dynamic loader (`ld.so` itself 102,000 cycles, the rest faults
+of libc and the binary, which the static edition avoids) and, when the output file exists, the
+writeback ext4 forces when a truncated file is closed (8.5 % of the Polish note; not changed,
+as it guards against empty files after a crash). Four changes, each with the same PDF bytes
+(plain, `--compress`, `--pdfa`, `--pdfua`):
+
+| Change | Polish note, user instructions | Polish note, CPU | Page faults |
+| --- | ---: | ---: | ---: |
+| Before | 1,143,000 | 1.00 ms | 187 |
+| The subset's size reserved (it reserved the sizes of moved-from strings) and its checksum a word at a time | | 0.975 ms | 182 |
+| The glyph table an array in `TtfFont`, which starts zeroed: ParseCmap assigned 64K entries, 128 KB | 1,143,000 | 0.915 ms | 161 |
+| `hmtx` and `loca` read with one bounds test a table, not 12,500 checked calls | 945,000 | 0.90 ms | 160 |
+| The subset planned, then written once into its stream object (kept tables are views of the font file), its glyph list made once | 844,000 | 0.88 ms | 156 |
+| Its checksum summed once (directory plus tables), its glyphs listed as they are marked, not by a scan of all 6,253 | 662,000 | 0.88 ms | 156 |
+
+`tester.md` without images went from 1.46 to 1.33 ms and 3.01 to 2.44 million instructions.
+2,100 mutated and truncated copies of DejaVu Sans as `RAYOMD_FONT` give the same PDF, or the same
+failure, as before, with no ASan or UBSan report.
+
+Measured and not taken: a branchless `WriteFixed2` (four digits in one word, the fraction's
+length from a table) was +1.84 % instructions and +0.72 % time on the watch suite, and
+`WriteFixed2` forced inline at every operand +1.19 % and +1.81 %: its branches predict well, and
+inlining it costs elsewhere in `tiny_pdf.cpp`. Keeping the default font alive at exit instead
+of destroying it was 1 to 2 % less CPU under `perf stat` and no faster by the clock (400 fresh
+exports, ±0.3 %): the kernel unmaps it at exit anyway. Loading the cmap block by block on first
+use would save about 10 of the 156 faults, but put a test on every glyph lookup and need atomics
+for the font that batch workers share.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
