@@ -144,6 +144,41 @@ A/A spread up to 1.5 %; the ASCII fixtures keep their instructions, so their ali
 placement. Fresh exports (perfstat, 300 runs): README 1.44 → 1.37 ms, 5.48 → 4.59 M
 instructions; polish 0.58 ms both, 0.688 → 0.671 M, 110 → 113 faults; notes and essay unchanged.
 
+Then the allocations every export made (callgrind call counts of `operator new` by call chain;
+polish.md made 101 a warm build, notes.md 174), in two changes:
+
+- **Buffers kept by each thread from one export to the next** (`KeptBuffer`, `KeptLocal`): the
+  renderers' page, link and heading tables, paragraph and table-cell runs, the object table,
+  `BuildInto`'s offsets, the outline's buffers and storage, the WinAnsi transcoding and the line
+  tables of nested parser levels (`LevelLines`) are swapped in when an export starts and back
+  when it ends; one grown past 1 MiB goes back to the allocator, which bounds a batch worker's
+  memory. The Unicode renderer's CID set is kept and cleared by the words of the CIDs it
+  recorded (`KeptCidSet`), not zeroed (16 KB) per export. The document's own parser level is
+  not kept: a one-shot export would hold its lines to the end and later allocations take new
+  pages (README +12 faults). Local image paths are parsed at the first image only.
+- **Small objects assembled without strlen** (`AppendLit`): `out += "..."` reached
+  `basic_string::append(const char*)` out of line, a strlen per piece; the info dictionary is
+  reserved once and the font cache key written without `push_back`.
+
+Allocations a warm build: polish 101 → about 50, notes 174 → about 115.
+
+| fixture | against Phase 2b, time | instructions | against Phase 1, time | instructions |
+| --- | ---: | ---: | ---: | ---: |
+| polish.md | -16.1 % | -11.4 % | -23.6 % | -18.8 % |
+| notes.md | -9.8 % | -8.3 % | -11.4 % | -10.0 % |
+| README.md | -6.4 % | -3.7 % | -19.3 % | -21.7 % |
+| native_math.md | -5.5 % | -3.4 % | -7.5 % | -5.6 % |
+| tester-noimg.md | -4.1 % | -3.3 % | -8.2 % | -9.1 % |
+| essay.md | -3.8 % | -2.0 % | -12.6 % | -8.5 % |
+| code-heavy.md | -0.8 % | -0.9 % | -8.4 % | -15.0 % |
+| table-heavy.md | +0.1 % | -0.5 % | -5.8 % | -8.4 % |
+| geometric mean | -5.9 % | -4.2 % | -12.3 % | -12.3 % |
+
+A/A within 1.1 %; alignment-pinned builds of the first change -5.1 % (unpinned -5.2 %). Fresh
+exports (perfstat, 300 runs) stay within 10 µs and 3 faults. `--batch` on one CPU: the generated
+corpus (305 documents) -2.1 %, peak RSS 17.4 → 18.2 MiB with one worker and 36.3 → 39.1 MiB with
+the automatic count; 200 copies of polish.md -4.4 %, 12.8 MiB both.
+
 ## Maintained workflows
 
 ```sh
@@ -428,6 +463,9 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
   table of pointers, not a computed index.
 - Large temporaries meet glibc's dynamic mmap threshold; see *glibc's mmap
   threshold* below before changing a reservation.
+- Containers that every export fills are kept by the thread between exports (`KeptBuffer`,
+  `KeptLocal`, `KeptCidSet`, the parser's `LevelLines`), each up to 1 MiB. A new per-export
+  container should be one of them; keep the document's top parser level out (fresh faults).
 
 ### Bounded scans
 
@@ -514,11 +552,21 @@ to `/Identity`.
 It carries the license notice, so it stays; keeping only the records with the
 notices would save about 10 KB per Unicode PDF.
 
-**The object table.** `PdfObjects::Object` is 72 bytes and grows by doubling
-(`baseline.md`'s outline takes it past 128 to 256, about 6,000 more D1 misses over
-41 builds). Reserve from the block count or shrink the entry; outline entries
-could format their consecutive object numbers once (about 250 instructions a
-heading).
+**The object table.** `PdfObjects::Object` is 72 bytes. The table is now kept from export
+to export (no growth after the first), so only a single export grows it; outline entries
+could format their consecutive object numbers once (about 250 instructions a heading).
+
+**`BuildInto` zero-fills what it then overwrites.** `pdf.resize(total)` fills the file's growth
+(polish.md: 31 KB, mostly the font subset copied in after) with zeros first: 1.7 % of a warm
+polish build. C++23's `resize_and_overwrite` would avoid it; C++17 has no growth without filling.
+The remaining per-export allocations are the parser's block strings, the dictionaries moved into
+`PdfObjects` (a head kept per object would need callers to write into it) and `WrapText`'s
+vector of lines for headings and image fallbacks.
+
+**Phase 2 items left open (2026-10-13).** SIMD byte-class scans (*Byte classes scanned a byte
+at a time*), the fresh-process leftovers (read() into the input string, the 1 MB buffer and font
+mapping left to exit) and the renderers in translation units of their own were not measured in
+this round.
 
 **Branchless candidate choice in the DEFLATE encoder.** Font programs are its
 slowest input (151 MB/s), with about 0.5 mispredictions a byte, 43 % of them on
@@ -617,6 +665,11 @@ Text and layout:
   PNG 8 % slower (musl's allocator). glibc's static build is the `-static` asset.
 - Highlighting at `-Os` (1.5 times slower lexers for 12 KB) and the highlighted
   path as `RAYOMD_COLD` (more instructions than the lexer).
+- Keeping the parser's top-level line tables between exports: -0.35 % instructions on
+  README, but a one-shot export held them to the end (README +12 faults, +30 µs). Reserving a
+  line per 16 bytes instead of 48: essay +5 faults fresh.
+- Headings wrapped through `WrapWideWords` directly instead of `WrapText`'s vector of lines:
+  the new instantiation moved GCC's inlining of `WrapText` (table-heavy +0.8 %, aligned too).
 
 Images and compression:
 
