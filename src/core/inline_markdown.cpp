@@ -1292,8 +1292,7 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
     for (size_t i = 0; i < source.size();) {
         if (ordinary(i)) {
             // A run of bytes none of which can start inline syntax: taken in one append.
-            size_t end = i + 1;
-            while (end < source.size() && ordinary(end)) end++;
+            const size_t end = RayoMd::Text::FindByteClass<kStops>(source, i + 1);
             text.append(source.data() + i, end - i);
             i = end;
             continue;

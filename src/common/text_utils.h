@@ -8,7 +8,13 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
+
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+#include <emmintrin.h>
+#define RAYOMD_TEXT_SSE2 1
+#endif
 
 namespace RayoMd::Text {
 
@@ -125,6 +131,78 @@ inline bool ContainsByteClass(std::string_view text, unsigned char mask) {
         if (classes[*at] & mask) return true;
     }
     return false;
+}
+
+namespace Detail {
+template <unsigned char Mask>
+constexpr size_t ClassByteCount() {
+    size_t count = 0;
+    for (unsigned char value : kByteClasses) count += (value & Mask) != 0;
+    return count;
+}
+// The bytes of the classes in `Mask`, in ascending order.
+template <unsigned char Mask>
+constexpr std::array<unsigned char, ClassByteCount<Mask>()> ClassBytes() {
+    std::array<unsigned char, ClassByteCount<Mask>()> bytes{};
+    size_t count = 0;
+    for (size_t value = 0; value < kByteClasses.size(); value++) {
+        if (kByteClasses[value] & Mask) bytes[count++] = static_cast<unsigned char>(value);
+    }
+    return bytes;
+}
+#if RAYOMD_TEXT_SSE2
+// 0xFF in each lane of `chunk` that holds a byte of the classes in `Mask`: one compare a byte.
+template <unsigned char Mask, size_t... Index>
+inline __m128i MatchClassBytes(__m128i chunk, std::index_sequence<Index...>) {
+    constexpr auto bytes = ClassBytes<Mask>();
+    __m128i hit = _mm_setzero_si128();
+    ((hit = _mm_or_si128(hit, _mm_cmpeq_epi8(chunk, _mm_set1_epi8(static_cast<char>(bytes[Index]))))), ...);
+    return hit;
+}
+#endif
+inline unsigned LowestBit(unsigned bits) {
+#if defined(__GNUC__) || defined(__clang__)
+    return static_cast<unsigned>(__builtin_ctz(bits));
+#else
+    unsigned bit = 0;
+    while ((bits & 1u) == 0) {
+        bits >>= 1;
+        bit++;
+    }
+    return bit;
+#endif
+}
+} // namespace Detail
+
+// The index of the first byte of `text` from `from` on with a class in `Mask`, or text.size().
+// In SSE2 16 bytes a step, one compare per byte of the classes (a mask of a few bytes only);
+// the last step reads the text's last 16 bytes again.
+template <unsigned char Mask>
+inline size_t FindByteClass(std::string_view text, size_t from) {
+    const unsigned char* const data = reinterpret_cast<const unsigned char*>(text.data());
+    const size_t size = text.size();
+    size_t at = from;
+#if RAYOMD_TEXT_SSE2
+    constexpr size_t kBytes = Detail::ClassByteCount<Mask>();
+    static_assert(kBytes <= 16, "FindByteClass compares each byte of the classes");
+    if (size >= 16) {
+        for (; at + 16 <= size; at += 16) {
+            const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + at));
+            const unsigned bits = static_cast<unsigned>(_mm_movemask_epi8(
+                Detail::MatchClassBytes<Mask>(chunk, std::make_index_sequence<kBytes>())));
+            if (bits != 0) return at + Detail::LowestBit(bits);
+        }
+        if (at == size) return size;
+        // The last bytes: the text's last 16, without those already read.
+        const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + size - 16));
+        const unsigned bits = static_cast<unsigned>(_mm_movemask_epi8(
+            Detail::MatchClassBytes<Mask>(chunk, std::make_index_sequence<kBytes>()))) >> (at + 16 - size);
+        return bits != 0 ? at + Detail::LowestBit(bits) : size;
+    }
+#endif
+    const auto& classes = Detail::kByteClasses;
+    while (at < size && (classes[data[at]] & Mask) == 0) at++;
+    return at;
 }
 
 std::string Trim(std::string value);
