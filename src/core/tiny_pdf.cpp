@@ -2456,10 +2456,12 @@ static bool InflateZlibStream(const std::string& data, uint8_t* out, size_t size
         ReadBigEndian32(in + 2 + consumed) == RayoMd::Flate::Adler32(out, size);
 }
 
-// A decoded image's working buffers, not zeroed, on 2 MB pages where Linux offers them
-// (transparent huge pages in "madvise" or "always" mode): a fresh process faults a 4 MB buffer in
-// twice instead of 1,024 times. Cold exports of a 1024x1024 RGBA PNG 15.26 -> 13.68 ms, of a
-// 2048x2048 one 41.35 -> 32.59 ms, for 2 to 4 MB more peak memory (2026-10-13).
+// A decoded image's working buffers, not zeroed. The first ones of a process are on 2 MB pages
+// where Linux offers them (transparent huge pages in "madvise" or "always" mode): a fresh process
+// faults a 4 MB buffer in twice instead of 1,024 times, so cold exports of a 1024x1024 RGBA PNG
+// took 15.26 -> 13.68 ms, of a 2048x2048 one 41.35 -> 32.59 ms, for 2 to 4 MB more peak memory.
+// Later buffers reuse memory the allocator has already mapped, and on huge pages a batch of 48
+// such images ran 4 % slower (2026-10-13).
 struct FreeBuffer {
     void operator()(uint8_t* buffer) const { std::free(buffer); }
 };
@@ -2468,7 +2470,9 @@ using ImageBuffer = std::unique_ptr<uint8_t[], FreeBuffer>;
 static ImageBuffer AllocateImageBuffer(size_t size) {
 #ifdef __linux__
     constexpr size_t kHugePage = size_t(2) << 20;
-    if (size >= kHugePage) {
+    static std::atomic<int> hugeBuffersLeft{ 12 };   // the buffers of about four images
+    if (size >= kHugePage && hugeBuffersLeft.load(std::memory_order_relaxed) > 0 &&
+        hugeBuffersLeft.fetch_sub(1, std::memory_order_relaxed) > 0) {
         const size_t rounded = (size + kHugePage - 1) & ~(kHugePage - 1);
         void* const buffer = std::aligned_alloc(kHugePage, rounded);
         if (buffer) madvise(buffer, rounded, MADV_HUGEPAGE);

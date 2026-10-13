@@ -1444,6 +1444,12 @@ time (only the noisy photo, whose 2.8 MB stream fills it, gained 3 %). glibc's o
 -16.4 %), most likely as its large chunks are not 2 MB-aligned and so cover fewer whole huge
 pages. Elsewhere, and on Windows, the buffers are plain `malloc`.
 
+Only the first 12 such buffers of a process, about four images, take huge pages: later ones get
+memory the allocator has already mapped, and on huge pages 48 images in one `--batch` (12 CPUs,
+`--no-image-cache`) ran 3.5 to 5.7 % slower (default workers 117.7 → 123.9 ms, `--workers=12`
+112.9 → 119.3, `--workers=1` 472.4 → 488.9). With the budget: 119.5, 113.9 and 472.8 ms, and
+the cold exports above unchanged (the mascot 13.65 ms, the illustration 32.54).
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason
