@@ -6022,7 +6022,7 @@ private:
         w.Lit(" Q\n");
     }
 
-    void DrawTextLine(double x, double size, const std::wstring& line, const char* color = "0.08 0.08 0.08") {
+    void DrawTextLine(double x, double size, std::wstring_view line, const char* color = "0.08 0.08 0.08") {
         double lh = size * 1.35;
         Ensure(lh);
         PaintText(x, y - size, size, line, color);
@@ -6617,18 +6617,41 @@ private:
             TagEnd(tagged);
             return;
         }
-        std::vector<std::string> raw = SplitLines(block.text);
+        // WrapCodeLine's pieces of SplitLines' lines, read where they are, as in
+        // RenderHighlightedCode: the block decoded once, and the same sums, so the same breaks.
+        std::string_view body(block.text);
+        if (body.size() >= 3 && memcmp(body.data(), "\xEF\xBB\xBF", 3) == 0) body.remove_prefix(3);
+        std::wstring wide = Utf8ToWide(body);
         double size = 9.5;
         double lh = size * 1.35;
         double x = margin + 8.0;
         double width = pageW - margin * 2.0 - 16.0;
+        const double scale = size * 0.001;
         bool first = true;
-        for (const auto& rawLine : raw) {
-            std::wstring wide = Utf8ToWide(rawLine);
-            for (const auto& line : WrapCodeLine(font, wide, width, size)) {
+        for (size_t start = 0;;) {
+            size_t end = wide.find(L'\n', start);
+            const bool last = end == std::wstring::npos;
+            if (last) end = wide.size();
+            const size_t lineEnd = end > start && wide[end - 1] == L'\r' ? end - 1 : end;
+            const auto draw = [&](size_t from, size_t to) {
                 CodeTile(lh, first, "0.95 0.95 0.93");
-                DrawTextLine(x, size, line, "0.12 0.12 0.12");
+                DrawTextLine(x, size, std::wstring_view(wide.data() + from, to - from), "0.12 0.12 0.12");
+            };
+            size_t piece = start;
+            double pieceWidth = 0.0;
+            for (size_t at = start; at < lineEnd; at++) {
+                if (wide[at] == L'\t') wide[at] = L' ';
+                const double charWidth = CodepointWidth(font, (uint16_t)wide[at], scale);
+                if (at > piece && pieceWidth + charWidth > width) {
+                    draw(piece, at);
+                    piece = at;
+                    pieceWidth = 0.0;
+                }
+                pieceWidth += charWidth;
             }
+            draw(piece, lineEnd);
+            if (last) break;
+            start = end + 1;
         }
         y -= 8.0;
         TagEnd(tagged);
@@ -9067,17 +9090,40 @@ private:
             RenderHighlightedCode(block.text, block.codeLanguage);
             return;
         }
-        std::vector<std::string> raw = SplitLines(block.text);
+        // WrapAsciiLiteral's lines of SplitLines' lines, read where they are, as in
+        // RenderHighlightedCode: a byte-order mark and CRs are not printable, so they go either way.
+        const std::string& text = block.text;
         double size = 9.5;
         double lh = size * 1.35;
         double x = margin + 8.0;
         double width = pageW - margin * 2.0 - 16.0;
+        const size_t perLine = (size_t)std::max<uint64_t>(1, MaxUnits(width, size) / WordAdvances(StandardTextFont::Mono).space);
         bool first = true;
-        for (const auto& rawLine : raw) {
-            for (const auto& line : WrapAsciiLiteral(rawLine, width, size)) {
-                CodeTile(lh, first, "0.95 0.95 0.93");
-                DrawTextLine(x, size, line, "F3", "0.12 0.12 0.12", true);
+        for (size_t start = 0;;) {
+            size_t end = text.find('\n', start);
+            const bool last = end == std::string::npos;
+            if (last) end = text.size();
+            std::string_view line(text.data() + start, end - start);
+            size_t printable = 0;
+            while (printable < line.size() && (unsigned char)line[printable] - 32u < 95u) printable++;
+            if (printable < line.size()) {
+                codeLine.resize(line.size());
+                size_t kept = 0;
+                for (const char ch : line) {
+                    if (ch != '\t' && ((unsigned char)ch < 32 || (unsigned char)ch >= 127)) continue;
+                    codeLine[kept++] = ch == '\t' ? ' ' : ch;
+                }
+                line = std::string_view(codeLine.data(), kept);
             }
+            size_t piece = 0;
+            do {
+                const size_t count = std::min(perLine, line.size() - piece);
+                CodeTile(lh, first, "0.95 0.95 0.93");
+                DrawTextLine(x, size, line.substr(piece, count), "F3", "0.12 0.12 0.12", true);
+                piece += count;
+            } while (piece < line.size());
+            if (last) break;
+            start = end + 1;
         }
         y -= 8.0;
     }
