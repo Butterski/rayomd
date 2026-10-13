@@ -559,9 +559,11 @@ The Windows app should feel like a compact utility, not a landing page.
   possible.
 - Default Linux release should be a compact `rayomd` CLI binary.
 - `packaging/arch/` holds the Arch Linux PKGBUILDs (`rayomd` from the source tag, with
-  curl; `rayomd-bin` from the release asset) and their `.SRCINFO`. With a release, set
-  `pkgver`, reset `pkgrel`, update both `sha256sums` and regenerate `.SRCINFO`
-  (`makepkg --printsrcinfo`). They are published to the AUR by hand.
+  curl; `rayomd-bin` from the release asset) and their `.SRCINFO`. Do not bump them by hand:
+  the release workflow's `arch` job runs `packaging/arch/update.sh <version>` (pkgver,
+  pkgrel, sha256sums, `.SRCINFO`), builds, checks and smoke-tests both packages on Arch,
+  commits the result to the default branch and, when the `AUR_SSH_PRIVATE_KEY` secret is
+  set, pushes both to the AUR.
 - RayoMD's own code is licensed under Apache-2.0. Keep `LICENSE`,
   `NOTICE`, README license wording, and SPDX headers aligned when changing
   licensing metadata.

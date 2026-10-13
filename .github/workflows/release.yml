@@ -211,3 +211,91 @@ jobs:
               --generate-notes \
               --latest
           fi
+
+  arch:
+    name: Arch Linux packages
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+
+    env:
+      RAYOMD_VERSION: ${{ needs.version.outputs.version }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      PACKAGER_NAME: Milosz Kucharski
+      PACKAGER_EMAIL: miloszkucharski@gmail.com
+      # makepkg writes this into each package's metadata.
+      PACKAGER: Milosz Kucharski <miloszkucharski@gmail.com>
+
+    steps:
+      - name: Install tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git openssh namcap cmake python ttf-dejavu curl
+          useradd -m builder
+
+      # The default branch, not the release ref: the updated PKGBUILDs are committed onto it.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Update PKGBUILDs
+        run: |
+          chown -R builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- packaging/arch/update.sh "$RAYOMD_VERSION"
+
+      - name: Build, check and smoke-test both packages
+        run: |
+          for pkg in rayomd rayomd-bin; do
+            (cd "packaging/arch/$pkg" && runuser -u builder -- makepkg --cleanbuild --noconfirm)
+            namcap "packaging/arch/$pkg/PKGBUILD" packaging/arch/$pkg/*.pkg.tar.zst
+            pacman -U --noconfirm packaging/arch/$pkg/*.pkg.tar.zst
+            rayomd --version | grep -Fx "rayomd ${RAYOMD_VERSION}"
+            rayomd --export tester.md /tmp/tester.pdf --no-image-cache
+            test -s /tmp/tester.pdf
+            pacman -R --noconfirm "$pkg"
+          done
+
+      - name: Commit PKGBUILDs
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging/arch/*/PKGBUILD packaging/arch/*/.SRCINFO
+          if git diff --cached --quiet; then
+            echo "The PKGBUILDs are already at ${RAYOMD_VERSION}."
+            exit 0
+          fi
+          git commit -m "Arch packages: ${RAYOMD_VERSION}"
+          git pull --rebase origin "$DEFAULT_BRANCH"
+          git push origin "HEAD:${DEFAULT_BRANCH}"
+
+      # Needs the repository secret AUR_SSH_PRIVATE_KEY: the private half of a key added to the
+      # AUR account that maintains rayomd and rayomd-bin. Without it the step is skipped.
+      - name: Publish to the AUR
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          # aur.archlinux.org's ED25519 key, SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4
+          # as the AUR's home page lists it.
+          echo 'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' > ~/.ssh/known_hosts
+          printf 'Host aur.archlinux.org\n  User aur\n  IdentityFile ~/.ssh/aur\n  IdentitiesOnly yes\n' > ~/.ssh/config
+          for pkg in rayomd rayomd-bin; do
+            rm -rf "/tmp/aur-$pkg"
+            git -c init.defaultBranch=master clone "ssh://aur@aur.archlinux.org/$pkg.git" "/tmp/aur-$pkg"
+            cp "packaging/arch/$pkg/PKGBUILD" "packaging/arch/$pkg/.SRCINFO" "/tmp/aur-$pkg/"
+            release="$(sed -n 's/^pkgrel=//p' "packaging/arch/$pkg/PKGBUILD")"
+            (
+              cd "/tmp/aur-$pkg"
+              git add PKGBUILD .SRCINFO
+              if git diff --cached --quiet; then
+                echo "$pkg is already published at ${RAYOMD_VERSION}-${release}."
+              else
+                git -c user.name="$PACKAGER_NAME" -c user.email="$PACKAGER_EMAIL" \
+                  commit -m "Update to ${RAYOMD_VERSION}-${release}"
+                git push origin HEAD:master
+              fi
+            )
+          done
