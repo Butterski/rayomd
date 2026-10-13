@@ -9,7 +9,7 @@
 **Markdown to PDF in milliseconds, from a single small executable.**<br>
 No browser. No LaTeX. No Pandoc. No runtime.
 
-<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.2.1 MathTex" src="https://img.shields.io/badge/version-4.2.1%20MathTex-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.2.2 MathTex" src="https://img.shields.io/badge/version-4.2.2%20MathTex-informational?style=for-the-badge"></a>
 <a href="https://github.com/Butterski/rayomd/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Butterski/rayomd/total?style=for-the-badge&color=2ea44f"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 
@@ -100,9 +100,9 @@ veraPDF.
 <summary><b>Linux</b>: download and run</summary>
 
 ```sh
-curl -LO https://github.com/Butterski/rayomd/releases/download/v4.2.1/rayomd-4.2.1-linux-x64-static.tar.gz
-tar -xzf rayomd-4.2.1-linux-x64-static.tar.gz
-./rayomd-4.2.1-linux-x64-static/rayomd --export input.md output.pdf
+curl -LO https://github.com/Butterski/rayomd/releases/download/v4.2.2/rayomd-4.2.2-linux-x64-static.tar.gz
+tar -xzf rayomd-4.2.2-linux-x64-static.tar.gz
+./rayomd-4.2.2-linux-x64-static/rayomd --export input.md output.pdf
 ```
 
 </details>
@@ -110,7 +110,7 @@ tar -xzf rayomd-4.2.1-linux-x64-static.tar.gz
 <details>
 <summary><b>Windows</b>: the app and the CLI in one <code>rayomd.exe</code></summary>
 
-Download `rayomd-4.2.1-windows-x64.zip` from
+Download `rayomd-4.2.2-windows-x64.zip` from
 [Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
 without arguments opens the app: edit or drop a file, pick a style and margins, and press
 `Ctrl+E` to export. With arguments it is the same CLI as on Linux:
