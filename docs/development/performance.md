@@ -1800,13 +1800,18 @@ translation units only (`tiny_pdf.cpp`, `inline_markdown.cpp`,
 `markdown_parser.cpp`) with MinGW g++ on Windows hardware, and weigh it
 against the executable size.
 
-**PDF/A text in single-byte codes.** Under `--pdfa` an ASCII or Latin document
-leaves the standard fonts for the Unicode renderer, whose CID text takes two bytes
-a glyph: 2026-10-13, `baseline.md` +59 % time and +57 % size, `ascii_96kb.md` +26 %
-and +25 % (four hex digits a glyph until then: +72 % and +85 %, +32 % and +54 % on
-2026-10-09). A TrueType font embedded as a simple font in WinAnsiEncoding would
-write one byte a glyph; the price is a second embedding path (simple-font widths, a
-`cmap` subtable PDF/A accepts) next to the CID one.
+**Latin PDF/A on the standard renderer.** Under `--pdfa` an ASCII or Latin document
+leaves the standard fonts for the Unicode renderer: 2026-10-13, `baseline.md` +59 % time
+and +57 % size, `ascii_96kb.md` +26 % and +25 % (with four hex digits a glyph: +72 % and
++85 %, +32 % and +54 % on 2026-10-09). The bytes of the text are not the cost: a build that
+wrote one byte a glyph, the most a TrueType font embedded as a simple WinAnsi font could
+give, was 0.6 to 1.3 % faster and 9 to 11 % smaller, so that second embedding path (simple-font
+widths, a `cmap` subtable PDF/A accepts) was not taken. The time is the Unicode renderer's:
+wrapping and measuring wide strings with TrueType advances (`WrapStyledInline`, `TextWidth`,
+`AppendUtf8ToWide`) and a glyph lookup per character. Latin PDF/A at the standard renderer's
+speed needs that renderer on embedded fonts: TrueType regular, bold, italic and mono faces with
+their own advances in place of the AFM tables, which changes how `--pdfa` documents look (real
+bold instead of a second offset copy) and must not slow the default path's constant metrics.
 
 **A larger inlining budget for `tiny_pdf.cpp`.** The file sits at GCC's
 `inline-unit-growth` limit, so edits move which hot calls stay inlined.
