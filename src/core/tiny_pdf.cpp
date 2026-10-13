@@ -8749,8 +8749,10 @@ private:
                 style, url });
             first = last + 1;
         }
-        // Every word is written once, with at most one space in front of it.
-        out.text.resize(out.parsed.text.size() * 2 + 1);
+        // Every word is written once, with at most one space in front of it. The buffer only
+        // grows: resized to each paragraph, it zero-filled twice the paragraph first.
+        const size_t room = out.parsed.text.size() * 2 + 1;
+        if (out.text.size() < room) out.text.resize(room);
         char* const textBegin = &out.text[0];
         char* cursor = textBegin;
         const char* const source = out.parsed.text.data();
@@ -8848,7 +8850,7 @@ private:
         }
 
         FlushAsciiRunText(cursor, pending, pendingLength);
-        out.text.resize(static_cast<size_t>(cursor - textBegin));
+        // out.text keeps its size: the runs say where their text is.
         if (out.runs.size() != lineStart) out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
         if (out.lineEnds.empty()) out.lineEnds.push_back(0);
         return true;
