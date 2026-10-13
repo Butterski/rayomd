@@ -24,7 +24,6 @@
 
 #ifndef _WIN32
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -86,14 +85,17 @@ bool ReadUtf8FilePortable(const fs::path& path, std::string& content) {
                 ::close(fd);
                 return true;
             }
-            void* mapped = ::mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-            if (mapped != MAP_FAILED) {
-                const char* data = static_cast<const char*>(mapped);
-                content.assign(data, data + (size_t)st.st_size);
-                ::munmap(mapped, (size_t)st.st_size);
-                ::close(fd);
-                return true;
+            content.resize((size_t)st.st_size);
+            size_t offset = 0;
+            while (offset < content.size()) {
+                const ssize_t got = ::read(fd, &content[offset], content.size() - offset);
+                if (got < 0 && errno == EINTR) continue;
+                if (got <= 0) break;
+                offset += (size_t)got;
             }
+            ::close(fd);
+            if (offset == content.size()) return true;
+            return RayoMd::File::ReadAll(path, (size_t)kMaxMarkdownInputBytes, content);
         }
         ::close(fd);
     }
