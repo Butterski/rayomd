@@ -96,7 +96,6 @@ ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 // App State
 // ============================================================================
 std::string g_markdownText;
-int g_selectedEngine = 0;
 int g_selectedStyle = 0;
 int g_selectedMargin = 1;
 float g_customMarginInches = 1.0f;
@@ -128,29 +127,12 @@ ImFont* g_fontBody = nullptr;
 ImFont* g_fontTitle = nullptr;
 ImFont* g_fontStrong = nullptr;
 ImFont* g_fontEditor = nullptr;
-const char* g_engines[] = { "Native Tiny PDF", "Pandoc (full)" };
 const char* g_styles[] = { "Elegant", "Modern", "Tech" };
 const char* g_margins[] = { "Compact", "Normal", "Wide", "Custom" };
-const char* g_styleArgs[] = {
-    "--pdf-engine=xelatex",
-    "--pdf-engine=xelatex -V mainfont=\"Segoe UI\"",
-    "--pdf-engine=xelatex -V mainfont=Consolas --highlight-style=breezedark"
-};
-const char* g_marginArgs[] = {
-    "-V geometry:margin=0.55in",
-    "-V geometry:margin=1in",
-    "-V geometry:margin=1.25in"
-};
-const char* BASE_ARGS = "--highlight-style=tango -V colorlinks=true "
-    "-V header-includes=\"\\usepackage{framed}\\usepackage{xcolor}"
-    "\\definecolor{shadecolor}{RGB}{245,245,245}"
-    "\\renewenvironment{quote}{\\begin{shaded*}}{\\end{shaded*}}\"";
 
 constexpr long long kMaxMarkdownInputBytes = 128LL * 1024LL * 1024LL;
-constexpr DWORD kPandocTimeoutMs = 120000;
 
 struct WinExportOptions {
-    int engine = 0;
     TinyPdf::PdfStyle style = TinyPdf::PdfStyle::Elegant;
     TinyPdf::PdfMargin margin = TinyPdf::PdfMargin::Normal();
     TinyPdf::PdfPageSize pageSize;
@@ -300,15 +282,6 @@ std::wstring GetDocumentsPath() {
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, path)))
         return path;
     return L"C:\\";
-}
-
-std::wstring GetTempFilePath() {
-    wchar_t tempDir[MAX_PATH] = {};
-    wchar_t tempFile[MAX_PATH] = {};
-    DWORD len = GetTempPathW(MAX_PATH, tempDir);
-    if (len == 0 || len >= MAX_PATH) return L"";
-    if (!GetTempFileNameW(tempDir, L"rmd", 0, tempFile)) return L"";
-    return tempFile;
 }
 
 std::wstring ShowSaveDialog(HWND hWnd) {
@@ -569,117 +542,13 @@ bool ExportNativePdf(const std::string& markdown, const std::wstring& outputPath
 int GetNativePdfLastError() {
     return g_nativePdfLastError;
 }
-static bool IsExistingAbsoluteFile(const std::wstring& path) {
-    std::error_code ec;
-    std::filesystem::path fsPath(path);
-    return fsPath.is_absolute() && std::filesystem::is_regular_file(fsPath, ec) && !ec;
-}
-
-static bool ResolvePandocExecutable(std::wstring& executable, std::string* warning) {
-    wchar_t configured[32768];
-    DWORD configuredLen = GetEnvironmentVariableW(L"RAYOMD_PANDOC", configured, (DWORD)std::size(configured));
-    if (configuredLen > 0 && configuredLen < std::size(configured)) {
-        std::wstring configuredPath(configured, configuredLen);
-        if (IsExistingAbsoluteFile(configuredPath)) {
-            executable = std::move(configuredPath);
-            return true;
-        }
-        if (warning) *warning = "RAYOMD_PANDOC is not an existing absolute pandoc.exe path; falling back to PATH lookup.";
-    }
-
-    DWORD needed = SearchPathW(nullptr, L"pandoc.exe", nullptr, 0, nullptr, nullptr);
-    if (needed == 0) return false;
-    std::wstring found(needed, L'\0');
-    DWORD written = SearchPathW(nullptr, L"pandoc.exe", nullptr, (DWORD)found.size(), &found[0], nullptr);
-    if (written == 0 || written >= found.size()) return false;
-    found.resize(written);
-    executable = std::move(found);
-    if (warning && warning->empty()) {
-        *warning = "Pandoc was resolved from PATH; set RAYOMD_PANDOC to an absolute path.";
-    }
-    return true;
-}
-
-bool RunPandoc(const std::wstring& input, const std::wstring& output,
-    const WinExportOptions& options, std::string* warning = nullptr) {
-    std::string marginArg;
-    switch (options.margin.preset) {
-    case TinyPdf::MarginPreset::Compact:
-        marginArg = g_marginArgs[0];
-        break;
-    case TinyPdf::MarginPreset::Normal:
-        marginArg = g_marginArgs[1];
-        break;
-    case TinyPdf::MarginPreset::Wide:
-        marginArg = g_marginArgs[2];
-        break;
-    case TinyPdf::MarginPreset::Custom: {
-        char buffer[96];
-        std::snprintf(buffer, sizeof(buffer), "-V geometry:margin=%.2fin",
-            TinyPdf::Internal::ResolveMarginPoints(options.margin) / 72.0);
-        marginArg = buffer;
-        break;
-    }
-    }
-
-    std::wstring pandocExe;
-    if (!ResolvePandocExecutable(pandocExe, warning)) return false;
-
-    std::wstring pandocOutput;
-    for (int attempt = 0; attempt < 16; attempt++) {
-        std::wstring candidate = MakeTempSiblingPath(output, L".pdf");
-        if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            pandocOutput = std::move(candidate);
-            break;
-        }
-    }
-    if (pandocOutput.empty()) return false;
-
-    std::wstring cmd = L"\"" + pandocExe + L"\" --from=markdown \"" + input + L"\" -o \"" + pandocOutput + L"\" " +
-        Utf8ToWide(BASE_ARGS) + L" " + Utf8ToWide(g_styleArgs[static_cast<int>(options.style)]) + L" " + Utf8ToWide(marginArg);
-
-    STARTUPINFOW si = { sizeof(si) };
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi = {};
-
-    if (!CreateProcessW(pandocExe.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        DeleteFileW(pandocOutput.c_str());
-        return false;
-    }
-
-    DWORD wait = WaitForSingleObject(pi.hProcess, kPandocTimeoutMs);
-    if (wait == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 20);
-        WaitForSingleObject(pi.hProcess, 5000);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        DeleteFileW(pandocOutput.c_str());
-        return false;
-    }
-    if (wait != WAIT_OBJECT_0) {
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        DeleteFileW(pandocOutput.c_str());
-        return false;
-    }
-
-    DWORD exitCode = 1;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    if (exitCode != 0) {
-        DeleteFileW(pandocOutput.c_str());
-        return false;
-    }
-    return ReplaceWithTempFile(pandocOutput, output);
-}
 bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& options, std::wstring& error) {
     for (int i = start; i < argc; i++) {
         if (lstrcmpiW(argv[i], L"pandoc") == 0) {
-            options.engine = 1;
+            error = L"the pandoc engine was removed; RayoMD exports with its native renderer only";
+            return false;
         } else if (lstrcmpiW(argv[i], L"native") == 0) {
-            options.engine = 0;
+            // The only engine, still accepted from older command lines.
         } else if (lstrcmpiW(argv[i], L"--allow-url-images") == 0) {
             options.enableUrlImages = true;
         } else if (lstrcmpiW(argv[i], L"--allow-unsafe-local-images") == 0 || lstrcmpiW(argv[i], L"--unsafe-local-images") == 0) {
@@ -925,15 +794,6 @@ bool RegisterBatchOutputPath(const std::wstring& outputPath, std::set<std::wstri
     return false;
 }
 
-bool ExportOneFile(const std::wstring& inputPath, const std::wstring& outputPath,
-    const WinExportOptions& options, std::string* warning = nullptr) {
-    if (options.engine == 0) {
-        std::string markdown;
-        return ReadUtf8File(inputPath, markdown) && ExportNativePdf(markdown, outputPath, options, inputPath);
-    }
-    return RunPandoc(inputPath, outputPath, options, warning);
-}
-
 int ExportNativeFileWithBufferResult(const std::wstring& inputPath, const std::wstring& outputPath,
     const WinExportOptions& options, std::string& pdfBuffer, TinyPdf::BuildResult* details = nullptr) {
     const auto profileBefore = RayoMd::Profiling::Capture();
@@ -1002,7 +862,7 @@ double MillisecondsSince(std::chrono::steady_clock::time_point start) {
 }
 
 unsigned ResolveWinWorkerCount(const WinExportOptions& options, const std::vector<WinBatchJob>& jobs) {
-    if (jobs.empty() || options.engine != 0) return 1;
+    if (jobs.empty()) return 1;
     unsigned workers = options.workers;
     if (workers == 0) {
         workers = std::thread::hardware_concurrency();
@@ -1031,47 +891,32 @@ int ExecuteWinBatchJobs(std::vector<WinBatchJob>& jobs, const WinExportOptions& 
         job.skipped = true;
         job.bytes = std::filesystem::file_size(std::filesystem::path(job.outputPath), sizeError);
     };
-    if (options.engine != 0) {
-        std::string warning;
-        for (WinBatchJob& job : jobs) {
-            if (job.result == 0 && upToDate(job)) {
-                skip(job);
-            } else if (job.result == 0) {
-                const auto start = std::chrono::steady_clock::now();
-                if (!ExportOneFile(job.inputPath, job.outputPath, options, &warning)) job.result = 20;
-                job.milliseconds = MillisecondsSince(start);
-            }
-            if (report.IsOpen()) report.Write(WinRecordFor(job));
-        }
-        if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
-    } else {
-        const unsigned workerCount = ResolveWinWorkerCount(options, jobs);
-        std::atomic<size_t> next{0};
-        std::vector<std::thread> workers;
-        workers.reserve(workerCount);
-        for (unsigned worker = 0; worker < workerCount; worker++) {
-            workers.emplace_back([&] {
-                std::string pdfBuffer;
-                pdfBuffer.reserve(1024 * 1024);
-                for (;;) {
-                    size_t index = next.fetch_add(1, std::memory_order_relaxed);
-                    if (index >= jobs.size()) break;
-                    WinBatchJob& job = jobs[index];
-                    if (job.result == 0 && upToDate(job)) {
-                        skip(job);
-                    } else if (job.result == 0) {
-                        const auto start = std::chrono::steady_clock::now();
-                        job.result = ExportNativeFileWithBufferResult(job.inputPath, job.outputPath, options, pdfBuffer,
-                            &job.details);
-                        job.milliseconds = MillisecondsSince(start);
-                        if (job.result == 0) job.bytes = pdfBuffer.size();
-                    }
-                    if (report.IsOpen()) report.Write(WinRecordFor(job));
+    const unsigned workerCount = ResolveWinWorkerCount(options, jobs);
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount);
+    for (unsigned worker = 0; worker < workerCount; worker++) {
+        workers.emplace_back([&] {
+            std::string pdfBuffer;
+            pdfBuffer.reserve(1024 * 1024);
+            for (;;) {
+                size_t index = next.fetch_add(1, std::memory_order_relaxed);
+                if (index >= jobs.size()) break;
+                WinBatchJob& job = jobs[index];
+                if (job.result == 0 && upToDate(job)) {
+                    skip(job);
+                } else if (job.result == 0) {
+                    const auto start = std::chrono::steady_clock::now();
+                    job.result = ExportNativeFileWithBufferResult(job.inputPath, job.outputPath, options, pdfBuffer,
+                        &job.details);
+                    job.milliseconds = MillisecondsSince(start);
+                    if (job.result == 0) job.bytes = pdfBuffer.size();
                 }
-            });
-        }
-        for (std::thread& worker : workers) worker.join();
+                if (report.IsOpen()) report.Write(WinRecordFor(job));
+            }
+        });
     }
+    for (std::thread& worker : workers) worker.join();
     const bool reported = report.Close();
     if (!reported) WriteStdoutLine("Error: could not write the report file: " + options.report);
 
@@ -1172,11 +1017,6 @@ int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& o
     return ExecuteWinBatchJobs(jobs, options, "stdin batch export");
 }
 int RunStdinExport(const std::wstring& outputPath, const WinExportOptions& options) {
-    if (options.engine != 0) {
-        WriteStdoutLine("Error: stdin export only supports native mode.");
-        return 20;
-    }
-
     std::string markdown;
     if (!ReadAllStdin(markdown)) {
         WriteStdoutLine("Error: could not read Markdown from stdin or input exceeded " +
@@ -1227,7 +1067,6 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
     std::string pdfBuffer;
     pdfBuffer.reserve(1024 * 1024);
     std::string pending;
-    std::string warning;
     char buf[4096];
     DWORD read = 0;
     int failures = 0;
@@ -1242,12 +1081,8 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
 
         LARGE_INTEGER start = {}, end = {};
         QueryPerformanceCounter(&start);
-        if (options.engine == 0) {
-            job.result = ExportNativeFileWithBufferResult(job.inputPath, job.outputPath, options, pdfBuffer, &job.details);
-            if (job.result == 0) job.bytes = pdfBuffer.size();
-        } else if (!ExportOneFile(job.inputPath, job.outputPath, options, &warning)) {
-            job.result = 20;
-        }
+        job.result = ExportNativeFileWithBufferResult(job.inputPath, job.outputPath, options, pdfBuffer, &job.details);
+        if (job.result == 0) job.bytes = pdfBuffer.size();
         QueryPerformanceCounter(&end);
 
         const bool ok = job.result == 0;
@@ -1256,10 +1091,6 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
         if (!ok) failures++;
         if (report.IsOpen()) report.Write(WinRecordFor(job));
         WriteStdoutLine(std::string(ok ? "OK\t" : "ERR\t") + RayoMd::Text::FormatDouble(ms) + "\t" + WideToUtf8(job.outputPath));
-        if (!warning.empty()) {
-            WriteStdoutLine("Warning: " + warning);
-            warning.clear();
-        }
         return true;
     };
 
@@ -1279,7 +1110,7 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
 
     if (!pending.empty()) processLine(pending);
     report.Close();
-    return failures == 0 ? 0 : (options.engine == 0 ? 10 + GetNativePdfLastError() : 20);
+    return failures == 0 ? 0 : 10 + GetNativePdfLastError();
 }
 
 int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
@@ -1535,9 +1366,6 @@ int TryCommandLineExport() {
         } else if (parseOrReport(output + 1)) {
             if (options.embedSource) {
                 WriteStdoutLine("Error: --embed-source does not apply to --book: a book is not reversible.");
-            } else if (options.engine != 0) {
-                WriteStdoutLine("Error: --book takes the native engine only.");
-                result = 20;
             } else {
                 result = RunBookExport(std::vector<std::filesystem::path>(argv + 2, argv + output), argv[output], options);
             }
@@ -1586,24 +1414,16 @@ int TryCommandLineExport() {
         outputPath += L".pdf";
     }
 
-    bool ok = false;
-    if (options.engine == 0) {
-        std::string markdown;
-        if (!ReadUtf8File(inputPath, markdown)) {
-            WriteStdoutLine("Error: could not read input Markdown file: " + WideToUtf8(inputPath));
-            LocalFree(argv);
-            return 3;
-        }
-        ok = ExportNativePdf(markdown, outputPath, options, inputPath);
-    } else {
-        std::string warning;
-        ok = RunPandoc(inputPath, outputPath, options, &warning);
-        if (!warning.empty()) WriteStdoutLine("Warning: " + warning);
+    std::string markdown;
+    if (!ReadUtf8File(inputPath, markdown)) {
+        WriteStdoutLine("Error: could not read input Markdown file: " + WideToUtf8(inputPath));
+        LocalFree(argv);
+        return 3;
     }
+    const bool ok = ExportNativePdf(markdown, outputPath, options, inputPath);
 
     LocalFree(argv);
-    if (ok) return 0;
-    return options.engine == 0 ? 10 + GetNativePdfLastError() : 20;
+    return ok ? 0 : 10 + GetNativePdfLastError();
 }
 // ============================================================================
 // Export Thread
@@ -1620,7 +1440,6 @@ struct ExportParams {
 struct ExportResult {
     bool ok = false;
     double elapsedMs = 0.0;
-    std::string warning;
 };
 
 void CloseWorkerThreadHandle(HANDLE& threadHandle, bool wait) {
@@ -1632,19 +1451,11 @@ void CloseWorkerThreadHandle(HANDLE& threadHandle, bool wait) {
 
 DWORD WINAPI ExportThread(LPVOID lp) {
     auto* p = (ExportParams*)lp;
-    bool ok = false;
-    std::string warning;
     LARGE_INTEGER freq = {}, start = {}, end = {};
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&start);
 
-    if (p->options.engine == 0) {
-        ok = ExportNativePdf(p->markdown, p->outputPath, p->options, p->sourcePath);
-    } else {
-        std::wstring tmp = GetTempFilePath();
-        ok = !tmp.empty() && WriteUtf8File(tmp, p->markdown) && RunPandoc(tmp, p->outputPath, p->options, &warning);
-        if (!tmp.empty()) DeleteFileW(tmp.c_str());
-    }
+    const bool ok = ExportNativePdf(p->markdown, p->outputPath, p->options, p->sourcePath);
     QueryPerformanceCounter(&end);
     double elapsedMs = freq.QuadPart > 0
         ? (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart
@@ -1656,7 +1467,7 @@ DWORD WINAPI ExportThread(LPVOID lp) {
         }
     }
 
-    auto* result = new ExportResult{ ok, elapsedMs, warning };
+    auto* result = new ExportResult{ ok, elapsedMs };
     if (!PostMessageW(p->hWnd, WM_RAYOMD_EXPORT_DONE, 0, (LPARAM)result)) {
         delete result;
     }
@@ -1685,15 +1496,14 @@ void DoExport(HWND hWnd) {
         g_statusText = "Still exporting the previous PDF.";
         return;
     }
-    g_statusText = g_selectedEngine == 0 ? "Converting with native PDF..." : "Converting with Pandoc...";
+    g_statusText = "Converting with native PDF...";
 
     WinExportOptions options;
-    options.engine = g_selectedEngine;
     options.style = TinyPdf::Internal::PdfStyleFromLegacyIndex(g_selectedStyle);
     options.margin = g_selectedMargin == 3
         ? TinyPdf::PdfMargin::CustomPoints(std::max(0.25f, std::min(2.0f, g_customMarginInches)) * 72.0)
         : TinyPdf::Internal::PdfMarginFromLegacySetting(g_selectedMargin);
-    options.embedSource = g_embedSource && g_selectedEngine == 0;
+    options.embedSource = g_embedSource;
     options.enableUrlImages = g_enableUrlImages;
     auto* params = new ExportParams{ g_markdownText, g_currentMarkdownPath, outPath, options, g_openAfterExport, hWnd };
     HANDLE hThread = CreateThread(nullptr, 0, ExportThread, params, 0, nullptr);
@@ -1914,30 +1724,6 @@ static bool DrawQuietChip(const char* id, const char* label, bool selected, ImVe
     return pressed;
 }
 
-static bool DrawOptionTile(const char* id, const char* title, const char* detail, bool selected, ImVec2 size) {
-    ImGui::PushID(id);
-    bool pressed = ImGui::InvisibleButton("tile", size);
-    bool hovered = ImGui::IsItemHovered();
-
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    ImVec2 min = ImGui::GetItemRectMin();
-    ImVec2 max = ImGui::GetItemRectMax();
-    ImU32 bg = selected ? Rgba32(17, 31, 38) : (hovered ? Rgba32(16, 21, 30) : Rgba32(12, 16, 23));
-    ImU32 border = selected ? Rgba32(84, 205, 229, 180) : Rgba32(39, 48, 64, hovered ? 210 : 150);
-
-    draw->AddRectFilled(min, max, bg, 10.0f);
-    draw->AddRect(min, max, border, 10.0f);
-    if (selected) {
-        draw->AddRectFilled(ImVec2(min.x, min.y + 8.0f), ImVec2(min.x + 3.0f, max.y - 8.0f), Rgba32(94, 218, 242), 3.0f);
-    }
-
-    ImFont* font = g_fontStrong ? g_fontStrong : ImGui::GetFont();
-    draw->AddText(font, font->LegacySize, ImVec2(min.x + 14.0f, min.y + 9.0f), Rgba32(225, 233, 242), title);
-    draw->AddText(ImVec2(min.x + 14.0f, min.y + 31.0f), Rgba32(122, 136, 153), detail);
-    ImGui::PopID();
-    return pressed;
-}
-
 static bool DrawSwitch(const char* id, bool* value) {
     ImGui::PushID(id);
     ImVec2 size(46.0f, 26.0f);
@@ -1998,9 +1784,6 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_statusText = result->ok
                 ? "Export complete in " + FormatDurationMs(result->elapsedMs) + "."
                 : "Export failed after " + FormatDurationMs(result->elapsedMs) + ".";
-            if (!result->warning.empty()) {
-                g_statusText += " Warning: " + result->warning;
-            }
             delete result;
         }
         CloseWorkerThreadHandle(g_exportThread, true);
@@ -2144,7 +1927,7 @@ void RenderMainFrame(HWND hWnd, ImGuiIO& io) {
     draw->AddRectFilled(ImVec2(win.x + pad, win.y + 22.0f), ImVec2(win.x + pad + 3.0f, win.y + 56.0f), Rgba32(94, 218, 242), 2.0f);
     draw->AddText(titleFont, titleSizePx, titlePos, Rgba32(238, 244, 249), "RayoMD");
     char headerDetail[160];
-    snprintf(headerDetail, sizeof(headerDetail), "%s / %s / %s", g_engines[g_selectedEngine], g_styles[g_selectedStyle], g_margins[g_selectedMargin]);
+    snprintf(headerDetail, sizeof(headerDetail), "%s / %s", g_styles[g_selectedStyle], g_margins[g_selectedMargin]);
     draw->AddText(ImVec2(titlePos.x, titlePos.y + 35.0f), Rgba32(126, 139, 155), headerDetail);
 
     char headerStats[128];
@@ -2241,15 +2024,6 @@ void RenderMainFrame(HWND hWnd, ImGuiIO& io) {
     DrawSectionTitle(draw, "Export", ImVec2(panelX, panelY));
     draw->AddText(ImVec2(panelX, panelY + 23.0f), Rgba32(117, 131, 149), "PDF settings");
     panelY += 62.0f;
-
-    draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Engine");
-    panelY += 24.0f;
-    ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
-    if (DrawOptionTile("engine_native", "Native Tiny PDF", "Fast local export", g_selectedEngine == 0, ImVec2(panelW, 58.0f))) g_selectedEngine = 0;
-    panelY += 66.0f;
-    ImGui::SetCursorScreenPos(ImVec2(panelX, panelY));
-    if (DrawOptionTile("engine_pandoc", "Pandoc", "Full document pipeline", g_selectedEngine == 1, ImVec2(panelW, 58.0f))) g_selectedEngine = 1;
-    panelY += 78.0f;
 
     draw->AddText(ImVec2(panelX, panelY), Rgba32(132, 146, 164), "Style");
     panelY += 24.0f;

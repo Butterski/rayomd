@@ -74,10 +74,6 @@
 #define RAYOMD_VERSION "0.0.0"
 #endif
 
-#ifdef RAYOMD_USE_SIMDUTF
-#include "simdutf.h"
-#endif
-
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_IX86)
 #include <emmintrin.h>
 #define FAST_MD_SSE2 1
@@ -173,45 +169,17 @@ static std::wstring Utf8ToWide(std::string_view str) {
     if (str.empty()) return L"";
     // ASCII, the usual case for a span or a table cell, needs no decoder.
     if (IsAllAscii(str)) return std::wstring(str.begin(), str.end());
-#ifdef RAYOMD_USE_SIMDUTF
-#if defined(_WIN32)
-    const size_t units = simdutf::utf16_length_from_utf8(str.data(), str.size());
-    if (units == 0) return Utf8ToWideFallback(str);
-    static_assert(sizeof(wchar_t) == sizeof(char16_t), "Windows wchar_t must be UTF-16 sized");
-    std::wstring wstr(units, 0);
-    size_t written = simdutf::convert_valid_utf8_to_utf16le(
-        str.data(), str.size(), reinterpret_cast<char16_t*>(&wstr[0]));
-    if (written == 0) return Utf8ToWideFallback(str);
-    wstr.resize(written);
-    return wstr;
-#else
-    const size_t units = simdutf::utf16_length_from_utf8(str.data(), str.size());
-    if (units == 0) return Utf8ToWideFallback(str);
-    std::u16string utf16(units, 0);
-    size_t written = simdutf::convert_valid_utf8_to_utf16le(str.data(), str.size(), &utf16[0]);
-    if (written == 0) return Utf8ToWideFallback(str);
-    std::wstring wstr(written, 0);
-    for (size_t i = 0; i < written; i++) {
-        wstr[i] = (wchar_t)utf16[i];
-    }
-    return wstr;
-#endif
-#else
     return Utf8ToWideFallback(str);
-#endif
 }
 
-// Appends Utf8ToWide(str) to `out`. ASCII and, without simdutf, other text are written straight
-// into `out`, so a caller that reuses the string converts without allocating.
+// Appends Utf8ToWide(str) to `out`, written straight into `out`, so a caller that reuses the
+// string converts without allocating.
 static void AppendUtf8ToWide(std::wstring& out, std::string_view str) {
     if (str.empty()) return;
     if (IsAllAscii(str)) {
         out.append(str.begin(), str.end());
         return;
     }
-#if defined(RAYOMD_USE_SIMDUTF)
-    out += Utf8ToWide(str);
-#else
     const size_t base = out.size();
     out.resize(base + str.size());
 #if defined(_WIN32)
@@ -219,7 +187,6 @@ static void AppendUtf8ToWide(std::wstring& out, std::string_view str) {
     out.resize(base + (len > 0 ? (size_t)len : 0));
 #else
     out.resize((size_t)(WriteUtf8Units(&out[base], str) - out.data()));
-#endif
 #endif
 }
 

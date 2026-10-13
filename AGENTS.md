@@ -11,21 +11,20 @@ RayoMD is a tiny native Markdown-to-PDF converter. The default value is:
 - very small packaged binaries
 - fast startup and conversion
 - low memory use for normal documents
-- no browser, LaTeX, or Pandoc dependency on the native fast path
+- no browser, LaTeX, or Pandoc dependency
 - a polished Windows Dear ImGui app plus a compact cross-platform CLI
 
 Treat the native renderer as a fast Markdown subset, not a full Pandoc clone.
-Pandoc compatibility may exist as an optional Windows mode, but it must not
-become a required dependency for the default lightweight package.
 
 ## Release Readiness Priorities
 
 - Keep the repository root clean: source entry points, `README.md`, `LICENSE`,
   `CMakeLists.txt`, `AGENTS.md`, `CONTRIBUTING.md`, `VERSION`, and the main
   smoke document belong there.
-- Keep source-coupled fixtures, release records, specifications, and decision
-  documents under docs/; keep longer user guides, dated reports, and research
-  archives in the GitHub wiki.
+- Keep source-coupled fixtures, specifications, and decision documents under
+  docs/; keep longer user guides, dated reports, benchmark results, and research
+  archives in the GitHub wiki. Release benchmark records are not kept in the
+  repository.
 - Keep generated build trees, generated PDFs, benchmark corpora, local binaries,
   caches, and one-off scratch files out of source.
 - Prefer reproducible helper scripts under `scripts/` over ad hoc command blobs.
@@ -306,7 +305,7 @@ Important image/link details:
   books, and benchmarks.
 
 - `src/win32/main_win32.cpp`
-  Windows Dear ImGui + DirectX 11 app, Windows CLI glue, drag/drop, Pandoc mode,
+  Windows Dear ImGui + DirectX 11 app, Windows CLI glue, drag/drop,
   and native export integration. Its batch modes mirror `main_cli.cpp`; change
   both. A MinGW cross-build runs under Wine for local checks of the CLI glue.
 
@@ -328,10 +327,6 @@ Important image/link details:
 - `third_party/imgui/`
   Vendored Dear ImGui, currently v1.92.8. Do not edit vendored ImGui files
   unless the task explicitly requires it.
-
-- `third_party/simdutf/`
-  Optional vendored simdutf experiment. It is OFF by default because measured
-  results were mixed or slower.
 
 - `third_party/libdeflate/`
   libdeflate v1.26's decompressor, the files it needs and unchanged (MIT): the core
@@ -355,17 +350,15 @@ Important image/link details:
   look-ahead tables.
 
 - tools/benchmark.py
-  Maintained entry point for run, compare, release, and competitor performance
-  workflows. Focused implementations remain under scripts/.
+  Maintained entry point for run, A/B (warm engine and fresh process),
+  competitor, and reversible-profile performance workflows. Focused
+  implementations remain under scripts/.
 - `.github/workflows/`
   GitHub Actions for Linux/Windows CI, repository hygiene, and CodeQL. Keep
   README badges aligned with workflow filenames when adding or renaming checks.
 
 - docs/assets/branding/ and docs/assets/demo/
   Project branding sources and demo media, kept separate.
-
-- `docs/benchmarks/releases/`
-  Script-consumed release benchmark records and their generated index.
 
 - `docs/development/`
   Source-coupled performance workflow, format profiles, the native math contract, and
@@ -515,8 +508,6 @@ GitHub CI entry points:
   that grows by pieces through `TailWriter`, not per-byte `push_back`.
 - Keep image caches bounded. Image support can dominate memory on large or many
   remote images.
-- Do not turn optional experiments such as simdutf ON by default without fresh,
-  broad benchmark evidence.
 - Linux benchmarks are much faster on native/ext4 storage than on `/mnt/*` WSL
   mounts. State the storage location when reporting Linux benchmark numbers.
 
@@ -553,8 +544,8 @@ GitHub CI entry points:
 
 The Windows app should feel like a compact utility, not a landing page.
 
-- Keep the main workflow immediate: edit/import Markdown, choose engine/style/
-  margin, export.
+- Keep the main workflow immediate: edit/import Markdown, choose style/margin,
+  export.
 - Preserve keyboard export behavior and drag/drop file loading.
 - Use Dear ImGui idioms and keep custom drawing localized in `main_win32.cpp`.
 - Avoid UI changes that make the binary much larger or require shipping assets
@@ -570,8 +561,6 @@ The Windows app should feel like a compact utility, not a landing page.
 - RayoMD's own code is licensed under Apache-2.0. Keep `LICENSE`,
   `NOTICE`, README license wording, and SPDX headers aligned when changing
   licensing metadata.
-- Do not bundle Pandoc unless deliberately producing a larger compatibility
-  package and accounting for Pandoc's GPL license terms.
 - Keep Dear ImGui license attribution intact.
 - Keep generated build trees, benchmark outputs, PDFs, and temporary corpora out
   of source unless the user explicitly asks to track a specific artifact.

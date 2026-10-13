@@ -557,12 +557,11 @@ rayomd --export notes.md notes.pdf --embed-source
 rayomd --recover-source notes.pdf recovered.md
 ```
 
-### Diagnostics and Pandoc mode
+### Diagnostics
 
 `--doctor` checks fonts, temporary output and a smoke export; `--bench` times repeated exports of
 one document; `--version` prints the version. Exit codes are in the
-[CLI Reference](https://github.com/Butterski/rayomd/wiki/CLI-Reference). On Windows an optional
-Pandoc mode hands documents to an installed Pandoc when the native subset is not enough.
+[CLI Reference](https://github.com/Butterski/rayomd/wiki/CLI-Reference).
 
 ```sh
 rayomd --doctor
@@ -614,7 +613,7 @@ Engineering contracts stay beside the code:
 Read [`AGENTS.md`](AGENTS.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md) first. A change to hot
 code comes with before/after measurements and byte-identical output unless changing the output
 is its purpose; benchmark claims stay dated and scoped; builds, PDFs and corpora stay out of
-the repository. Pandoc is never bundled into the lightweight packages.
+the repository.
 
 <a href="https://github.com/Butterski/rayomd/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=Butterski/rayomd" alt="Contributors">

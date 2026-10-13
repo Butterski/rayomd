@@ -20,8 +20,7 @@ def main() -> int:
     for name, help_text in (
         ("run", "run the standard performance watcher"),
         ("ab", "compare two RayoMD binaries on the warm engine, with an A/A noise control"),
-        ("compare", "compare RayoMD with Pandoc"),
-        ("release", "archive curated release benchmark records"),
+        ("fresh", "compare two RayoMD binaries as fresh processes"),
         ("competitors", "compare supported Markdown-to-PDF tools"),
         ("reversible", "benchmark and validate the reversible PDF profile"),
     ):
@@ -31,8 +30,7 @@ def main() -> int:
     routes = {
         "run": "perf_watch.py",
         "ab": "engine_ab.py",
-        "compare": "compare_pandoc.py",
-        "release": "archive_release_benchmarks.py",
+        "fresh": "fresh_process_ab.py",
         "competitors": "compare_markdown_pdf_tools.py",
         "reversible": "reversible_pdf_benchmark.py",
     }

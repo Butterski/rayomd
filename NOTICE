@@ -4,8 +4,6 @@ Copyright 2026 RayoMD contributors
 This product includes third-party software:
 
 - Dear ImGui v1.92.8, licensed under the MIT License. See third_party/imgui/LICENSE.txt.
-- simdutf, licensed under the Apache License 2.0 or the MIT License.
-  See third_party/simdutf/LICENSE-APACHE and third_party/simdutf/LICENSE-MIT.
 - libdeflate v1.26 (its decompressor), licensed under the MIT License, in the source only:
   the core tests' reference, linked into no executable. See third_party/libdeflate/COPYING:
 

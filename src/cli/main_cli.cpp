@@ -286,7 +286,6 @@ std::string Lower(std::string value) {
 }
 
 struct CliExportOptions {
-    int engine = 0;
     TinyPdf::PdfStyle style = TinyPdf::PdfStyle::Elegant;
     TinyPdf::PdfMargin margin = TinyPdf::PdfMargin::Normal();
     TinyPdf::PdfPageSize pageSize;
@@ -314,8 +313,11 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
     std::string& error) {
     for (int i = start; i < argc; i++) {
         std::string value = Lower(argv[i]);
-        if (value == "pandoc") options.engine = 1;
-        else if (value == "native") options.engine = 0;
+        if (value == "pandoc") {
+            error = "the pandoc engine was removed; RayoMD exports with its native renderer only";
+            return false;
+        }
+        else if (value == "native") continue;   // the only engine, still accepted from older command lines
         else if (value == "--allow-url-images") options.enableUrlImages = true;
         else if (value == "--allow-unsafe-local-images" || value == "--unsafe-local-images") options.allowUnsafeLocalImages = true;
         else if (value == "--embed-source") options.embedSource = true;
@@ -520,11 +522,6 @@ int RunBookExport(const std::vector<fs::path>& inputs, const fs::path& outputPat
 }
 
 int RunStdinExport(const fs::path& outputPath, const CliExportOptions& options) {
-    if (options.engine != 0) {
-        PrintError("Error: stdin export only supports native mode.");
-        return 20;
-    }
-
     std::string markdown;
     if (!ReadStdinPortable(markdown)) {
         PrintError("Error: could not read Markdown from stdin or input exceeded " + std::to_string(kMaxMarkdownInputBytes) +
@@ -650,11 +647,6 @@ int ExecuteBatchJobs(std::vector<BatchJob>& jobs, const CliExportOptions& option
 }
 
 int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const CliExportOptions& options) {
-    if (options.engine != 0) {
-        PrintError("Error: Pandoc mode is currently only wired into the Windows build.");
-        return 20;
-    }
-
     std::string fsError;
     if (!IsDirectoryPortable(inputDir, fsError)) {
         PrintError("Error: input folder is not a readable directory: " + PathToUtf8(inputDir) + Reason(fsError));
@@ -686,10 +678,6 @@ int RunBatchExport(const fs::path& inputDir, const fs::path& outputDir, const Cl
 }
 
 int RunStdinBatchExport(const fs::path& outputDir, const CliExportOptions& options) {
-    if (options.engine != 0) {
-        PrintError("Error: Pandoc mode is currently only wired into the Windows build.");
-        return 20;
-    }
     std::string fsError;
     if (!EnsureDirectoryPortable(outputDir, fsError)) {
         PrintError("Error: could not create output folder: " + PathToUtf8(outputDir) + Reason(fsError));
@@ -715,10 +703,6 @@ int RunStdinBatchExport(const fs::path& outputDir, const CliExportOptions& optio
 }
 
 int RunServeExport(const fs::path& outputDir, const CliExportOptions& options) {
-    if (options.engine != 0) {
-        PrintError("Error: Pandoc mode is currently only wired into the Windows build.");
-        return 20;
-    }
     std::string fsError;
     if (!EnsureDirectoryPortable(outputDir, fsError)) {
         PrintError("Error: could not create output folder: " + PathToUtf8(outputDir) + Reason(fsError));
@@ -991,11 +975,6 @@ int main(int argc, char** argv) {
         if (argc < 4) return PrintArgumentError("--export requires <input.md> <output.pdf>.");
         std::string error;
         if (!ParseExportOptions(argc, argv, 4, options, error)) return PrintArgumentError(error);
-        if (options.engine != 0) {
-            PrintError("Error: Pandoc mode is currently only wired into the Windows build.");
-            return 20;
-        }
-
         fs::path outputPath(argv[3]);
         if (outputPath.extension() != ".pdf") outputPath += ".pdf";
         std::string pdfBuffer;
@@ -1013,10 +992,6 @@ int main(int argc, char** argv) {
         std::string error;
         if (!ParseExportOptions(argc, argv, output + 1, options, error)) return PrintArgumentError(error);
         if (options.embedSource) return PrintArgumentError("--embed-source does not apply to --book: a book is not reversible.");
-        if (options.engine != 0) {
-            PrintError("Error: Pandoc mode is currently only wired into the Windows build.");
-            return 20;
-        }
         return RunBookExport(std::vector<fs::path>(argv + 2, argv + output), argv[output], options);
     }
 

@@ -640,6 +640,9 @@ def verify(binary: Path, keep: Path | None) -> None:
         unknown = run(binary, "--export", str(ascii_md), str(root / "bad.pdf"), "--unknown", expect=2)
         if b"unrecognized export option" not in unknown.stdout:
             raise AssertionError("missing unknown-option diagnostic")
+        pandoc = run(binary, "--export", str(ascii_md), str(root / "pandoc.pdf"), "pandoc", expect=2)
+        if b"pandoc engine was removed" not in pandoc.stdout or (root / "pandoc.pdf").exists():
+            raise AssertionError("missing removed-Pandoc diagnostic")
         missing_input = run(binary, "--export", str(root / "missing.md"), str(root / "missing.pdf"), expect=3)
         if b"could not read input Markdown file" not in missing_input.stdout:
             raise AssertionError("missing input-file diagnostic")
