@@ -604,19 +604,19 @@ struct TtfFont {
         glyphCount = ReadU16(bytes, maxp.offset + 4);
         if (glyphCount == 0 || metricCount == 0) return false;
 
+        // Read straight from the file after one bounds test: the last metric is the furthest, so
+        // when it fits, all do (a metric past the file failed the load one read at a time too).
         Table hmtx = tables["hmtx"];
-        advances.assign(glyphCount, 500);
+        const size_t metrics = std::min<size_t>(metricCount, glyphCount);
+        if ((size_t)hmtx.offset + (metrics - 1) * 4 + 2 > bytes.size()) return false;
+        const uint8_t* const metric = bytes.data() + hmtx.offset;
+        advances.resize(glyphCount);
         uint16_t lastAdvance = 500;
-        for (uint16_t i = 0; i < glyphCount; i++) {
-            if (i < metricCount) {
-                size_t off = hmtx.offset + (size_t)i * 4;
-                if (off + 2 > bytes.size()) return false;
-                lastAdvance = ReadU16(bytes, off);
-                advances[i] = lastAdvance;
-            } else {
-                advances[i] = lastAdvance;
-            }
+        for (size_t i = 0; i < metrics; i++) {
+            lastAdvance = (uint16_t)(metric[i * 4] << 8 | metric[i * 4 + 1]);
+            advances[i] = lastAdvance;
         }
+        for (size_t i = metrics; i < glyphCount; i++) advances[i] = lastAdvance;
 
         if (!ParseCmap()) return false;
         if (!ParseLoca()) return false;
@@ -685,24 +685,24 @@ struct TtfFont {
 
     bool ParseLoca() {
         Table table = tables["loca"];
-        loca.assign((size_t)glyphCount + 1, 0);
+        loca.resize((size_t)glyphCount + 1);
+        const uint8_t* const entries = bytes.data() + table.offset;
+        uint32_t furthest = 0;
         if (indexToLocFormat == 0) {
             if ((size_t)table.offset + (size_t)(glyphCount + 1) * 2 > bytes.size()) return false;
-            for (uint32_t i = 0; i <= glyphCount; i++) {
-                loca[i] = (uint32_t)ReadU16(bytes, table.offset + (size_t)i * 2) * 2u;
+            for (size_t i = 0; i <= glyphCount; i++) {
+                loca[i] = (uint32_t)(entries[i * 2] << 8 | entries[i * 2 + 1]) * 2u;
+                furthest = std::max(furthest, loca[i]);
             }
         } else {
             if ((size_t)table.offset + (size_t)(glyphCount + 1) * 4 > bytes.size()) return false;
-            for (uint32_t i = 0; i <= glyphCount; i++) {
-                loca[i] = ReadU32(bytes, table.offset + (size_t)i * 4);
+            for (size_t i = 0; i <= glyphCount; i++) {
+                loca[i] = (uint32_t)entries[i * 4] << 24 | (uint32_t)entries[i * 4 + 1] << 16 |
+                    (uint32_t)entries[i * 4 + 2] << 8 | entries[i * 4 + 3];
+                furthest = std::max(furthest, loca[i]);
             }
         }
-
-        Table glyf = tables["glyf"];
-        for (uint32_t off : loca) {
-            if (off > glyf.length) return false;
-        }
-        return true;
+        return furthest <= tables["glyf"].length;
     }
 
     uint16_t GlyphFor(uint32_t cp) const {
