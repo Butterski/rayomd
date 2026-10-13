@@ -1,0 +1,35 @@
+# Maintainer: Milosz Kucharski <miloszkucharski at gmail dot com>
+pkgname=rayomd
+pkgver=4.3.1
+pkgrel=1
+pkgdesc='Tiny native Markdown-to-PDF converter (no browser, LaTeX or Pandoc)'
+arch=('x86_64')
+url='https://github.com/Butterski/rayomd'
+license=('Apache-2.0')
+depends=('glibc' 'curl')
+makedepends=('cmake' 'gcc')
+checkdepends=('python' 'ttf-dejavu')
+options=('!debug')
+optdepends=('ttf-dejavu: TrueType font for non-Latin-1 text (Polish, Cyrillic, ...)'
+            'noto-fonts: alternative TrueType font and script fallbacks')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('57f1f00c452948461852baaa51a54cfbed60d1bf57d679d5e97c7cca3393aadf')
+
+build() {
+  cmake -S "$pkgname-$pkgver" -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DRAYOMD_USE_CURL=ON
+  cmake --build build
+}
+
+check() {
+  ctest --test-dir build --output-on-failure
+}
+
+package() {
+  install -Dm755 build/rayomd "$pkgdir/usr/bin/rayomd"
+  cd "$pkgname-$pkgver"
+  install -Dm644 LICENSE NOTICE -t "$pkgdir/usr/share/licenses/$pkgname/"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
+}

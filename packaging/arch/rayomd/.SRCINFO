@@ -1,0 +1,20 @@
+pkgbase = rayomd
+	pkgdesc = Tiny native Markdown-to-PDF converter (no browser, LaTeX or Pandoc)
+	pkgver = 4.3.1
+	pkgrel = 1
+	url = https://github.com/Butterski/rayomd
+	arch = x86_64
+	license = Apache-2.0
+	checkdepends = python
+	checkdepends = ttf-dejavu
+	makedepends = cmake
+	makedepends = gcc
+	depends = glibc
+	depends = curl
+	optdepends = ttf-dejavu: TrueType font for non-Latin-1 text (Polish, Cyrillic, ...)
+	optdepends = noto-fonts: alternative TrueType font and script fallbacks
+	options = !debug
+	source = rayomd-4.3.1.tar.gz::https://github.com/Butterski/rayomd/archive/refs/tags/v4.3.1.tar.gz
+	sha256sums = 57f1f00c452948461852baaa51a54cfbed60d1bf57d679d5e97c7cca3393aadf
+
+pkgname = rayomd
