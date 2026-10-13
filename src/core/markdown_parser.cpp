@@ -69,8 +69,9 @@ static bool StartsWith(const std::string& s, const char* prefix) {
     return StartsWith(std::string_view(s), std::string_view(prefix, strlen(prefix)));
 }
 
-static std::vector<std::string_view> SplitLineViews(const std::string& text) {
-    std::vector<std::string_view> lines;
+// The lines of `text` into `lines`, which it empties first.
+static void SplitLineViews(const std::string& text, std::vector<std::string_view>& lines) {
+    lines.clear();
     size_t start = StartsWith(std::string_view(text), std::string_view("\xEF\xBB\xBF", 3)) ? 3 : 0;
     lines.reserve(std::max<size_t>(8, text.size() / 48));
 
@@ -112,11 +113,11 @@ static std::vector<std::string_view> SplitLineViews(const std::string& text) {
     size_t lineEnd = text.size();
     if (lineEnd > lineStart && base[lineEnd - 1] == '\r') lineEnd--;
     lines.emplace_back(base + lineStart, lineEnd - lineStart);
-    return lines;
 }
 
 std::vector<std::string> SplitLines(const std::string& text) {
-    std::vector<std::string_view> views = SplitLineViews(text);
+    std::vector<std::string_view> views;
+    SplitLineViews(text, views);
     std::vector<std::string> lines;
     lines.reserve(views.size());
     for (std::string_view v : views) lines.emplace_back(v.data(), v.size());
@@ -1151,9 +1152,50 @@ static RAYOMD_NOINLINE bool TableMayReferToNote(const std::vector<std::string_vi
     return false;
 }
 
-static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth, FootnoteParse* notes) {
-    std::vector<std::string_view> lines = SplitLineViews(markdown);
+// The lines of a nested level (list items, quotes, footnotes) and their classes, kept by each
+// thread from one parse of that depth to the next, also of later documents, so that items do not
+// allocate them each time. A level parsed while another of its depth holds them gets empty ones;
+// those a large item grew go back to the allocator. The document's own level is not kept: a
+// one-shot export would hold its lines to the end, and later allocations would take new pages.
+class LevelLines {
+public:
+    explicit LevelLines(int depth) : slot(depth >= 1 && depth < kLevels ? &Slots()[depth] : nullptr) {
+        if (slot == nullptr) return;
+        lines.swap(slot->lines);
+        infos.swap(slot->infos);
+    }
+    ~LevelLines() {
+        if (slot == nullptr) return;
+        if (lines.capacity() * sizeof(lines[0]) + infos.capacity() * sizeof(infos[0]) > kKeptBytes) return;
+        lines.swap(slot->lines);
+        infos.swap(slot->infos);
+    }
+    LevelLines(const LevelLines&) = delete;
+    LevelLines& operator=(const LevelLines&) = delete;
+
+    std::vector<std::string_view> lines;
     std::vector<LineInfo> infos;
+
+private:
+    static constexpr int kLevels = 9;               // depth 0 to 8: nested parses stop at 8
+    static constexpr size_t kKeptBytes = 1u << 20;
+    struct Slot {
+        std::vector<std::string_view> lines;
+        std::vector<LineInfo> infos;
+    };
+    static Slot* Slots() {
+        static thread_local Slot slots[kLevels];
+        return slots;
+    }
+    Slot* const slot;
+};
+
+static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth, FootnoteParse* notes) {
+    LevelLines level(depth);
+    std::vector<std::string_view>& lines = level.lines;
+    std::vector<LineInfo>& infos = level.infos;
+    SplitLineViews(markdown, lines);
+    infos.clear();
     infos.reserve(lines.size());
     bool hasMathOpeners = false;
     for (std::string_view line : lines) {

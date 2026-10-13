@@ -945,6 +945,43 @@ static void AppendSize(std::string& out, size_t value) {
     if (result.ec == std::errc()) out.append(buf, (size_t)(result.ptr - buf));
 }
 
+// Buffers each thread keeps from one export to the next (batch workers, --serve, --bench), so that
+// a short document does not grow its containers from nothing every time: an owner swaps the kept
+// one in when it starts, with its capacity and what it last held, and swaps it back when it ends.
+// One that a large document grew past kKeptBufferBytes goes back to the allocator, so a long batch
+// holds at most that much in each. An owner that starts while another holds the buffer gets an
+// empty one; `Tag` tells apart buffers of one type that are held at the same time.
+constexpr size_t kKeptBufferBytes = 1u << 20;
+
+template <typename Container>
+static size_t KeptBytes(const Container& container) {
+    return container.capacity() * sizeof(typename Container::value_type);
+}
+
+static size_t KeptBytes(const Internal::InlineRuns& runs) {
+    return KeptBytes(runs.text) + KeptBytes(runs.urls) + KeptBytes(runs.runs);
+}
+
+template <typename T, int Tag = 0>
+class KeptBuffer {
+public:
+    static void Take(T& into) {
+        using std::swap;
+        swap(into, Slot());
+    }
+    static void Give(T& from, size_t bytes) {
+        if (bytes > kKeptBufferBytes) return;
+        using std::swap;
+        swap(from, Slot());
+    }
+
+private:
+    static T& Slot() {
+        static thread_local T slot;
+        return slot;
+    }
+};
+
 // Lets one drawing operation write its operators through a raw pointer, then appends them to a
 // content stream in one piece. The per-span paint functions used a dozen small appends each;
 // this is one growth and no temporaries. An operation whose upper bound fits writes into a
@@ -1087,6 +1124,16 @@ static RAYOMD_HOT_INLINE bool NeedsLiteralEscape(uint8_t byte) {
 
 class UsedCidSet {
 public:
+    // Lives on the heap only (KeptCidSet), allocated zeroed by calloc: the bit arrays are not
+    // cleared again, and their pages stay untouched where no CID falls.
+    UsedCidSet() {}
+    static void* operator new(size_t size) {
+        if (void* zeroed = std::calloc(1, size)) return zeroed;
+        void* memory = ::operator new(size);
+        return std::memset(memory, 0, size);
+    }
+    static void operator delete(void* memory) noexcept { std::free(memory); }
+
     void Add(uint16_t cid) {
         uint64_t mask = 1ull << (cid & 63);
         uint64_t& word = bits[cid >> 6];
@@ -1113,15 +1160,64 @@ public:
         return values;
     }
 
+    // Empty again: the words of the CIDs it recorded, which hold every bit set, are cleared.
+    void Clear() {
+        for (uint16_t cid : values) {
+            bits[cid >> 6] = 0;
+            plain[cid >> 6] = 0;
+        }
+        values.clear();
+        sorted = true;
+        missing = 0;
+    }
+
     // Characters shown without a glyph of their own, as '?': those the font lacks and those
     // beyond the BMP.
     uint32_t missing = 0;
 
 private:
-    std::array<uint64_t, 1024> bits{};
-    std::array<uint64_t, 1024> plain{};
+    std::array<uint64_t, 1024> bits;
+    std::array<uint64_t, 1024> plain;
     mutable CidList values;
     mutable bool sorted = true;
+};
+
+// The Unicode renderer's CID set, kept by each thread (see KeptBuffer): clearing the words of the
+// CIDs a document used costs less than the 16 KB of zeros of a new set. A renderer made while
+// another holds it gets a set of its own.
+class KeptCidSet {
+public:
+    KeptCidSet() {
+        Slot& slot = ThreadSlot();
+        if (!slot.busy) {
+            if (!slot.set) slot.set.reset(new UsedCidSet());
+            slot.busy = true;
+            set = slot.set.get();
+        } else {
+            own.reset(new UsedCidSet());
+            set = own.get();
+        }
+    }
+    ~KeptCidSet() {
+        if (own) return;
+        set->Clear();
+        ThreadSlot().busy = false;
+    }
+    KeptCidSet(const KeptCidSet&) = delete;
+    KeptCidSet& operator=(const KeptCidSet&) = delete;
+    UsedCidSet& Get() const { return *set; }
+
+private:
+    struct Slot {
+        std::unique_ptr<UsedCidSet> set;
+        bool busy = false;
+    };
+    static Slot& ThreadSlot() {
+        static thread_local Slot slot;
+        return slot;
+    }
+    UsedCidSet* set = nullptr;
+    std::unique_ptr<UsedCidSet> own;
 };
 
 // Writes the literal string "(..)" of `text`, two bytes a CID, high byte first, and records the
@@ -1293,6 +1389,18 @@ protected:
 
 class PdfObjects {
 public:
+    // The object table is kept from export to export (KeptBuffer), emptied.
+    PdfObjects() {
+        KeptBuffer<std::vector<Object>>::Take(objects);
+        objects.clear();
+    }
+    ~PdfObjects() {
+        objects.clear();
+        KeptBuffer<std::vector<Object>>::Give(objects, KeptBytes(objects));
+    }
+    PdfObjects(const PdfObjects&) = delete;
+    PdfObjects& operator=(const PdfObjects&) = delete;
+
     int Reserve() {
         objects.emplace_back();
         return (int)objects.size();
@@ -1405,7 +1513,9 @@ public:
         constexpr size_t kObjectCloseBytes = 8;     // "\nendobj\n"
         const size_t count = objects.size();
 
-        std::vector<size_t> offsets(count + 1, 0);
+        std::vector<size_t> offsets;    // kept from export to export (KeptBuffer)
+        KeptBuffer<std::vector<size_t>, 1>::Take(offsets);
+        offsets.assign(count + 1, 0);
         size_t position = kHeaderBytes;
         size_t unmoved = 0;         // end of the in-place payloads of the objects seen so far
         bool movable = true;
@@ -1478,6 +1588,7 @@ public:
             Internal::FileIdentifier(std::string_view(base, xref), id);
             WriteTail(base + xref, offsets, xref, rootId, infoId, id);
         }
+        KeptBuffer<std::vector<size_t>, 1>::Give(offsets, KeptBytes(offsets));
     }
 
 private:
@@ -2064,17 +2175,12 @@ static bool IsPathContainedInRoot(
 
 class LocalImagePolicy {
 public:
+    // The source's directory is worked out on the first image only: most documents have none, and
+    // parsing the path cost every export a few allocations.
     explicit LocalImagePolicy(const PdfOptions& options)
         : allowUnsafe(options.allowUnsafeLocalImages),
-          hasSourcePath(!options.sourcePath.empty()) {
-        if (!hasSourcePath) return;
-
-        sourceBase = PathFromUtf8(options.sourcePath);
-        if (sourceBase.has_filename()) sourceBase = sourceBase.parent_path();
-
-        safeBase = sourceBase;
-        if (safeBase.empty()) safeBase = ".";
-    }
+          hasSourcePath(!options.sourcePath.empty()),
+          sourcePath(options.sourcePath) {}
 
     // A book's file (BuildBookPdf): its relative images resolve from its own directory, and must
     // still lie in the book's.
@@ -2127,8 +2233,20 @@ public:
     }
 
 private:
+    // The source's directory, and the one images must lie in: "." for a source path without one.
+    RAYOMD_COLD void PrepareBases() {
+        if (basesReady) return;
+        basesReady = true;
+        if (!hasSourcePath) return;
+        sourceBase = PathFromUtf8(sourcePath);
+        if (sourceBase.has_filename()) sourceBase = sourceBase.parent_path();
+        safeBase = sourceBase;
+        if (safeBase.empty()) safeBase = ".";
+    }
+
     const std::filesystem::path& SafeRoot() {
         if (!safeRootReady) {
+            PrepareBases();
             safeRootValid = TryCanonicalRootForPolicy(
                 safeBase, safeRoot, safeRootDirect, safeRootNt);
             safeRootReady = true;
@@ -2136,9 +2254,12 @@ private:
         return safeRoot;
     }
 
-    bool ResolveUnsafe(const std::string& src, std::string& key, std::string& pathUtf8) const {
+    bool ResolveUnsafe(const std::string& src, std::string& key, std::string& pathUtf8) {
         std::filesystem::path path = PathFromUtf8(src);
-        if (path.is_relative() && hasSourcePath) path = (chapterBase.empty() ? sourceBase : chapterBase) / path;
+        if (path.is_relative() && hasSourcePath) {
+            PrepareBases();
+            path = (chapterBase.empty() ? sourceBase : chapterBase) / path;
+        }
 
         std::filesystem::path normalized;
         if (!TryCanonicalForPolicy(path, normalized)) return false;
@@ -2149,11 +2270,13 @@ private:
 
     bool allowUnsafe = false;
     bool hasSourcePath = false;
+    bool basesReady = false;
     bool safeRootReady = false;
     bool safeRootValid = false;
     bool safeRootDirect = false;
     bool chapterRootReady = false;
     bool chapterRootValid = false;
+    const std::string& sourcePath;       // PdfOptions::sourcePath, which outlives the export
     std::filesystem::path sourceBase;
     std::filesystem::path safeBase;
     std::filesystem::path safeRoot;
@@ -5149,8 +5272,28 @@ public:
         lineHeight = bodySize * 1.35;
         mathFallback = { this, &Renderer::MeasureMathFallback, &Renderer::EmitMathFallback,
             kMathFallbackAscent / kMathSizeFactor, kMathFallbackDescent / kMathSizeFactor };
+        KeptBuffer<std::vector<size_t>>::Take(pageStarts);
+        KeptBuffer<std::vector<std::vector<LinkRect>>>::Take(pageLinks);
+        KeptBuffer<std::vector<HeadingMark>>::Take(headings);
+        pageStarts.clear();
+        pageLinks.clear();
+        headings.clear();
+        // These are reused from paragraph to paragraph as they are, so also from the last export.
+        KeptBuffer<StyledRuns>::Take(paragraphRuns);
+        KeptBuffer<std::vector<StyledRuns>>::Take(tableCells);
         NewPage();
     }
+    ~Renderer() {
+        KeptBuffer<std::vector<size_t>>::Give(pageStarts, KeptBytes(pageStarts));
+        KeptBuffer<std::vector<std::vector<LinkRect>>>::Give(pageLinks, KeptBytes(pageLinks));
+        KeptBuffer<std::vector<HeadingMark>>::Give(headings, KeptBytes(headings));
+        KeptBuffer<StyledRuns>::Give(paragraphRuns, paragraphRuns.Bytes());
+        size_t cellBytes = KeptBytes(tableCells);
+        for (const StyledRuns& cell : tableCells) cellBytes += cell.Bytes();
+        KeptBuffer<std::vector<StyledRuns>>::Give(tableCells, cellBytes);
+    }
+    Renderer(const Renderer&) = delete;
+    Renderer& operator=(const Renderer&) = delete;
 
     void Render(const std::vector<Block>& blocks) { RenderBlocks(*this, blocks); }
     // The footnotes the text refers to (ParseMarkdown), which RenderFootnotes draws after it.
@@ -5252,7 +5395,8 @@ private:
         if (firstLine > 0.0) Ensure(firstLine);
         headings.push_back({ level, text, pageStarts.size() - 1, y });
     }
-    UsedCidSet usedCids;
+    KeptCidSet keptCids;
+    UsedCidSet& usedCids = keptCids.Get();
     MathPool math;
     const Internal::Footnotes* footnotes = nullptr;
     NoteMarks noteMarks;
@@ -5706,6 +5850,10 @@ private:
 
         std::wstring_view Text(const StyledRun& run) const {
             return std::wstring_view(text.data() + run.begin, run.end - run.begin);
+        }
+        size_t Bytes() const {
+            return KeptBytes(parsed) + KeptBytes(wide) + KeptBytes(wideEnds) + KeptBytes(text) + KeptBytes(runs) +
+                KeptBytes(lineEnds);
         }
     };
     StyledRuns paragraphRuns;
@@ -8033,8 +8181,28 @@ public:
         lineHeight = bodySize * 1.35;
         latinMathFallback = { this, &StandardRenderer::MeasureLatinMathFallback,
             &StandardRenderer::EmitLatinMathFallback, 0.718, 0.207 };
+        KeptBuffer<std::vector<size_t>>::Take(pageStarts);
+        KeptBuffer<std::vector<std::vector<LinkRect>>>::Take(pageLinks);
+        KeptBuffer<std::vector<HeadingMark>>::Take(headings);
+        pageStarts.clear();
+        pageLinks.clear();
+        headings.clear();
+        // These are reused from paragraph to paragraph as they are, so also from the last export.
+        KeptBuffer<AsciiRuns>::Take(paragraphRuns);
+        KeptBuffer<std::vector<AsciiRuns>>::Take(tableCells);
         NewPage();
     }
+    ~StandardRenderer() {
+        KeptBuffer<std::vector<size_t>>::Give(pageStarts, KeptBytes(pageStarts));
+        KeptBuffer<std::vector<std::vector<LinkRect>>>::Give(pageLinks, KeptBytes(pageLinks));
+        KeptBuffer<std::vector<HeadingMark>>::Give(headings, KeptBytes(headings));
+        KeptBuffer<AsciiRuns>::Give(paragraphRuns, paragraphRuns.Bytes());
+        size_t cellBytes = KeptBytes(tableCells);
+        for (const AsciiRuns& cell : tableCells) cellBytes += cell.Bytes();
+        KeptBuffer<std::vector<AsciiRuns>>::Give(tableCells, cellBytes);
+    }
+    StandardRenderer(const StandardRenderer&) = delete;
+    StandardRenderer& operator=(const StandardRenderer&) = delete;
 
     void Render(const std::vector<Block>& blocks) { RenderBlocks(*this, blocks); }
     // The footnotes the text refers to (ParseMarkdown), which RenderFootnotes draws after it.
@@ -8718,6 +8886,9 @@ private:
         // AsciiTextWidth(Text(run), size, StyleFont(run.style)), without reading the text again.
         double Width(const AsciiRun& run, double size) const {
             return UnitsToPoints(run.widthUnits, size);
+        }
+        size_t Bytes() const {
+            return KeptBytes(parsed) + KeptBytes(segments) + KeptBytes(text) + KeptBytes(runs) + KeptBytes(lineEnds);
         }
     };
     AsciiRuns paragraphRuns;
