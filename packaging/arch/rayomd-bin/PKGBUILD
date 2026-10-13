@@ -1,7 +1,7 @@
 # Maintainer: Milosz Kucharski <miloszkucharski at gmail dot com>
 pkgname=rayomd-bin
 _pkgname=rayomd
-pkgver=4.3.1
+pkgver=4.4.0
 pkgrel=1
 pkgdesc='Tiny native Markdown-to-PDF converter (prebuilt release binary)'
 arch=('x86_64')
@@ -14,7 +14,7 @@ provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname")
 options=('!strip' '!debug')
 source=("$url/releases/download/v$pkgver/$_pkgname-$pkgver-linux-x64.tar.gz")
-sha256sums=('01b9b4ab29dbc022f1d2e8d8eb63031a697273047a6912a067c6157d55091773')
+sha256sums=('c5373437b6fcc59c83eab18c05352ee26e05f23658148cd12b5ba1870a11772e')
 
 package() {
   cd "$_pkgname-$pkgver-linux-x64"
