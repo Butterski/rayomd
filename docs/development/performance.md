@@ -1738,10 +1738,10 @@ exports and documents without images are unchanged.
 strings, and in the Unicode renderer decoded from UTF-8 line by line. Both renderers now read its
 lines and pieces where they are, as the highlighted path does: the standard renderer copies a
 line only when it has bytes to drop, the Unicode renderer decodes the block once. The same sums
-in the same order, so the same breaks: the corpus' 108 PDFs and 12,000 generated documents of
+in the same order, so the same breaks: the corpus' 108 PDFs and 8,600 generated documents of
 code blocks (tabs, CR and CRLF, byte-order marks, non-ASCII and invalid UTF-8, long and empty
-lines; both renderers, highlighting on and off) are byte-identical. `tools/benchmark.py ab`,
-seven rounds, one pinned CPU (2026-10-13): 30 KiB of C++ in 30 blocks 350.2 → 201.6 µs
+lines; both renderers, highlighting on and off: 17,200 PDFs) are byte-identical. `tools/benchmark.py ab`,
+seven rounds, one pinned CPU (2026-10-13): 35 KB of C++ in 30 blocks 350.2 → 201.6 µs
 (-42.4 %), with a Polish comment on every line 483.6 → 317.8 µs (-34.3 %); callgrind -44.7 % and
 -22.9 % instructions, README.md -2.2 %. The watch suite, which has few such blocks, ran +0.85 %
 (A/A +0.23 %), `performance.md` +1.65 % on the same instructions (callgrind, `tester.md` -0.4 %),
