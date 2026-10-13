@@ -1691,6 +1691,8 @@ per 8 MiB. AVX2 Sub and Average one pixel at a time were slower than SSE2 (2.93 
 5.30 against 5.12). Filter scoring and filtering compute Paeth on 32 bytes without widening
 (|a + b - 2c| from byte differences; equal to the scalar predictor on all 2^24 inputs), and a
 residual's cost is `vpabsb` summed by `vpsadbw`: 2 to 4 % on the mascot and the illustration.
+Two filters' sums in the halves of one accumulator, which removes the scoring loop's one spill
+to the stack, stayed within 0.6 % in process and was not taken.
 The inflater's fast loop keeps the output position before the window in a register and tests
 end-of-block and invalid codes in one branch: against libdeflate on the test images (`-O2`, as
 built), +4.0 → +2.7 % in total, the opaque photo +23.8 → +20.4 %, soft shadows +21.5 → +19.5 %,
