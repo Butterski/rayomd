@@ -5,6 +5,7 @@
 #include "inline_markdown.h"
 #include "../common/file_io.h"
 #include "../common/profiling.h"
+#include "../common/exact_math.h"
 #include "../common/text_utils.h"
 #include "book.h"
 #include "image_cache.h"
@@ -3355,7 +3356,7 @@ bool ImageRegistry::ConvertSvgImage(std::string_view svg, PdfImage& image) {
         return false;
     }
     // Its size in pixels at 96 dpi, as RenderImage sizes raster images.
-    const auto pixels = [](double points) { return (int)std::lround(std::clamp(points * 96.0 / 72.0, 1.0, 100000.0)); };
+    const auto pixels = [](double points) { return (int)RayoMd::ExactMath::LRound(std::clamp(points * 96.0 / 72.0, 1.0, 100000.0)); };
     image.width = pixels(form->width);
     image.height = pixels(form->height);
     image.svg = std::move(form);
@@ -3410,7 +3411,7 @@ static std::string BuildMaskStreamDict(const PdfImage& image) {
 
 // `value`, 0 or more, with eight decimals: the scale of a form's /Matrix, as small as 1/1000.
 RAYOMD_COLD static void AppendFraction8(std::string& out, double value) {
-    const uint64_t scaled = (uint64_t)std::llround(std::min(value, 1e9) * 1e8);
+    const uint64_t scaled = (uint64_t)RayoMd::ExactMath::LlRound(std::min(value, 1e9) * 1e8);
     AppendSize(out, (size_t)(scaled / 100000000u));
     char fraction[9];
     uint64_t rest = scaled % 100000000u;
@@ -5079,7 +5080,7 @@ public:
             const bool top = (*contents)[line.entry].level == 1;
             std::string& out = overlays[line.page];
             // The dots stand on a grid from the left margin, so that those of all entries line up.
-            const double first = margin + std::ceil((line.end + em * 0.3 - margin) / pitch) * pitch;
+            const double first = margin + RayoMd::ExactMath::Ceil((line.end + em * 0.3 - margin) / pitch) * pitch;
             const double limit = numberLeft - em * 0.3 - dotWidth;
             if (!top && first <= limit) {
                 const std::wstring dots((size_t)((limit - first) / pitch) + 1, L'.');
@@ -7873,7 +7874,7 @@ public:
                 Internal::StandardTextWidth(number, bodySize, top ? StandardTextFont::Bold : StandardTextFont::Regular);
             std::string& out = overlays[line.page];
             // The dots stand on a grid from the left margin, so that those of all entries line up.
-            const double first = margin + std::ceil((line.end + em * 0.3 - margin) / pitch) * pitch;
+            const double first = margin + RayoMd::ExactMath::Ceil((line.end + em * 0.3 - margin) / pitch) * pitch;
             const double limit = numberLeft - em * 0.3 - dotWidth;
             if (!top && first <= limit) {
                 const std::string dots((size_t)((limit - first) / pitch) + 1, '.');

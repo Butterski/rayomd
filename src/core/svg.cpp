@@ -8,12 +8,20 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
+#include "../common/exact_math.h"
 #include "../common/text_utils.h"
+
+#if defined(RAYOMD_LIBM_DLOPEN) && defined(__GLIBC__)
+#include <dlfcn.h>
+#include <gnu/lib-names.h>
+#define RAYOMD_SVG_LOADS_LIBM 1
+#endif
 
 namespace TinyPdf::Internal {
 namespace {
@@ -41,6 +49,70 @@ constexpr size_t kMaxTextPerElement = 64u << 10;  // bytes of one text element
 constexpr size_t kMaxTextTotal = 1u << 20;        // bytes of all text
 constexpr double kMaxReal = 32767.0;              // the largest real a content stream holds
 constexpr double kPi = 3.14159265358979323846;
+
+using RayoMd::ExactMath::Ceil;
+using RayoMd::ExactMath::Fmod;
+using RayoMd::ExactMath::Sqrt;
+
+// atan2, sin and cos, and tan: glibc's own, whose digits the PDF bytes depend on. The dynamic
+// Linux build does not link libm (see exact_math.h): it loads libm.so.6 the first time an SVG
+// transform or arc needs one of them, once per process, so only documents with such SVGs pay.
+// Should it not load, the functions give NaN and ConvertSvg fails the SVG (alt text).
+#ifdef RAYOMD_SVG_LOADS_LIBM
+struct Libm {
+    double (*atan2)(double, double) = nullptr;
+    void (*sincos)(double, double*, double*) = nullptr;
+    double (*tan)(double) = nullptr;
+};
+
+// Null when libm.so.6 or one of the functions cannot be loaded. Thread-safe: a function-local
+// static is initialized once.
+const Libm* LoadedLibm() {
+    static const Libm libm = [] {
+        Libm loaded;
+        void* const handle = dlopen(LIBM_SO, RTLD_NOW | RTLD_LOCAL);
+        if (handle == nullptr) return loaded;
+        loaded.atan2 = reinterpret_cast<double (*)(double, double)>(dlsym(handle, "atan2"));
+        loaded.sincos = reinterpret_cast<void (*)(double, double*, double*)>(dlsym(handle, "sincos"));
+        loaded.tan = reinterpret_cast<double (*)(double)>(dlsym(handle, "tan"));
+        if (!loaded.atan2 || !loaded.sincos || !loaded.tan) loaded = Libm();
+        return loaded;
+    }();
+    return libm.atan2 ? &libm : nullptr;
+}
+
+thread_local bool libmMissing = false;   // a function was needed and could not be loaded
+
+double Atan2(double y, double x) {
+    if (const Libm* libm = LoadedLibm()) return libm->atan2(y, x);
+    libmMissing = true;
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
+// sin and cos of one angle, which GCC computes with one sincos call where it links libm.
+void SinCos(double x, double& sine, double& cosine) {
+    if (const Libm* libm = LoadedLibm()) {
+        libm->sincos(x, &sine, &cosine);
+        return;
+    }
+    libmMissing = true;
+    sine = cosine = std::numeric_limits<double>::quiet_NaN();
+}
+
+double Tan(double x) {
+    if (const Libm* libm = LoadedLibm()) return libm->tan(x);
+    libmMissing = true;
+    return std::numeric_limits<double>::quiet_NaN();
+}
+#else
+double Atan2(double y, double x) { return std::atan2(y, x); }
+void SinCos(double x, double& sine, double& cosine) {
+    sine = std::sin(x);
+    cosine = std::cos(x);
+}
+double Tan(double x) { return std::tan(x); }
+#endif
+
 constexpr double kPxToPt = 0.75;
 
 // ---------------------------------------------------------------------------------------------
@@ -330,7 +402,7 @@ void AddCubicExtremes(Box& box, const double (&x)[4], const double (&y)[4], cons
     } else {
         const double discriminant = b * b - 4.0 * a * c;
         if (discriminant >= 0.0) {
-            const double root = std::sqrt(discriminant);
+            const double root = Sqrt(discriminant);
             roots[count++] = (-b + root) / (2.0 * a);
             roots[count++] = (-b - root) / (2.0 * a);
         }
@@ -557,13 +629,13 @@ bool ParseColorFunction(std::string_view args, bool hsl, uint32_t& rgb, double& 
     if (count < 3) return false;
     alpha = count == 4 ? std::clamp(percent[3] ? values[3] / 100.0 : values[3], 0.0, 1.0) : 1.0;
     if (hsl) {
-        double hue = std::fmod(values[0], 360.0);
+        double hue = Fmod(values[0], 360.0);
         if (hue < 0.0) hue += 360.0;
         const double saturation = std::clamp(values[1] / 100.0, 0.0, 1.0);
         const double lightness = std::clamp(values[2] / 100.0, 0.0, 1.0);
         const double chroma = (1.0 - std::fabs(2.0 * lightness - 1.0)) * saturation;
         const double h = hue / 60.0;
-        const double x = chroma * (1.0 - std::fabs(std::fmod(h, 2.0) - 1.0));
+        const double x = chroma * (1.0 - std::fabs(Fmod(h, 2.0) - 1.0));
         double r = 0.0, g = 0.0, b = 0.0;
         if (h < 1.0) { r = chroma; g = x; }
         else if (h < 2.0) { r = x; g = chroma; }
@@ -1251,15 +1323,15 @@ bool ParseTransform(std::string_view text, Matrix& out) {
         } else if (name == "scale" && (count == 1 || count == 2)) {
             step = { args[0], 0.0, 0.0, count == 2 ? args[1] : args[0], 0.0, 0.0 };
         } else if (name == "rotate" && (count == 1 || count == 3)) {
-            const double angle = std::fmod(args[0], 360.0) * kPi / 180.0;
-            const double cosine = std::cos(angle);
-            const double sine = std::sin(angle);
+            const double angle = Fmod(args[0], 360.0) * kPi / 180.0;
+            double sine, cosine;
+            SinCos(angle, sine, cosine);
             step = { cosine, sine, -sine, cosine, 0.0, 0.0 };
             if (count == 3) step = Multiply(Multiply(Translation(args[1], args[2]), step), Translation(-args[1], -args[2]));
         } else if (name == "skewX" && count == 1) {
-            step.c = std::tan(args[0] * kPi / 180.0);
+            step.c = Tan(args[0] * kPi / 180.0);
         } else if (name == "skewY" && count == 1) {
-            step.b = std::tan(args[0] * kPi / 180.0);
+            step.b = Tan(args[0] * kPi / 180.0);
         } else {
             return false;
         }
@@ -1450,22 +1522,22 @@ void ArcTo(PathWriter& writer, double x1, double y1, double rx, double ry, doubl
         writer.LineTo(x2, y2);
         return;
     }
-    const double phi = std::fmod(angle, 360.0) * kPi / 180.0;
-    const double cosine = std::cos(phi);
-    const double sine = std::sin(phi);
+    const double phi = Fmod(angle, 360.0) * kPi / 180.0;
+    double sine, cosine;
+    SinCos(phi, sine, cosine);
     const double dx = (x1 - x2) / 2.0;
     const double dy = (y1 - y2) / 2.0;
     const double xp = cosine * dx + sine * dy;
     const double yp = -sine * dx + cosine * dy;
     const double lambda = xp * xp / (rx * rx) + yp * yp / (ry * ry);
     if (lambda > 1.0) {
-        const double root = std::sqrt(lambda);
+        const double root = Sqrt(lambda);
         rx *= root;
         ry *= root;
     }
     const double numerator = rx * rx * ry * ry - rx * rx * yp * yp - ry * ry * xp * xp;
     const double denominator = rx * rx * yp * yp + ry * ry * xp * xp;
-    double coefficient = denominator > 0.0 ? std::sqrt(std::max(0.0, numerator / denominator)) : 0.0;
+    double coefficient = denominator > 0.0 ? Sqrt(std::max(0.0, numerator / denominator)) : 0.0;
     if (large == sweep) coefficient = -coefficient;
     const double cxp = coefficient * rx * yp / ry;
     const double cyp = -coefficient * ry * xp / rx;
@@ -1473,23 +1545,25 @@ void ArcTo(PathWriter& writer, double x1, double y1, double rx, double ry, doubl
     const double cy = sine * cxp + cosine * cyp + (y1 + y2) / 2.0;
     const double ux = (xp - cxp) / rx, uy = (yp - cyp) / ry;
     const double vx = (-xp - cxp) / rx, vy = (-yp - cyp) / ry;
-    const double theta = std::atan2(uy, ux);
-    double delta = std::atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+    const double theta = Atan2(uy, ux);
+    double delta = Atan2(ux * vy - uy * vx, ux * vx + uy * vy);
     if (!sweep && delta > 0.0) delta -= 2.0 * kPi;
     else if (sweep && delta < 0.0) delta += 2.0 * kPi;
     if (!std::isfinite(delta) || !std::isfinite(cx) || !std::isfinite(cy)) {
         writer.LineTo(x2, y2);
         return;
     }
-    const int segments = std::clamp(static_cast<int>(std::ceil(std::fabs(delta) / (kPi / 2.0) - 1e-9)), 1, 4);
+    const int segments = std::clamp(static_cast<int>(Ceil(std::fabs(delta) / (kPi / 2.0) - 1e-9)), 1, 4);
     const double step = delta / segments;
-    const double k = 4.0 / 3.0 * std::tan(step / 4.0);
+    const double k = 4.0 / 3.0 * Tan(step / 4.0);
     auto mapX = [&](double px, double py) { return cx + cosine * rx * px - sine * ry * py; };
     auto mapY = [&](double px, double py) { return cy + sine * rx * px + cosine * ry * py; };
     for (int index = 0; index < segments; index++) {
         const double a = theta + index * step;
         const double b = a + step;
-        const double ca = std::cos(a), sa = std::sin(a), cb = std::cos(b), sb = std::sin(b);
+        double ca, sa, cb, sb;
+        SinCos(a, sa, ca);
+        SinCos(b, sb, cb);
         const double p1x = ca - k * sa, p1y = sa + k * ca;
         const double p2x = cb + k * sb, p2y = sb - k * cb;
         const bool last = index == segments - 1;
@@ -1813,7 +1887,7 @@ public:
         if (!(formWidth > 0.0 && formHeight > 0.0 && formWidth <= kMaxReal && formHeight <= kMaxReal)) return false;
         viewportWidth_ = hasBox ? box[2] : width;
         viewportHeight_ = hasBox ? box[3] : height;
-        viewportDiagonal_ = std::sqrt((viewportWidth_ * viewportWidth_ + viewportHeight_ * viewportHeight_) / 2.0);
+        viewportDiagonal_ = Sqrt((viewportWidth_ * viewportWidth_ + viewportHeight_ * viewportHeight_) / 2.0);
 
         Matrix ctm{ kPxToPt, 0.0, 0.0, -kPxToPt, 0.0, formHeight };
         if (hasBox) {
@@ -3122,8 +3196,8 @@ private:
                 // a square cap's corner) in user space; the pen's circle maps to an ellipse whose
                 // extents along x and y come from the rows of the matrix.
                 const double reach = 0.5 * s.strokeWidth * (s.join == 0 ? std::max(s.miterLimit, 1.5) : 1.5);
-                const double reachX = reach * std::sqrt(ctm.a * ctm.a + ctm.c * ctm.c);
-                const double reachY = reach * std::sqrt(ctm.b * ctm.b + ctm.d * ctm.d);
+                const double reachX = reach * Sqrt(ctm.a * ctm.a + ctm.c * ctm.c);
+                const double reachY = reach * Sqrt(ctm.b * ctm.b + ctm.d * ctm.d);
                 writer.box.Add(writer.box.x0 - reachX, writer.box.y0 - reachY);
                 writer.box.Add(writer.box.x1 + reachX, writer.box.y1 + reachY);
             }
@@ -3162,7 +3236,7 @@ private:
         if (writer.full) failed_ = true;
         if (writer.bad || geom_.empty() || failed_) return;
         if (local && !MatrixFits(ctm)) return;
-        const double scale = local ? 1.0 : std::sqrt(std::fabs(Determinant(ctm)));
+        const double scale = local ? 1.0 : Sqrt(std::fabs(Determinant(ctm)));
         if (strokes && !Fits(s.strokeWidth * scale)) return;   // like a coordinate past the limit
         if (local) {
             if (!Push()) return;
@@ -3452,7 +3526,7 @@ private:
             const Matrix tm = Multiply(Multiply(ctm, Translation(run.x, run.y)), Matrix{ 1.0, 0.0, 0.0, -1.0, 0.0, 0.0 });
             const bool face = run.bold && host_.HasBoldFace();
             const bool faux = run.bold && !face;
-            const double width = faux ? 0.03 * run.fontSize * std::sqrt(std::fabs(Determinant(tm))) : 0.0;
+            const double width = faux ? 0.03 * run.fontSize * Sqrt(std::fabs(Determinant(tm))) : 0.0;
             if (!MatrixFits(tm) || !Fits(run.fontSize) || !Fits(width)) continue;
             SetAlpha(run.fill.alpha, faux ? run.fill.alpha : -1.0);
             SetFillColor(run.fill.rgb);
@@ -3659,7 +3733,12 @@ bool ConvertSvg(std::string_view svg, SvgHost& host, SvgForm& form) {
     if (svg.size() > kMaxSvgBytes) return false;
     Document document;
     if (!XmlReader(svg, document).Read()) return false;
+#ifdef RAYOMD_SVG_LOADS_LIBM
+    libmMissing = false;
+    if (Converter(document, svg.size(), host, form).Run() && !libmMissing) return true;
+#else
     if (Converter(document, svg.size(), host, form).Run()) return true;
+#endif
     form = SvgForm();
     return false;
 }

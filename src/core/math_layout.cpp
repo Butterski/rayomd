@@ -1,6 +1,7 @@
 #include "math_layout.h"
 
 #include "math_parser.h"
+#include "../common/exact_math.h"
 #include "../common/text_utils.h"
 
 #include <algorithm>
@@ -79,7 +80,7 @@ constexpr DelimShape kDelimShapes[15] = {
     {kShapeCeil, 0.30f, 0.03f, 0.50f}, {kShapeCeil, 0.30f, 0.03f, 0.50f},
 };
 
-double Round2(double value) { return static_cast<double>(std::llround(value * 100.0)) / 100.0; }
+double Round2(double value) { return static_cast<double>(RayoMd::ExactMath::LlRound(value * 100.0)) / 100.0; }
 double RuleThickness(double s) { return std::max(0.05 * s, 0.30); }
 double SurdWidth(double height, double s) {
     return (0.56 + std::min(0.20, 0.05 * std::max(0.0, height / s - 1.0))) * s;
@@ -762,7 +763,7 @@ struct Layouter {
         const double r = target / s;
         double height = s;
         if (!natural && !(base.base == kDelimBaseVector && r <= 1.0)) {
-            height = r <= 1.2 ? 1.2 * s : std::min(60.0, 1.2 + 0.3 * std::ceil((r - 1.2) / 0.3 - 1e-9)) * s;
+            height = r <= 1.2 ? 1.2 * s : std::min(60.0, 1.2 + 0.3 * RayoMd::ExactMath::Ceil((r - 1.2) / 0.3 - 1e-9)) * s;
         }
         const DelimShape& shape = kDelimShapes[id];
         const double width = std::min<double>(shape.base + shape.slope * (height / s), shape.cap) * s;
@@ -1198,7 +1199,7 @@ void Number(std::string& out, double value) {
 
 // Writes "<w> w" when the width, in 1/100 pt, differs from the last one written in this formula.
 void LineWidth(std::string& out, double width, long long& last) {
-    const long long centi = std::max<long long>(1, std::llround(width * 100.0));
+    const long long centi = std::max<long long>(1, RayoMd::ExactMath::LlRound(width * 100.0));
     if (centi == last) return;
     last = centi;
     Number(out, static_cast<double>(centi) * 0.01);
@@ -1450,7 +1451,7 @@ void EmitText(std::string& out, const std::vector<MathItem>& items, double ox, d
             out += " Tr";
         }
         if (mode != 0) LineWidth(out, (mode == 1 ? 0.025 : 0.03) * size, lineWidth);
-        const long long x = std::llround((ox + head.x) * 100.0), y = std::llround((oy + head.y) * 100.0);
+        const long long x = RayoMd::ExactMath::LlRound((ox + head.x) * 100.0), y = RayoMd::ExactMath::LlRound((oy + head.y) * 100.0);
         const unsigned transform = head.flags >> 5;
         if ((head.flags & kItemSlant) || transform != 0 || transformed) {
             transformed = (head.flags & kItemSlant) || transform != 0;
@@ -1581,12 +1582,12 @@ MathFormula MathFormula::LayoutParsed(const MathParseResult& parsed, std::string
     if (!formula.sourceFallback_) {
         const double first = layout.FitRatio(maxWidth, maxHeight);
         if (first < 1.0) {
-            const double smaller = std::floor(base * (first >= 0.75 ? first * 0.995 : 0.75) * 100.0) / 100.0;
+            const double smaller = RayoMd::ExactMath::Floor(base * (first >= 0.75 ? first * 0.995 : 0.75) * 100.0) / 100.0;
             layout.Run(*arena, smaller, display);
             const double second = layout.FitRatio(maxWidth, maxHeight);
             if (second < 1.0) {
-                const double floorScale = std::min(1.0, std::ceil(50.0 * base / smaller - 1e-9) / 100.0);
-                scale = std::max(floorScale, std::floor(second * 100.0 - 1e-9) / 100.0);
+                const double floorScale = std::min(1.0, RayoMd::ExactMath::Ceil(50.0 * base / smaller - 1e-9) / 100.0);
+                scale = std::max(floorScale, RayoMd::ExactMath::Floor(second * 100.0 - 1e-9) / 100.0);
             }
         }
     }

@@ -1,5 +1,6 @@
 #include "rayomd/tiny_pdf.h"
 #include "../src/common/batch_report.h"
+#include "../src/common/exact_math.h"
 #include "../src/common/file_io.h"
 #include "../src/core/flate.h"
 #include "../src/core/image_encoder.h"
@@ -26,9 +27,11 @@
 #include <cstdlib>
 #include <sstream>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -2596,6 +2599,82 @@ bool CheckCidStrings() {
     return true;
 }
 
+// RayoMd::ExactMath gives libm's bits: every function against <cmath> on edge cases and on
+// millions of doubles (random bit patterns, whole numbers and halves with their neighbours,
+// every exponent, subnormals), NaN, infinities and -0.0 included.
+bool CheckExactMath() {
+    namespace X = RayoMd::ExactMath;
+    auto bits = [](double value) {
+        uint64_t b;
+        std::memcpy(&b, &value, sizeof(b));
+        return b;
+    };
+    auto fromBits = [](uint64_t b) {
+        double value;
+        std::memcpy(&value, &b, sizeof(value));
+        return value;
+    };
+    uint64_t state = 0x9E3779B97F4A7C15ull;
+    auto next = [&state] {
+        uint64_t z = (state += 0x9E3779B97F4A7C15ull);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    };
+    // A double of a kind chosen by `kind`: any bit pattern, a whole number or a half or a
+    // neighbour of one, any exponent with a random significand, or a subnormal.
+    auto sample = [&](uint64_t kind) {
+        const uint64_t r = next();
+        const uint64_t sign = r & 0x8000000000000000ull;
+        switch (kind % 5) {
+        case 0: return fromBits(r);
+        case 1: {
+            const double whole = (double)(int64_t)(next() >> (11 + r % 53)) * ((r >> 8) & 1 ? 1.0 : 0.5);
+            const double value = (r >> 9) & 1 ? -whole : whole;
+            const int step = (int)((r >> 10) % 5) - 2;   // -2 .. 2 ulps away
+            return step == 0 ? value : fromBits(bits(value) + (uint64_t)(int64_t)step);
+        }
+        case 2: return fromBits(sign | ((r >> 12) % 2047) << 52 | (next() & 0x000FFFFFFFFFFFFFull));
+        case 3: return fromBits(sign | (next() & 0x000FFFFFFFFFFFFFull));
+        default: return (double)(int64_t)(r % 2000001) / 1000.0 - 1000.0;
+        }
+    };
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double edges[] = {0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, -0.49999999999999994,
+        0.5000000000000001, 4503599627370495.5, -4503599627370495.5, 4503599627370496.0, 9007199254740991.0,
+        9007199254740993.0, 9223372036854774784.0, -9223372036854775808.0, 9223372036854775808.0, 1e300, -1e300,
+        4.9406564584124654e-324, -4.9406564584124654e-324, 2.2250738585072014e-308, 1.7976931348623157e308,
+        -1.7976931348623157e308, inf, -inf, nan, -nan, 1.0, -1.0, 0.1, -0.1, 360.0, -720.5, 1e-9};
+    size_t failures = 0;
+    auto unary = [&](double x) {
+        const bool ok = bits(X::Ceil(x)) == bits(std::ceil(x)) && bits(X::Floor(x)) == bits(std::floor(x)) &&
+            bits(X::Trunc(x)) == bits(std::trunc(x)) && X::LRound(x) == std::lround(x) &&
+            X::LlRound(x) == std::llround(x) && bits(X::Sqrt(x)) == bits(std::sqrt(x));
+        if (!ok && failures++ < 5) std::cerr << "ExactMath differs from libm for " << std::hexfloat << x << std::defaultfloat << std::endl;
+    };
+    // A NaN divisor (RayoMD divides by constants) gives a NaN whose sign and payload differ
+    // between glibc versions; every other case must match bit for bit.
+    auto binary = [&](double x, double y) {
+        const double ours = X::Fmod(x, y), theirs = std::fmod(x, y);
+        const bool same = std::isnan(y) ? std::isnan(ours) && std::isnan(theirs) : bits(ours) == bits(theirs);
+        if (!same && failures++ < 5) {
+            std::cerr << "ExactMath::Fmod differs from libm for " << std::hexfloat << x << ", " << y << std::defaultfloat << std::endl;
+        }
+    };
+    for (double x : edges) {
+        unary(x);
+        for (double y : edges) binary(x, y);
+    }
+    for (uint32_t i = 0; i < 10000000; i++) unary(sample(i));
+    for (uint32_t i = 0; i < 2000000; i++) {
+        const double x = sample(i), y = sample(i / 5);
+        binary(x, y);
+        binary(x, (double)(int64_t)(next() % 720) - 360.0);   // as SVG angles and hues are reduced
+    }
+    return failures == 0;
+}
+
 // WriteAll overwrites an existing file in place on POSIX systems: a shorter content must cut off
 // the old tail, a longer one replace it all, and an empty one leave an empty file.
 bool CheckWriteAll() {
@@ -3237,6 +3316,7 @@ int main() {
     if (!CheckChangedImageFiles()) return 100;
     if (!CheckCidStrings()) return 101;
     if (!CheckWriteAll()) return 102;
+    if (!CheckExactMath()) return 103;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

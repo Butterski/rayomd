@@ -41,7 +41,10 @@ inline char* WriteFixed2(char* out, double value) {
         scaled = static_cast<uint64_t>(hundredths);
         if (hundredths - static_cast<double>(scaled) >= 0.5) scaled++;
     } else {
-        scaled = static_cast<uint64_t>(std::llround(hundredths));
+        // From 2^52 on a double is a whole number, so rounding is the conversion: what llround
+        // (ExactMath::LlRound) gives, also INT64_MIN's bits past 2^63 and for NaN.
+        scaled = hundredths < 9223372036854775808.0 ? static_cast<uint64_t>(static_cast<int64_t>(hundredths))
+                                                     : static_cast<uint64_t>(INT64_MIN);
     }
     if (negative) *out++ = '-';
     unsigned fraction;

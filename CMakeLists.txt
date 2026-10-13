@@ -66,6 +66,31 @@ function(rayomd_common_definitions target)
     target_compile_definitions(${target} PRIVATE RAYOMD_VERSION="${PROJECT_VERSION}")
 endfunction()
 
+# A dynamic glibc build does not link libm: rounding, sqrt and fmod are RayoMD's own
+# (src/common/exact_math.h) and svg.cpp loads libm.so.6 for its transcendental functions when an
+# SVG first needs one. A fresh export then starts 0.07 ms sooner (10 page faults fewer); one with
+# such an SVG takes 0.04 ms longer. --as-needed drops the -lm the C++ driver adds. Static builds
+# link libm.a as before.
+set(RAYOMD_LIBM_DLOPEN OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT RAYOMD_STATIC)
+    include(CheckSymbolExists)
+    check_symbol_exists(gnu_get_libc_version "gnu/libc-version.h" RAYOMD_HAVE_GLIBC)
+    if(RAYOMD_HAVE_GLIBC)
+        set(RAYOMD_LIBM_DLOPEN ON)
+        check_symbol_exists(dlopen "dlfcn.h" RAYOMD_DLOPEN_IN_LIBC)
+    endif()
+endif()
+
+function(rayomd_libm target)
+    if(RAYOMD_LIBM_DLOPEN)
+        target_compile_definitions(${target} PRIVATE RAYOMD_LIBM_DLOPEN=1)
+        target_link_options(${target} PRIVATE -Wl,--as-needed)
+        if(NOT RAYOMD_DLOPEN_IN_LIBC)
+            target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
+        endif()
+    endif()
+endfunction()
+
 function(rayomd_experiments target)
     if(RAYOMD_ENABLE_LTO)
         include(CheckIPOSupported)
@@ -161,6 +186,7 @@ if(WIN32)
         src/common/text_utils.cpp
         src/common/batch_report.cpp
         src/common/file_io.cpp
+        src/common/exact_math.cpp
         src/win32/main_win32.cpp
         src/win32/rayomd.rc
         third_party/imgui/imgui.cpp
@@ -233,6 +259,7 @@ else()
         src/common/text_utils.cpp
         src/common/batch_report.cpp
         src/common/file_io.cpp
+        src/common/exact_math.cpp
         src/core/rayomd_pdf_source.cpp
         src/cli/main_cli.cpp
     )
@@ -243,6 +270,7 @@ else()
         target_compile_definitions(rayomd PRIVATE RAYOMD_USE_CURL=1)
     endif()
     rayomd_common_definitions(rayomd)
+    rayomd_libm(rayomd)
     rayomd_release_flags(rayomd)
     rayomd_experiments(rayomd)
 endif()
@@ -274,9 +302,11 @@ if(BUILD_TESTING)
         src/core/math_layout.cpp
         src/common/text_utils.cpp
         src/common/batch_report.cpp
-        src/common/file_io.cpp)
+        src/common/file_io.cpp
+        src/common/exact_math.cpp)
     target_include_directories(rayomd-core-tests PRIVATE include)
     target_compile_definitions(rayomd-core-tests PRIVATE RAYOMD_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    rayomd_libm(rayomd-core-tests)
     target_link_libraries(rayomd-core-tests PRIVATE rayomd_inflate Threads::Threads)
     if(WIN32)
         target_link_libraries(rayomd-core-tests PRIVATE ole32 winhttp windowscodecs ws2_32)
