@@ -76,10 +76,9 @@ changes, each keeping every PDF byte:
 Warm builds (`ab --instructions`) stay within their spread: instructions -0.5 % (the libm
 change; `WriteFixed2` converts numbers from 2^52 directly instead of calling `llround`).
 Not done: the lazy cmap (see *Tried and rejected*: `HasGlyph` runs per painted character and
-would need a test and atomics for shared fonts) and leaving the 1 MB output buffer and the font
-mapping to `exit`. Open decisions measured in the Phase 1 breakdown: the static binary as the
-default asset, `-no-pie`, and skipping libgcc's frame registration in GCC 13 static builds
-(30 µs).
+would need a test and atomics for shared fonts). Open decisions measured in the Phase 1
+breakdown: the static binary as the default asset, `-no-pie`, and skipping libgcc's frame
+registration in GCC 13 static builds (30 µs).
 
 Later trims of the one-shot CLI (dynamic, `perf stat` in 40 to 60 interleaved rounds of 50
 exports onto an existing tmpfs or ext4 PDF, against an identical copy as control):
@@ -87,6 +86,11 @@ exports onto an existing tmpfs or ext4 PDF, against an identical copy as control
 - **The input is read with `read()`** into the string instead of mapped, copied and unmapped:
   one fault, two syscalls and 15 K kernel instructions less; notes, polish and README 4 to 6 µs
   less CPU (control ±2), 3 to 9 µs less wall time.
+- **`--export` and `--stdin` end with `_Exit`** after flushing stdout (`ExitOneShot`), so the
+  1 MB output buffer, the font mapping, the document and every static are left to the kernel;
+  batch, serve and the library free theirs as before. notes, polish and README 7 to 45 µs less
+  CPU and 8 to 19 µs less wall time (control within ±5), about one fault and 15 to 130 K kernel
+  instructions less.
 
 ## Warm text, Phase 2
 
@@ -690,7 +694,8 @@ Text and layout:
   length branch (16 bytes compared, the rest blanked to spaces): -29 % branch
   misses, +11 % instructions, cycles even, L1i misses x2.7.
 - Keeping the default font alive at exit: 1 to 2 % less CPU, no faster by the
-  clock. Loading the cmap block by block: 10 of 156 faults, a test per glyph
+  clock (ending the one-shot export with `_Exit`, which skips all of the teardown, is
+  kept). Loading the cmap block by block: 10 of 156 faults, a test per glyph
   lookup, atomics for shared fonts.
 - Exact cell reservation in table rows: `table_96kb.md` -0.57 % instructions,
   others +0.10 to +0.29 %.
