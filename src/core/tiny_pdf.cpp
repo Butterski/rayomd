@@ -922,17 +922,40 @@ static void AppendSize(std::string& out, size_t value) {
     if (result.ec == std::errc()) out.append(buf, (size_t)(result.ptr - buf));
 }
 
-// Grows a content stream once by an upper bound, lets one drawing operation write its
-// operators through a raw pointer, and trims to what was written. The per-span paint
-// functions used a dozen small appends each; this is one growth and no temporaries.
+// Lets one drawing operation write its operators through a raw pointer, then appends them to a
+// content stream in one piece. The per-span paint functions used a dozen small appends each;
+// this is one growth and no temporaries. An operation whose upper bound fits writes into a
+// buffer of the thread's own, which stays in L1, and only the bytes it wrote are appended:
+// growing the string by the bound zero-filled all of it first (std::string has no growth
+// without filling before C++23). A larger bound, a writer opened while another holds the
+// buffer, and Windows (where MinGW's thread_local is a call) grow the string by the bound and
+// trim what was not written. The buffer is not a member: a pointer into the writer itself kept
+// GCC from holding `cursor` in a register across calls. Constructor and destructor are always
+// inlined: left to GCC, the destructor went out of line and `Text` out of `PaintAsciiRuns`.
 class TailWriter {
 public:
-    TailWriter(std::string& target, size_t maxBytes) : out(target) {
-        const size_t base = out.size();
-        out.resize(base + maxBytes);
-        cursor = &out[base];
+    RAYOMD_HOT_INLINE TailWriter(std::string& target, size_t maxBytes) : out(target) {
+#ifndef _WIN32
+        if (maxBytes <= sizeof(scratch) && !scratchBusy) {
+            scratchBusy = true;
+            start = scratch;
+            cursor = start;
+            return;
+        }
+#endif
+        start = Grow(target, maxBytes);
+        cursor = start;
     }
-    ~TailWriter() { out.resize((size_t)(cursor - out.data())); }
+    RAYOMD_HOT_INLINE ~TailWriter() {
+#ifndef _WIN32
+        if (start == scratch) {
+            out.append(start, (size_t)(cursor - start));
+            scratchBusy = false;
+            return;
+        }
+#endif
+        out.resize((size_t)(cursor - out.data()));
+    }
     TailWriter(const TailWriter&) = delete;
     TailWriter& operator=(const TailWriter&) = delete;
 
@@ -952,8 +975,23 @@ public:
     char* cursor = nullptr;
 
 private:
+    static char* Grow(std::string& target, size_t maxBytes) {
+        const size_t base = target.size();
+        target.resize(base + maxBytes);
+        return &target[base];
+    }
+
     std::string& out;
+    char* start = nullptr;
+#ifndef _WIN32
+    static thread_local char scratch[1024];
+    static thread_local bool scratchBusy;
+#endif
 };
+#ifndef _WIN32
+thread_local char TailWriter::scratch[1024];
+thread_local bool TailWriter::scratchBusy = false;
+#endif
 
 // Room for one operand written by TailWriter::Fixed, with its separator.
 constexpr size_t kOperandBytes = RayoMd::Text::kFixed2MaxChars + 1;
