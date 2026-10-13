@@ -1172,10 +1172,6 @@ static uint32_t ChecksumBytes(const char* data, size_t size) {
     return sum;
 }
 
-static uint32_t ChecksumString(const std::string& s) {
-    return ChecksumBytes(s.data(), s.size());
-}
-
 // The key of the font objects of a document: the font, then the CIDs it shows.
 static std::string MakeCidKey(const TtfFont& font, const CidList& used) {
     std::string key;
@@ -7142,15 +7138,6 @@ static bool AddGlyphClosure(const TtfFont& font, uint16_t glyph, std::vector<uin
     return off <= glyphEnd;
 }
 
-static bool OriginalTableBytes(const TtfFont& font, const std::string& tag, std::string& out) {
-    auto it = font.tables.find(tag);
-    if (it == font.tables.end()) return false;
-    const TtfFont::Table& t = it->second;
-    if ((size_t)t.offset + t.length > font.bytes.size()) return false;
-    out.assign((const char*)font.bytes.data() + t.offset, t.length);
-    return true;
-}
-
 // Whether the glyph data and the tables a subset rewrites can be read: then a subset of the
 // font is built, else the whole font is embedded with its own glyph ids.
 static bool CanSubset(const TtfFont& font) {
@@ -7184,16 +7171,41 @@ static uint16_t SubsetGlyphId(const std::vector<uint16_t>& glyphs, uint16_t glyp
     return it != glyphs.end() && *it == glyph ? (uint16_t)(it - glyphs.begin()) : 0;
 }
 
+// A subset font (SubsetGlyphs) before it is written: its tables, sorted by tag, and its size.
+// The tables it keeps as they are point into the font; those it makes or changes are its own.
+struct SubsetFontPlan {
+    struct Table {
+        char tag[4];
+        std::string owned;            // the bytes of a table the subset makes or changes
+        const char* data = nullptr;   // or those of a table it keeps, in the font
+        size_t size = 0;
+        bool isOwned = true;
+
+        const char* Data() const { return isOwned ? owned.data() : data; }
+        size_t Size() const { return isOwned ? owned.size() : size; }
+    };
+    std::vector<Table> tables;
+    uint32_t sfntVersion = 0;
+    size_t size = 0;
+};
+
 // A TrueType font of `glyphs` (SubsetGlyphs) only, numbered from 0 in that order: loca and
 // hmtx hold those glyphs, a composite glyph points at the new ids of its components, post
 // keeps no glyph names, and the cmap maps nothing, since the PDF's CIDToGIDMap does. The
-// font must pass CanSubset.
-static bool BuildSubsetFontBytes(const TtfFont& font, const std::vector<uint16_t>& glyphs, std::string& out) {
+// font must pass CanSubset. WriteSubsetFont writes it.
+static bool PlanSubsetFont(const TtfFont& font, const std::vector<uint16_t>& glyphs, SubsetFontPlan& plan) {
     const TtfFont::Table& oldGlyf = font.tables.at("glyf");
     const TtfFont::Table& oldHmtx = font.tables.at("hmtx");
+    size_t glyfBytes = 0;
+    for (uint16_t glyph : glyphs) {
+        const uint32_t start = font.loca[glyph];
+        const uint32_t end = font.loca[(size_t)glyph + 1];
+        if (end > start) glyfBytes += ((size_t)(end - start) + 3) & ~(size_t)3;
+    }
     std::string glyfData;
     std::string locaData;
     std::string hmtxData;
+    glyfData.reserve(glyfBytes);
     locaData.reserve((glyphs.size() + 1) * 4);
     hmtxData.reserve(glyphs.size() * 4);
     for (uint16_t glyph : glyphs) {
@@ -7226,106 +7238,124 @@ static bool BuildSubsetFontBytes(const TtfFont& font, const std::vector<uint16_t
     }
     AppendU32(locaData, (uint32_t)glyfData.size());
 
-    struct SubsetTable {
-        std::string tag;
-        std::string data;
-        uint32_t checksum = 0;
-        uint32_t offset = 0;
-    };
-
-    static const char* wanted[] = {
+    // In the order of their tags, as the table directory lists them.
+    static const char* const wanted[] = {
         "OS/2", "cmap", "cvt ", "fpgm", "gasp", "glyf", "head", "hhea",
         "hmtx", "loca", "maxp", "name", "post", "prep"
     };
-
-    std::vector<SubsetTable> tables;
+    plan.tables.clear();
+    plan.tables.reserve(sizeof(wanted) / sizeof(wanted[0]));
     for (const char* tag : wanted) {
-        std::string table;
-        std::string tagString(tag, 4);
+        SubsetFontPlan::Table table;
+        memcpy(table.tag, tag, 4);
+        const std::string tagString(tag, 4);
         if (tagString == "glyf") {
-            table = std::move(glyfData);
+            table.owned = std::move(glyfData);
         } else if (tagString == "loca") {
-            table = std::move(locaData);
+            table.owned = std::move(locaData);
         } else if (tagString == "hmtx") {
-            table = std::move(hmtxData);
+            table.owned = std::move(hmtxData);
         } else if (tagString == "cmap") {
             // Version 0, one Windows Unicode subtable of format 4 with the closing segment only.
-            for (int value : {0, 1, 3, 1, 0, 12, 4, 24, 0, 2, 2, 0, 0, 0xFFFF, 0, 0xFFFF, 1, 0}) AppendU16(table, (uint16_t)value);
+            for (int value : {0, 1, 3, 1, 0, 12, 4, 24, 0, 2, 2, 0, 0, 0xFFFF, 0, 0xFFFF, 1, 0}) AppendU16(table.owned, (uint16_t)value);
         } else {
-            if (!OriginalTableBytes(font, tagString, table)) continue;
-            if (tagString == "head") {
-                SetU32(table, 8, 0);
-                SetU16(table, 50, 1);
-            } else if (tagString == "hhea") {
-                SetU16(table, 34, (uint16_t)glyphs.size());
-            } else if (tagString == "maxp") {
-                SetU16(table, 4, (uint16_t)glyphs.size());
-            } else if (tagString == "post") {
-                if (table.size() < 32) continue;
-                table.resize(32);
-                SetU32(table, 0, 0x00030000);
+            auto it = font.tables.find(tagString);
+            if (it == font.tables.end() || (size_t)it->second.offset + it->second.length > font.bytes.size()) continue;
+            const char* const original = (const char*)font.bytes.data() + it->second.offset;
+            if (tagString == "head" || tagString == "hhea" || tagString == "maxp" || tagString == "post") {
+                table.owned.assign(original, it->second.length);
+                if (tagString == "head") {
+                    SetU32(table.owned, 8, 0);
+                    SetU16(table.owned, 50, 1);
+                } else if (tagString == "hhea") {
+                    SetU16(table.owned, 34, (uint16_t)glyphs.size());
+                } else if (tagString == "maxp") {
+                    SetU16(table.owned, 4, (uint16_t)glyphs.size());
+                } else {
+                    if (table.owned.size() < 32) continue;
+                    table.owned.resize(32);
+                    SetU32(table.owned, 0, 0x00030000);
+                }
+            } else {
+                table.isOwned = false;
+                table.data = original;
+                table.size = it->second.length;
             }
         }
-        tables.push_back({ tagString, std::move(table), 0, 0 });
+        plan.tables.push_back(std::move(table));
     }
+    bool hasHead = false;
+    plan.size = 12 + plan.tables.size() * 16;
+    for (const SubsetFontPlan::Table& table : plan.tables) {
+        plan.size += (table.Size() + 3) & ~(size_t)3;
+        hasHead = hasHead || memcmp(table.tag, "head", 4) == 0;
+    }
+    plan.sfntVersion = font.sfntVersion;
+    return hasHead;
+}
 
-    if (tables.empty()) return false;
-    std::sort(tables.begin(), tables.end(),
-        [](const SubsetTable& a, const SubsetTable& b) { return a.tag < b.tag; });
+static void PutU16(char* out, uint16_t v) {
+    out[0] = (char)(v >> 8);
+    out[1] = (char)v;
+}
 
-    uint16_t numTables = (uint16_t)tables.size();
+static void PutU32(char* out, uint32_t v) {
+    out[0] = (char)(v >> 24);
+    out[1] = (char)(v >> 16);
+    out[2] = (char)(v >> 8);
+    out[3] = (char)v;
+}
+
+// The font of `plan` at `out`, plan.size bytes: the table directory, each table padded to four
+// bytes with zeros, and head's checkSumAdjustment, which makes the font's sum 0xB1B0AFBA.
+static void WriteSubsetFont(const SubsetFontPlan& plan, char* out) {
+    const uint16_t numTables = (uint16_t)plan.tables.size();
     uint16_t maxPower = 1;
     uint16_t entrySelector = 0;
     while ((uint16_t)(maxPower * 2) <= numTables) {
         maxPower *= 2;
         entrySelector++;
     }
-    uint16_t searchRange = maxPower * 16;
-    uint16_t rangeShift = numTables * 16 - searchRange;
-
-    size_t tableBytes = 0;
-    for (const SubsetTable& table : tables) tableBytes += (table.data.size() + 3) & ~(size_t)3;
-    out.clear();
-    out.reserve(12 + (size_t)numTables * 16 + tableBytes);
-    AppendU32(out, font.sfntVersion);
-    AppendU16(out, numTables);
-    AppendU16(out, searchRange);
-    AppendU16(out, entrySelector);
-    AppendU16(out, rangeShift);
-    out.resize(12 + (size_t)numTables * 16, '\0');
-
-    size_t headAdjustmentOffset = std::string::npos;
-    for (SubsetTable& table : tables) {
-        while (out.size() & 3) out.push_back('\0');
-        table.offset = (uint32_t)out.size();
-        table.checksum = ChecksumString(table.data);
-        out.append(table.data);
-        while (out.size() & 3) out.push_back('\0');
-        if (table.tag == "head") headAdjustmentOffset = table.offset + 8;
+    const uint16_t searchRange = maxPower * 16;
+    PutU32(out, plan.sfntVersion);
+    PutU16(out + 4, numTables);
+    PutU16(out + 6, searchRange);
+    PutU16(out + 8, entrySelector);
+    PutU16(out + 10, (uint16_t)(numTables * 16 - searchRange));
+    size_t offset = 12 + (size_t)numTables * 16;
+    size_t headAdjustment = 0;
+    for (size_t i = 0; i < plan.tables.size(); i++) {
+        const SubsetFontPlan::Table& table = plan.tables[i];
+        const char* const data = table.Data();
+        const size_t size = table.Size();
+        char* const record = out + 12 + i * 16;
+        memcpy(record, table.tag, 4);
+        PutU32(record + 4, ChecksumBytes(data, size));
+        PutU32(record + 8, (uint32_t)offset);
+        PutU32(record + 12, (uint32_t)size);
+        if (size != 0) memcpy(out + offset, data, size);
+        const size_t padded = (size + 3) & ~(size_t)3;
+        memset(out + offset + size, 0, padded - size);
+        if (memcmp(table.tag, "head", 4) == 0) headAdjustment = offset + 8;
+        offset += padded;
     }
-
-    for (size_t i = 0; i < tables.size(); i++) {
-        size_t rec = 12 + i * 16;
-        memcpy(&out[rec], tables[i].tag.data(), 4);
-        SetU32(out, rec + 4, tables[i].checksum);
-        SetU32(out, rec + 8, tables[i].offset);
-        SetU32(out, rec + 12, (uint32_t)tables[i].data.size());
-    }
-
-    if (headAdjustmentOffset == std::string::npos) return false;
-    uint32_t fileSum = ChecksumString(out);
-    SetU32(out, headAdjustmentOffset, 0xB1B0AFBAu - fileSum);
-    return true;
+    PutU32(out + headAdjustment, 0xB1B0AFBAu - ChecksumBytes(out, plan.size));
 }
 
-static std::string BuildFontFileObject(const std::string& fontBytes) {
+// The start of a font program's stream object, uncompressed, before its `size` bytes.
+static std::string FontFileHeader(size_t size) {
     std::string body;
-    body.reserve(fontBytes.size() + 128);
     body += "<< /Length ";
-    AppendSize(body, fontBytes.size());
+    AppendSize(body, size);
     body += " /Length1 ";
-    AppendSize(body, fontBytes.size());
+    AppendSize(body, size);
     body += " >>\nstream\n";
+    return body;
+}
+
+static std::string BuildFontFileObject(std::string_view fontBytes) {
+    std::string body = FontFileHeader(fontBytes.size());
+    body.reserve(body.size() + fontBytes.size() + 16);
     body.append(fontBytes.data(), fontBytes.size());
     body += "\nendstream";
     return body;
@@ -7384,34 +7414,69 @@ private:
     std::unordered_map<std::string, std::shared_ptr<const std::string>> values;
 };
 
+// The glyphs of the subset for a document's CIDs (SubsetGlyphs), made once for both the font
+// program and the CIDToGIDMap, and only when one of their caches misses.
+class SubsetGlyphList {
+public:
+    SubsetGlyphList(const TtfFont& fontValue, const CidList& usedValue) : font(fontValue), used(usedValue) {}
+    const std::vector<uint16_t>& Get() {
+        if (!ready) {
+            glyphs = SubsetGlyphs(font, used);
+            ready = true;
+        }
+        return glyphs;
+    }
+
+private:
+    const TtfFont& font;
+    const CidList& used;
+    std::vector<uint16_t> glyphs;
+    bool ready = false;
+};
+
 // The font program of a document: the subset of the glyphs it shows, or the whole font when
 // it cannot be subset (CanSubset). With `compress` FlateDecode-compressed, in a cache of its own.
+// Uncompressed, the subset is written straight into the stream object.
 static std::shared_ptr<const std::string> CachedFontFileObject(
-    const TtfFont& font, const CidList& used, const std::string& key, bool compress) {
+    const TtfFont& font, SubsetGlyphList& glyphs, const std::string& key, bool compress) {
     static BoundedStringCache plainCache(8, 32u * 1024u * 1024u);
     static BoundedStringCache flateCache(8, 32u * 1024u * 1024u);
     BoundedStringCache& cache = compress ? flateCache : plainCache;
     if (auto cached = cache.Get(key)) return cached;
 
-    std::string bytes;
-    if (!CanSubset(font) || !BuildSubsetFontBytes(font, SubsetGlyphs(font, used), bytes)) {
-        bytes.assign((const char*)font.bytes.data(), font.bytes.size());
+    SubsetFontPlan plan;
+    const bool subset = CanSubset(font) && PlanSubsetFont(font, glyphs.Get(), plan);
+    const std::string_view whole((const char*)font.bytes.data(), font.bytes.size());
+    if (compress) {
+        std::string bytes;
+        if (subset) {
+            bytes.resize(plan.size);
+            WriteSubsetFont(plan, &bytes[0]);
+        } else {
+            bytes.assign(whole.data(), whole.size());
+        }
+        return cache.Insert(key, BuildFlateFontFileObject(bytes));
     }
-    return cache.Insert(key, compress ? BuildFlateFontFileObject(bytes) : BuildFontFileObject(bytes));
+    if (!subset) return cache.Insert(key, BuildFontFileObject(whole));
+    std::string body = FontFileHeader(plan.size);
+    const size_t at = body.size();
+    body.resize(at + plan.size + 10);
+    WriteSubsetFont(plan, &body[at]);
+    memcpy(&body[at + plan.size], "\nendstream", 10);
+    return cache.Insert(key, std::move(body));
 }
 
 // The glyph id of every used CID in the font program of CachedFontFileObject.
 static std::shared_ptr<const std::string> MakeCidToGidMap(
-    const TtfFont& font, const CidList& used, const std::string& key) {
+    const TtfFont& font, const CidList& used, SubsetGlyphList& glyphs, const std::string& key) {
     static BoundedStringCache cache(64, 8u * 1024u * 1024u);
     if (auto cached = cache.Get(key)) return cached;
     uint16_t maxCid = 255;
     for (uint16_t cid : used) maxCid = std::max(maxCid, cid);
     std::string map((size_t)(maxCid + 1) * 2, char(0));
     const bool subset = CanSubset(font);
-    const std::vector<uint16_t> glyphs = subset ? SubsetGlyphs(font, used) : std::vector<uint16_t>();
     for (uint16_t cid : used) {
-        const uint16_t glyph = subset ? SubsetGlyphId(glyphs, font.GlyphFor(cid)) : font.GlyphFor(cid);
+        const uint16_t glyph = subset ? SubsetGlyphId(glyphs.Get(), font.GlyphFor(cid)) : font.GlyphFor(cid);
         map[(size_t)cid * 2] = (char)((glyph >> 8) & 0xff);
         map[(size_t)cid * 2 + 1] = (char)(glyph & 0xff);
     }
@@ -10246,12 +10311,13 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (betterFont && (*betterFont = BetterFontFor(font, used)) != nullptr) return true;
     missingCharacters = renderer.MissingCharacters();
     std::string cidKey = MakeCidKey(font, used);
-    auto cidMapBytes = MakeCidToGidMap(font, used, cidKey);
+    SubsetGlyphList subsetGlyphs(font, used);
+    auto cidMapBytes = MakeCidToGidMap(font, used, subsetGlyphs, cidKey);
     auto toUnicodeBytes = MakeToUnicodeCMap(used, cidKey);
 
     // The cached font objects are referenced, not copied: the shared pointers keep them
     // alive until BuildInto below.
-    std::shared_ptr<const std::string> fontFileObject = CachedFontFileObject(font, used, cidKey, options.compress);
+    std::shared_ptr<const std::string> fontFileObject = CachedFontFileObject(font, subsetGlyphs, cidKey, options.compress);
     pdf.SetView(fontFileId, *fontFileObject);
 
     // With --compress, the compressed CMaps, which have to outlive BuildInto.
