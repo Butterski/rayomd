@@ -9,7 +9,7 @@
 **Markdown to PDF in milliseconds, from a single small executable.**<br>
 No browser. No LaTeX. No Pandoc. No runtime.
 
-<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.2.2 MathTex" src="https://img.shields.io/badge/version-4.2.2%20MathTex-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.3.0 MathTex" src="https://img.shields.io/badge/version-4.3.0%20MathTex-informational?style=for-the-badge"></a>
 <a href="https://github.com/Butterski/rayomd/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Butterski/rayomd/total?style=for-the-badge&color=2ea44f"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 
@@ -34,11 +34,12 @@ No browser. No LaTeX. No Pandoc. No runtime.
 </div>
 
 > [!TIP]
-> **New in 4.2.1:** PNGs convert **up to 17 % faster** than in 4.2.0 on one core and **up to
-> 29 %** on two (a 2048×2048 illustration 24.6 → 20.4 ms; two cores 20.1 → 14.3 ms), with the
-> same PDF bytes. Since 4.2, RayoMD decodes PNGs with its own inflater, a row at a time,
-> compresses them on up to four cores at once, and needs **70 % less memory** than 4.1.0 for a
-> large one (27.8 → 8.4 MiB). Every pixel is still unchanged. See [the numbers](#performance).
+> **New in 4.3:** text in other scripts than Latin (and Latin with characters beyond Windows-1252)
+> takes **half the bytes** in the PDF, so such documents come out **up to 26 % smaller** and
+> export up to 12 % faster, and documents of plain code blocks export **34 to 42 % faster** in a
+> warm process. Since 4.2, RayoMD decodes PNGs with its own inflater, a row at a
+> time, on up to four cores, in **70 % less memory** than 4.1.0 for a large one. Text and pixels
+> are unchanged. See [the numbers](#performance).
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. Windows gets a
 compact Dear ImGui app with command-line modes, Linux a small CLI, and both share one exporter
@@ -100,9 +101,9 @@ veraPDF.
 <summary><b>Linux</b>: download and run</summary>
 
 ```sh
-curl -LO https://github.com/Butterski/rayomd/releases/download/v4.2.2/rayomd-4.2.2-linux-x64-static.tar.gz
-tar -xzf rayomd-4.2.2-linux-x64-static.tar.gz
-./rayomd-4.2.2-linux-x64-static/rayomd --export input.md output.pdf
+curl -LO https://github.com/Butterski/rayomd/releases/download/v4.3.0/rayomd-4.3.0-linux-x64-static.tar.gz
+tar -xzf rayomd-4.3.0-linux-x64-static.tar.gz
+./rayomd-4.3.0-linux-x64-static/rayomd --export input.md output.pdf
 ```
 
 </details>
@@ -110,7 +111,7 @@ tar -xzf rayomd-4.2.2-linux-x64-static.tar.gz
 <details>
 <summary><b>Windows</b>: the app and the CLI in one <code>rayomd.exe</code></summary>
 
-Download `rayomd-4.2.2-windows-x64.zip` from
+Download `rayomd-4.3.0-windows-x64.zip` from
 [Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
 without arguments opens the app: edit or drop a file, pick a style and margins, and press
 `Ctrl+E` to export. With arguments it is the same CLI as on Linux:
@@ -150,6 +151,23 @@ Every feature below works the same from both command lines and the
 
 Measured on 2026-10-13: Linux x86-64, g++ 13.3, one pinned CPU core unless said. A one-shot
 export is a fresh `rayomd --export` process, start to exit (median of 40 runs).
+
+### Text, 4.3
+
+The Unicode renderer, which draws any text the standard PDF fonts cannot, writes two bytes a
+character where it wrote four hex digits; plain code blocks are drawn without a list of strings
+per line. One-shot export against 4.2.2 (median of 41):
+
+| Document | 4.2.2 | 4.3.0 | PDF size |
+|---|---:|---:|---:|
+| [`performance.md`](docs/development/performance.md) (Unicode, 2,000 lines) | 5.07 ms | **4.77 ms** | 960 → **709 KB** |
+| This README | 2.41 ms | **2.33 ms** | 252 → **206 KB** |
+| 35 KB of C++ in code blocks, Polish comments | 2.34 ms | **2.06 ms** | 287 → **217 KB** |
+| The same code, ASCII only | 1.63 ms | **1.48 ms** | 146 KB, as before |
+
+Documents in ASCII or Windows-1252 Latin keep the standard fonts and their exact bytes. Text
+extracts and renders the same: 650 PDFs under five option sets pass `qpdf --check` and give
+Poppler the same text and pixels as with 4.2.2.
 
 ### Images, 4.2
 
