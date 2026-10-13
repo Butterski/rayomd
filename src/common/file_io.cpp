@@ -1,5 +1,17 @@
 #include "file_io.h"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
+
 namespace RayoMd::File {
 
 std::FILE* Open(const std::filesystem::path& path, const char* mode) {
@@ -58,6 +70,32 @@ bool WriteAll(const std::filesystem::path& path, std::string_view content) {
     bool written = content.empty() || std::fwrite(content.data(), 1, content.size(), file) == content.size();
     if (std::fclose(file) != 0) written = false;
     return written;
+}
+
+Stamp StampOf(const std::filesystem::path& path) {
+    Stamp stamp;
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return stamp;
+    const auto time = [](FILETIME value) { return (uint64_t)value.dwHighDateTime << 32 | value.dwLowDateTime; };
+    stamp.size = (uint64_t)data.nFileSizeHigh << 32 | data.nFileSizeLow;
+    stamp.modified = time(data.ftLastWriteTime);
+    stamp.changed = time(data.ftCreationTime);
+#else
+    struct stat info {};
+    if (::stat(path.c_str(), &info) != 0) return stamp;
+#ifdef __APPLE__
+    const struct timespec modified = info.st_mtimespec, changed = info.st_ctimespec;
+#else
+    const struct timespec modified = info.st_mtim, changed = info.st_ctim;
+#endif
+    const auto time = [](const struct timespec& value) { return (uint64_t)value.tv_sec * 1000000000u + (uint64_t)value.tv_nsec; };
+    stamp.size = (uint64_t)info.st_size;
+    stamp.modified = time(modified);
+    stamp.changed = time(changed);
+    stamp.id = (uint64_t)info.st_ino ^ (uint64_t)info.st_dev << 32;
+#endif
+    return stamp;
 }
 
 } // namespace RayoMd::File

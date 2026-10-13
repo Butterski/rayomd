@@ -1598,13 +1598,14 @@ static std::string PathToUtf8(const std::filesystem::path& path) {
 struct WinLocalImageFile {
     HANDLE handle = INVALID_HANDLE_VALUE;
     size_t size = 0;
+    RayoMd::File::Stamp stamp;   // as RayoMd::File::StampOf gives it for a path
 
     WinLocalImageFile() = default;
     WinLocalImageFile(const WinLocalImageFile&) = delete;
     WinLocalImageFile& operator=(const WinLocalImageFile&) = delete;
 
     WinLocalImageFile(WinLocalImageFile&& other) noexcept
-        : handle(other.handle), size(other.size) {
+        : handle(other.handle), size(other.size), stamp(other.stamp) {
         other.handle = INVALID_HANDLE_VALUE;
         other.size = 0;
     }
@@ -1614,6 +1615,7 @@ struct WinLocalImageFile {
         Reset();
         handle = other.handle;
         size = other.size;
+        stamp = other.stamp;
         other.handle = INVALID_HANDLE_VALUE;
         other.size = 0;
         return *this;
@@ -1752,6 +1754,9 @@ static DirectLocalImageResult TryOpenDirectLocalImage(
     file.Reset();
     file.handle = handle;
     file.size = (size_t)size.QuadPart;
+    file.stamp.size = (uint64_t)size.QuadPart;
+    file.stamp.modified = (uint64_t)info.ftLastWriteTime.dwHighDateTime << 32 | info.ftLastWriteTime.dwLowDateTime;
+    file.stamp.changed = (uint64_t)info.ftCreationTime.dwHighDateTime << 32 | info.ftCreationTime.dwLowDateTime;
     return DirectLocalImageResult::Opened;
 }
 
@@ -2998,12 +3003,13 @@ public:
             index = known->second;
             return true;
         }
-        SharedPdfImage sharedImage = LoadDecodedImageFromCache(key);
+        const RayoMd::File::Stamp stamp = RayoMd::File::StampOf(normalized);
+        SharedPdfImage sharedImage = LoadDecodedImageFromCache(key, stamp);
         if (!sharedImage) {
             std::vector<uint8_t> bytes;
-            if (IsKnownFailure(key) || !ReadLocalImageFile(PathToUtf8(normalized), bytes) ||
-                bytes.size() > kMaxImageBytes || !Decode(key, bytes, sharedImage)) {
-                StoreFailure(key);
+            if (IsKnownFailure(key, stamp) || !ReadLocalImageFile(PathToUtf8(normalized), bytes) ||
+                bytes.size() > kMaxImageBytes || !Decode(key, stamp, bytes, sharedImage)) {
+                StoreFailure(key, stamp);
                 failed++;
                 return false;
             }
@@ -3055,8 +3061,15 @@ private:
             return true;
         }
 
-        SharedPdfImage sharedImage = LoadDecodedImageFromCache(key);
-        if (!sharedImage && IsKnownFailure(key)) return false;
+        // A local file is taken from the process's caches only while it is the file they read.
+        RayoMd::File::Stamp stamp;
+#ifdef _WIN32
+        if (directLocal) stamp = localFile.stamp;
+        else
+#endif
+        if (!isUrl) stamp = RayoMd::File::StampOf(PathFromUtf8(localPathUtf8));
+        SharedPdfImage sharedImage = LoadDecodedImageFromCache(key, stamp);
+        if (!sharedImage && IsKnownFailure(key, stamp)) return false;
         if (!sharedImage) {
             std::vector<uint8_t> bytes;
             bool loaded = false;
@@ -3071,8 +3084,8 @@ private:
             else {
                 loaded = ReadLocalImageFile(localPathUtf8, bytes) && bytes.size() <= kMaxImageBytes;
             }
-            if (!loaded || !Decode(key, bytes, sharedImage)) {
-                StoreFailure(key);
+            if (!loaded || !Decode(key, stamp, bytes, sharedImage)) {
+                StoreFailure(key, stamp);
                 return false;
             }
         }
@@ -3096,7 +3109,8 @@ private:
     // `bytes` as an image: an SVG converted for this document, as its forms name the document's
     // fonts, else a PNG or JPEG decoded and kept for later documents, and a re-encoded PNG in
     // options.imageCacheDirectory for later processes too.
-    bool Decode(const std::string& key, const std::vector<uint8_t>& bytes, SharedPdfImage& shared) {
+    bool Decode(const std::string& key, const RayoMd::File::Stamp& stamp, const std::vector<uint8_t>& bytes,
+        SharedPdfImage& shared) {
         PdfImage image;
         const std::string_view view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
         if (Internal::LooksLikeSvg(view)) {
@@ -3105,7 +3119,7 @@ private:
             return true;
         }
         if (!DecodeImageBytes(bytes, image, options.imageCacheDirectory)) return false;
-        shared = StoreDecodedImageInCache(key, std::move(image));
+        shared = StoreDecodedImageInCache(key, stamp, std::move(image));
         return true;
     }
 
@@ -3119,8 +3133,17 @@ private:
     uint32_t failed = 0;
     const TtfFont* svgFont = nullptr;   // the document's TrueType font (SetFont), or none
     UsedCidSet* svgCids = nullptr;
-    static std::unordered_map<std::string, SharedPdfImage>& Cache() {
-        static std::unordered_map<std::string, SharedPdfImage> cache;
+    // Decoded images and failed sources for later documents of the process, each with the stamp of
+    // its file when it was read (none for a URL): a lookup with another stamp misses, and storing
+    // replaces the entry, so a file changed on disk is read again.
+    struct CachedImage {
+        RayoMd::File::Stamp stamp;
+        SharedPdfImage image;
+        size_t cost = 0;
+    };
+
+    static std::unordered_map<std::string, CachedImage>& Cache() {
+        static std::unordered_map<std::string, CachedImage> cache;
         return cache;
     }
 
@@ -3134,8 +3157,8 @@ private:
         return bytes;
     }
 
-    static std::unordered_map<std::string, bool>& FailureCache() {
-        static std::unordered_map<std::string, bool> failures;
+    static std::unordered_map<std::string, RayoMd::File::Stamp>& FailureCache() {
+        static std::unordered_map<std::string, RayoMd::File::Stamp> failures;
         return failures;
     }
 
@@ -3144,44 +3167,57 @@ private:
             image.filter.size() + image.decodeParms.size() + 128;
     }
 
-    static SharedPdfImage LoadDecodedImageFromCache(const std::string& key) {
+    static SharedPdfImage LoadDecodedImageFromCache(const std::string& key, const RayoMd::File::Stamp& stamp) {
         std::lock_guard<std::mutex> lock(CacheMutex());
         auto& cache = Cache();
         auto it = cache.find(key);
-        return it == cache.end() ? SharedPdfImage{} : it->second;
+        return it == cache.end() || it->second.stamp != stamp ? SharedPdfImage{} : it->second.image;
     }
 
-    static SharedPdfImage StoreDecodedImageInCache(const std::string& key, PdfImage image) {
+    // Drops the cached image of `key`, under the lock.
+    static void ForgetCachedImage(const std::string& key) {
+        auto& cache = Cache();
+        auto it = cache.find(key);
+        if (it == cache.end()) return;
+        CacheBytes() -= it->second.cost;
+        cache.erase(it);
+    }
+
+    static SharedPdfImage StoreDecodedImageInCache(const std::string& key, const RayoMd::File::Stamp& stamp, PdfImage image) {
         size_t cost = ImageCacheCost(image);
         SharedPdfImage candidate = std::make_shared<PdfImage>(std::move(image));
         if (cost > kMaxImageBytes) return candidate;
 
         std::lock_guard<std::mutex> lock(CacheMutex());
         auto& cache = Cache();
-        if (cache.find(key) != cache.end()) return candidate;
+        auto known = cache.find(key);
+        if (known != cache.end() && known->second.stamp == stamp) return candidate;
+        ForgetCachedImage(key);
         size_t& cacheBytes = CacheBytes();
         if (cacheBytes + cost > 64u * 1024u * 1024u) {
             cache.clear();
             cacheBytes = 0;
         }
         cacheBytes += cost;
-        cache.emplace(key, candidate);
+        cache.emplace(key, CachedImage{ stamp, candidate, cost });
         return candidate;
     }
 
-    static bool IsKnownFailure(const std::string& key) {
+    static bool IsKnownFailure(const std::string& key, const RayoMd::File::Stamp& stamp) {
         if (key.empty()) return false;
         std::lock_guard<std::mutex> lock(CacheMutex());
         auto& failures = FailureCache();
-        return failures.find(key) != failures.end();
+        auto it = failures.find(key);
+        return it != failures.end() && it->second == stamp;
     }
 
-    static void StoreFailure(const std::string& key) {
+    static void StoreFailure(const std::string& key, const RayoMd::File::Stamp& stamp) {
         if (key.empty() || key.size() > 4096) return;
         std::lock_guard<std::mutex> lock(CacheMutex());
+        ForgetCachedImage(key);   // a file that no longer decodes, or is gone
         auto& failures = FailureCache();
         if (failures.size() >= 256) failures.clear();
-        failures[key] = true;
+        failures[key] = stamp;
     }
 };
 

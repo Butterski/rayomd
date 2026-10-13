@@ -1720,6 +1720,17 @@ limit is. On 4 KiB pages a third buffer would take about 175 faults for its 0.7 
 estimate, not measured), and waiting for the helper would stall the decoder on images that
 compress slowly.
 
+**Images checked against their files.** A process keeps decoded images and failed sources for
+later documents (`--serve`, `--batch`, the app), and until 4.2.1 kept them by path alone: a PNG
+replaced on disk during `--serve` still exported as the old image. Each entry now holds the
+file's stamp (size, last write, last status change or creation, and inode on POSIX;
+`RayoMd::File::StampOf`), a lookup with another stamp misses, and storing replaces the entry.
+The price is one `stat` per image a document shows, on top of the canonicalisation the image
+policy already does: a warm `--bench` of `tester.md` with its one PNG 251.5 → 258.5 µs per
+export (+2.7 %, 20,000 exports, one pinned CPU, 2026-10-13), of which callgrind counts 1,570
+user instructions (+0.07 %); the rest is the system call, 2.3 µs alone on that path. One-shot
+exports and documents without images are unchanged.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

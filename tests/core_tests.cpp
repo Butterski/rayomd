@@ -2577,6 +2577,45 @@ bool CheckSvg() {
     return true;
 }
 
+// A process keeps decoded images and failed paths for later documents (--serve, --batch, the app):
+// an image file created, replaced or removed in between must be read again.
+bool CheckChangedImageFiles() {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-changed-image";
+    const fs::path assets = fs::path(RAYOMD_TEST_SOURCE_DIR) / "docs" / "assets";
+    const fs::path mascot = assets / "branding" / "rayomd.png";
+    const fs::path screenshot = assets / "demo" / "ui.png";
+    fs::remove_all(root);
+    for (const char* name : { "changing", "mascot", "screenshot" }) fs::create_directories(root / name);
+    fs::copy_file(mascot, root / "mascot" / "pic.png");
+    fs::copy_file(screenshot, root / "screenshot" / "pic.png");
+    const auto build = [&](const char* directory, uint32_t failures, std::string& pdf) {
+        TinyPdf::PdfOptions options;
+        options.sourcePath = (root / directory / "doc.md").u8string();
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf("![picture](pic.png)\n", options, pdf);
+        return result.Ok() && result.failedImages == failures && ValidPdf(pdf);
+    };
+    std::string mascotPdf, screenshotPdf, missing, created, replaced, removed;
+    const fs::path changing = root / "changing" / "pic.png";
+    bool ok = build("mascot", 0, mascotPdf) && build("screenshot", 0, screenshotPdf) && mascotPdf != screenshotPdf &&
+        build("changing", 1, missing);
+    if (ok) {
+        fs::copy_file(mascot, changing);
+        ok = build("changing", 0, created) && created == mascotPdf;
+    }
+    if (ok) {
+        fs::copy_file(screenshot, changing, fs::copy_options::overwrite_existing);
+        ok = build("changing", 0, replaced) && replaced == screenshotPdf;
+    }
+    if (ok) {
+        fs::remove(changing);
+        ok = build("changing", 1, removed) && removed == missing;
+    }
+    fs::remove_all(root);
+    if (!ok) std::cerr << "a changed image file was not read again" << std::endl;
+    return ok;
+}
+
 // PDF/UA-1: a structure tree in reading order. Headings from H1, one level deeper at most; lists
 // as L, LI, Lbl and LBody, an item's text the body's own content and a nested list in that body,
 // a task's box its label with the state as ActualText; a table's header cells TH with a column
@@ -3158,6 +3197,7 @@ int main() {
     if (!CheckSvg()) return 97;
     if (!CheckTaggedPdf()) return 98;
     if (!CheckPngFilters()) return 99;
+    if (!CheckChangedImageFiles()) return 100;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
