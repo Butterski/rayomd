@@ -1156,13 +1156,17 @@ static void SetU32(std::string& out, size_t off, uint32_t v) {
 }
 
 // The TrueType checksum: the sum of the big-endian words of `data`, the last one padded with
-// zeros. Whole words are read four bytes at a time.
+// zeros. Whole words are one load each, swapped on a little-endian machine.
 static uint32_t ChecksumBytes(const char* data, size_t size) {
     uint32_t sum = 0;
     size_t i = 0;
     for (; i + 4 <= size; i += 4) {
-        sum += (uint32_t)(unsigned char)data[i] << 24 | (uint32_t)(unsigned char)data[i + 1] << 16 |
-            (uint32_t)(unsigned char)data[i + 2] << 8 | (uint32_t)(unsigned char)data[i + 3];
+        uint32_t word;
+        memcpy(&word, data + i, 4);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        word = __builtin_bswap32(word);
+#endif
+        sum += word;
     }
     if (i < size) {
         uint32_t word = 0;
@@ -7101,10 +7105,14 @@ private:
     }
 };
 
-static bool AddGlyphClosure(const TtfFont& font, uint16_t glyph, std::vector<uint8_t>& include) {
+// Marks `glyph` and the components of a composite one in `include`, and lists each glyph it
+// marks in `marked`.
+static bool AddGlyphClosure(const TtfFont& font, uint16_t glyph, std::vector<uint8_t>& include,
+    std::vector<uint16_t>& marked) {
     if (glyph >= include.size()) return false;
     if (include[glyph]) return true;
     include[glyph] = 1;
+    marked.push_back(glyph);
 
     if (glyph + 1 >= font.loca.size()) return true;
     uint32_t start = font.loca[glyph];
@@ -7128,7 +7136,7 @@ static bool AddGlyphClosure(const TtfFont& font, uint16_t glyph, std::vector<uin
         uint16_t flags = ReadU16(font.bytes, off);
         uint16_t componentGlyph = ReadU16(font.bytes, off + 2);
         off += 4;
-        if (!AddGlyphClosure(font, componentGlyph, include)) return false;
+        if (!AddGlyphClosure(font, componentGlyph, include, marked)) return false;
         off += (flags & 0x0001) ? 4 : 2;
         if (flags & 0x0008) off += 2;
         else if (flags & 0x0040) off += 4;
@@ -7151,17 +7159,17 @@ static bool CanSubset(const TtfFont& font) {
 
 // The glyphs of the subset for `used`, by their ids in the font, which is also the order of
 // their ids in the subset: .notdef, '?', the space, the glyph of every used CID and the
-// components of composite glyphs.
+// components of composite glyphs. Listed as they are marked and then sorted: a document shows
+// a few dozen of the font's thousands of glyphs.
 static std::vector<uint16_t> SubsetGlyphs(const TtfFont& font, const CidList& used) {
     std::vector<uint8_t> include((size_t)font.glyphCount, 0);
-    AddGlyphClosure(font, 0, include);
-    AddGlyphClosure(font, font.GlyphFor('?'), include);
-    AddGlyphClosure(font, font.GlyphFor(' '), include);
-    for (uint16_t cid : used) AddGlyphClosure(font, font.GlyphFor(cid), include);
     std::vector<uint16_t> glyphs;
-    for (uint32_t glyph = 0; glyph < font.glyphCount; glyph++) {
-        if (include[glyph]) glyphs.push_back((uint16_t)glyph);
-    }
+    glyphs.reserve(used.size() + 8);
+    AddGlyphClosure(font, 0, include, glyphs);
+    AddGlyphClosure(font, font.GlyphFor('?'), include, glyphs);
+    AddGlyphClosure(font, font.GlyphFor(' '), include, glyphs);
+    for (uint16_t cid : used) AddGlyphClosure(font, font.GlyphFor(cid), include, glyphs);
+    std::sort(glyphs.begin(), glyphs.end());
     return glyphs;
 }
 
@@ -7322,15 +7330,21 @@ static void WriteSubsetFont(const SubsetFontPlan& plan, char* out) {
     PutU16(out + 6, searchRange);
     PutU16(out + 8, entrySelector);
     PutU16(out + 10, (uint16_t)(numTables * 16 - searchRange));
-    size_t offset = 12 + (size_t)numTables * 16;
+    const size_t directoryBytes = 12 + (size_t)numTables * 16;
+    size_t offset = directoryBytes;
     size_t headAdjustment = 0;
+    // The font's sum is the directory's plus each table's: tables start on four-byte bounds and
+    // their padding is zeros, which a table's checksum pads its last word with too.
+    uint32_t tableSums = 0;
     for (size_t i = 0; i < plan.tables.size(); i++) {
         const SubsetFontPlan::Table& table = plan.tables[i];
         const char* const data = table.Data();
         const size_t size = table.Size();
         char* const record = out + 12 + i * 16;
+        const uint32_t checksum = ChecksumBytes(data, size);
+        tableSums += checksum;
         memcpy(record, table.tag, 4);
-        PutU32(record + 4, ChecksumBytes(data, size));
+        PutU32(record + 4, checksum);
         PutU32(record + 8, (uint32_t)offset);
         PutU32(record + 12, (uint32_t)size);
         if (size != 0) memcpy(out + offset, data, size);
@@ -7339,7 +7353,7 @@ static void WriteSubsetFont(const SubsetFontPlan& plan, char* out) {
         if (memcmp(table.tag, "head", 4) == 0) headAdjustment = offset + 8;
         offset += padded;
     }
-    PutU32(out + headAdjustment, 0xB1B0AFBAu - ChecksumBytes(out, plan.size));
+    PutU32(out + headAdjustment, 0xB1B0AFBAu - (ChecksumBytes(out, directoryBytes) + tableSums));
 }
 
 // The start of a font program's stream object, uncompressed, before its `size` bytes.
