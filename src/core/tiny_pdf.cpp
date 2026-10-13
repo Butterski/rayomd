@@ -6067,12 +6067,14 @@ private:
             text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
             return false;
         }
-        return WrapStyledInline(text, width, size, out);
+        return WrapStyledInline(text, width, size, out, false);
     }
 
     // WrapStyledRuns for one line of inline Markdown without formulas, such as a table cell.
-    // Text too long for the run offsets gives one empty line and false.
-    RAYOMD_SHARED bool WrapStyledInline(std::string_view text, double width, double size, StyledRuns& out) {
+    // Text too long for the run offsets gives one empty line and false. `recognizeMath` false
+    // (text without '$' and "\(") spares the parser its own search for them.
+    RAYOMD_SHARED bool WrapStyledInline(std::string_view text, double width, double size, StyledRuns& out,
+        bool recognizeMath = true) {
         out.text.clear();
         out.runs.clear();
         out.lineEnds.clear();
@@ -6080,11 +6082,12 @@ private:
             out.lineEnds.push_back(0);
             return false;
         }
-        if (!Internal::NeedsInlineParse(text)) {
+        unsigned char seen = 0;
+        if (!Internal::NeedsInlineParse(text, 0, &seen)) {
             // No inline syntax: every line is one unstyled run, also when it is empty.
             // The wide buffer keeps its size from paragraph to paragraph, so that resizing it
-            // fills only what it grows by.
-            if (text.find('\xE2') == std::string_view::npos) AssignUtf8ToWide(out.wide, text);
+            // fills only what it grows by. NeedsInlineParse saw every byte, also any 0xE2.
+            if ((seen & RayoMd::Text::kByteSymbolLead) == 0) AssignUtf8ToWide(out.wide, text);
             else AssignUtf8ToWide(out.wide, NormalizeSymbols(std::string(text)));
             WrapWideWords(font, std::wstring_view(out.wide), width, size, [&](std::wstring_view line) {
                 out.runs.emplace_back();
@@ -6097,7 +6100,7 @@ private:
             return true;
         }
 
-        Internal::ParseInlineRuns(text, out.parsed);
+        Internal::ParseInlineRuns(text, out.parsed, recognizeMath);
         const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
         size_t bytes = 0;
         for (const Internal::InlineRun& span : parsed) bytes += span.end - span.begin;
@@ -9049,15 +9052,17 @@ private:
             text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
             return false;
         }
-        return WrapAsciiInline(text, width, size, 0, out);
+        return WrapAsciiInline(text, width, size, 0, out, false);
     }
 
     // WrapAsciiRuns for one line of inline Markdown without formulas, such as a table cell;
     // every run gets the style bits `baseStyle` too (a bold header). Returns false only for
-    // text too long for the run offsets.
-    bool WrapAsciiInline(std::string_view text, double width, double size, uint8_t baseStyle, AsciiRuns& out) {
+    // text too long for the run offsets. `recognizeMath` false (text without '$' and "\(")
+    // spares the parser its own search for them.
+    bool WrapAsciiInline(std::string_view text, double width, double size, uint8_t baseStyle, AsciiRuns& out,
+        bool recognizeMath = true) {
         if (text.size() >= 0x40000000u) return false;
-        Internal::ParseInlineRuns(text, out.parsed);
+        Internal::ParseInlineRuns(text, out.parsed, recognizeMath);
         out.segments.clear();
         out.runs.clear();
         out.lineEnds.clear();
