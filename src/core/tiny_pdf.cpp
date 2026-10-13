@@ -789,6 +789,27 @@ static void AppendSingleSpaced(std::wstring& out, std::wstring_view text) {
     }
 }
 
+// The end of the word that starts at text[start]: its first white space, or `end`. Its width at
+// `scale` comes in `width`, the sum TextWidth makes of it, in the same order, from the same pass.
+static RAYOMD_HOT_INLINE size_t ScanWideWord(const TtfFont& font, const wchar_t* text, size_t start, size_t end,
+    double scale, double& width) {
+    double sum = 0.0;
+    size_t at = start;
+    while (at < end && !IsWideSpace(text[at])) {
+        uint32_t cp = (uint16_t)text[at++];
+        if (cp >= 0xD800 && cp <= 0xDBFF && at < end) {
+            const uint32_t lo = (uint16_t)text[at];
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                at++;
+            }
+        }
+        sum += font.CodepointWidth(cp) * scale;
+    }
+    width = sum;
+    return at;
+}
+
 // Greedy word wrap of text without inline styles: emit(line) receives every line. A line
 // is the piece of `raw` from its first to its last word; only when two of its words are
 // not exactly one space apart is it rebuilt in a scratch string. The view passed to emit
@@ -819,14 +840,14 @@ static void WrapWideWords(const TtfFont& font, std::wstring_view raw, double max
         singleSpaced = true;
     };
 
+    const double scale = size * 0.001;
     size_t i = 0;
     while (i < raw.size()) {
         while (i < raw.size() && IsWideSpace(raw[i])) i++;
         const size_t start = i;
-        while (i < raw.size() && !IsWideSpace(raw[i])) i++;
+        double wordWidth;
+        i = ScanWideWord(font, raw.data(), start, raw.size(), scale, wordWidth);
         if (i == start) continue;
-        const std::wstring_view word = raw.substr(start, i - start);
-        const double wordWidth = TextWidth(font, word, size);
         const bool lineEmpty = lineEnd == lineStart;
 
         if (!lineEmpty && lineWidth + spaceWidth + wordWidth <= maxWidth) {
@@ -852,7 +873,6 @@ static void WrapWideWords(const TtfFont& font, std::wstring_view raw, double max
         // A word wider than the line is cut into pieces; the last piece stays open.
         size_t partStart = start;
         double partWidth = 0.0;
-        const double scale = size * 0.001;
         for (size_t at = start; at < i; at++) {
             const double chWidth = CodepointWidth(font, (uint16_t)raw[at], scale);
             if (at > partStart && partWidth + chWidth > maxWidth) {
@@ -5902,6 +5922,7 @@ private:
         size_t lineStart = 0;       // index of the first run of the line being filled
         double lineWidth = 0.0;
         const double spaceWidth = TextWidth(font, L" ", size);
+        const double scale = size * 0.001;
 
         const size_t runCount = parsed.size();
         const size_t total = source.size();
@@ -5929,20 +5950,15 @@ private:
                     continue;
                 }
                 const size_t wordStart = at;
-                while (at < runEnd && !IsWideSpace(source[at])) at++;
-                // A word that reaches the end of its run goes on in the runs after it unless
-                // white space follows: "**a**b" and "[link](u)." are one word each.
-                size_t lastRun = index;
-                if (at == runEnd && at < total && !IsWideSpace(source[at])) {
-                    do {
-                        lastRun++;
-                        while (at < out.wideEnds[lastRun] && !IsWideSpace(source[at])) at++;
-                    } while (at == out.wideEnds[lastRun] && at < total && !IsWideSpace(source[at]));
-                }
+                double wordWidth;
+                at = ScanWideWord(font, source.data(), wordStart, total, scale, wordWidth);
                 const size_t wordEnd = at;
-                const std::wstring_view word(source.data() + wordStart, wordEnd - wordStart);
+                // A word that reaches the end of its run goes on in the runs after it unless
+                // white space follows: "**a**b" and "[link](u)." are one word each. It ends in
+                // the first run that ends at or after it.
+                size_t lastRun = index;
+                while (out.wideEnds[lastRun] < wordEnd) lastRun++;
 
-                double wordWidth = TextWidth(font, word, size);
                 const bool lineEmpty = out.runs.size() == lineStart;
                 bool needsSpace = !lineEmpty;
                 double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
