@@ -423,7 +423,11 @@ struct TtfFont {
 
     FileBytes bytes;
     std::map<std::string, Table> tables;
-    std::vector<uint16_t> glyphForBmp;   // glyph index by BMP code point, 0 = no glyph
+    // Glyph index by BMP code point, 0 = no glyph. Zero to begin with, as the width cache is, so
+    // a load writes only the code points the font maps and touches only their pages: assigning
+    // 64K entries zeroed 128 KB, a twentieth of a short Unicode export (2026-10-13).
+    std::array<uint16_t, 65536> glyphForBmp;
+    bool glyphTableWritten = false;   // by a ParseCmap since the table was last cleared
     std::vector<uint16_t> advances;
     std::vector<uint32_t> loca;
     mutable std::array<std::atomic<uint16_t>, 65536> widthCache;   // zero to begin with: see above
@@ -493,7 +497,10 @@ struct TtfFont {
     bool TryLoad(const Path& path) {
         bytes.clear();
         tables.clear();
-        glyphForBmp.clear();
+        if (glyphTableWritten) {
+            glyphForBmp.fill(0);
+            glyphTableWritten = false;
+        }
         advances.clear();
         loca.clear();
         // Widths are cached only from a loaded font.
@@ -617,7 +624,7 @@ struct TtfFont {
     }
 
     bool ParseCmap() {
-        glyphForBmp.assign(65536, 0);
+        glyphTableWritten = true;
         Table cmap = tables["cmap"];
         if (cmap.offset + 4 > bytes.size()) return false;
         uint16_t count = ReadU16(bytes, cmap.offset + 2);
