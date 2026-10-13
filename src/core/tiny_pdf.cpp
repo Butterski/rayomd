@@ -388,16 +388,15 @@ struct TtfFont {
         uint32_t length = 0;
     };
 
+    // The scalars first and the two 128 KB arrays last, so a load's writes to the scalars do not
+    // touch pages behind the arrays.
     FileBytes bytes;
     std::map<std::string, Table> tables;
-    // Glyph index by BMP code point, 0 = no glyph. Zero to begin with, as the width cache is, so
-    // a load writes only the code points the font maps and touches only their pages: assigning
-    // 64K entries zeroed 128 KB, a twentieth of a short Unicode export (2026-10-13).
-    std::array<uint16_t, 65536> glyphForBmp;
-    bool glyphTableWritten = false;   // by a ParseCmap since the table was last cleared
-    std::vector<uint16_t> advances;
-    std::vector<uint32_t> loca;
-    mutable std::array<std::atomic<uint16_t>, 65536> widthCache;   // zero to begin with: see above
+    uint32_t hmtxOffset = 0;
+    uint32_t locaOffset = 0;
+    uint32_t locaEntries = 0;     // glyphCount + 1 once loca is checked, else 0
+    uint16_t metricGlyphs = 0;    // glyphCount once hmtx is checked, else 0: the glyphs with an advance
+    uint16_t advanceCount = 0;    // the advances hmtx lists; later glyphs take the last one
     uint16_t unitsPerEm = 1000;
     uint16_t glyphCount = 0;
     uint16_t metricCount = 0;
@@ -410,6 +409,26 @@ struct TtfFont {
     int16_t yMax = 900;
     uint32_t sfntVersion = 0x00010000;  // of the font's table directory; a collection starts "ttcf"
     bool loaded = false;
+    bool glyphTableWritten = false;   // by a ParseCmap since the table was last cleared
+    // Glyph index by BMP code point, 0 = no glyph. Zero to begin with, as the width cache is, so
+    // a load writes only the code points the font maps and touches only their pages: assigning
+    // 64K entries zeroed 128 KB, a twentieth of a short Unicode export (2026-10-13).
+    std::array<uint16_t, 65536> glyphForBmp;
+    mutable std::array<std::atomic<uint16_t>, 65536> widthCache;   // zero to begin with: see above
+
+    // hmtx and loca are read in place from the font file, checked once when it is loaded.
+    uint16_t Advance(uint16_t glyph) const {
+        const uint8_t* const metric = bytes.data() + hmtxOffset + (size_t)std::min<uint16_t>(glyph, advanceCount - 1) * 4;
+        return (uint16_t)(metric[0] << 8 | metric[1]);
+    }
+
+    // The offset of `index`'s glyph in glyf, for an index below locaEntries.
+    uint32_t Loca(size_t index) const {
+        const uint8_t* const entries = bytes.data() + locaOffset;
+        if (indexToLocFormat == 0) return (uint32_t)(entries[index * 2] << 8 | entries[index * 2 + 1]) * 2u;
+        return (uint32_t)entries[index * 4] << 24 | (uint32_t)entries[index * 4 + 1] << 16 |
+            (uint32_t)entries[index * 4 + 2] << 8 | entries[index * 4 + 3];
+    }
 
     // RAYOMD_FONT first, then the sans fonts where the common systems install them, then,
     // on systems other than Windows, any regular sans TrueType font under the usual font
@@ -468,8 +487,8 @@ struct TtfFont {
             glyphForBmp.fill(0);
             glyphTableWritten = false;
         }
-        advances.clear();
-        loca.clear();
+        metricGlyphs = 0;
+        locaEntries = 0;
         // Widths are cached only from a loaded font.
         if (loaded) {
             for (auto& width : widthCache) width.store(0, std::memory_order_relaxed);
@@ -576,14 +595,9 @@ struct TtfFont {
         Table hmtx = tables["hmtx"];
         const size_t metrics = std::min<size_t>(metricCount, glyphCount);
         if ((size_t)hmtx.offset + (metrics - 1) * 4 + 2 > bytes.size()) return false;
-        const uint8_t* const metric = bytes.data() + hmtx.offset;
-        advances.resize(glyphCount);
-        uint16_t lastAdvance = 500;
-        for (size_t i = 0; i < metrics; i++) {
-            lastAdvance = (uint16_t)(metric[i * 4] << 8 | metric[i * 4 + 1]);
-            advances[i] = lastAdvance;
-        }
-        for (size_t i = metrics; i < glyphCount; i++) advances[i] = lastAdvance;
+        hmtxOffset = hmtx.offset;
+        advanceCount = (uint16_t)metrics;
+        metricGlyphs = glyphCount;
 
         if (!ParseCmap()) return false;
         if (!ParseLoca()) return false;
@@ -650,26 +664,27 @@ struct TtfFont {
         return true;
     }
 
+    // Checks every loca entry once: none may point past glyf.
     bool ParseLoca() {
         Table table = tables["loca"];
-        loca.resize((size_t)glyphCount + 1);
         const uint8_t* const entries = bytes.data() + table.offset;
         uint32_t furthest = 0;
         if (indexToLocFormat == 0) {
             if ((size_t)table.offset + (size_t)(glyphCount + 1) * 2 > bytes.size()) return false;
             for (size_t i = 0; i <= glyphCount; i++) {
-                loca[i] = (uint32_t)(entries[i * 2] << 8 | entries[i * 2 + 1]) * 2u;
-                furthest = std::max(furthest, loca[i]);
+                furthest = std::max(furthest, (uint32_t)(entries[i * 2] << 8 | entries[i * 2 + 1]) * 2u);
             }
         } else {
             if ((size_t)table.offset + (size_t)(glyphCount + 1) * 4 > bytes.size()) return false;
             for (size_t i = 0; i <= glyphCount; i++) {
-                loca[i] = (uint32_t)entries[i * 4] << 24 | (uint32_t)entries[i * 4 + 1] << 16 |
-                    (uint32_t)entries[i * 4 + 2] << 8 | entries[i * 4 + 3];
-                furthest = std::max(furthest, loca[i]);
+                furthest = std::max(furthest, (uint32_t)entries[i * 4] << 24 | (uint32_t)entries[i * 4 + 1] << 16 |
+                    (uint32_t)entries[i * 4 + 2] << 8 | entries[i * 4 + 3]);
             }
         }
-        return furthest <= tables["glyf"].length;
+        if (furthest > tables["glyf"].length) return false;
+        locaOffset = table.offset;
+        locaEntries = (uint32_t)glyphCount + 1;
+        return true;
     }
 
     uint16_t GlyphFor(uint32_t cp) const {
@@ -693,8 +708,8 @@ struct TtfFont {
         uint16_t cached = widthCache[cid].load(std::memory_order_relaxed);
         if (cached != 0) return cached;
         uint16_t glyph = GlyphFor(cid);
-        uint16_t width = glyph < advances.size()
-            ? (uint16_t)((advances[glyph] * 1000u + unitsPerEm / 2u) / unitsPerEm)
+        uint16_t width = glyph < metricGlyphs
+            ? (uint16_t)((Advance(glyph) * 1000u + unitsPerEm / 2u) / unitsPerEm)
             : (uint16_t)500;
         widthCache[cid].store(width, std::memory_order_relaxed);
         return width;
@@ -1165,6 +1180,15 @@ static size_t DecimalDigits(size_t value) {
     return digits;
 }
 
+// A payload that BuildInto writes straight into the file, instead of copying it from a buffer.
+class PdfPayloadWriter {
+public:
+    virtual void Write(char* out) const = 0;
+
+protected:
+    ~PdfPayloadWriter() = default;
+};
+
 class PdfObjects {
 public:
     int Reserve() {
@@ -1243,6 +1267,18 @@ public:
         return (int)objects.size();
     }
 
+    // A stream object whose payload of `length` bytes `writer` writes in BuildInto, where it
+    // lies in the file. The writer outlives BuildInto.
+    void SetStreamWriter(int id, std::string&& head, size_t length, const PdfPayloadWriter& writer) {
+        if (Object* object = At(id)) {
+            *object = Object();
+            object->head = std::move(head);
+            object->writer = &writer;
+            object->inPlaceBytes = length;
+            object->stream = true;
+        }
+    }
+
     // Copies `data`; for small payloads that do not outlive the call.
     int AddStream(const std::string& dict, const std::string& data) {
         std::string body = StreamHead(dict, data.size());
@@ -1319,6 +1355,8 @@ public:
                 } else {
                     memset(payload, ' ', payloadBytes);
                 }
+            } else if (object.writer) {
+                object.writer->Write(payload);
             } else if (payloadBytes != 0) {
                 memcpy(payload, object.view.data(), payloadBytes);
             }
@@ -1345,7 +1383,8 @@ private:
         std::string head;           // owned text of the object, or the stream dictionary
         std::string_view view;      // referenced payload written after `head`
         size_t inPlaceOffset = 0;   // in-place payload: where it lies in the output buffer
-        size_t inPlaceBytes = 0;
+        size_t inPlaceBytes = 0;    // the size of an in-place or a written payload
+        const PdfPayloadWriter* writer = nullptr;   // writes the payload in BuildInto
         bool inPlace = false;
         bool stream = false;        // "\nendstream" follows the payload
     };
@@ -1355,7 +1394,7 @@ private:
     }
 
     static size_t PayloadBytes(const Object& object) {
-        return object.inPlace ? object.inPlaceBytes : object.view.size();
+        return object.inPlace || object.writer ? object.inPlaceBytes : object.view.size();
     }
 
     static std::string StreamHead(const std::string& dict, size_t length) {
@@ -7081,9 +7120,9 @@ static bool AddGlyphClosure(const TtfFont& font, uint16_t glyph, std::vector<uin
     include[glyph] = 1;
     marked.push_back(glyph);
 
-    if (glyph + 1 >= font.loca.size()) return true;
-    uint32_t start = font.loca[glyph];
-    uint32_t end = font.loca[glyph + 1];
+    if ((size_t)glyph + 1 >= font.locaEntries) return true;
+    uint32_t start = font.Loca(glyph);
+    uint32_t end = font.Loca((size_t)glyph + 1);
     if (end <= start) return true;
 
     auto it = font.tables.find("glyf");
@@ -7120,7 +7159,7 @@ static bool CanSubset(const TtfFont& font) {
         auto it = font.tables.find(tag);
         return it != font.tables.end() && it->second.length >= size;
     };
-    return font.glyphCount != 0 && font.loca.size() >= (size_t)font.glyphCount + 1 && font.advances.size() >= font.glyphCount &&
+    return font.glyphCount != 0 && font.locaEntries >= (size_t)font.glyphCount + 1 && font.metricGlyphs >= font.glyphCount &&
         sized("glyf", 0) && sized("hmtx", 0) && sized("head", 54) && sized("hhea", 36) && sized("maxp", 6);
 }
 
@@ -7173,8 +7212,8 @@ static bool PlanSubsetFont(const TtfFont& font, const std::vector<uint16_t>& gly
     const TtfFont::Table& oldHmtx = font.tables.at("hmtx");
     size_t glyfBytes = 0;
     for (uint16_t glyph : glyphs) {
-        const uint32_t start = font.loca[glyph];
-        const uint32_t end = font.loca[(size_t)glyph + 1];
+        const uint32_t start = font.Loca(glyph);
+        const uint32_t end = font.Loca((size_t)glyph + 1);
         if (end > start) glyfBytes += ((size_t)(end - start) + 3) & ~(size_t)3;
     }
     std::string glyfData;
@@ -7188,11 +7227,11 @@ static bool PlanSubsetFont(const TtfFont& font, const std::vector<uint16_t>& gly
         // Every glyph gets a full metric; past numberOfHMetrics the font lists only bearings.
         const size_t bearing = glyph < font.metricCount ? (size_t)glyph * 4 + 2
             : (size_t)font.metricCount * 4 + (size_t)(glyph - font.metricCount) * 2;
-        AppendU16(hmtxData, font.advances[glyph]);
+        AppendU16(hmtxData, font.Advance(glyph));
         AppendU16(hmtxData, bearing + 2 <= oldHmtx.length ? ReadU16(font.bytes, oldHmtx.offset + bearing) : 0);
 
-        const uint32_t start = font.loca[glyph];
-        const uint32_t end = font.loca[(size_t)glyph + 1];
+        const uint32_t start = font.Loca(glyph);
+        const uint32_t end = font.Loca((size_t)glyph + 1);
         if (end <= start) continue;
         const size_t at = glyfData.size();
         glyfData.append((const char*)font.bytes.data() + oldGlyf.offset + start, end - start);
@@ -7238,7 +7277,8 @@ static bool PlanSubsetFont(const TtfFont& font, const std::vector<uint16_t>& gly
             if (it == font.tables.end() || (size_t)it->second.offset + it->second.length > font.bytes.size()) continue;
             const char* const original = (const char*)font.bytes.data() + it->second.offset;
             if (tagString == "head" || tagString == "hhea" || tagString == "maxp" || tagString == "post") {
-                table.owned.assign(original, it->second.length);
+                // post keeps only its 32-byte header: no glyph names.
+                table.owned.assign(original, tagString == "post" ? std::min<size_t>(it->second.length, 32) : it->second.length);
                 if (tagString == "head") {
                     SetU32(table.owned, 8, 0);
                     SetU16(table.owned, 50, 1);
@@ -7387,12 +7427,23 @@ public:
         return candidate;
     }
 
+    // Whether `key` was asked about before. The last 64 keys asked about are remembered, as hashes.
+    bool SeenBefore(const std::string& key) {
+        const size_t hash = std::hash<std::string>()(key);
+        std::lock_guard<std::mutex> lock(mutex);
+        if (std::find(seen.begin(), seen.end(), hash) != seen.end()) return true;
+        if (seen.size() >= 64) seen.erase(seen.begin());
+        seen.push_back(hash);
+        return false;
+    }
+
 private:
     const size_t maxEntries;
     const size_t maxBytes;
     size_t bytes = 0;
     std::mutex mutex;
     std::unordered_map<std::string, std::shared_ptr<const std::string>> values;
+    std::vector<size_t> seen;
 };
 
 // The glyphs of the subset for a document's CIDs (SubsetGlyphs), made once for both the font
@@ -7417,15 +7468,16 @@ private:
 
 // The font program of a document: the subset of the glyphs it shows, or the whole font when
 // it cannot be subset (CanSubset). With `compress` FlateDecode-compressed, in a cache of its own.
-// Uncompressed, the subset is written straight into the stream object.
+// Uncompressed, a subset is kept only when its key comes again (a batch or a warm process):
+// the first time, null is returned and BuildInto writes the subset of `plan` straight into the
+// file, without a copy in a buffer of its own.
 static std::shared_ptr<const std::string> CachedFontFileObject(
-    const TtfFont& font, SubsetGlyphList& glyphs, const std::string& key, bool compress) {
+    const TtfFont& font, SubsetGlyphList& glyphs, const std::string& key, bool compress, SubsetFontPlan& plan) {
     static BoundedStringCache plainCache(8, 32u * 1024u * 1024u);
     static BoundedStringCache flateCache(8, 32u * 1024u * 1024u);
     BoundedStringCache& cache = compress ? flateCache : plainCache;
     if (auto cached = cache.Get(key)) return cached;
 
-    SubsetFontPlan plan;
     const bool subset = CanSubset(font) && PlanSubsetFont(font, glyphs.Get(), plan);
     const std::string_view whole((const char*)font.bytes.data(), font.bytes.size());
     if (compress) {
@@ -7439,6 +7491,7 @@ static std::shared_ptr<const std::string> CachedFontFileObject(
         return cache.Insert(key, BuildFlateFontFileObject(bytes));
     }
     if (!subset) return cache.Insert(key, BuildFontFileObject(whole));
+    if (!cache.SeenBefore(key)) return nullptr;
     std::string body = FontFileHeader(plan.size);
     const size_t at = body.size();
     body.resize(at + plan.size + 10);
@@ -7446,6 +7499,16 @@ static std::shared_ptr<const std::string> CachedFontFileObject(
     memcpy(&body[at + plan.size], "\nendstream", 10);
     return cache.Insert(key, std::move(body));
 }
+
+// Writes the subset font of a plan in BuildInto (CachedFontFileObject).
+class SubsetFontWriter final : public PdfPayloadWriter {
+public:
+    explicit SubsetFontWriter(const SubsetFontPlan& planValue) : plan(planValue) {}
+    void Write(char* out) const override { WriteSubsetFont(plan, out); }
+
+private:
+    const SubsetFontPlan& plan;
+};
 
 // The glyph id of every used CID in the font program of CachedFontFileObject.
 static std::shared_ptr<const std::string> MakeCidToGidMap(
@@ -10022,12 +10085,13 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
 }
 
 static const TtfFont* GetCachedFont() {
+    // The font's own `loaded`, which lies before its arrays, not a flag after them.
     struct CachedFont {
+        CachedFont() { font.Load(); }
         TtfFont font;
-        bool loaded = font.Load();
     };
     static const CachedFont cached;
-    return cached.loaded ? &cached.font : nullptr;
+    return cached.font.loaded ? &cached.font : nullptr;
 }
 
 // A theme's font, loaded once per path and kept, as the default font is: builds on other threads
@@ -10297,9 +10361,12 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     auto toUnicodeBytes = MakeToUnicodeCMap(used, cidKey);
 
     // The cached font objects are referenced, not copied: the shared pointers keep them
-    // alive until BuildInto below.
-    std::shared_ptr<const std::string> fontFileObject = CachedFontFileObject(font, subsetGlyphs, cidKey, options.compress);
-    pdf.SetView(fontFileId, *fontFileObject);
+    // alive until BuildInto below. A subset not cached is written by BuildInto from its plan.
+    SubsetFontPlan fontPlan;
+    const SubsetFontWriter fontWriter(fontPlan);
+    std::shared_ptr<const std::string> fontFileObject = CachedFontFileObject(font, subsetGlyphs, cidKey, options.compress, fontPlan);
+    if (fontFileObject) pdf.SetView(fontFileId, *fontFileObject);
+    else pdf.SetStreamWriter(fontFileId, FontFileHeader(fontPlan.size), fontPlan.size, fontWriter);
 
     // With --compress, the compressed CMaps, which have to outlive BuildInto.
     std::string cidMapFlate;
