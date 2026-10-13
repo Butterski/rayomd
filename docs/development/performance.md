@@ -179,6 +179,36 @@ exports (perfstat, 300 runs) stay within 10 µs and 3 faults. `--batch` on one C
 corpus (305 documents) -2.1 %, peak RSS 17.4 → 18.2 MiB with one worker and 36.3 → 39.1 MiB with
 the automatic count; 200 copies of polish.md -4.4 %, 12.8 MiB both.
 
+Then the byte-class scans (*Byte classes scanned a byte at a time*), measured the same way, in
+three changes:
+
+- **The parser's ordinary-byte runs found 16 bytes at a time** (`FindByteClass`): SSE2 compares
+  against the twelve bytes that stop a run (inline syntax, ':' and '@'), the last step over the
+  text's last 16 bytes again; text under 16 bytes keeps the byte loop. The loop in
+  `ParseInlineRuns` took 9.2 % of the essay's instructions (about 5 a byte), now 0.65 %.
+- **A plain paragraph wrapped without a second syntax test**: `NeedsInlineParse` has read every
+  byte of a paragraph without inline syntax, so the standard `RenderParagraph` calls
+  `WrapAsciiWords` directly unless the paragraph holds 0xE2 (`ForEachWrappedAsciiLine`'s
+  `ContainsByteClass` read it again: 1.4 % of the essay).
+- **No second math search**: `WrapAsciiRuns` and `WrapStyledRuns` have looked for '$' and "\("
+  already and pass `recognizeMath` false, which spares `ParseInlineRuns` the same two searches;
+  `WrapStyledInline` takes 0xE2 from `NeedsInlineParse`'s classes instead of a `find`.
+
+| fixture (against Phase 2c) | time | time, aligned | instructions |
+| --- | ---: | ---: | ---: |
+| essay.md | -5.2 % | -5.1 % | -7.2 % |
+| native_math.md | 0.0 % | -1.5 % | -2.6 % |
+| README.md | -0.8 % | -0.7 % | -1.4 % |
+| polish.md | -0.4 % | -0.9 % | -1.2 % |
+| notes.md | -0.2 % | -0.3 % | -0.9 % |
+| tester-noimg.md | 0.0 % | -0.9 % | -0.2 % |
+| code-heavy.md | -0.3 % | -0.2 % | -0.2 % |
+| table-heavy.md | +1.3 % | -1.1 % | 0.0 % |
+| geometric mean | -0.7 % | -1.3 % | -1.7 % |
+
+A/A up to 1.6 % unaligned (table-heavy), 0.6 % aligned. Fresh exports (perfstat, 200 runs):
+essay 1.02 → 0.99 ms, 3.455 → 3.223 M instructions; the others within 10 µs and their faults.
+
 ## Maintained workflows
 
 ```sh
@@ -522,11 +552,18 @@ Not adopted: +5 to +40 % of the executable for 1 to 3 %, and the cliff only move
 Try first: the two renderers in translation units of their own, each with its own
 budget.
 
-**Byte classes scanned a byte at a time.** `ContainsByteClass`, `NeedsInlineParse`
-and the parser's ordinary-byte runs take about 28 instructions per 8 bytes; the
-out-of-line check alone is 3.2 % of the 96 KiB ASCII fixture's instructions
-(2026-10-09). SSE2 compares against the ten syntax bytes: about 22 per 16 bytes;
-an SSSE3 `pshufb` nibble table: about 8. Measure on short table cells first.
+**Byte classes scanned a byte at a time.** The parser's ordinary-byte runs take SSE2 now (Phase
+2); left are `NeedsInlineParse` (3 % of the essay's instructions) and `ContainsByteClass` (table
+cells, `WriteEscapedLiteral`'s runs, `StripInlineMarkdown`). Their loop ORs a table load per byte
+into one register: about 17 instructions per 8 bytes, not the 28 measured on 2026-10-09. Ten SSE2
+compares cost more (about 40 per 16 bytes without VEX: every `pcmpeqb` overwrites its operand, so
+each needs a register copy); an SSSE3 `pshufb` nibble table about 16 per 16 bytes for the stops
+and 13 for the classes of text without one, but behind a call, the CPU test and table loads per
+paragraph it gained on the essay only (see *Tried and rejected*). Most table cells are under 16
+bytes. The paragraph's searches for '\n', '$', "\(" and "[^" (`WrapAsciiRuns`) and for 0xE2
+(`ParseInlineRuns`) are glibc's AVX2 `memchr`, a fraction of an instruction a byte: one SSE2
+pass for all of them costs more on long paragraphs. A VEX (AVX) build would drop the copies;
+not measured (2026-10-13).
 
 **One text object per line.** Every run is its own `q … BT … ET Q` (about 70
 bytes besides the text); 2,322 of 3,999 text objects in the 96 KiB ASCII fixture
@@ -563,10 +600,9 @@ The remaining per-export allocations are the parser's block strings, the diction
 `PdfObjects` (a head kept per object would need callers to write into it) and `WrapText`'s
 vector of lines for headings and image fallbacks.
 
-**Phase 2 items left open (2026-10-13).** SIMD byte-class scans (*Byte classes scanned a byte
-at a time*), the fresh-process leftovers (read() into the input string, the 1 MB buffer and font
-mapping left to exit) and the renderers in translation units of their own were not measured in
-this round.
+**Phase 2 items left open (2026-10-13).** The fresh-process leftovers (read() into the input
+string, the 1 MB buffer and font mapping left to exit) and the renderers in translation units of
+their own were not measured in this round.
 
 **Branchless candidate choice in the DEFLATE encoder.** Font programs are its
 slowest input (151 MB/s), with about 0.5 mispredictions a byte, 43 % of them on
@@ -655,6 +691,13 @@ Text and layout:
   scan once per paragraph instead, a flag for all its runs, is kept: essay -4.8 %).
 - SSE2 runs of ASCII in UTF-8 decoding: single fixtures -0.5 %, `unicode_96kb.md`
   +0.53 %, as simdutf did.
+- `NeedsInlineParse` in SIMD (2026-10-13): ten SSE2 compares a step, inline (essay +0.56 %
+  instructions); SSSE3 nibble tables in a template kernel, stops and classes in one pass (essay
+  -1.1 % instructions, other fixtures +0.6 to +1.8 % aligned with the same instructions: the
+  template moved `tiny_pdf.cpp`'s inlining and took `NeedsInlineParse` out of `.text.hot`); the
+  same tables out of line behind the old signature, stops and classes in two passes (essay
+  -1.0 % instructions and -1.1 % aligned time; README +0.55 %, table-heavy +0.9 %, tester-noimg
+  +0.8 % aligned, notes +0.1 % instructions).
 - `ScanWideWord` out of line, the sum in a register: README +2.2 % instructions, +3.0 % time
   aligned. `WrapWideWords` out of line (+0.2 % instructions) and the width cache filled outside
   the word loop (+0.3 %): the sum stayed on the stack. A two- and three-byte fast path in
