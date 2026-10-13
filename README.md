@@ -34,14 +34,9 @@ No browser. No LaTeX. No Pandoc. No runtime.
 </div>
 
 > [!TIP]
-> **New in 4.3:** text in other scripts than Latin (and Latin with characters beyond Windows-1252)
-> takes **half the bytes** in the PDF, so such documents come out **up to 26 % smaller** and
-> export up to 12 % faster, and documents of plain code blocks export **34 to 42 % faster** in a
-> warm process. Since 4.2, RayoMD decodes PNGs with its own inflater, a row at a
-> time, on up to four cores, in **70 % less memory** than 4.1.0 for a large one. Text and pixels
-> are unchanged. 4.3.1 loads and subsets the TrueType font with less work, so a fresh export of
-> a Unicode document runs **up to 8 % faster** than in 4.3.0, with the same bytes. See
-> [the numbers](#performance).
+> **New in 4.3:** text beyond Windows-1252 takes **half the bytes** in the PDF, so such documents
+> come out **up to 26 % smaller**; plain code blocks export **up to 42 % faster** in a warm
+> process; and 4.3.1 loads the TrueType font with less work. See [the numbers](#performance).
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. Windows gets a
 compact Dear ImGui app with command-line modes, Linux a small CLI, and both share one exporter
@@ -54,14 +49,14 @@ you can also embed through the [C++ API](https://github.com/Butterski/rayomd/wik
 <td width="33%" valign="top">
 
 ### Fast
-A short note in about **1 ms**, start to exit; a 1024×1024 PNG in 8 to 12 ms, 2 ms once
+A short note in about **1 ms**, start to exit; a 1024×1024 PNG in 7 to 11 ms, 2 ms once
 converted. Batches run on up to 64 threads.
 
 </td>
 <td width="33%" valign="top">
 
 ### Small
-A **643 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
+A **645 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
 runtime to install.
 
 </td>
@@ -139,221 +134,90 @@ cmake --build build --config Release
 
 </details>
 
-| Package | For |
-|---|---|
-| `rayomd-<version>-windows-x64.zip` | Windows: the app and every CLI mode in one `rayomd.exe` |
-| `rayomd-<version>-linux-x64.tar.gz` | Linux: needs only glibc |
-| `rayomd-<version>-linux-x64-static.tar.gz` | Linux with no dependency at all, the fastest start |
-| `rayomd-<version>-linux-x64-curl.tar.gz` | Linux with HTTP/HTTPS images through libcurl |
+| Package | Size, 4.3.1 | For |
+|---|---:|---|
+| `rayomd-<version>-windows-x64.zip` | 1,482 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
+| `rayomd-<version>-linux-x64.tar.gz` | 645 KB | Linux: needs only glibc |
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,042 KB | Linux with no dependency at all, the fastest start |
+| `rayomd-<version>-linux-x64-curl.tar.gz` | 647 KB | Linux with HTTP/HTTPS images through libcurl |
 
 Every feature below works the same from both command lines and the
 [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
 
 ## Performance
 
-Measured on 2026-10-13: Linux x86-64, g++ 13.3, one pinned CPU core unless said. A one-shot
-export is a fresh `rayomd --export` process, start to exit (median of 40 runs).
-
-### Text, 4.3
-
-The Unicode renderer, which draws any text the standard PDF fonts cannot, writes two bytes a
-character where it wrote four hex digits; plain code blocks are drawn without a list of strings
-per line. One-shot export against 4.2.2 (median of 41):
-
-| Document | 4.2.2 | 4.3.0 | PDF size |
-|---|---:|---:|---:|
-| [`performance.md`](docs/development/performance.md) (Unicode, 2,000 lines) | 5.07 ms | **4.77 ms** | 960 → **709 KB** |
-| This README | 2.41 ms | **2.33 ms** | 252 → **206 KB** |
-| 35 KB of C++ in code blocks, Polish comments | 2.34 ms | **2.06 ms** | 287 → **217 KB** |
-| The same code, ASCII only | 1.63 ms | **1.48 ms** | 146 KB, as before |
-
-Documents in ASCII or Windows-1252 Latin keep the standard fonts and their exact bytes. Text
-extracts and renders the same: 650 PDFs under five option sets pass `qpdf --check` and give
-Poppler the same text and pixels as with 4.2.2.
-
-4.3.1 reads the TrueType font's tables directly, keeps its glyph table in memory that starts
-zeroed, and writes the font subset once, straight into the PDF. One-shot export against
-4.3.0, the same PDF bytes:
-
-| Document | 4.3.0 | 4.3.1 |
-|---|---:|---:|
-| Short note in Polish | 1.40 ms | **1.28 ms** |
-| `tester.md`, no images | 1.89 ms | **1.75 ms** |
-| 35 KB of C++ in code blocks, Polish comments | 2.07 ms | **1.91 ms** |
-| [`performance.md`](docs/development/performance.md) | 4.86 ms | **4.69 ms** |
-| Short note in ASCII (standard fonts) | 0.96 ms | 0.95 ms |
-
-### Images, 4.2
-
-```mermaid
-%%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#2ea44f"}}}}%%
-xychart-beta
-    title "One 1024×1024 RGBA PNG, one-shot export, in ms"
-    x-axis ["3.2.0", "4.0.0", "4.1.0", "4.2.0", "4.2.1", "4.2.1, 2 cores", "4.2.1, seen before"]
-    y-axis "Milliseconds" 0 --> 90
-    bar [87.6, 27.3, 12.2, 11.4, 11.0, 7.2, 2.2]
-```
-
-| Document | 4.1.0 | 4.2.0 | 4.2.1 | 4.2.1, 2 cores | 4.2.1, image seen before |
-|---|---:|---:|---:|---:|---:|
-| One 1024×1024 RGBA PNG | 12.2 ms | 11.4 ms | **11.0 ms** | **7.2 ms** | **2.2 ms** |
-| `tester.md` with that PNG | 13.1 ms | 12.2 ms | **11.9 ms** | **8.0 ms** | **3.0 ms** |
-| One 2048×2048 RGBA illustration | 27.7 ms | 24.6 ms | **20.4 ms** | **14.3 ms** | **1.7 ms** |
-| One noisy 1024×1024 RGBA photo | 32.7 ms | 33.1 ms | **31.9 ms** | **24.5 ms** | **14.1 ms** |
-
-A PNG with transparency is inflated by RayoMD's own decoder a row at a time, each row is
-unfiltered, split into colour and alpha, filtered again (in AVX2 where the CPU has it) straight
-into compression segments, and on more than one core helper threads compress the segments
-while decoding goes on. The decoder accepts exactly what zlib does; it is faster than
-libdeflate's on three of the seven test images, within 1.3 % on a fourth and up to 21 % slower
-on the others. 4.2.1 unfilters two Paeth-filtered rows at once and scores filters on bytes, so
-images with such rows gain most; the screenshot, which has none, is 2 to 3 % slower than in
-4.2.0. Every pixel is unchanged and the streams are within 0.3 % of 4.1.0's. From 32,768 pixels
-a converted image is kept in the user cache directory, so its next export, in any process,
-skips the work: the last column. `--no-image-cache` turns that off. Documents without such a
-PNG give the same PDF bytes as 4.0.0, as fast.
-
-**Memory.** A new image is no longer decoded whole: the decoder keeps the last 32 KB and a
-chunk, and at most six 1 MiB compression segments are filled at once. Peak memory of a one-shot
-export, one core (RSS):
-
-| Export | 4.1.0, new image | 4.2, new image | 4.2, image seen before |
-|---|---:|---:|---:|
-| Short note, no image | 2.7 MiB | 2.8 MiB | 2.8 MiB |
-| One 1024×1024 RGBA PNG | 11.2 MiB | **8.8 MiB** | 3.8 MiB |
-| One 2048×2048 RGBA illustration | 27.8 MiB | **8.4 MiB** | 3.3 MiB |
-| One noisy 1024×1024 RGBA photo | 22.3 MiB | **19.9 MiB** | 14.8 MiB |
-| 48 documents with a 1024×1024 PNG each, `--batch`, six workers | 58.5 MiB | 60.3 MiB | |
-
-On four cores the helper threads and their buffers add up to 3.8 MiB (the 1024×1024 PNG
-12.6 MiB, 4.1.0 11.9 MiB there). A batch keeps every document's streams, which dominate its
-memory. The noisy photo's memory is mostly its own PNG and its 2.8 MB stream.
-
-### Text, 4.0
-
-4.0.0 against 3.2.0 (2026-10-12); 4.1.0 and 4.2 render text as fast and with the same bytes.
-
-| Document | 3.2.0 | 4.0.0 | Faster by |
-|---|---:|---:|---:|
-| Short note, ASCII | 1.69 ms | **1.04 ms** | 38 % |
-| Short note, Polish text | 2.53 ms | **1.31 ms** | 48 % |
-| Mixed document with formulas (`single_01.md`) | 6.27 ms | **4.14 ms** | 34 % |
-| Short Chinese note, drawn in a fallback font | 7.59 ms | **2.67 ms** | 65 % |
-
-Warm exports, repeated in one process with `--bench`, run 16 % faster than 3.2.0 (geometric
-mean of the nine watch-suite documents, pinned; documents with formulas up to 25 %), with PDFs
-byte for byte those of 3.2.0 on a corpus of 3,353 PDFs. The fully static Linux edition starts
-another 0.3 ms sooner: a short ASCII note in 0.68 ms.
-
-| Release asset | 4.0.0 | 4.1.0 | 4.2.0 | 4.2.1 | 4.3.0 | 4.3.1 |
-|---|---:|---:|---:|---:|---:|---:|
-| `rayomd-<version>-linux-x64.tar.gz` | 604 KB | 635 KB | 643 KB | 645 KB | 646 KB | 645 KB |
-| `rayomd-<version>-linux-x64-static.tar.gz` | 1,039 KB | 1,027 KB | 1,039 KB | 1,042 KB | 1,042 KB | 1,042 KB |
-| `rayomd-<version>-windows-x64.zip` (GUI and CLI) | 1,444 KB | 1,474 KB | 1,480 KB | 1,482 KB | 1,484 KB | 1,482 KB |
-
-4.1.0 adds libdeflate's decompressor (MIT) and drops zlib, which the static edition linked in;
-4.2.0 replaces libdeflate with RayoMD's own decoder.
+Measured on 2026-10-13 on an AMD Ryzen 5 PRO 4650GE in an Arch Linux container without network.
+A one-shot export is a fresh process, start to exit.
 
 ### Against other tools
 
-The same machine (AMD Ryzen 5 PRO 4650GE, Debian 12 container, no network) converting the
-repository's `tester.md` (headings, Unicode text, code, tables, lists, quotes, footnotes and
-formulas), each tool as a fresh process, start to exit, median of 20 runs on 2026-10-12.
-
-**Without images**
+Each tool converts the repository's `tester.md` (headings, Unicode text, code, tables, lists,
+quotes, footnotes and formulas) as a fresh process, median of 20 on four pinned cores.
 
 ```mermaid
 %%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#2ea44f"}}}}%%
 xychart-beta
     title "tester.md without images, in ms (lower is better)"
-    x-axis ["RayoMD", "glu", "Pandoc + Typst", "md-to-pdf", "Pandoc + XeLaTeX"]
-    y-axis "Milliseconds" 0 --> 1800
-    bar [1.6, 56, 112, 1670, 1708]
+    x-axis ["RayoMD", "glu", "Qt 6", "Pandoc + Typst", "Pandoc + WeasyPrint", "md-to-pdf", "Pandoc + XeLaTeX"]
+    y-axis "Milliseconds" 0 --> 2200
+    bar [1.5, 54, 69, 346, 968, 1805, 2097]
 ```
 
-| Tool | Version | Time | Formulas |
-|---|---|---:|---|
-| **RayoMD** | 4.0.0 | **1.6 ms** | typeset |
-| glu | 0.0.43 | 55.8 ms (35×) | left as TeX source |
-| Pandoc + Typst | 3.12.1, Typst 0.15.1 | 112.2 ms (71×) | typeset |
-| md-to-pdf | 5.2.5, Chromium 154 | 1,669.8 ms (1,057×) | left as TeX source |
-| Pandoc + XeLaTeX | 3.12.1, TeX Live 2022 | 1,708.2 ms (1,081×) | typeset |
+| Tool | Version | Without images | With a 1024×1024 PNG | Peak memory | Installed size¹ | Formulas |
+|---|---|---:|---:|---:|---:|---|
+| **RayoMD** | 4.3.1 | **1.5 ms** | **7.8 ms** | **3.9 MiB** | **1.2 MiB** | typeset |
+| glu | 0.0.46 | 54 ms (37×) | 85 ms (11×) | 33 MiB | 25 MiB | TeX source |
+| Qt 6 `QTextDocument` + `QPrinter` | 6.12.0 | 69 ms (47×) | 112 ms (14×) | 39 MiB | 373 MiB | TeX source |
+| Pandoc + Typst | 3.11, Typst 0.15.1 | 346 ms (234×) | 376 ms (49×) | 239 MiB² | 0.65 GiB | typeset |
+| Pandoc + WeasyPrint | 3.11, WeasyPrint 70.0 | 968 ms (654×) | 1,238 ms (160×) | 241 MiB² | 0.9 GiB | MathML text and TeX |
+| md-to-pdf | 5.2.5, Chromium 154 | 1,805 ms (1,220×) | 1,903 ms (246×) | 205 MiB² | 1.0 GiB | TeX source |
+| Pandoc + XeLaTeX | 3.11, TeX Live 2026 | 2,097 ms (1,417×) | 3,351 ms (432×) | 340 MiB² | 1.4 GiB | typeset |
 
-In a running process (`--serve`, `--batch`, `--bench`) each further export takes **0.21 ms**.
+¹ Approximate: the tool's packages and their dependencies beyond a base Arch Linux image. Qt
+comes with any Qt desktop. ² The largest single process; these tools run several.
 
-**With a 1024×1024 PNG**
-
-```mermaid
-%%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#2ea44f"}}}}%%
-xychart-beta
-    title "tester.md with its PNG, in ms (lower is better)"
-    x-axis ["RayoMD", "glu", "Pandoc + Typst", "md-to-pdf", "Pandoc + XeLaTeX"]
-    y-axis "Milliseconds" 0 --> 2800
-    bar [7.5, 86, 148, 1745, 2652]
-```
-
-| Tool | Time |
-|---|---:|
-| **RayoMD** 4.2.0 | **7.5 ms** |
-| glu | 86.5 ms (12×) |
-| Pandoc + Typst | 148.5 ms (20×) |
-| md-to-pdf | 1,744.8 ms (233×) |
-| Pandoc + XeLaTeX | 2,651.8 ms (354×) |
-
-RayoMD 4.2.0 was measured on 2026-10-13 in the same container with `--no-image-cache`, so it
-converts the PNG every run, as the other tools do; beside it 4.1.0 took 9.5 ms (4.0.0 took
-30.9 ms that day, 27.9 ms on 2026-10-12), and 4.2.0 takes 2.8 ms once the image is in its
-cache. Without images 4.2.0 is as fast as 4.1.0 (1.62 against 1.61 ms).
+On one core RayoMD takes the same 1.5 ms (11.3 ms with the PNG, which it re-encodes on up to
+four cores) and the others 64 ms to 2.2 s. In a running process (`--serve`, `--batch`,
+`--bench`) each further export takes **0.21 ms**.
 
 > [!NOTE]
-> Both documents are `tester.md` without the five lines that test fallbacks: the remote and
-> missing images and a formula with an unknown TeX command. RayoMD shows those as fallback
-> text; with them XeLaTeX and glu stop with an error, and Pandoc waits on the network. The
-> imageless one also drops the mascot PNG. Pandoc reads
-> `markdown+tex_math_single_backslash-raw_tex`, so `\[ … \]` is display math as in RayoMD.
-> The tools render different Markdown subsets, so this compares time to a finished PDF, not
-> identical output. Details and the command:
-> [comparison of 2026-10-12](https://github.com/Butterski/rayomd/wiki/Markdown-to-PDF-Speed-Comparison-2026-10-12).
+> The documents are `tester.md` without the five lines that test fallbacks: the remote and
+> missing images and a formula with an unknown TeX command. RayoMD shows those as fallback text;
+> with them XeLaTeX and glu stop with an error, and Pandoc waits on the network. The imageless one
+> also drops the mascot PNG. RayoMD converts the PNG every run (`--no-image-cache`), as the
+> others do. Pandoc reads `markdown+tex_math_single_backslash-raw_tex`. Qt prints through a small
+> harness with an 11 pt font. The tools render different Markdown subsets and look different, so
+> this compares time to a finished PDF, not identical output. Method, one-core figures, page
+> renders and each tool's output:
+> [comparison of 2026-10-13](https://github.com/Butterski/rayomd/wiki/Markdown-to-PDF-Comparison-2026-10-13).
 
-[`performance.md`](docs/development/performance.md) records how every number was taken and what
-each change gained; the warm comparisons come from `python3 tools/benchmark.py ab`. The
-[benchmark index](https://github.com/Butterski/rayomd/wiki/Benchmarks) keeps older reports,
-comparisons with other tools, and their caveats.
+### Release by release
 
-## The 4.x goal: hot code in faster forms
+The big steps only: 4.0 rewrote the text path in lower-level code and linked the C++ runtime in;
+4.1 and 4.2 replaced zlib with RayoMD's own PNG decoder and encoder, a row at a time and on up
+to four cores; 4.3 writes Unicode text in two bytes a character and loads the font with less
+work. One-shot export, one pinned core, median of 40:
 
-RayoMD 4.0 moved the code where the time goes into lower-level, faster forms, one measured
-change at a time, and 4.1 and 4.2 continue it for images: plain C-style loops over raw buffers
-where library containers allocated and copied, SSE2 and AVX2 instructions where one operation
-can work on 16 or 32 bytes, more cores where work can overlap, data streamed a row at a time
-instead of held whole, and a statically linked runtime where process start dominated.
+| Document | 3.2.0 | 4.0.0 | 4.3.1 |
+|---|---:|---:|---:|
+| Short note, ASCII | 1.74 ms | 1.04 ms | **1.00 ms** |
+| Short note, Polish | 2.73 ms | 1.38 ms | **1.19 ms** |
+| Essay, 10,000 words | 2.43 ms | 1.75 ms | **1.68 ms** |
+| `tester.md`, no images | 3.19 ms | 1.83 ms | **1.64 ms** |
+| README of 4.3.1 (Unicode text) | 3.80 ms, 270 KB | 2.41 ms, 270 KB | **2.16 ms**, 221 KB |
+| One 1024×1024 RGBA PNG | 92.9 ms | 27.5 ms | **11.0 ms**, 7.4 on four cores |
 
-```mermaid
-flowchart LR
-    A["Profile a real export"] --> B["Rewrite the hot spot:<br/>C-style loop, SIMD, a thread"]
-    B --> C{"Same PDF bytes,<br/>or for a re-encoded<br/>image the same pixels?"}
-    C -- no --> X["Left out,<br/>recorded with its numbers"]
-    C -- yes --> D{"Faster in a<br/>pinned A/B?"}
-    D -- no --> X
-    D -- yes --> E["Committed and recorded<br/>in performance.md"]
-```
+From 32,768 pixels a converted image is kept in the user cache directory, so its next export, in
+any process, takes about 2 ms; `--no-image-cache` turns that off. Text and pixels are the same
+from release to release; the fully static Linux edition starts another 0.3 ms sooner.
 
-- **Images (4.2).** RayoMD's own inflater, a row at a time, instead of libdeflate's whole-image
-  one; rows filtered straight into compression segments that up to four cores compress at once,
-  in an order that does not change the bytes; AVX2 Adler-32. Encoders with one hash probe or
-  fewer insertions were faster but up to 19 % larger on some image, and lost.
-- **Images (4.1).** libdeflate's decompressor instead of zlib, RayoMD's own encoder with an image
-  mode, colour split from alpha in SSE2, filters chosen in AVX2, the colour compressed on a
-  second core while decoding goes on, SHA-NI hashing, and a persistent cache of converted
-  images. zlib, libdeflate's and ISA-L's encoders, zlib-ng, Wuffs and fixed filters were
-  measured and lost.
-- **Text.** Numbers and glyph codes are written from digit-pair tables, a character's width is
-  one table lookup, and text with formulas no longer copies every word.
-- **Start-up.** No iostreams, the C++ runtime linked in, fonts memory-mapped instead of read,
-  and a fully static Linux edition.
-
-What is left in the profiles, and what was tried and rejected, is listed under *Measured
-opportunities* in [`performance.md`](docs/development/performance.md).
+Every change is profiled on a real export, rewritten, and kept only if a pinned A/B shows it
+faster and the PDF bytes (for a re-encoded image, the pixels) stay the same, unless changing
+them is its purpose.
+[`performance.md`](docs/development/performance.md) says how the numbers are taken and lists
+what is left in the profiles and what was tried and rejected; what each change gained is in the
+wiki's [Performance History](https://github.com/Butterski/rayomd/wiki/Performance-History), and
+older reports are in the [benchmark index](https://github.com/Butterski/rayomd/wiki/Benchmarks).
 
 <p align="right"><a href="#readme-top">back to top ↑</a></p>
 
