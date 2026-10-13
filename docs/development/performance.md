@@ -1670,6 +1670,15 @@ segment buffers. TSan finds nothing in the core tests, five single exports and t
 four CPUs; under ASan and UBSan the 1,279 hostile PNGs decode as before; the corpus differs
 from 4.1.0 only in image streams, with the same pixels.
 
+**The helper pool shared among decodes.** A `--batch` of 48 mascot documents with its default six
+workers on twelve CPUs peaked at 68.5 MiB of RSS against 4.1.0's 61.9: each worker's decode found
+eleven CPUs free of other decodes, asked for three helpers, and so kept six segment buffers,
+while the pool has three helpers for the whole process. A decode now asks for at most its share,
+three divided by the decodes in progress: 59.9 → 61.8 MiB against 4.1.0, the rest being the
+documents' streams, which the batch keeps. Single exports ask for what they did, and batches on
+two and four pinned CPUs ran -5.1 and -8.7 % (48 mascots), -4.0 and +2.0 % (21 mixed) against
+4.1.0; unpinned, +2.6 and -3.9 %, within the batches' run-to-run spread of about 4 %.
+
 ## Measured opportunities
 
 Findings that could make RayoMD faster later, with the evidence and the reason

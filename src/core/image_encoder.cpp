@@ -20,7 +20,6 @@ namespace TinyPdf::Internal {
 namespace {
 
 constexpr size_t kAbandoned = ~size_t(0);
-constexpr unsigned kMaxHelpers = 3;
 // A segment's first block and what it reads past it (flate.cpp: kBlockStart, kMaxMatch, a hash).
 constexpr size_t kFirstBlock = 65278 + 258 + 8;
 constexpr size_t kHistory = RayoMd::Flate::kImageSegmentHistory;

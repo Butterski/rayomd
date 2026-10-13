@@ -480,9 +480,9 @@ GitHub CI entry points:
   published with release order after they are written; on a decode error the encoder's
   destructor abandons the planes and waits for its helpers. From `kImageThreadPixels`,
   helpers join in for each usable CPU (the affinity mask) that no other decode of the
-  process holds, so a busy batch asks for none. The first encoders of a process carve
-  their buffers from 2 MB pages (`MADV_HUGEPAGE` on Linux), which saves most of a fresh
-  process's page faults.
+  process holds, within the decode's share of the pool's three, so a busy batch asks for
+  none. The first encoders of a process carve their buffers from 2 MB pages
+  (`MADV_HUGEPAGE` on Linux), which saves most of a fresh process's page faults.
 - `WriteFixed2` may write one byte past the end it returns, within the
   `kFixed2MaxChars` every caller must leave.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document

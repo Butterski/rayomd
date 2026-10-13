@@ -2586,8 +2586,8 @@ static void DescribeReencodedPng(const PngInfo& png, PdfImage& image) {
 //
 // The segments are compressed as their rows are written: from kImageThreadPixels, by helper
 // threads while this one decodes, one for each CPU the process may run on that no other decode of
-// this process holds (so a batch whose workers already keep the CPUs busy asks for none), else by
-// this one between rows.
+// this process holds, within its share of the pool (so a batch whose workers already keep the
+// CPUs busy asks for none), else by this one between rows.
 static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     size_t rowBytes = 0;
     size_t bpp = 0;
@@ -2622,7 +2622,10 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
         ~Leave() { decoding--; }
     } leave;
     const size_t sizes[2] = { (colorRow + 1) * height, (width + 1) * height };
-    const unsigned helpers = width * height >= kImageThreadPixels && cpus > decodes ? cpus - decodes : 0;
+    // The pool's helpers are shared among the decodes in progress: a batch of six workers on twelve
+    // CPUs asked for three each, and kept six segment buffers apiece for helpers it did not get.
+    const unsigned share = Internal::ImagePlanesEncoder::kMaxHelpers / decodes;
+    const unsigned helpers = width * height >= kImageThreadPixels && cpus > decodes ? std::min(cpus - decodes, share) : 0;
     Internal::ImagePlanesEncoder encoder(sizes, 2, helpers);
     const auto writeRow = [&](size_t plane, const uint8_t* row, const uint8_t* up, size_t bytes, size_t components) {
         uint8_t* const reserved = encoder.Reserve(plane, bytes + 1);

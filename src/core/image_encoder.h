@@ -19,9 +19,11 @@ namespace TinyPdf::Internal {
 class ImagePlanesEncoder {
 public:
     static constexpr size_t kMaxPlanes = 2;
+    // The helper threads of the process, shared by every encoder.
+    static constexpr unsigned kMaxHelpers = 3;
 
-    // Planes of `sizes[i]` bytes, written in order; up to `helpers` helper threads (at most three)
-    // are asked to join in.
+    // Planes of `sizes[i]` bytes, written in order; up to `helpers` helper threads (at most
+    // kMaxHelpers) are asked to join in.
     ImagePlanesEncoder(const size_t* sizes, size_t count, unsigned helpers);
     // Abandons what is not finished and waits for the helpers to leave.
     ~ImagePlanesEncoder();
