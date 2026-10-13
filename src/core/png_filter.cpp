@@ -117,34 +117,31 @@ inline uint64_t LaneSum(__m128i sums) {
 #endif
 
 #if RAYOMD_PNG_AVX2
-// The SSE2 helpers above on 32 bytes. Unpacking and packing work within 128-bit halves, so the
-// bytes come back in their order.
+// The SSE2 helpers above on 32 bytes. A residual's magnitude read as a signed byte is its absolute
+// value as one (-128 gives 128).
 RAYOMD_AVX2 inline __m256i Cost32(__m256i value, __m256i predictor) {
-    const __m256i zero = _mm256_setzero_si256();
-    __m256i r = _mm256_sub_epi8(value, predictor);
-    return _mm256_sad_epu8(_mm256_min_epu8(r, _mm256_sub_epi8(zero, r)), zero);
+    return _mm256_sad_epu8(_mm256_abs_epi8(_mm256_sub_epi8(value, predictor)), _mm256_setzero_si256());
 }
 
 RAYOMD_AVX2 inline __m256i Average32(__m256i a, __m256i b) {
     return _mm256_sub_epi8(_mm256_avg_epu8(a, b), _mm256_and_si256(_mm256_xor_si256(a, b), _mm256_set1_epi8(1)));
 }
 
-RAYOMD_AVX2 inline __m256i PaethLanes32(__m256i a, __m256i b, __m256i c) {
-    __m256i bc = _mm256_sub_epi16(b, c);
-    __m256i ac = _mm256_sub_epi16(a, c);
-    __m256i pa = _mm256_abs_epi16(bc);
-    __m256i pb = _mm256_abs_epi16(ac);
-    __m256i pc = _mm256_abs_epi16(_mm256_add_epi16(bc, ac));
-    __m256i notA = _mm256_or_si256(_mm256_cmpgt_epi16(pa, pb), _mm256_cmpgt_epi16(pa, pc));
-    __m256i useC = _mm256_cmpgt_epi16(pb, pc);
-    return _mm256_blendv_epi8(a, _mm256_blendv_epi8(b, c, useC), notA);
-}
-
+// Paeth on 32 bytes without widening. pa = |b - c| and pb = |a - c| fit a byte; pc = |a + b - 2c|
+// is pa + pb when a - c and b - c have the same sign, which never makes pc the smallest, so a
+// saturated sum compares the same, and |pa - pb| when the signs differ. Equal to the scalar
+// predictor for all 2^24 inputs (2026-10-13).
 RAYOMD_AVX2 inline __m256i Paeth32(__m256i a, __m256i b, __m256i c) {
-    const __m256i zero = _mm256_setzero_si256();
-    __m256i lo = PaethLanes32(_mm256_unpacklo_epi8(a, zero), _mm256_unpacklo_epi8(b, zero), _mm256_unpacklo_epi8(c, zero));
-    __m256i hi = PaethLanes32(_mm256_unpackhi_epi8(a, zero), _mm256_unpackhi_epi8(b, zero), _mm256_unpackhi_epi8(c, zero));
-    return _mm256_packus_epi16(lo, hi);
+    const __m256i pa = _mm256_sub_epi8(_mm256_max_epu8(b, c), _mm256_min_epu8(b, c));
+    const __m256i pb = _mm256_sub_epi8(_mm256_max_epu8(a, c), _mm256_min_epu8(a, c));
+    const __m256i bAbove = _mm256_cmpeq_epi8(_mm256_max_epu8(b, c), b);
+    const __m256i aAbove = _mm256_cmpeq_epi8(_mm256_max_epu8(a, c), a);
+    const __m256i pc = _mm256_blendv_epi8(_mm256_sub_epi8(_mm256_max_epu8(pa, pb), _mm256_min_epu8(pa, pb)),
+        _mm256_adds_epu8(pa, pb), _mm256_cmpeq_epi8(bAbove, aAbove));
+    const __m256i paSmallest = _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_min_epu8(pa, pb), pa),
+        _mm256_cmpeq_epi8(_mm256_min_epu8(pa, pc), pa));
+    const __m256i bOrC = _mm256_blendv_epi8(c, b, _mm256_cmpeq_epi8(_mm256_min_epu8(pb, pc), pb));
+    return _mm256_blendv_epi8(bOrC, a, paSmallest);
 }
 
 RAYOMD_AVX2 inline __m256i Load32(const uint8_t* p) {
