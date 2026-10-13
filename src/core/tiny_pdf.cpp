@@ -9528,14 +9528,20 @@ private:
         }
 
         // Without ( ) \ or control bytes (and without the symbols ForEachWrappedAsciiLine rewrites)
-        // no line needs escaping; NeedsInlineParse saw every byte.
+        // no line needs escaping; NeedsInlineParse saw every byte. It found no inline syntax, so
+        // only text with a symbol needs ForEachWrappedAsciiLine's stripped copy.
         const bool plain = (seen & (RayoMd::Text::kByteLiteralSpecial | RayoMd::Text::kByteSymbolLead)) == 0;
-        ForEachWrappedAsciiLine(text, width, bodySize, StandardTextFont::Regular, [&](std::string_view line, double) {
+        const auto emitLine = [&](std::string_view line, double) {
             const double lh = bodySize * 1.35;
             Ensure(lh);
             Text(x, y - bodySize, bodySize, line, "F1", "0.08 0.08 0.08", plain);
             y -= lh;
-        });
+        };
+        if (seen & RayoMd::Text::kByteSymbolLead) {
+            ForEachWrappedAsciiLine(text, width, bodySize, StandardTextFont::Regular, emitLine);
+        } else {
+            WrapAsciiWords(text, width, bodySize, StandardTextFont::Regular, emitLine);
+        }
         y -= 5.0;
     }
 
