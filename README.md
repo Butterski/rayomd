@@ -56,7 +56,7 @@ converted. Batches run on up to 64 threads.
 <td width="33%" valign="top">
 
 ### Small
-A **604 KB** Linux download and a 1.4 MB Windows app. No browser engine, TeX stack or
+A **635 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
 runtime to install.
 
 </td>
@@ -205,11 +205,13 @@ mean of the nine watch-suite documents, pinned; documents with formulas up to 25
 byte for byte those of 3.2.0 on a corpus of 3,353 PDFs. The fully static Linux edition starts
 another 0.3 ms sooner: a short ASCII note in 0.68 ms.
 
-| Release asset | Size |
-|---|---:|
-| `rayomd-4.0.0-linux-x64.tar.gz` | 604 KB |
-| `rayomd-4.0.0-linux-x64-static.tar.gz` | 1,039 KB |
-| `rayomd-4.0.0-windows-x64.zip` (GUI and CLI) | 1,444 KB |
+| Release asset | 4.0.0 | 4.1.0 |
+|---|---:|---:|
+| `rayomd-<version>-linux-x64.tar.gz` | 604 KB | 635 KB |
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,039 KB | 1,027 KB |
+| `rayomd-<version>-windows-x64.zip` (GUI and CLI) | 1,444 KB | 1,474 KB |
+
+4.1.0 adds libdeflate's decompressor (MIT) and drops zlib, which the static edition linked in.
 
 ### Against other tools
 
