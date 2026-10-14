@@ -207,6 +207,14 @@ Important image/link details:
   host (`SvgHost`, implemented by `tiny_pdf.cpp` for each renderer). Built at `-Os`;
   every input-size, depth, work and output limit makes `ConvertSvg` return false.
 
+- `src/core/cff.h` and `src/core/cff.cpp`
+  OpenType fonts with PostScript outlines: the 'CFF ' table checked once when the font
+  loads (INDEXes, DICTs, FDSelect, private DICTs and subroutines), each glyph's Type 2
+  charstring with its subroutines inlined (`Desubroutinize`, bounded in depth, bytes and
+  work), and the font programs written of it: a CID-keyed subset whose CIDs are the code
+  points (FontFile3 /CIDFontType0C, no CIDToGIDMap) and simple fonts with a built-in
+  encoding. Built at `-Os`; every read is bounds-checked, as font files are untrusted.
+
 - `src/core/tagged.h` and `src/core/tagged.cpp`
   PDF/UA's structure tree: elements opened and closed as the renderer paints, marked
   content and artifacts in the page streams, lists, tables and links tracked across
@@ -535,8 +543,8 @@ GitHub CI entry points:
   characters all have a WinAnsiEncoding code is transcoded once in `BuildPdf`
   (`TranscodeToWinAnsi`); link targets, image paths and formula sources go back to UTF-8
   where they leave the renderer (`WinAnsiToUtf8`).
-- Preserve Unicode output by loading/subsetting a system font when needed
-  (`RAYOMD_FONT`, then known per-OS paths, then a bounded scan of the font
+- Preserve Unicode output by loading/subsetting a system font when needed, TrueType or
+  OpenType/CFF (`RAYOMD_FONT`, then known per-OS paths, then a bounded scan of the font
   directories). Without any font, the document degrades to the standard fonts
   and `BuildResult::missingCharacters` counts what they could not show; never
   fail the export for a missing font.

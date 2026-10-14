@@ -123,7 +123,7 @@ rayomd.exe --export input.md output.pdf
 <details>
 <summary><b>Build from source</b></summary>
 
-A C and C++17 compiler and CMake; on Linux also a TrueType font such as
+A C and C++17 compiler and CMake; on Linux also a TrueType or OpenType font such as
 `fonts-dejavu-core`. On Windows add `-G "MinGW Makefiles"`.
 
 ```sh
@@ -256,8 +256,9 @@ A sentence with a footnote.[^1]
 Also reference links (full, collapsed and shortcut), `<…>` autolinks, rules, page breaks
 (`\pagebreak`, `\newpage`, `<!-- pagebreak -->`), `<br>`, character references such as
 `&copy;`, and hidden HTML comments. Unicode text uses an embedded subset of a system font (or
-the one `RAYOMD_FONT` names) with fallback fonts for other scripts; Latin text stays on the PDF
-standard fonts, which keeps those files small.
+the one `RAYOMD_FONT` names, TrueType or OpenType: `.ttf`, `.otf`, `.ttc`) with fallback fonts
+for other scripts, Noto Sans CJK first for Chinese, Japanese and Korean; Latin text stays on the
+PDF standard fonts, which keeps those files small.
 
 ### Code highlighting
 
@@ -345,10 +346,10 @@ rayomd --export handbook.md handbook.pdf --toc --toc-depth=2
 
 ### Themes
 
-`--theme=FILE` lays a company look over a style: your TrueType font, heading, link and accent
-colours, a header and footer with placeholders (`{title}`, `{author}`, `{subject}`, `{date}`,
-`{page}`, `{pages}`, `{logo}`) and a logo, and a cover page. Paths are relative to the theme
-file; see [Themes](https://github.com/Butterski/rayomd/wiki/Themes).
+`--theme=FILE` lays a company look over a style: your TrueType or OpenType font, heading, link
+and accent colours, a header and footer with placeholders (`{title}`, `{author}`, `{subject}`,
+`{date}`, `{page}`, `{pages}`, `{logo}`) and a logo, and a cover page. Paths are relative to the
+theme file; see [Themes](https://github.com/Butterski/rayomd/wiki/Themes).
 
 <details>
 <summary>Example theme file</summary>
@@ -402,8 +403,8 @@ cat notes.md | rayomd --stdin notes.pdf
   scope, figures with their alt text, formulas, links and footnotes in reading order, decoration
   marked as artifacts; the language is the front matter's `lang`, else `en`.
 
-PDF/A and PDF/UA need a TrueType font to embed and show formulas as their TeX source; together
-the file claims both, and every test document passes veraPDF. See
+PDF/A and PDF/UA need a TrueType or OpenType font to embed and show formulas as their TeX
+source; together the file claims both, and every test document passes veraPDF. See
 [Archival and Accessible PDFs](https://github.com/Butterski/rayomd/wiki/Archival-and-Accessible-PDFs).
 
 ```sh

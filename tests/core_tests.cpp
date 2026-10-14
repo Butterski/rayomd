@@ -17,6 +17,7 @@
 #include "../src/core/contents.h"
 #include "../src/core/book.h"
 #include "../src/core/png_filter.h"
+#include "../src/core/cff.h"
 
 #include <algorithm>
 #include <array>
@@ -3033,6 +3034,77 @@ bool CheckComposedAdvance() {
     return true;
 }
 
+// OpenType fonts with PostScript outlines: a glyph whose charstring calls a local subroutine and
+// has a hint mask comes out of Desubroutinize self-contained (the call and its operand gone, the
+// subroutine inline, the mask with its byte), seac and endless recursion fail, and the CID-keyed
+// subset and the simple font written of it read back as CFF fonts with that glyph.
+bool CheckCffSubset() {
+    using namespace TinyPdf::Internal::Cff;
+    auto index = [](const std::string& item) {     // an INDEX of one item, offsets of one byte
+        std::string out("\x00\x01\x01\x01", 4);
+        out.push_back(static_cast<char>(item.size() + 1));
+        return out + item;
+    };
+    auto int5 = [](uint32_t value) {
+        std::string out(1, '\x1D');
+        for (int shift = 24; shift >= 0; shift -= 8) out.push_back(static_cast<char>((value >> shift) & 0xFF));
+        return out;
+    };
+    // A name-keyed CFF of one glyph: the top DICT gives CharStrings and Private, the private
+    // DICT its Subrs right after it.
+    auto font = [&](const std::string& glyph, const std::string& subr) {
+        const std::string head = std::string("\x01\x00\x04\x01", 4) + index("T");
+        const size_t topIndexBytes = 5 + 17;
+        const size_t charStringsAt = head.size() + topIndexBytes + 2 + 2;
+        const std::string charStrings = index(glyph);
+        const size_t privateAt = charStringsAt + charStrings.size();
+        const std::string top = int5(static_cast<uint32_t>(charStringsAt)) + "\x11" + int5(6) +
+            int5(static_cast<uint32_t>(privateAt)) + "\x12";
+        return head + index(top) + std::string(4, '\0') + charStrings + int5(6) + "\x13" + index(subr);
+    };
+    auto flatten = [](const std::string& bytes, uint16_t glyphs, uint16_t glyph, CffFont& parsed, std::string& out) {
+        return ParseCff(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), glyphs, parsed) &&
+            Desubroutinize(parsed, glyph, out);
+    };
+    // hstemhm (two stems), hintmask after one implicit vstem (a mask byte), callsubr -107
+    // (subroutine 0: rmoveto, return), hlineto, endchar.
+    const std::string glyph("\x8B\x95\xBD\x9F\x12" "\x8B\x95\x13\xE0" "\x20\x0A" "\x95\x06" "\x0E", 15);
+    const std::string expected("\x8B\x95\xBD\x9F\x12" "\x8B\x95\x13\xE0" "\x9F\x9F\x15" "\x95\x06" "\x0E", 15);
+    const std::string source = font(glyph, std::string("\x9F\x9F\x15\x0B", 4));
+    CffFont parsed;
+    std::string flat;
+    if (!flatten(source, 1, 0, parsed, flat) || flat != expected || parsed.cidKeyed) {
+        std::cerr << "CFF: the desubroutinized glyph differs" << std::endl;
+        return false;
+    }
+    CffFont other;
+    std::string ignored;
+    if (flatten(font(std::string("\x8B\x8B\x8B\x8B\x0E", 5), std::string("\x0B", 1)), 1, 0, other, ignored) ||
+        flatten(font(std::string("\x20\x0A\x0E", 3), std::string("\x20\x0A\x0B", 3)), 1, 0, other, ignored) ||
+        ParseCff(reinterpret_cast<const uint8_t*>(source.data()), source.size(), 2, other)) {
+        std::cerr << "CFF: seac, endless recursion or a wrong glyph count passed" << std::endl;
+        return false;
+    }
+    std::string subset;
+    CffFont cid;
+    if (!WriteCidKeyedSubset(parsed, "T", { { 0x4E2D, 0 } }, subset) || !flatten(subset, 2, 1, cid, flat) ||
+        flat != expected || !cid.cidKeyed || cid.fds.size() != 1 ||
+        subset.find(std::string("\x00\x00\x4E\x2D", 4)) == std::string::npos) {
+        std::cerr << "CFF: the CID-keyed subset does not read back" << std::endl;
+        return false;
+    }
+    const SimpleGlyph simpleGlyph{ 'A', 34, {}, expected };
+    const int16_t box[4] = { 0, -10, 500, 700 };
+    std::string simple;
+    CffFont named;
+    if (!WriteSimpleFont("S", &simpleGlyph, 1, box, simple) || !flatten(simple, 2, 1, named, flat) ||
+        flat != expected || named.cidKeyed) {
+        std::cerr << "CFF: the simple font does not read back" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // GFM table rows: a table goes on up to a blank line or the start of another block, a line
 // without pipes is a row too, and every row has the header's number of cells.
 bool CheckTableRows() {
@@ -3355,6 +3427,7 @@ int main() {
     if (!CheckWriteAll()) return 102;
     if (!CheckExactMath()) return 103;
     if (!CheckComposedAdvance()) return 104;
+    if (!CheckCffSubset()) return 105;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

@@ -46,8 +46,8 @@ struct PdfPageSize {
 struct PdfTheme {
     static constexpr int32_t kStyleColor = -1;
 
-    // A TrueType font (.ttf, or .ttc for its first face) for all text, embedded as a subset; the
-    // standard fonts are then not used. Bold and italic are drawn from it.
+    // A TrueType or OpenType font (.ttf, .otf, or .ttc for its first face) for all text, embedded
+    // as a subset; the standard fonts are then not used. Bold and italic are drawn from it.
     std::string fontPath;
     // Colours as 0xRRGGBB, or kStyleColor.
     int32_t headingColor = kStyleColor;
@@ -80,10 +80,10 @@ enum class BuildError : uint8_t {
     SourceTooLarge = 4,
     InvalidSourceUtf8 = 5,
     ReversiblePdfTooLarge = 6,
-    // PdfTheme::fontPath cannot be read or is no TrueType font.
+    // PdfTheme::fontPath cannot be read or is no TrueType or OpenType font.
     ThemeFontUnavailable = 7,
-    // PdfOptions::pdfa or pdfua, but no TrueType font to embed: neither RAYOMD_FONT nor a
-    // system font.
+    // PdfOptions::pdfa or pdfua, but no TrueType or OpenType font to embed: neither RAYOMD_FONT
+    // nor a system font.
     PdfaFontUnavailable = 8,
 };
 
@@ -118,7 +118,7 @@ struct PdfOptions {
     // FlateDecode page content, font program and CMaps where that makes the file smaller:
     // text-heavy PDFs two to five times smaller, at the cost of compressing them.
     bool compress = false;
-    // PDF/A-3b (ISO 19005-3): every font embedded, so all text takes a TrueType font and
+    // PDF/A-3b (ISO 19005-3): every font embedded, so all text takes a TrueType or OpenType font and
     // formulas show their TeX source; an sRGB output intent, XMP metadata and a file identifier.
     bool pdfa = false;
     // PDF/UA-1 (ISO 14289-1), a tagged PDF for assistive technology: a structure tree of the

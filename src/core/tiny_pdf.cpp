@@ -8,6 +8,7 @@
 #include "../common/exact_math.h"
 #include "../common/text_utils.h"
 #include "book.h"
+#include "cff.h"
 #include "image_cache.h"
 #include "image_encoder.h"
 #include "inflate.h"
@@ -414,6 +415,9 @@ struct TtfFont {
     int16_t yMax = 900;
     uint32_t sfntVersion = 0x00010000;  // of the font's table directory; a collection starts "ttcf"
     char postScriptName[64];   // name ID 6, [A-Za-z0-9._-] only, else "RayoMDFont" (ParseName)
+    // An OpenType font with PostScript outlines: its 'CFF ' table, read when it is loaded. Such a
+    // font has no loca and glyf, and is embedded as a CID-keyed CFF subset (FontFile3).
+    std::unique_ptr<Internal::Cff::CffFont> cff;
     bool loaded = false;
     bool glyphTableWritten = false;   // by a ParseCmap since the table was last cleared
     // Glyph index by BMP code point, 0 = no glyph. Zero to begin with, as the width cache is, so
@@ -515,6 +519,7 @@ struct TtfFont {
 
     template <typename Path>
     bool TryLoad(const Path& path) {
+        cff.reset();
         bytes.clear();
         tables.clear();
         if (glyphTableWritten) {
@@ -533,8 +538,9 @@ struct TtfFont {
 
 #ifndef _WIN32
     // The last resort: a walk of the usual font directories (at most 20,000 entries) for
-    // TrueType files, trying the most promising names first: sans before serif, regular
-    // before bold, italic, light, condensed, monospaced, emoji or symbol faces.
+    // TrueType and OpenType files, trying the most promising names first: sans before serif,
+    // regular before bold, italic, light, condensed, monospaced, emoji or symbol faces, and
+    // TrueType outlines (.ttf) before PostScript ones (.otf) among equals.
     RAYOMD_COLD bool LoadFromFontDirectories() {
         std::vector<std::string> roots = { "/usr/share/fonts", "/usr/local/share/fonts", "/System/Library/Fonts",
             "/Library/Fonts" };
@@ -552,8 +558,10 @@ struct TtfFont {
                 entries.increment(error), visited++) {
                 std::string name = entries->path().filename().string();
                 for (char& ch : name) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-                if (name.size() < 5 || name.compare(name.size() - 4, 4, ".ttf") != 0) continue;
-                int score = 0;
+                if (name.size() < 5) continue;
+                const bool trueType = name.compare(name.size() - 4, 4, ".ttf") == 0;
+                if (!trueType && name.compare(name.size() - 4, 4, ".otf") != 0) continue;
+                int score = trueType ? 1 : 0;
                 if (name.find("sans") != std::string::npos) score += 4;
                 if (name.find("regular") != std::string::npos) score += 2;
                 for (const char* face : { "bold", "italic", "oblique", "light", "thin", "black", "heavy", "medium",
@@ -565,7 +573,7 @@ struct TtfFont {
             }
         }
         // The best remaining candidate, the first found among equals, up to 32 attempts. Scores
-        // lie between -140 and 6, so kTried marks a file that failed to load.
+        // lie between -140 and 7, so kTried marks a file that failed to load.
         const int kTried = -1000000;
         for (int attempt = 0; attempt < 32; attempt++) {
             size_t best = paths.size();
@@ -600,9 +608,10 @@ struct TtfFont {
             if ((size_t)t.offset + t.length <= bytes.size()) tables[tag] = t;
         }
 
+        // TrueType outlines (loca and glyf), else PostScript ones (an OpenType 'CFF ' table).
+        const bool trueTypeOutlines = tables.count("loca") && tables.count("glyf");
         if (!tables.count("head") || !tables.count("hhea") || !tables.count("maxp") ||
-            !tables.count("hmtx") || !tables.count("cmap") || !tables.count("loca") ||
-            !tables.count("glyf")) {
+            !tables.count("hmtx") || !tables.count("cmap") || (!trueTypeOutlines && !tables.count("CFF "))) {
             return false;
         }
 
@@ -634,9 +643,17 @@ struct TtfFont {
         metricGlyphs = glyphCount;
 
         if (!ParseCmap()) return false;
-        if (!ParseLoca()) return false;
+        if (trueTypeOutlines ? !ParseLoca() : !ParseCffTable()) return false;
         ParseName();
         return GlyphFor('A') != 0 && GlyphFor(' ') != 0;
+    }
+
+    RAYOMD_COLD bool ParseCffTable() {
+        const Table table = tables["CFF "];
+        auto parsed = std::make_unique<Internal::Cff::CffFont>();
+        if (!Internal::Cff::ParseCff(bytes.data() + table.offset, table.length, glyphCount, *parsed)) return false;
+        cff = std::move(parsed);
+        return true;
     }
 
     // The PostScript name (name ID 6) that the PDF's font objects carry: from the Windows
@@ -692,22 +709,30 @@ struct TtfFont {
         if (cmap.offset + 4 > bytes.size()) return false;
         uint16_t count = ReadU16(bytes, cmap.offset + 2);
         size_t chosen = 0;
-
+        bool windowsFormat4 = false;
+        size_t format12 = 0;
         for (uint16_t i = 0; i < count; i++) {
             size_t rec = cmap.offset + 4 + (size_t)i * 8;
-            if (rec + 8 > bytes.size()) return false;
+            if (rec + 8 > bytes.size()) {
+                if (!windowsFormat4) return false;
+                break;
+            }
             uint16_t platform = ReadU16(bytes, rec);
             uint16_t encoding = ReadU16(bytes, rec + 2);
             uint32_t subOffset = ReadU32(bytes, rec + 4);
             size_t sub = cmap.offset + subOffset;
             if (sub + 2 > bytes.size()) continue;
             uint16_t format = ReadU16(bytes, sub);
-            if (format == 4 && platform == 3 && (encoding == 1 || encoding == 10)) {
+            if (format == 12 && platform == 3 && encoding == 10 && format12 == 0) format12 = sub;
+            if (format == 4 && platform == 3 && (encoding == 1 || encoding == 10) && !windowsFormat4) {
                 chosen = sub;
-                break;
+                windowsFormat4 = true;
             }
             if (format == 4 && chosen == 0) chosen = sub;
         }
+        // Format 12 maps the BMP as format 4 does, also where a format 4 table would pass its
+        // 64 KB (CJK fonts).
+        if (format12 != 0 && ParseCmap12(format12)) return true;
 
         if (chosen == 0) return false;
         uint16_t length = ReadU16(bytes, chosen + 2);
@@ -743,6 +768,29 @@ struct TtfFont {
             }
         }
 
+        return true;
+    }
+
+    // A format 12 subtable: groups of consecutive code points and glyphs, of which the BMP's are
+    // read. Groups ascend in a valid font; a code point a group before covered is not read again.
+    RAYOMD_COLD bool ParseCmap12(size_t sub) {
+        if (sub + 16 > bytes.size()) return false;
+        const uint32_t length = ReadU32(bytes, sub + 4);
+        const uint32_t groups = ReadU32(bytes, sub + 12);
+        if (length < 16 || length > bytes.size() - sub || groups > (length - 16) / 12) return false;
+        uint32_t lowest = 0;
+        for (uint32_t group = 0; group < groups && lowest <= 0xffff; group++) {
+            const size_t at = sub + 16 + (size_t)group * 12;
+            const uint32_t start = ReadU32(bytes, at);
+            const uint32_t end = ReadU32(bytes, at + 4);
+            const uint32_t glyph = ReadU32(bytes, at + 8);
+            if (end < start || end < lowest) continue;
+            for (uint32_t cp = std::max(start, lowest); cp <= end && cp <= 0xffff; cp++) {
+                const uint32_t id = glyph + (cp - start);
+                if (id != 0 && id <= 0xffff) glyphForBmp[cp] = (uint16_t)id;
+            }
+            lowest = end >= 0xffff ? 0x10000 : end + 1;
+        }
         return true;
     }
 
@@ -7954,6 +8002,38 @@ static std::shared_ptr<const std::string> CachedFontFileObject(
     return cache.Insert(key, std::move(body));
 }
 
+// The font program of a document in an OpenType font with PostScript outlines: a CID-keyed CFF
+// of the CIDs it shows (Cff::WriteCidKeyedSubset), each CID the code point the page content
+// and /W have, so the PDF needs no CIDToGIDMap. With `compress` FlateDecode-compressed where
+// that makes it smaller; each in a cache of its own.
+RAYOMD_COLD static std::shared_ptr<const std::string> CachedCffFontFileObject(
+    const TtfFont& font, const CidList& used, const std::string& key, bool compress) {
+    static BoundedStringCache plainCache(8, 32u * 1024u * 1024u);
+    static BoundedStringCache flateCache(8, 32u * 1024u * 1024u);
+    BoundedStringCache& cache = compress ? flateCache : plainCache;
+    if (auto cached = cache.Get(key)) return cached;
+
+    std::vector<Internal::Cff::CidGlyph> glyphs;
+    glyphs.reserve(used.size());
+    for (uint16_t cid : used) {
+        if (cid != 0) glyphs.push_back({ cid, font.GlyphFor(cid) });
+    }
+    std::string program;
+    Internal::Cff::WriteCidKeyedSubset(*font.cff, font.postScriptName, glyphs, program);
+    FlateWork& work = ThreadFlateWork();
+    const size_t packed = compress ? Deflate(program, work) : 0;
+    std::string body;
+    body.reserve((packed != 0 ? packed : program.size()) + 96);
+    body += packed != 0 ? "<< /Filter /FlateDecode /Length " : "<< /Length ";
+    AppendSize(body, packed != 0 ? packed : program.size());
+    body += " /Subtype /CIDFontType0C >>\nstream\n";
+    if (packed != 0) body.append(work.out.data(), packed);
+    else body += program;
+    body += "\nendstream";
+    if (compress) TrimFlateWork(work);
+    return cache.Insert(key, std::move(body));
+}
+
 // Writes the subset font of a plan in BuildInto (CachedFontFileObject).
 class SubsetFontWriter final : public PdfPayloadWriter {
 public:
@@ -10682,13 +10762,16 @@ RAYOMD_COLD static bool ThemeTextNeedsUnicode(const PdfTheme& theme) {
 // Fonts for documents with characters the default font has no glyph for: RAYOMD_FALLBACK_FONT,
 // then broad CJK and multi-script fonts where the common systems install them. Such a document
 // is drawn in one font, so a candidate must show Latin text too (Droid Sans Fallback does
-// not), and only TrueType outlines can be subset (OpenType CFF fonts such as Noto Sans CJK
-// do not load).
+// not). Noto Sans CJK's first face is Noto Sans CJK JP, which has the Chinese and Korean
+// characters too, in their Japanese forms where Han forms differ.
 #ifdef _WIN32
 static const wchar_t* const kFallbackFontNames[] = { L"msyh.ttc", L"msjh.ttc", L"YuGothR.ttc", L"meiryo.ttc",
     L"msgothic.ttc", L"malgun.ttf", L"Nirmala.ttf", L"seguisym.ttf", L"simsun.ttc", L"arialuni.ttf" };
 #else
 static const char* const kFallbackFontNames[] = {
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",                    // Arch
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",               // Debian, Ubuntu
+    "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc",  // Fedora
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",                       // Debian, Ubuntu
     "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",                       // Fedora
     "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",             // Arch
@@ -10914,22 +10997,27 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     missingCharacters = renderer.MissingCharacters();
     std::string cidKey = MakeCidKey(font, used);
     const std::string fontName = SubsetFontName(font, used);
+    // An OpenType font with PostScript outlines is embedded as a CID-keyed CFF subset whose
+    // CIDs are those of the page content: no CIDToGIDMap then.
+    const bool cff = font.cff != nullptr;
     SubsetGlyphList subsetGlyphs(font, used);
-    auto cidMapBytes = MakeCidToGidMap(font, used, subsetGlyphs, cidKey);
+    auto cidMapBytes = cff ? nullptr : MakeCidToGidMap(font, used, subsetGlyphs, cidKey);
     auto toUnicodeBytes = MakeToUnicodeCMap(used, cidKey);
 
     // The cached font objects are referenced, not copied: the shared pointers keep them
     // alive until BuildInto below. A subset not cached is written by BuildInto from its plan.
     SubsetFontPlan fontPlan;
     const SubsetFontWriter fontWriter(fontPlan);
-    std::shared_ptr<const std::string> fontFileObject = CachedFontFileObject(font, subsetGlyphs, cidKey, options.compress, fontPlan);
+    std::shared_ptr<const std::string> fontFileObject = cff ? CachedCffFontFileObject(font, used, cidKey, options.compress)
+        : CachedFontFileObject(font, subsetGlyphs, cidKey, options.compress, fontPlan);
     if (fontFileObject) pdf.SetView(fontFileId, *fontFileObject);
     else pdf.SetStreamWriter(fontFileId, FontFileHeader(fontPlan.size), fontPlan.size, fontWriter);
 
     // With --compress, the compressed CMaps, which have to outlive BuildInto.
     std::string cidMapFlate;
     std::string toUnicodeFlate;
-    SetPayloadStream(pdf, cidMapId, *cidMapBytes, options.compress, cidMapFlate);
+    if (cff) pdf.Set(cidMapId, std::string("null"));
+    else SetPayloadStream(pdf, cidMapId, *cidMapBytes, options.compress, cidMapFlate);
     SetPayloadStream(pdf, toUnicodeId, *toUnicodeBytes, options.compress, toUnicodeFlate);
 
     std::string desc;
@@ -10950,20 +11038,22 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     AppendInt(desc, font.Metric(font.descent));
     AppendLit(desc, " /CapHeight ");
     AppendInt(desc, (int)(font.Metric(font.ascent) * 0.72));
-    AppendLit(desc, " /StemV 80 /FontFile2 ");
+    AppendLit(desc, cff ? " /StemV 80 /FontFile3 " : " /StemV 80 /FontFile2 ");
     AppendInt(desc, fontFileId);
     AppendLit(desc, " 0 R >>");
     pdf.Set(descriptorId, std::move(desc));
 
     std::string cidFont;
     cidFont.reserve(320);
-    AppendLit(cidFont, "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /");
+    AppendLit(cidFont, cff ? "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /" : "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /");
     cidFont += fontName;
     AppendLit(cidFont, " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
         " /FontDescriptor ");
     AppendInt(cidFont, descriptorId);
-    AppendLit(cidFont, " 0 R /CIDToGIDMap ");
-    AppendInt(cidFont, cidMapId);
+    if (!cff) {
+        AppendLit(cidFont, " 0 R /CIDToGIDMap ");
+        AppendInt(cidFont, cidMapId);
+    }
     AppendLit(cidFont, " 0 R /DW 500 /W ");
     cidFont += *MakeWidths(font, used, cidKey);
     AppendLit(cidFont, " >>");

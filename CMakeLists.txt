@@ -139,10 +139,10 @@ endfunction()
 
 # Recovery is cold, opt-in code, the math parser and layout run only for documents with
 # formulas, options and themes are parsed once per run, a theme's header, footer and cover,
-# PDF/A's metadata and the footnotes' numbering are made once per document, and the image
-# encoder's threads only hand out segments that flate.cpp compresses. Optimize these
-# translation units for package size while leaving the performance-critical renderer and
-# parser on the normal release flags.
+# PDF/A's metadata and the footnotes' numbering are made once per document, an OpenType font's
+# CFF table is read once and subset once per document, and the image encoder's threads only
+# hand out segments that flate.cpp compresses. Optimize these translation units for package
+# size while leaving the performance-critical renderer and parser on the normal release flags.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
         src/core/rayomd_pdf_source.cpp
@@ -157,6 +157,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/contents.cpp
         src/core/book.cpp
         src/core/svg.cpp
+        src/core/cff.cpp
         src/core/tagged.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
@@ -202,6 +203,7 @@ if(WIN32)
         src/core/contents.cpp
         src/core/book.cpp
         src/core/svg.cpp
+        src/core/cff.cpp
         src/core/tagged.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp
@@ -275,6 +277,7 @@ else()
         src/core/contents.cpp
         src/core/book.cpp
         src/core/svg.cpp
+        src/core/cff.cpp
         src/core/tagged.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp
@@ -320,6 +323,7 @@ if(BUILD_TESTING)
         src/core/contents.cpp
         src/core/book.cpp
         src/core/svg.cpp
+        src/core/cff.cpp
         src/core/tagged.cpp
         src/core/math_parser.cpp
         src/core/math_layout.cpp

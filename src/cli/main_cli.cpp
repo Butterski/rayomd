@@ -403,8 +403,9 @@ void WarnMissingCharacters(const std::string& inputLabel, uint32_t count) {
     message += ": ";
     message += std::to_string(count);
     message += " character(s) have no glyph in the fonts found and are shown as a base letter or '?'."
-        " Install a font that has them (DejaVu Sans or Noto Sans for most alphabets, WenQuanYi Micro Hei"
-        " for Chinese), or set RAYOMD_FONT or RAYOMD_FALLBACK_FONT to a .ttf or .ttc file.\n";
+        " Install a font that has them (DejaVu Sans or Noto Sans for most alphabets, Noto Sans CJK or"
+        " WenQuanYi Micro Hei for Chinese, Japanese and Korean), or set RAYOMD_FONT or RAYOMD_FALLBACK_FONT"
+        " to a .ttf, .otf or .ttc file.\n";
     Print(stderr, message);
 }
 fs::path PdfNameForMarkdown(const fs::path& path) {
@@ -458,10 +459,10 @@ std::string ExportFailure(const TinyPdf::BuildResult& result, const std::string&
     if (!inputLabel.empty()) message += " for " + inputLabel;
     message += " (code " + std::to_string(10 + static_cast<int>(result.error)) + ").";
     if (result.error == TinyPdf::BuildError::ThemeFontUnavailable) {
-        message += " The theme's font cannot be read or is no TrueType font: " + options.theme.fontPath;
+        message += " The theme's font cannot be read or is no TrueType/OpenType font: " + options.theme.fontPath;
     }
     if (result.error == TinyPdf::BuildError::PdfaFontUnavailable) {
-        message += " PDF/A embeds every font, but no TrueType font was found; set RAYOMD_FONT to one.";
+        message += " PDF/A embeds every font, but no TrueType/OpenType font was found; set RAYOMD_FONT to one.";
     }
     return message;
 }
