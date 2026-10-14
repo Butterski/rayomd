@@ -1752,6 +1752,14 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
     flush();
 }
 
+std::string_view StripInlineMarkdownView(std::string_view input, InlineRuns& scratch, bool recognizeMath) {
+    if (!RayoMd::Text::ContainsByteClass(input, RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteSymbolLead)) {
+        return TrimView(input);
+    }
+    ParseInlineRuns(input, scratch, recognizeMath);
+    return TrimView(scratch.text);
+}
+
 std::vector<InlineSpan> ParseInlineSpans(std::string_view input, bool recognizeMath, size_t lookaheadBudget) {
     InlineRuns runs;
     ParseInlineRuns(input, runs, recognizeMath, lookaheadBudget);

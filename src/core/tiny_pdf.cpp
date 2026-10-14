@@ -8943,9 +8943,19 @@ static double AsciiTextWidth(std::string_view text, double size, StandardTextFon
     return UnitsToPoints(units, size);
 }
 
-struct WrappedAsciiLine {
-    std::string text;
-    double width = 0.0;
+// Wrapped lines of plain text, kept in one buffer that is reused from cell to cell.
+struct AsciiLines {
+    struct Line { uint32_t end; double width; };
+    std::string text;                // the lines one after another
+    std::vector<Line> lines;         // line i is text[i ? lines[i-1].end : 0, lines[i].end)
+    Internal::InlineRuns parsed;     // scratch for the stripped text
+    size_t Count() const { return lines.size(); }
+    std::string_view Text(size_t i) const {
+        const size_t begin = i ? lines[i - 1].end : 0;
+        return std::string_view(text.data() + begin, lines[i].end - begin);
+    }
+    double Width(size_t i) const { return lines[i].width; }
+    size_t Bytes() const { return KeptBytes(text) + KeptBytes(lines) + KeptBytes(parsed); }
 };
 
 // Appends the words of `text`, which starts and ends with a word, one space apart.
@@ -9057,21 +9067,23 @@ static void ForEachWrappedAsciiLine(const std::string& raw, double maxWidth, dou
     WrapAsciiWords(text, maxWidth, size, font, emit);
 }
 
-static void WrapAsciiText(const std::string& raw, double maxWidth, double size,
-    StandardTextFont font, std::vector<WrappedAsciiLine>& lines) {
-    lines.clear();
-    ForEachWrappedAsciiLine(raw, maxWidth, size, font, [&](std::string_view line, double width) {
-        lines.emplace_back();
-        lines.back().text.assign(line.data(), line.size());
-        lines.back().width = width;
+// The lines ForEachWrappedAsciiLine gives, into `out`.
+static void WrapAsciiText(const std::string& raw, double maxWidth, double size, StandardTextFont font, AsciiLines& out) {
+    out.text.clear();
+    out.lines.clear();
+    const std::string_view source =
+        RayoMd::Text::ContainsByteClass(raw, RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteSymbolLead)
+            ? Internal::StripInlineMarkdownView(raw, out.parsed, false) : std::string_view(raw);
+    WrapAsciiWords(source, maxWidth, size, font, [&](std::string_view line, double width) {
+        out.text.append(line.data(), line.size());
+        out.lines.push_back({static_cast<uint32_t>(out.text.size()), width});
     });
 }
 
-static std::vector<WrappedAsciiLine> WrapAsciiText(
-    const std::string& raw, double maxWidth, double size, StandardTextFont font) {
-    std::vector<WrappedAsciiLine> lines;
-    WrapAsciiText(raw, maxWidth, size, font, lines);
-    return lines;
+// WrapAsciiText for the rare callers, which so add no caller to the table loop's helpers.
+RAYOMD_COLD static void WrapAsciiTextCold(const std::string& raw, double maxWidth, double size, StandardTextFont font,
+                                          AsciiLines& out) {
+    WrapAsciiText(raw, maxWidth, size, font, out);
 }
 
 // Lines of code and of formula source, shown in Courier: every printable byte is 600 units
@@ -9125,6 +9137,7 @@ public:
         // These are reused from paragraph to paragraph as they are, so also from the last export.
         KeptBuffer<AsciiRuns>::Take(paragraphRuns);
         KeptBuffer<std::vector<AsciiRuns>>::Take(tableCells);
+        KeptBuffer<std::vector<AsciiLines>>::Take(tableLines);
         NewPage();
     }
     ~StandardRenderer() {
@@ -9135,6 +9148,9 @@ public:
         size_t cellBytes = KeptBytes(tableCells);
         for (const AsciiRuns& cell : tableCells) cellBytes += cell.Bytes();
         KeptBuffer<std::vector<AsciiRuns>>::Give(tableCells, cellBytes);
+        size_t lineBytes = KeptBytes(tableLines);
+        for (const AsciiLines& cell : tableLines) lineBytes += cell.Bytes();
+        KeptBuffer<std::vector<AsciiLines>>::Give(tableLines, lineBytes);
     }
     StandardRenderer(const StandardRenderer&) = delete;
     StandardRenderer& operator=(const StandardRenderer&) = delete;
@@ -9796,8 +9812,11 @@ private:
     RAYOMD_MATH_COLD std::vector<std::vector<AsciiSpan>> WrapMathCell(const std::string& cell, double width, double size, bool bold) {
         if (cell.find(Internal::kMathTextOpen) != std::string::npos) return WrapMathText(cell, width, size, bold);
         std::vector<std::vector<AsciiSpan>> lines;
-        for (WrappedAsciiLine& line : WrapAsciiText(cell, width, size, bold ? StandardTextFont::Bold : StandardTextFont::Regular)) {
-            MathAppend(MathAppend(lines)).text = std::move(line.text);
+        AsciiLines plain;
+        WrapAsciiTextCold(cell, width, size, bold ? StandardTextFont::Bold : StandardTextFont::Regular, plain);
+        for (size_t i = 0; i < plain.Count(); i++) {
+            const std::string_view line = plain.Text(i);
+            MathAppend(MathAppend(lines)).text.assign(line.data(), line.size());
         }
         return lines;
     }
@@ -9871,6 +9890,7 @@ private:
     };
     AsciiRuns paragraphRuns;
     std::vector<AsciiRuns> tableCells;      // the cells with inline Markdown of a table row, by column
+    std::vector<AsciiLines> tableLines;     // the other cells of a table row, by column
 
     // Colors of text runs: plain text, code and the background of code.
     struct RunColors { const char* text; const char* code; const char* codeFill; };
@@ -10266,10 +10286,12 @@ private:
             return;
         }
         const double lh = bodySize * 1.35;
-        for (const WrappedAsciiLine& line : WrapAsciiText(fallback, pageW - margin * 2.0, bodySize, StandardTextFont::Regular)) {
+        AsciiLines lines;
+        WrapAsciiTextCold(fallback, pageW - margin * 2.0, bodySize, StandardTextFont::Regular, lines);
+        for (size_t i = 0; i < lines.Count(); i++) {
             Ensure(lh);
-            Text(margin, y - bodySize, bodySize, line.text, "F1", linkColor);
-            AddLink(margin, y - bodySize, line.width, bodySize, image.link);
+            Text(margin, y - bodySize, bodySize, lines.Text(i), "F1", linkColor);
+            AddLink(margin, y - bodySize, lines.Width(i), bodySize, image.link);
             y -= lh;
         }
         y -= 5.0;
@@ -10750,10 +10772,12 @@ private:
             return;
         }
         MarkHeading(level, block.text, height + 2.0);
-        for (const WrappedAsciiLine& line : WrapAsciiText(block.text, width, size, StandardTextFont::Bold)) {
+        AsciiLines lines;
+        WrapAsciiTextCold(block.text, width, size, StandardTextFont::Bold, lines);
+        for (size_t i = 0; i < lines.Count(); i++) {
             Ensure(height + 2.0);
             QuoteStrip(height + 3.0);
-            Text(x, y - size, size, line.text, "F2", "0.10 0.15 0.18");
+            Text(x, y - size, size, lines.Text(i), "F2", "0.10 0.15 0.18");
             y -= height;
         }
         y -= 7.0;
@@ -10952,10 +10976,13 @@ private:
     RAYOMD_COLD void RenderTitlePage(const std::string& text, bool mark) {
         RenderPageBreak();
         const double size = kHeadingSizes[1];
-        const std::vector<WrappedAsciiLine> lines = WrapAsciiText(text, pageW - margin * 2.0, size, StandardTextFont::Bold);
-        y = std::min(pageH - margin, pageH * 0.6 + (double)lines.size() * size * 1.35 * 0.5);
+        AsciiLines lines;
+        WrapAsciiTextCold(text, pageW - margin * 2.0, size, StandardTextFont::Bold, lines);
+        y = std::min(pageH - margin, pageH * 0.6 + (double)lines.Count() * size * 1.35 * 0.5);
         if (mark) MarkHeading(1, text, 0.0);
-        for (const WrappedAsciiLine& line : lines) DrawTextLine((pageW - line.width) * 0.5, size, line.text, "F2", headingColor);
+        for (size_t i = 0; i < lines.Count(); i++) {
+            DrawTextLine((pageW - lines.Width(i)) * 0.5, size, lines.Text(i), "F2", headingColor);
+        }
     }
 
     // The table of contents (contents.h), once: a title, then each entry indented by its level and
@@ -10970,7 +10997,7 @@ private:
         y -= 8.0;
         const double em = bodySize;
         const double lh = bodySize * 1.35;
-        std::vector<WrappedAsciiLine> lines;
+        AsciiLines lines;
         contentsLines.resize(contents->size());
         for (size_t index = 0; index < contents->size(); index++) {
             const Internal::ContentsEntry& entry = (*contents)[index];
@@ -10981,14 +11008,14 @@ private:
             const std::string_view link(url, (size_t)(std::to_chars(url + 2, url + sizeof(url), index).ptr - url));
             ContentsLine& last = contentsLines[index];
             last = { index, pageStarts.size() - 1, y - bodySize, x };
-            WrapAsciiText(entry.text, pageW - margin - x - 2.55 * em, bodySize,
+            WrapAsciiTextCold(entry.text, pageW - margin - x - 2.55 * em, bodySize,
                 top ? StandardTextFont::Bold : StandardTextFont::Regular, lines);
-            for (const WrappedAsciiLine& line : lines) {
+            for (size_t i = 0; i < lines.Count(); i++) {
                 Ensure(lh);
                 const double baseline = y - bodySize;
-                Text(x, baseline, bodySize, line.text, top ? "F2" : "F1", "0.08 0.08 0.08");
-                AddLink(x, baseline, line.width, bodySize, link);
-                last = { index, pageStarts.size() - 1, baseline, x + line.width };
+                Text(x, baseline, bodySize, lines.Text(i), top ? "F2" : "F1", "0.08 0.08 0.08");
+                AddLink(x, baseline, lines.Width(i), bodySize, link);
+                last = { index, pageStarts.size() - 1, baseline, x + lines.Width(i) };
                 y -= lh;
             }
         }
@@ -11090,10 +11117,10 @@ private:
         y -= 3.0;
 
         // A cell with inline Markdown is wrapped into runs, any other into plain lines.
-        std::vector<std::vector<WrappedAsciiLine>> wrapped(columns);
         std::vector<unsigned char> styled(columns, 0);
-        // Grows rarely (to the widest table); a new vector keeps resize code out of the binary.
+        // Grow rarely (to the widest table); a new vector keeps resize code out of the binary.
         if (tableCells.size() < columns) tableCells = std::vector<AsciiRuns>(columns);
+        if (tableLines.size() < columns) tableLines = std::vector<AsciiLines>(columns);
         const double cellWidth = std::max(16.0, colWidth - pad * 2.0);
         static const std::string emptyCell;
         // A table that goes on to a new page repeats its header row there, unless it and the row
@@ -11108,9 +11135,9 @@ private:
                     WrapAsciiInline(cell, cellWidth, size, r == 0 ? kStyleBold : 0, tableCells[c]);
                 if (!styled[c]) {
                     WrapAsciiText(cell, cellWidth, size, r == 0 ? StandardTextFont::Bold : StandardTextFont::Regular,
-                        wrapped[c]);
+                        tableLines[c]);
                 }
-                maxLines = std::max(maxLines, styled[c] ? tableCells[c].lineEnds.size() : wrapped[c].size());
+                maxLines = std::max(maxLines, styled[c] ? tableCells[c].lineEnds.size() : tableLines[c].Count());
             }
 
             // A row taller than a page is drawn in slices, each with cell borders of its own.
@@ -11157,14 +11184,14 @@ private:
                         }
                         continue;
                     }
-                    const size_t end = std::min(wrapped[c].size(), first + count);
+                    const AsciiLines& cellLines = tableLines[c];
+                    const size_t end = std::min(cellLines.Count(), first + count);
                     for (size_t li = first; li < end; li++) {
-                        const WrappedAsciiLine& line = wrapped[c][li];
                         double tx = cellX + pad;
-                        double lw = line.width;
+                        double lw = cellLines.Width(li);
                         if (align == 0) tx = cellX + (colWidth - lw) * 0.5;
                         else if (align == 1) tx = cellX + colWidth - pad - lw;
-                        Text(tx, top - pad - size - (li - first) * lh, size, line.text, r == 0 ? "F2" : "F1", "0.08 0.08 0.08");
+                        Text(tx, top - pad - size - (li - first) * lh, size, cellLines.Text(li), r == 0 ? "F2" : "F1", "0.08 0.08 0.08");
                     }
                 }
                 y -= rowHeight;

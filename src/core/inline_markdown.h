@@ -103,6 +103,9 @@ std::vector<InlineSpan> ParseInlineSpans(std::string_view input, bool recognizeM
 // read in order, cover out.text without a gap.
 void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath = true,
     size_t lookaheadBudget = kDefaultLookaheadBudget);
+// StripInlineMarkdown's text (markdown_parser.h) without a copy: a view of `input`, or of
+// `scratch.text`.
+std::string_view StripInlineMarkdownView(std::string_view input, InlineRuns& scratch, bool recognizeMath);
 
 // Whether `text` needs the inline parser: inline syntax (or a byte of `classes`), or the "://"
 // or '@' of a bare URL or email address. One pass, which stops at the first inline syntax; only
