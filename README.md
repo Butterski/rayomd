@@ -57,7 +57,7 @@ converted. Batches run on up to 64 threads.
 <td width="33%" valign="top">
 
 ### Small
-A **780 KB** Linux download and a 1.6 MB Windows app. No browser engine, TeX stack or
+A **790 KB** Linux download and a 1.6 MB Windows app. No browser engine, TeX stack or
 runtime to install.
 
 </td>
@@ -135,12 +135,12 @@ cmake --build build --config Release
 
 </details>
 
-| Package | Size, 4.6.0 | For |
+| Package | Size, 4.7.0 | For |
 |---|---:|---|
-| `rayomd-<version>-linux-x64-static.tar.gz` | 1,175 KB | Linux, recommended: no dependency, the fastest start |
-| `rayomd-<version>-windows-x64.zip` | 1,589 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
-| `rayomd-<version>-linux-x64.tar.gz` | 776 KB | Linux: needs only glibc |
-| `rayomd-<version>-linux-x64-curl.tar.gz` | 778 KB | Linux with HTTP/HTTPS images through libcurl |
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,187 KB | Linux, recommended: no dependency, the fastest start |
+| `rayomd-<version>-windows-x64.zip` | 1,598 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
+| `rayomd-<version>-linux-x64.tar.gz` | 787 KB | Linux: needs only glibc |
+| `rayomd-<version>-linux-x64-curl.tar.gz` | 789 KB | Linux with HTTP/HTTPS images through libcurl |
 
 Every feature below works the same from both command lines and the
 [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
