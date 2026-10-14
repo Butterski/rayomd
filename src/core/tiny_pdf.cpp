@@ -8069,6 +8069,11 @@ private:
         const double width = pageW - margin * 2.0 - 16.0;
         const double scale = size * 0.001;
         bool first = true;
+        // A line whose exact width in 1/1000 em, times the scale and a margin for rounding, is
+        // narrower than `width` is drawn whole, as the loop below would draw it: each of that loop's
+        // sums is at most the exact one times (1 + 2^-53)^(n + 1), below 1 + 1e-9 for n under a
+        // million characters. Summing stops past limitUnits, where no such line can end.
+        const uint64_t limitUnits = width > 0.0 ? (uint64_t)(width / scale) + 1 : 0;
         for (size_t start = 0;;) {
             size_t end = wide.find(L'\n', start);
             const bool last = end == std::wstring::npos;
@@ -8080,20 +8085,31 @@ private:
                 PaintCodeRuns(x, y - size, size, std::wstring_view(wide.data() + from, to - from), codeClasses.data() + from);
                 y -= lh;
             };
-            // WrapCodeLine's pieces, read where they are: one ends before the character that would
-            // make it wider than the line, and holds at least one. The same sums, so the same breaks.
-            size_t piece = start;
-            double pieceWidth = 0.0;
-            for (size_t at = start; at < lineEnd; at++) {
-                const double charWidth = CodepointWidth(font, (uint16_t)wide[at], scale);
-                if (at > piece && pieceWidth + charWidth > width) {
-                    draw(piece, at);
-                    piece = at;
-                    pieceWidth = 0.0;
-                }
-                pieceWidth += charWidth;
+            bool whole = false;
+            if (lineEnd - start < 1000000) {
+                uint64_t units = 0;
+                size_t at = start;
+                for (; at < lineEnd && units <= limitUnits; at++) units += font.CodepointWidth((uint16_t)wide[at]);
+                whole = at == lineEnd && (double)units * scale * (1.0 + 1e-9) < width;
             }
-            draw(piece, lineEnd);
+            if (whole) {
+                draw(start, lineEnd);
+            } else {
+                // WrapCodeLine's pieces, read where they are: one ends before the character that would
+                // make it wider than the line, and holds at least one. The same sums, so the same breaks.
+                size_t piece = start;
+                double pieceWidth = 0.0;
+                for (size_t at = start; at < lineEnd; at++) {
+                    const double charWidth = CodepointWidth(font, (uint16_t)wide[at], scale);
+                    if (at > piece && pieceWidth + charWidth > width) {
+                        draw(piece, at);
+                        piece = at;
+                        pieceWidth = 0.0;
+                    }
+                    pieceWidth += charWidth;
+                }
+                draw(piece, lineEnd);
+            }
             if (last) break;
             start = end + 1;
         }
