@@ -15,7 +15,8 @@ template <typename Function>
 Function LoadSystemProcedure(const wchar_t* moduleName, const char* procedureName) {
     HMODULE module = LoadLibraryExW(moduleName, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!module) return nullptr;
-    return reinterpret_cast<Function>(GetProcAddress(module, procedureName));
+    // Through void (*)(), which -Wcast-function-type accepts as any function type.
+    return reinterpret_cast<Function>(reinterpret_cast<void (*)()>(GetProcAddress(module, procedureName)));
 }
 
 #define RAYOMD_DELAY_PROC(moduleName, procedureName) \

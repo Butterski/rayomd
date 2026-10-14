@@ -790,8 +790,8 @@ int RunNativeBench(const fs::path& inputPath, const fs::path& outputDir, int ite
     size_t totalBytes = 0;
     for (int i = 0; i < iterations; i++) {
         pdfBytes.clear();
-        TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
-    if (!buildResult) {
+        buildResult = TinyPdf::BuildPdf(markdown, options, pdfBytes);
+        if (!buildResult) {
             int code = 10 + static_cast<int>(buildResult.error);
             PrintError("Error: native PDF benchmark export failed for " + PathToUtf8(inputPath) + " (code " +
                 std::to_string(code) + ").");

@@ -111,6 +111,7 @@ static bool IsAllAscii(std::string_view str) {
     return true;
 }
 
+#ifndef _WIN32
 // Writes the UTF-16 code units of `str` at `out`, which has room for one per byte, and returns
 // the end. A sequence that is not UTF-8 becomes U+FFFD, as MultiByteToWideChar makes it on
 // Windows; std::wstring_convert threw, which ended the process.
@@ -140,6 +141,7 @@ static wchar_t* WriteUtf8Units(wchar_t* out, std::string_view str) {
     }
     return out;
 }
+#endif
 
 static std::wstring Utf8ToWideFallback(std::string_view str) {
     if (str.empty()) return L"";
@@ -237,9 +239,11 @@ static RAYOMD_HOT_INLINE uint32_t ReadU32(const Bytes& data, size_t off) {
         ((uint32_t)data[off + 2] << 8) | data[off + 3];
 }
 
+#ifndef _WIN32
 static bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& bytes) {
     return RayoMd::File::ReadAll(std::filesystem::path(path), 64u * 1024u * 1024u, bytes) && !bytes.empty();
 }
+#endif
 
 #ifdef _WIN32
 static bool ReadFromHandle(HANDLE file, uint8_t* out, size_t size) {
@@ -9386,9 +9390,9 @@ private:
     }
     // /F1 Helvetica, /F2 Helvetica-Bold, /F4 Helvetica-Oblique, /F5 Helvetica-BoldOblique or
     // /F3 Courier. The oblique faces go into the PDF only when text was shown in them.
-    const char* StyleFontName(uint8_t style) {
+    const char* StyleFontName(uint8_t styleBits) {
         static const char* const kFaceNames[8] = { "F1", "F2", "F4", "F5", "F3", "F3", "F3", "F3" };
-        const unsigned face = style & (kStyleBold | kStyleItalic | kStyleCode);
+        const unsigned face = styleBits & (kStyleBold | kStyleItalic | kStyleCode);
         facesUsed = static_cast<uint8_t>(facesUsed | (1u << face));
         return kFaceNames[face];
     }
@@ -9407,10 +9411,10 @@ private:
     // A line through struck text, as the Unicode renderer draws it. A leading space of the
     // piece is not struck.
     RAYOMD_COLD void StrikeThrough(double x, double baseline, double width, double size, std::string_view text,
-        uint8_t style, const char* color) {
+        uint8_t styleBits, const char* color) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == ' ') spaces++;
-        const double skip = UnitsToPoints(StyleAdvances(style).space * spaces, size);
+        const double skip = UnitsToPoints(StyleAdvances(styleBits).space * spaces, size);
         if (width <= skip) return;
         const size_t colorSize = strlen(color);
         TailWriter out(content, 32 + colorSize + kOperandBytes * 4);
@@ -9430,10 +9434,10 @@ private:
     // HTML's <mark> behind a piece of text (`mark`, painted before the text) or <u> under it (after
     // it, in the text's colour), from its first glyph: a leading space of the piece stays clear.
     RAYOMD_COLD void PaintDecor(double x, double baseline, double width, double size, std::string_view text,
-        uint8_t style, bool mark, const char* color) {
+        uint8_t styleBits, bool mark, const char* color) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == ' ') spaces++;
-        const double skip = UnitsToPoints(StyleAdvances(style).space * spaces, size);
+        const double skip = UnitsToPoints(StyleAdvances(styleBits).space * spaces, size);
         if (width <= skip) return;
         if (mark) Rect(x + skip, baseline + size * 0.88, width - skip, size * 1.10, kMarkFill);
         else Rect(x + skip, baseline - size * 0.0825, width - skip, size * 0.055, color);
@@ -9458,16 +9462,16 @@ private:
         AddLinkRect(pageLinks.back(), x, baseline, width, size, url);
     }
 
-    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string&& text, std::string&& url, uint8_t style) {
+    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string&& text, std::string&& url, uint8_t styleBits) {
         if (text.empty()) return;
-        if (!spans.empty() && spans.back().url == url && spans.back().style == style && spans.back().math < 0) {
+        if (!spans.empty() && spans.back().url == url && spans.back().style == styleBits && spans.back().math < 0) {
             spans.back().text += text;
         } else {
             spans.emplace_back();
             AsciiSpan& span = spans.back();
             span.text = std::move(text);
             span.url = std::move(url);
-            span.style = style;
+            span.style = styleBits;
         }
     }
 
@@ -9592,10 +9596,10 @@ private:
     // Appends one word to the line being filled, with a leading space when `spaced`. It is
     // merged into the previous span when link, code and emphasis are the same.
     void AppendAsciiWord(std::vector<AsciiSpan>& line, std::string_view word, bool spaced, const std::string& url,
-        uint8_t style) {
+        uint8_t styleBits) {
         if (!line.empty()) {
             AsciiSpan& last = line.back();
-            if (last.url == url && last.style == style) {
+            if (last.url == url && last.style == styleBits) {
                 if (spaced) last.text.push_back(' ');
                 last.text.append(word.data(), word.size());
                 return;
@@ -9607,7 +9611,7 @@ private:
         if (spaced) span.text.push_back(' ');
         span.text.append(word.data(), word.size());
         span.url = url;
-        span.style = style;
+        span.style = styleBits;
     }
 
     // Exact width of text next to formulas and of heading and table-cell text with formulas,
@@ -9638,10 +9642,10 @@ private:
         }
         // Appends text to the line: merged into the previous span when the style is the
         // same (never into a formula), as AppendAsciiWord does for plain text.
-        auto appendText = [&](std::string text, const std::string& url, uint8_t style) {
+        auto appendText = [&](std::string text, const std::string& url, uint8_t styleBits) {
             if (!line.empty()) {
                 AsciiSpan& last = line.back();
-                if (last.math < 0 && last.style == style && last.url == url) {
+                if (last.math < 0 && last.style == styleBits && last.url == url) {
                     last.text += text;
                     return;
                 }
@@ -9649,7 +9653,7 @@ private:
             AsciiSpan& added = MathAppend(line);
             added.text = std::move(text);
             added.url = url;
-            added.style = style;
+            added.style = styleBits;
         };
         auto flush = [&]() {
             if (!line.empty()) MathAppend(lines).swap(line);
@@ -9955,15 +9959,15 @@ private:
         out.plain = !HasLiteralSpecial(out.parsed.text);
         const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
         for (size_t first = 0; first < parsed.size();) {
-            const uint8_t style = static_cast<uint8_t>(SpanStyle(parsed[first]) | baseStyle);
+            const uint8_t styleBits = static_cast<uint8_t>(SpanStyle(parsed[first]) | baseStyle);
             const std::string_view url = out.parsed.Url(parsed[first]);
             size_t last = first;
-            while (last + 1 < parsed.size() && (SpanStyle(parsed[last + 1]) | baseStyle) == style &&
+            while (last + 1 < parsed.size() && (SpanStyle(parsed[last + 1]) | baseStyle) == styleBits &&
                 out.parsed.Url(parsed[last + 1]) == url) {
                 last++;
             }
             out.segments.push_back({ static_cast<uint32_t>(parsed[first].begin), static_cast<uint32_t>(parsed[last].end),
-                style, url });
+                styleBits, url });
             first = last + 1;
         }
         // Every word is written once, with at most one space in front of it. The buffer only
@@ -9984,10 +9988,10 @@ private:
         const size_t total = segmentCount != 0 ? out.segments.back().end : 0;
         size_t at = 0;
         for (size_t segment = 0; segment < segmentCount; segment++) {
-            const uint8_t style = out.segments[segment].style;
+            const uint8_t styleBits = out.segments[segment].style;
             const std::string_view url = out.segments[segment].url;
             const size_t segmentEnd = out.segments[segment].end;
-            if (style & kStyleBreak) {
+            if (styleBits & kStyleBreak) {
                 // A <br> is one space: the line ends there, and each one more after it leaves an
                 // empty line.
                 for (; at < segmentEnd; at++) {
@@ -9998,7 +10002,7 @@ private:
                 }
                 continue;
             }
-            const StandardWordAdvances& font = StyleAdvances(style);
+            const StandardWordAdvances& font = StyleAdvances(styleBits);
             const uint16_t* const advances = font.byte;
             const uint32_t segmentSpace = font.space;
             while (at < segmentEnd) {
@@ -10043,7 +10047,7 @@ private:
                 } else {
                     lineUnits += spaceUnits + wordUnits;
                     if (lastSegment == segment) {
-                        AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, style, url,
+                        AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, styleBits, url,
                             source + wordStart, wordEnd - wordStart, static_cast<uint32_t>(wordUnits), spaceUnits);
                     } else {
                         // In one piece per segment the word touches.

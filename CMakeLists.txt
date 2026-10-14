@@ -64,6 +64,14 @@ function(rayomd_release_flags target)
     endif()
 endfunction()
 
+# Warnings for RayoMD's own C++ (GCC and Clang): -Wall -Wextra -Wshadow, as cpp-best-practices
+# recommends. Not errors: a newer compiler's new warnings must not break a build.
+function(rayomd_warnings target)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wshadow>")
+    endif()
+endfunction()
+
 function(rayomd_common_definitions target)
     target_compile_definitions(${target} PRIVATE RAYOMD_VERSION="${PROJECT_VERSION}")
 endfunction()
@@ -231,6 +239,8 @@ if(WIN32)
     add_executable(rayomd WIN32 ${RAYOMD_CORE_SOURCES} src/win32/main_win32.cpp src/win32/rayomd.rc
         ${RAYOMD_IMGUI_SOURCES})
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        # Vendored ImGui stays as upstream wrote it, and quiet.
+        set_property(SOURCE ${RAYOMD_IMGUI_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -w)
         target_sources(rayomd PRIVATE
             src/win32/delay_load.cpp
             src/win32/delay_import_pointers.cpp
@@ -264,6 +274,7 @@ if(WIN32)
     endif()
     rayomd_common_definitions(rayomd)
     rayomd_release_flags(rayomd)
+    rayomd_warnings(rayomd)
     rayomd_experiments(rayomd)
 else()
     if(RAYOMD_USE_CURL)
@@ -279,6 +290,7 @@ else()
     rayomd_common_definitions(rayomd)
     rayomd_libm(rayomd)
     rayomd_release_flags(rayomd)
+    rayomd_warnings(rayomd)
     rayomd_hot_sections(rayomd)
     rayomd_experiments(rayomd)
 endif()
@@ -295,6 +307,7 @@ if(BUILD_TESTING)
         target_link_libraries(rayomd-core-tests PRIVATE ole32 winhttp windowscodecs ws2_32)
     endif()
     rayomd_release_flags(rayomd-core-tests)
+    rayomd_warnings(rayomd-core-tests)
     rayomd_experiments(rayomd-core-tests)
     add_test(NAME rayomd-core COMMAND rayomd-core-tests)
     if(Python3_Interpreter_FOUND)

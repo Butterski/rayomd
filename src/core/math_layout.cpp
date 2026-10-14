@@ -164,15 +164,15 @@ struct Layouter {
         if (flags & (kItemOutline | kItemHeavy)) stroke = true;
         Push(item);
     }
-    void Rule(double x, double y, double width, double height) {
-        if (!(width > 0.0) || !(height > 0.0)) return;
+    void Rule(double x, double y, double width, double ruleHeight) {
+        if (!(width > 0.0) || !(ruleHeight > 0.0)) return;
         MathItem item{};
         item.x = static_cast<float>(x);
         item.y = static_cast<float>(y);
         item.a = static_cast<float>(width);
-        item.b = static_cast<float>(height);
+        item.b = static_cast<float>(ruleHeight);
         item.kind = kItemRule;
-        if (std::min(width, height) <= 1.0) stroke = true;
+        if (std::min(width, ruleHeight) <= 1.0) stroke = true;
         Push(item);
     }
     void Shape(unsigned id, double x, double y, double a, double b, double c, unsigned flags = 0) {
@@ -724,20 +724,20 @@ struct Layouter {
         const Box body = Field(node.child[0], Cramp(st));
         double psi = st.level == 0 ? th + kXHeight * s / 4.0 : 1.5 * th;
         const double need = body.h + body.d + psi + th;
-        const double height = std::max(need, s);
-        psi += (height - need) / 2.0;   // the excess is split above and below
-        const double top = body.h + psi + th, bottom = top - height;
-        const double surd = SurdWidth(height, s);
+        const double surdHeight = std::max(need, s);
+        psi += (surdHeight - need) / 2.0;   // the excess is split above and below
+        const double top = body.h + psi + th, bottom = top - surdHeight;
+        const double surd = SurdWidth(surdHeight, s);
         double x = 0.0;
         out.h = top + th;
         out.d = std::max(body.d, -bottom);
         if (node.child[1] != 0) {
-            const double raise = bottom + 0.60 * height;
+            const double raise = bottom + 0.60 * surdHeight;
             Shift(index, 0.0, raise);
             x = index.w - std::min(index.w, 0.55 * surd);
             Cover(out, index, raise);
         }
-        Shape(kShapeSurd, x, bottom, height, body.w + kRadicalPad * s, s);
+        Shape(kShapeSurd, x, bottom, surdHeight, body.w + kRadicalPad * s, s);
         Shift(body, x + surd, 0.0);
         out.w = x + surd + body.w + kRadicalPad * s;
         Close(out);
@@ -746,7 +746,7 @@ struct Layouter {
 
     // A delimiter of total height >= target on the axis, or its natural form. kDelimNone
     // gives an empty box; what "none" means is the caller's business.
-    Box LayoutDelimiter(unsigned id, double target, Style st, bool natural) {
+    Box LayoutDelimiter(unsigned id, double target, Style st, bool naturalForm) {
         const double s = Size(st);
         Box box = Open();
         if (id == kDelimNone || id >= kDelimCount) return box;
@@ -755,7 +755,7 @@ struct Layouter {
             box = CompositeBox(base.code, 0, s);
         } else if (base.base == kDelimBaseGlyph) {
             const MathGlyphMetrics& m = Metrics(base.font, base.code);
-            if (natural || id >= kDelimSlash || target <= kDelimGlyphMax * (m.yMax - m.yMin) / 1000.0 * s) {
+            if (naturalForm || id >= kDelimSlash || target <= kDelimGlyphMax * (m.yMax - m.yMin) / 1000.0 * s) {
                 box = GlyphBox(base.font, base.code, 0, s);
             }
         }
@@ -765,16 +765,16 @@ struct Layouter {
             return box;
         }
         const double r = target / s;
-        double height = s;
-        if (!natural && !(base.base == kDelimBaseVector && r <= 1.0)) {
-            height = r <= 1.2 ? 1.2 * s : std::min(60.0, 1.2 + 0.3 * RayoMd::ExactMath::Ceil((r - 1.2) / 0.3 - 1e-9)) * s;
+        double delimHeight = s;
+        if (!naturalForm && !(base.base == kDelimBaseVector && r <= 1.0)) {
+            delimHeight = r <= 1.2 ? 1.2 * s : std::min(60.0, 1.2 + 0.3 * RayoMd::ExactMath::Ceil((r - 1.2) / 0.3 - 1e-9)) * s;
         }
         const DelimShape& shape = kDelimShapes[id];
-        const double width = std::min<double>(shape.base + shape.slope * (height / s), shape.cap) * s;
-        Shape(shape.shape, 0.0, kAxis * s - height / 2.0, height, width, s, (id & 1) ? 0 : kShapeMirror);
+        const double width = std::min<double>(shape.base + shape.slope * (delimHeight / s), shape.cap) * s;
+        Shape(shape.shape, 0.0, kAxis * s - delimHeight / 2.0, delimHeight, width, s, (id & 1) ? 0 : kShapeMirror);
         box.w = width;
-        box.h = kAxis * s + height / 2.0;
-        box.d = height / 2.0 - kAxis * s;
+        box.h = kAxis * s + delimHeight / 2.0;
+        box.d = delimHeight / 2.0 - kAxis * s;
         Close(box);
         return box;
     }
@@ -874,12 +874,12 @@ struct Layouter {
             top = y + 0.11 * s;
         } else if (kind == kAccentWideHat || kind == kAccentWideTilde) {
             const double width = std::max(body.w, 0.5 * s);
-            const double height = std::min(0.22 * s, 0.10 * s + 0.06 * width);
+            const double accentHeight = std::min(0.22 * s, 0.10 * s + 0.06 * width);
             const double y = body.h + 0.07 * s;
             xl = (body.w - width) / 2.0 + 0.5 * skew;
             xr = xl + width;
-            Shape(kind == kAccentWideHat ? kShapeWideHat : kShapeWideTilde, xl, y, width, height, s);
-            top = y + height + 0.02 * s;
+            Shape(kind == kAccentWideHat ? kShapeWideHat : kShapeWideTilde, xl, y, width, accentHeight, s);
+            top = y + accentHeight + 0.02 * s;
         }
         out.w = body.w;
         out.h = std::max(body.h, top);

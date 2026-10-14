@@ -658,7 +658,7 @@ bool ParseColor(std::string_view text, uint32_t& rgb, double& alpha) {
     if (text.empty()) return false;
     if (text[0] == '#') {
         const std::string_view hex = text.substr(1);
-        int digits[8];
+        int digits[8] = {};
         if (hex.size() != 3 && hex.size() != 4 && hex.size() != 6 && hex.size() != 8) return false;
         for (size_t index = 0; index < hex.size(); index++) {
             digits[index] = HexDigit(hex[index]);

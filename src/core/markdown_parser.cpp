@@ -1410,13 +1410,13 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             // included, until all footnotes are known.
             const bool notesPending = notesPossible && TableMayReferToNote(lines, infos, suppressed, i);
             // Reference links resolve cell by cell, so a link target cannot split a row.
-            auto addRow = [&](std::string_view line, std::vector<std::string> row) {
+            auto addRow = [&](std::string_view rowLine, std::vector<std::string> row) {
                 if (!definitions.empty()) {
                     for (std::string& cell : row) {
                         if (cell.find('[') != std::string::npos) cell = ResolveReferenceLinks(cell, definitions);
                     }
                 }
-                if (!notesPending) FindTableMath(line, rows.size(), row, mathCells);
+                if (!notesPending) FindTableMath(rowLine, rows.size(), row, mathCells);
                 rows.push_back(std::move(row));
             };
             addRow(lines[i], SplitTableCells(lines[i]));

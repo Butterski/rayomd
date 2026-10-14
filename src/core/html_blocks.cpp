@@ -127,7 +127,7 @@ Range FindClose(std::string_view html, size_t from, Tag tag) {
 // do not each search the rest of the block.
 class Containers {
 public:
-    explicit Containers(std::string_view html) : html(html) {}
+    explicit Containers(std::string_view text) : html(text) {}
 
     // The close of the element whose open tag is at `tag`, when it ends at or before `limit`.
     bool Close(const char* tag, const char* limit, const char*& closeBegin, const char*& closeEnd) const {
@@ -298,8 +298,8 @@ constexpr std::array<uint8_t, 256> kTextClasses = MakeTextClasses();
 // One HTML block, or the content of an element of one, mapped to blocks (see MapBlock).
 class BlockMapper {
 public:
-    BlockMapper(HtmlState& state, std::vector<Block>& out, int nesting, const Containers& containers)
-        : state(state), out(out), nesting(nesting), containers(containers) {}
+    BlockMapper(HtmlState& openState, std::vector<Block>& blocks, int depth, const Containers& closes)
+        : state(openState), out(blocks), nesting(depth), containers(closes) {}
 
     void Map(std::string_view html) {
         paragraph.reserve(std::min<size_t>(html.size(), 512));

@@ -31,6 +31,9 @@ cmake --build build/linux --config Release
 
 Linux dependencies are listed in `README.md`.
 
+GCC and Clang builds compile RayoMD's own code with `-Wall -Wextra -Wshadow` (vendored
+`third_party/` code stays quiet). The warnings are not errors, but keep the build free of them.
+
 ## Verify
 
 Build first, then run the same correctness verifier on either platform:
