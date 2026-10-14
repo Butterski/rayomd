@@ -1331,7 +1331,9 @@ bool CheckLinkText() {
 }
 
 // A TrueType collection that holds one font: square glyphs for ' ' (empty), 'A', '?' and
-// U+4E2D, 1000 units per em and the bounding box [0 0 700 700].
+// U+4E2D, 1000 units per em and the bounding box [0 0 700 700], and for U+AC00 a composite
+// glyph with no advance of its own, whose one component (U+4E2D's square) is flagged
+// USE_MY_METRICS.
 std::string MinimalTrueTypeCollection() {
     auto u16 = [](std::string& out, int value) {
         out.push_back(static_cast<char>((value >> 8) & 0xFF));
@@ -1346,8 +1348,10 @@ std::string MinimalTrueTypeCollection() {
     square.append(4, '\x01');                                           // on-curve points, 16-bit deltas
     for (int value : {0, 700, 0, -700, 0, 0, 700, 0}) u16(square, value);
     std::string glyf = square + square + square;                        // glyphs 2 'A', 3 '?', 4 U+4E2D
+    for (int value : {-1, 0, 0, 700, 700, 0x0202, 4}) u16(glyf, value); // glyph 5 U+AC00: one component,
+    u16(glyf, 0);                                                       // byte offsets 0 0
     std::string loca;
-    for (uint32_t offset : {0u, 0u, 0u, 34u, 68u, 102u}) u32(loca, offset);  // 34 bytes a square; 0 and 1 empty
+    for (uint32_t offset : {0u, 0u, 0u, 34u, 68u, 102u, 118u}) u32(loca, offset);  // 34 bytes a square; 0 and 1 empty
     std::string head;
     u32(head, 0x00010000);
     u32(head, 0x00010000);
@@ -1358,27 +1362,27 @@ std::string MinimalTrueTypeCollection() {
     for (int value : {0, 0, 700, 700, 0, 8, 2, 1, 0}) u16(head, value); // box, style, ppem, hint, long loca
     std::string hhea;
     u32(hhea, 0x00010000);
-    for (int value : {800, -200, 0, 800, 0, 0, 700, 1, 0, 0, 0, 0, 0, 0, 0, 5}) u16(hhea, value);
+    for (int value : {800, -200, 0, 800, 0, 0, 700, 1, 0, 0, 0, 0, 0, 0, 0, 6}) u16(hhea, value);
     std::string maxp;
     u32(maxp, 0x00010000);
-    for (int value : {5, 4, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0}) u16(maxp, value);
+    for (int value : {6, 4, 1, 4, 1, 2, 0, 0, 0, 0, 0, 0, 1, 1}) u16(maxp, value);
     std::string hmtx;
-    for (int glyph = 0; glyph < 5; glyph++) {
-        u16(hmtx, 800);
+    for (int glyph = 0; glyph < 6; glyph++) {
+        u16(hmtx, glyph == 5 ? 0 : 800);
         u16(hmtx, 0);
     }
     std::string cmap;
     for (int value : {0, 1, 3, 1}) u16(cmap, value);
     u32(cmap, 12);
-    const int codes[] = {0x20, 0x3F, 0x41, 0x4E2D, 0xFFFF};
-    const int glyphs[] = {1, 3, 2, 4, 0};
+    const int codes[] = {0x20, 0x3F, 0x41, 0x4E2D, 0xAC00, 0xFFFF};
+    const int glyphs[] = {1, 3, 2, 4, 5, 0};
     // Format 4: length, language, two bytes per segment, search range, selector, range shift.
-    for (int value : {4, 14 + 2 + 5 * 8, 0, 10, 8, 2, 2}) u16(cmap, value);
+    for (int value : {4, 14 + 2 + 6 * 8, 0, 12, 8, 2, 4}) u16(cmap, value);
     for (int code : codes) u16(cmap, code);                             // end codes
     u16(cmap, 0);
     for (int code : codes) u16(cmap, code);                             // start codes
-    for (int index = 0; index < 5; index++) u16(cmap, (glyphs[index] - codes[index]) & 0xFFFF);
-    for (int index = 0; index < 5; index++) u16(cmap, 0);
+    for (int index = 0; index < 6; index++) u16(cmap, (glyphs[index] - codes[index]) & 0xFFFF);
+    for (int index = 0; index < 6; index++) u16(cmap, 0);
 
     const std::pair<const char*, const std::string*> tables[] = {
         {"cmap", &cmap}, {"glyf", &glyf}, {"head", &head}, {"hhea", &hhea}, {"hmtx", &hmtx}, {"loca", &loca},
@@ -2996,6 +3000,39 @@ bool CheckFallbackFont() {
     return true;
 }
 
+// A composite glyph is as wide as its component flagged USE_MY_METRICS, not as its own hmtx
+// entry says (0 here; wqy-microhei's Hangul syllables list a quarter em there): in /W, which
+// the layout shares.
+bool CheckComposedAdvance() {
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "rayomd-test-composed.ttc";
+    {
+        std::ofstream file(path, std::ios::binary);
+        const std::string bytes = MinimalTrueTypeCollection();
+        file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+#ifdef _WIN32
+    _wputenv_s(L"RAYOMD_FALLBACK_FONT", path.wstring().c_str());
+#else
+    setenv("RAYOMD_FALLBACK_FONT", path.string().c_str(), 1);
+#endif
+    TinyPdf::PdfOptions options;
+    std::string pdf;
+    const TinyPdf::BuildResult result = TinyPdf::BuildPdf(u8"A \uAC00\uAC00 A\n", options, pdf);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    if (!result.Ok()) {
+        std::cerr << "composed advance: build failed" << std::endl;
+        return false;
+    }
+    // A default font with Hangul glyphs needs no fallback.
+    if (pdf.find("/FontBBox [0 0 700 700]") == std::string::npos) return true;
+    if (pdf.find("44032 [ 800 ]") == std::string::npos) {
+        std::cerr << "composed advance: /W misses the component's advance for U+AC00" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // GFM table rows: a table goes on up to a blank line or the start of another block, a line
 // without pipes is a row too, and every row has the header's number of cells.
 bool CheckTableRows() {
@@ -3317,6 +3354,7 @@ int main() {
     if (!CheckCidStrings()) return 101;
     if (!CheckWriteAll()) return 102;
     if (!CheckExactMath()) return 103;
+    if (!CheckComposedAdvance()) return 104;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

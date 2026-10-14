@@ -398,6 +398,7 @@ struct TtfFont {
     std::map<std::string, Table> tables;
     uint32_t hmtxOffset = 0;
     uint32_t locaOffset = 0;
+    uint32_t glyfOffset = 0;      // of glyf, once loca is checked
     uint32_t locaEntries = 0;     // glyphCount + 1 once loca is checked, else 0
     uint16_t metricGlyphs = 0;    // glyphCount once hmtx is checked, else 0: the glyphs with an advance
     uint16_t advanceCount = 0;    // the advances hmtx lists; later glyphs take the last one
@@ -432,6 +433,34 @@ struct TtfFont {
         if (indexToLocFormat == 0) return (uint32_t)(entries[index * 2] << 8 | entries[index * 2 + 1]) * 2u;
         return (uint32_t)entries[index * 4] << 24 | (uint32_t)entries[index * 4 + 1] << 16 |
             (uint32_t)entries[index * 4 + 2] << 8 | entries[index * 4 + 3];
+    }
+
+    // Whether `glyph` is a composite glyph: one whose glyf entry has a negative contour count.
+    bool IsComposite(uint16_t glyph) const {
+        if ((size_t)glyph + 1 >= locaEntries) return false;
+        const uint32_t start = Loca(glyph);
+        const uint32_t end = Loca((size_t)glyph + 1);
+        return end >= start + 10 && (int8_t)bytes.data()[(size_t)glyfOffset + start] < 0;
+    }
+
+    // The advance a glyph is drawn with: that of the first component flagged USE_MY_METRICS
+    // (0x0200) of a composite glyph, which a rasterizer takes over the composite's own hmtx
+    // entry (wqy-microhei's Hangul syllables list a quarter em there), else its own.
+    RAYOMD_COLD uint16_t MetricAdvance(uint16_t glyph, int depth = 0) const {
+        if (depth >= 8 || !IsComposite(glyph)) return Advance(glyph);
+        const uint8_t* const data = bytes.data();
+        const size_t end = (size_t)glyfOffset + Loca((size_t)glyph + 1);
+        for (size_t at = (size_t)glyfOffset + Loca(glyph) + 10; at + 4 <= end;) {
+            const uint16_t flags = (uint16_t)(data[at] << 8 | data[at + 1]);
+            const uint16_t component = (uint16_t)(data[at + 2] << 8 | data[at + 3]);
+            if (flags & 0x0200) return MetricAdvance(component, depth + 1);
+            at += 4 + ((flags & 0x0001) ? 4 : 2);
+            if (flags & 0x0008) at += 2;
+            else if (flags & 0x0040) at += 4;
+            else if (flags & 0x0080) at += 8;
+            if (!(flags & 0x0020)) break;
+        }
+        return Advance(glyph);
     }
 
     // RAYOMD_FONT first, then the sans fonts where the common systems install them, then,
@@ -687,6 +716,7 @@ struct TtfFont {
         }
         if (furthest > tables["glyf"].length) return false;
         locaOffset = table.offset;
+        glyfOffset = tables["glyf"].offset;
         locaEntries = (uint32_t)glyphCount + 1;
         return true;
     }
@@ -712,9 +742,11 @@ struct TtfFont {
         uint16_t cached = widthCache[cid].load(std::memory_order_relaxed);
         if (cached != 0) return cached;
         uint16_t glyph = GlyphFor(cid);
-        uint16_t width = glyph < metricGlyphs
-            ? (uint16_t)((Advance(glyph) * 1000u + unitsPerEm / 2u) / unitsPerEm)
-            : (uint16_t)500;
+        uint16_t width = (uint16_t)500;
+        if (glyph < metricGlyphs) {
+            const uint16_t advance = IsComposite(glyph) ? MetricAdvance(glyph) : Advance(glyph);
+            width = (uint16_t)((advance * 1000u + unitsPerEm / 2u) / unitsPerEm);
+        }
         widthCache[cid].store(width, std::memory_order_relaxed);
         return width;
     }
@@ -7572,7 +7604,7 @@ static bool PlanSubsetFont(const TtfFont& font, const std::vector<uint16_t>& gly
         // Every glyph gets a full metric; past numberOfHMetrics the font lists only bearings.
         const size_t bearing = glyph < font.metricCount ? (size_t)glyph * 4 + 2
             : (size_t)font.metricCount * 4 + (size_t)(glyph - font.metricCount) * 2;
-        AppendU16(hmtxData, font.Advance(glyph));
+        AppendU16(hmtxData, font.MetricAdvance(glyph));
         AppendU16(hmtxData, bearing + 2 <= oldHmtx.length ? ReadU16(font.bytes, oldHmtx.offset + bearing) : 0);
 
         const uint32_t start = font.Loca(glyph);
