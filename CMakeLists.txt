@@ -185,46 +185,49 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         $<$<CONFIG:Release>:-fdata-sections>)
 endif()
 
+# The exporter's sources, shared by both command lines and the core tests. The order is the
+# Linux link order: changing it moves code in the binary.
+set(RAYOMD_CORE_SOURCES
+    src/core/tiny_pdf.cpp
+    src/core/theme.cpp
+    src/core/pdfa.cpp
+    src/core/png_filter.cpp
+    src/core/flate.cpp
+    src/core/image_cache.cpp
+    src/core/image_encoder.cpp
+    src/core/inflate.cpp
+    src/core/export_options.cpp
+    src/core/inline_markdown.cpp
+    src/core/markdown_parser.cpp
+    src/core/footnotes.cpp
+    src/core/highlight.cpp
+    src/core/html.cpp
+    src/core/html_blocks.cpp
+    src/core/contents.cpp
+    src/core/book.cpp
+    src/core/svg.cpp
+    src/core/cff.cpp
+    src/core/tagged.cpp
+    src/core/math_parser.cpp
+    src/core/math_layout.cpp
+    src/common/text_utils.cpp
+    src/common/batch_report.cpp
+    src/common/file_io.cpp
+    src/common/exact_math.cpp
+    src/core/rayomd_pdf_source.cpp)
+
 if(WIN32)
     enable_language(RC)
-    add_executable(rayomd WIN32
-        src/core/tiny_pdf.cpp
-        src/core/theme.cpp
-        src/core/pdfa.cpp
-        src/core/png_filter.cpp
-        src/core/flate.cpp
-        src/core/image_cache.cpp
-        src/core/image_encoder.cpp
-        src/core/inflate.cpp
-        src/core/rayomd_pdf_source.cpp
-        src/core/export_options.cpp
-        src/core/inline_markdown.cpp
-        src/core/markdown_parser.cpp
-        src/core/footnotes.cpp
-        src/core/highlight.cpp
-        src/core/html.cpp
-        src/core/html_blocks.cpp
-        src/core/contents.cpp
-        src/core/book.cpp
-        src/core/svg.cpp
-        src/core/cff.cpp
-        src/core/tagged.cpp
-        src/core/math_parser.cpp
-        src/core/math_layout.cpp
-        src/common/text_utils.cpp
-        src/common/batch_report.cpp
-        src/common/file_io.cpp
-        src/common/exact_math.cpp
-        src/win32/main_win32.cpp
-        src/win32/rayomd.rc
+    set(RAYOMD_IMGUI_SOURCES
         third_party/imgui/imgui.cpp
         third_party/imgui/imgui_draw.cpp
         third_party/imgui/imgui_tables.cpp
         third_party/imgui/imgui_widgets.cpp
         third_party/imgui/misc/cpp/imgui_stdlib.cpp
         third_party/imgui/backends/imgui_impl_win32.cpp
-        third_party/imgui/backends/imgui_impl_dx11.cpp
-    )
+        third_party/imgui/backends/imgui_impl_dx11.cpp)
+    add_executable(rayomd WIN32 ${RAYOMD_CORE_SOURCES} src/win32/main_win32.cpp src/win32/rayomd.rc
+        ${RAYOMD_IMGUI_SOURCES})
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_sources(rayomd PRIVATE
             src/win32/delay_load.cpp
@@ -264,36 +267,7 @@ else()
     if(RAYOMD_USE_CURL)
         find_package(CURL REQUIRED)
     endif()
-    add_executable(rayomd
-        src/core/tiny_pdf.cpp
-        src/core/theme.cpp
-        src/core/pdfa.cpp
-        src/core/png_filter.cpp
-        src/core/flate.cpp
-        src/core/image_cache.cpp
-        src/core/image_encoder.cpp
-        src/core/inflate.cpp
-        src/core/export_options.cpp
-        src/core/inline_markdown.cpp
-        src/core/markdown_parser.cpp
-        src/core/footnotes.cpp
-        src/core/highlight.cpp
-        src/core/html.cpp
-        src/core/html_blocks.cpp
-        src/core/contents.cpp
-        src/core/book.cpp
-        src/core/svg.cpp
-        src/core/cff.cpp
-        src/core/tagged.cpp
-        src/core/math_parser.cpp
-        src/core/math_layout.cpp
-        src/common/text_utils.cpp
-        src/common/batch_report.cpp
-        src/common/file_io.cpp
-        src/common/exact_math.cpp
-        src/core/rayomd_pdf_source.cpp
-        src/cli/main_cli.cpp
-    )
+    add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
     target_include_directories(rayomd PRIVATE include)
     target_link_libraries(rayomd PRIVATE Threads::Threads)
     if(RAYOMD_USE_CURL)
@@ -310,35 +284,7 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
-    add_executable(rayomd-core-tests
-        tests/core_tests.cpp
-        src/core/tiny_pdf.cpp
-        src/core/theme.cpp
-        src/core/pdfa.cpp
-        src/core/png_filter.cpp
-        src/core/flate.cpp
-        src/core/image_cache.cpp
-        src/core/image_encoder.cpp
-        src/core/inflate.cpp
-        src/core/rayomd_pdf_source.cpp
-        src/core/export_options.cpp
-        src/core/inline_markdown.cpp
-        src/core/markdown_parser.cpp
-        src/core/footnotes.cpp
-        src/core/highlight.cpp
-        src/core/html.cpp
-        src/core/html_blocks.cpp
-        src/core/contents.cpp
-        src/core/book.cpp
-        src/core/svg.cpp
-        src/core/cff.cpp
-        src/core/tagged.cpp
-        src/core/math_parser.cpp
-        src/core/math_layout.cpp
-        src/common/text_utils.cpp
-        src/common/batch_report.cpp
-        src/common/file_io.cpp
-        src/common/exact_math.cpp)
+    add_executable(rayomd-core-tests tests/core_tests.cpp ${RAYOMD_CORE_SOURCES})
     target_include_directories(rayomd-core-tests PRIVATE include)
     target_compile_definitions(rayomd-core-tests PRIVATE RAYOMD_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     rayomd_libm(rayomd-core-tests)
