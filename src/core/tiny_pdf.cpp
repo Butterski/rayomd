@@ -5079,31 +5079,83 @@ RAYOMD_MATH_COLD static std::string MathSourceText(const Internal::InlineSpan& s
     return delimiter + span.text + delimiter;
 }
 
+// One embedded math face's objects that do not depend on object numbers.
+struct MathFaceObjects {
+    std::string name;        // TaggedFontName(kMathFonts[face].fontName, codes)
+    std::string fileDict;    // "/Filter /FlateDecode /Subtype /Type1C" or "/Subtype /Type1C"
+    std::string file;        // the CFF program, compressed when CompressPayload made it smaller
+    std::string mapDict;     // "/Filter /FlateDecode" or ""
+    std::string toUnicode;
+    std::string widths;      // MathFaceFont::widths
+    std::string descriptor;  // MathFaceFont::descriptor
+};
+
+// The objects of face `face` for the codes `use` marks, kept between exports: they depend on
+// nothing else, and a batch's formulas mostly paint the same glyphs. Null when the face has none.
+RAYOMD_MATH_COLD static std::shared_ptr<const MathFaceObjects> CachedMathFace(int face, const Internal::MathGlyphUse& use,
+                                                                            bool compress) {
+    struct Entry {
+        int face;
+        uint64_t bits[4];
+        bool compress;
+        std::shared_ptr<const MathFaceObjects> objects;
+    };
+    static std::mutex mutex;
+    static std::vector<Entry> entries;
+    const uint64_t* const bits = use.bits[face];
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const Entry& entry : entries) {
+            if (entry.face == face && entry.compress == compress && memcmp(entry.bits, bits, sizeof(entry.bits)) == 0) {
+                return entry.objects;
+            }
+        }
+    }
+    std::shared_ptr<MathFaceObjects> objects;
+    Internal::MathFaceFont font;
+    if (Internal::BuildMathFaceFont(face, use, font)) {
+        objects = std::make_shared<MathFaceObjects>();
+        objects->name = TaggedFontName(Internal::kMathFonts[face].fontName, font.codes);
+        const bool flate = compress && CompressPayload(font.program, objects->file);
+        objects->fileDict = flate ? "/Filter /FlateDecode /Subtype /Type1C" : "/Subtype /Type1C";
+        if (!flate) objects->file = std::move(font.program);
+        const bool flateMap = compress && CompressPayload(font.toUnicode, objects->toUnicode);
+        if (flateMap) objects->mapDict = "/Filter /FlateDecode";
+        else objects->toUnicode = std::move(font.toUnicode);
+        objects->widths = std::move(font.widths);
+        objects->descriptor = std::move(font.descriptor);
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (entries.size() >= 32) entries.clear();
+    entries.push_back({face, {bits[0], bits[1], bits[2], bits[3]}, compress, objects});
+    return objects;
+}
+
 // The embedded math faces whose codes `use` marks: for each, its font program (FontFile3 /Type1C),
 // FontDescriptor, ToUnicode CMap and font dictionary. Returns the font of each face, 0 for a face
-// no formula painted.
-RAYOMD_MATH_COLD static std::vector<int> AddMathFontObjects(PdfObjects& pdf, const Internal::MathGlyphUse& use, bool compress) {
+// no formula painted. The streams are views of the cached objects, which `keep` holds until
+// BuildInto has run.
+RAYOMD_MATH_COLD static std::vector<int> AddMathFontObjects(PdfObjects& pdf, const Internal::MathGlyphUse& use, bool compress,
+                                                            std::vector<std::shared_ptr<const MathFaceObjects>>& keep) {
     std::vector<int> ids(Internal::kMathFontCount, 0);
-    Internal::MathFaceFont face;
     for (int index = 0; index < Internal::kMathFontCount; index++) {
-        if (!Internal::BuildMathFaceFont(index, use, face)) continue;
-        const std::string name = TaggedFontName(Internal::kMathFonts[index].fontName, face.codes);
-        std::string packed;
-        const bool flate = compress && CompressPayload(face.program, packed);
-        const int fileId = pdf.AddStream(flate ? "/Filter /FlateDecode /Subtype /Type1C" : "/Subtype /Type1C",
-            flate ? packed : face.program);
-        const bool flateMap = compress && CompressPayload(face.toUnicode, packed);
-        const int toUnicodeId = pdf.AddStream(flateMap ? "/Filter /FlateDecode" : "", flateMap ? packed : face.toUnicode);
-        std::string descriptor = "<< /Type /FontDescriptor /FontName /" + name + face.descriptor + " /FontFile3 ";
+        const uint64_t* const bits = use.bits[index];
+        if ((bits[0] | bits[1] | bits[2] | bits[3]) == 0) continue;
+        std::shared_ptr<const MathFaceObjects> face = CachedMathFace(index, use, compress);
+        if (!face) continue;
+        const int fileId = pdf.AddStreamView(face->fileDict, face->file);
+        const int toUnicodeId = pdf.AddStreamView(face->mapDict, face->toUnicode);
+        std::string descriptor = "<< /Type /FontDescriptor /FontName /" + face->name + face->descriptor + " /FontFile3 ";
         AppendInt(descriptor, fileId);
         descriptor += " 0 R >>";
         const int descriptorId = pdf.Add(std::move(descriptor));
-        std::string font = "<< /Type /Font /Subtype /Type1 /BaseFont /" + name + face.widths + " /FontDescriptor ";
+        std::string font = "<< /Type /Font /Subtype /Type1 /BaseFont /" + face->name + face->widths + " /FontDescriptor ";
         AppendInt(font, descriptorId);
         font += " 0 R /ToUnicode ";
         AppendInt(font, toUnicodeId);
         font += " 0 R >>";
         ids[(size_t)index] = pdf.Add(std::move(font));
+        keep.push_back(std::move(face));
     }
     return ids;
 }
@@ -11501,7 +11553,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         : AddBookLinkAnnotations(pdf, renderer.PageLinks(), winAnsi, headings, renderer.Ids(), *book->book, *bookParse,
             renderer.PageHeight(), contents.empty() ? nullptr : &contentsTargets, internalLinks, false);
     std::vector<int> mathFontIds;
-    if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf, renderer.MathGlyphs(), options.compress);
+    std::vector<std::shared_ptr<const MathFaceObjects>> mathFaceKeep;
+    if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf, renderer.MathGlyphs(), options.compress, mathFaceKeep);
     // The italic faces only when emphasis used them, so other documents keep their bytes.
     const int fontObliqueId = renderer.ObliqueUsed()
         ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding >>") : 0;
@@ -11985,7 +12038,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
             options.pdfa, tags.get())
         : AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa);
     std::vector<int> mathFontIds;
-    if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf, renderer.MathGlyphs(), options.compress);
+    std::vector<std::shared_ptr<const MathFaceObjects>> mathFaceKeep;
+    if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf, renderer.MathGlyphs(), options.compress, mathFaceKeep);
 
     // A theme's header and footer, one stream per page, PDF/A's and PDF/UA's page numbers, and a
     // theme's cover page, before the font subset is made, which then has their glyphs.

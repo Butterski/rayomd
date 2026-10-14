@@ -8,6 +8,7 @@
 #include "../common/text_utils.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 
 // Box layout and PDF emission of the native TeX-subset math module.
@@ -1492,6 +1493,12 @@ void EmitText(std::string& out, const std::vector<MathItem>& items, double ox, d
     out += " ET";
 }
 
+void AppendInt(std::string& out, int value) {
+    char buf[12];
+    const auto result = std::to_chars(buf, buf + sizeof(buf), value);
+    out.append(buf, static_cast<size_t>(result.ptr - buf));
+}
+
 } // namespace
 
 // ---- public API ---------------------------------------------------------------------------------
@@ -1502,6 +1509,8 @@ bool BuildMathFaceFont(int face, const MathGlyphUse& use, MathFaceFont& out) {
         face, [](const MathGlyphProgram& program, int value) { return program.face < value; });
     std::vector<Cff::SimpleGlyph> glyphs;
     std::vector<uint16_t> unicodes;
+    glyphs.reserve(224);
+    unicodes.reserve(224);
     out.codes.clear();
     for (const MathGlyphProgram* program = begin; program != std::end(kMathGlyphPrograms) && program->face == face; ++program) {
         if (!use.Has(face, program->code)) continue;
@@ -1517,14 +1526,16 @@ bool BuildMathFaceFont(int face, const MathGlyphUse& use, MathFaceFont& out) {
     }
 
     static constexpr char kHex[] = "0123456789ABCDEF";
-    out.toUnicode =
+    out.toUnicode.clear();
+    out.toUnicode.reserve(260 + 16 * glyphs.size());
+    out.toUnicode +=
         "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
         "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
         "/CMapName /RayoMDMathUnicode def\n/CMapType 2 def\n"
         "1 begincodespacerange\n<00> <FF>\nendcodespacerange\n";
     for (size_t first = 0; first < glyphs.size(); first += 100) {
         const size_t count = std::min<size_t>(100, glyphs.size() - first);
-        out.toUnicode += std::to_string(count);
+        AppendInt(out.toUnicode, static_cast<int>(count));
         out.toUnicode += " beginbfchar\n";
         for (size_t index = first; index < first + count; ++index) {
             out.toUnicode += '<';
@@ -1539,21 +1550,41 @@ bool BuildMathFaceFont(int face, const MathGlyphUse& use, MathFaceFont& out) {
     out.toUnicode += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
 
     const unsigned firstChar = glyphs.front().code, lastChar = glyphs.back().code;
-    out.widths = " /FirstChar " + std::to_string(firstChar) + " /LastChar " + std::to_string(lastChar) + " /Widths [";
+    out.widths.clear();
+    out.widths.reserve(40 + 6 * (lastChar - firstChar + 1));
+    out.widths += " /FirstChar ";
+    AppendInt(out.widths, static_cast<int>(firstChar));
+    out.widths += " /LastChar ";
+    AppendInt(out.widths, static_cast<int>(lastChar));
+    out.widths += " /Widths [";
     size_t next = 0;
     for (unsigned code = firstChar; code <= lastChar; ++code) {
         if (code != firstChar) out.widths += ' ';
         const bool marked = next < glyphs.size() && glyphs[next].code == code;
-        out.widths += std::to_string(marked ? kMathGlyphMetrics[face][code - 0x20].advance : 0);
+        AppendInt(out.widths, marked ? kMathGlyphMetrics[face][code - 0x20].advance : 0);
         if (marked) ++next;
     }
     out.widths += ']';
 
     const int16_t* const box = kMathFaceBBox[face];
     const bool italic = face == 1 || face == 3;
-    out.descriptor = " /Flags 4 /FontBBox [" + std::to_string(box[0]) + ' ' + std::to_string(box[1]) + ' ' +
-        std::to_string(box[2]) + ' ' + std::to_string(box[3]) + "] /ItalicAngle " + (italic ? "-15" : "0") +
-        " /Ascent " + std::to_string(box[3]) + " /Descent " + std::to_string(box[1]) + " /CapHeight 662 /StemV 85";
+    out.descriptor.clear();
+    out.descriptor.reserve(160);
+    out.descriptor += " /Flags 4 /FontBBox [";
+    AppendInt(out.descriptor, box[0]);
+    out.descriptor += ' ';
+    AppendInt(out.descriptor, box[1]);
+    out.descriptor += ' ';
+    AppendInt(out.descriptor, box[2]);
+    out.descriptor += ' ';
+    AppendInt(out.descriptor, box[3]);
+    out.descriptor += "] /ItalicAngle ";
+    out.descriptor += italic ? "-15" : "0";
+    out.descriptor += " /Ascent ";
+    AppendInt(out.descriptor, box[3]);
+    out.descriptor += " /Descent ";
+    AppendInt(out.descriptor, box[1]);
+    out.descriptor += " /CapHeight 662 /StemV 85";
     return true;
 }
 
