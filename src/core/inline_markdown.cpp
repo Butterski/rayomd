@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 
 namespace TinyPdf::Internal {
@@ -1362,6 +1363,82 @@ ReferenceNeed CharacterReferenceNeed(std::string_view text) {
         need = ReferenceNeed::WinAnsi;
     }
     return need;
+}
+
+void NonAsciiCodepoints(std::string_view text, CidList& out) {
+    out.clear();
+    // A bit per code point in words of 64; `touched` has a bit per word written, the only words
+    // that are cleared and read back.
+    uint64_t bits[1024];
+    uint64_t touched[16] = {};
+    const auto mark = [&](uint32_t codePoint) {
+        if (codePoint < 0x80 || codePoint > 0xFFFF) return;
+        const uint32_t word = codePoint >> 6;
+        const uint64_t wordBit = uint64_t(1) << (word & 63);
+        if ((touched[word >> 6] & wordBit) == 0) {
+            touched[word >> 6] |= wordBit;
+            bits[word] = 0;
+        }
+        bits[word] |= uint64_t(1) << (codePoint & 63);
+    };
+    constexpr uint64_t kOnes = 0x0101010101010101ull;
+    constexpr uint64_t kHigh = 0x8080808080808080ull;
+    const char* const data = text.data();
+    const size_t size = text.size();
+    size_t at = 0;
+    while (at < size) {
+        const unsigned char byte = static_cast<unsigned char>(data[at]);
+        uint32_t codePoint = 0;
+        size_t length = 0;
+        if (byte >= 0x80) {
+            if (RayoMd::Text::DecodeUtf8(text, at, codePoint, length)) {
+                mark(codePoint);
+                at += length;
+            } else {
+                mark(0xFFFD);
+                at++;
+            }
+            continue;
+        }
+        if (byte == '&') length = MatchCharacterReference(text, at, codePoint);
+        if (length != 0) {
+            mark(codePoint);
+            at += length;
+            continue;
+        }
+        // Then eight bytes at a time past ASCII without '&'; on little-endian targets on to the
+        // first byte that is not (the lowest flagged byte is exact: only those above it can be false).
+        at++;
+        while (size - at >= 8) {
+            uint64_t chunk;
+            memcpy(&chunk, data + at, 8);
+            const uint64_t amp = chunk ^ (kOnes * '&');
+            const uint64_t flagged = (chunk | ((amp - kOnes) & ~amp)) & kHigh;
+            if (flagged == 0) {
+                at += 8;
+                continue;
+            }
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            const uint32_t low = static_cast<uint32_t>(flagged);
+            at += (low != 0 ? RayoMd::Text::Detail::LowestBit(low)
+                            : 32 + RayoMd::Text::Detail::LowestBit(static_cast<uint32_t>(flagged >> 32))) / 8;
+#endif
+            break;
+        }
+    }
+    for (uint32_t group = 0; group < 16; group++) {
+        for (uint64_t words = touched[group]; words != 0; words &= words - 1) {
+            const uint32_t low = static_cast<uint32_t>(words);
+            const uint32_t word = group * 64 + (low != 0 ? RayoMd::Text::Detail::LowestBit(low)
+                                                         : 32 + RayoMd::Text::Detail::LowestBit(static_cast<uint32_t>(words >> 32)));
+            for (uint64_t set = bits[word]; set != 0; set &= set - 1) {
+                const uint32_t setLow = static_cast<uint32_t>(set);
+                const uint32_t bit = setLow != 0 ? RayoMd::Text::Detail::LowestBit(setLow)
+                                                 : 32 + RayoMd::Text::Detail::LowestBit(static_cast<uint32_t>(set >> 32));
+                out.push_back(static_cast<uint16_t>(word * 64 + bit));
+            }
+        }
+    }
 }
 
 WinAnsiReferences::WinAnsiReferences() : previous(tWinAnsiReferences) {

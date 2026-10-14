@@ -140,6 +140,11 @@ size_t MatchCharacterReference(std::string_view text, size_t at, uint32_t& codeP
 enum class ReferenceNeed : unsigned char { Ascii, WinAnsi, Unicode };
 ReferenceNeed CharacterReferenceNeed(std::string_view text);
 
+// The code points of the BMP from U+0080 on that `text` has, as UTF-8 or as character
+// references (U+FFFD for a byte that is not UTF-8), ascending, each once.
+using CidList = std::vector<uint16_t>;
+void NonAsciiCodepoints(std::string_view text, CidList& out);
+
 // While one lives, the inline parser on this thread writes character references as WinAnsi
 // codes, the bytes of the standard renderer's text, instead of UTF-8.
 class WinAnsiReferences {

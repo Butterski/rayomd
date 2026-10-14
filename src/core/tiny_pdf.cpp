@@ -1381,11 +1381,14 @@ public:
         values.clear();
         sorted = true;
         missing = 0;
+        missingBmp = 0;
     }
 
     // Characters shown without a glyph of their own, as '?': those the font lacks and those
     // beyond the BMP.
     uint32_t missing = 0;
+    // Those of them in the BMP, which a fallback font may have.
+    uint32_t missingBmp = 0;
 
 private:
     std::array<uint64_t, 1024> bits;
@@ -1481,6 +1484,7 @@ static RAYOMD_SHARED CidWritten WriteNewCid(char* out, const wchar_t* at, const 
     if (!own) {
         cid = CidForCodepoint(font, cp);
         usedCids.missing += cp >= 0x20;
+        usedCids.missingBmp += cp >= 0x20 && cp <= 0xffff;
     }
     usedCids.Add(cid);
     if (own && !high && !NeedsLiteralEscape((uint8_t)(cid >> 8)) && !NeedsLiteralEscape((uint8_t)cid)) {
@@ -3516,6 +3520,8 @@ public:
         return resolved;
     }
     uint32_t FailedImages() const { return failed; }
+    // Whether the document had an SVG image (ConvertSvgImage), whose text takes its font.
+    bool SvgAttempted() const { return svgAttempted; }
 
     // An image a theme names, such as its logo: the caller's own configuration, as a font is, so
     // outside the policy for images in documents. False, and one more failed image, when it cannot
@@ -3664,6 +3670,7 @@ private:
     UsedCidSet* svgCids = nullptr;
     const TtfFont* svgBoldFont = nullptr;   // a theme's bold face (SetFont), /F2 of the forms, or none
     UsedCidSet* svgBoldCids = nullptr;
+    bool svgAttempted = false;          // ConvertSvgImage ran: an SVG's text may be in the document's font
     // Decoded images and failed sources for later documents of the process, each with the stamp of
     // its file when it was read (none for a URL): a lookup with another stamp misses, and storing
     // replaces the entry, so a file changed on disk is read again.
@@ -3815,6 +3822,7 @@ private:
 };
 
 bool ImageRegistry::ConvertSvgImage(std::string_view svg, PdfImage& image) {
+    svgAttempted = true;
     auto form = std::make_shared<Internal::SvgForm>();
     const size_t rasters = images.size();   // its data: images go after them (AddDecoded)
     bool converted = false;
@@ -4939,10 +4947,16 @@ public:
         const MathFallbackFont* fallback) {
         Item item;
         item.display = display;
-        if (disabled || !LayoutMathToFit(tex, size, display, bold, maxWidth, maxHeight, fallback, item.formula)) return -1;
+        if (disabled) return -1;
+        laidOut = true;
+        if (!LayoutMathToFit(tex, size, display, bold, maxWidth, maxHeight, fallback, item.formula)) return -1;
         items.push_back(std::move(item));
         return (int)items.size() - 1;
     }
+    // Whether a formula was laid out since the pool was made (Add, MarkLaidOut): its text the
+    // math fonts lack is measured in the document's font. Clear keeps it.
+    bool LaidOut() const { return laidOut; }
+    void MarkLaidOut() { laidOut = true; }
 
     // A footnote reference, note `note` in text of `size`: a box `width` wide that the renderer
     // paints (PaintNote) and no formula.
@@ -5012,6 +5026,7 @@ private:
     bool used = false;
     bool sourceShown = false;
     bool disabled = false;
+    bool laidOut = false;
 };
 
 template <typename SpanType>
@@ -5465,6 +5480,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
     bool pageBreakPending = false;
     renderer.TagEnterBlocks();
     for (const Block& block : blocks) {
+        if (renderer.StopRender()) break;
         if (block.type == BlockType::PageBreak) { pageBreakPending = true; continue; }
         if (pageBreakPending) { renderer.RenderPageBreak(); pageBreakPending = false; }
         renderer.TagBlock(block);
@@ -5733,6 +5749,9 @@ public:
     const char* const quoteBar;   // the bar beside a plain quote, in the accent colour
 };
 
+// Defined with the builders.
+RAYOMD_COLD static const TtfFont* GuessFallbackFont(const TtfFont& primary, std::string_view markdown);
+
 class Renderer {
 public:
     // The content streams of all pages are appended to `output`, one after another.
@@ -5840,7 +5859,23 @@ public:
         for (const std::unique_ptr<UsedCidSet>& set : faceCids) missing += set ? set->missing : 0;
         return missing;
     }
+    // A layout in the primary font of a document that may be drawn in a guessed fallback font
+    // (FallbackCheck::stopEarly): at the first block that drew a character of the BMP the font
+    // lacks, GuessFallbackFont looks at the source; when it picks a font, the block loop stops
+    // there, the build is not finished and Guess() has the font. Else the layout goes on.
+    void ProbeFallback(std::string_view source) {
+        probeSource = source;
+        probing = true;
+    }
+    bool StopRender() { return probing && usedCids.missingBmp != 0 && ProbeGuess(); }
+    const TtfFont* Guess() const { return guess; }
+    RAYOMD_COLD bool ProbeGuess() {
+        if (guess == nullptr) guess = GuessFallbackFont(font, probeSource);
+        probing = guess != nullptr;
+        return probing;
+    }
     bool MathUsed() const { return math.Used(); }
+    bool FormulasLaidOut() const { return math.LaidOut(); }
     const Internal::MathGlyphUse& MathGlyphs() const { return math.Glyphs(); }
     // PDF/UA: formulas show their TeX source, as they have no structure tags yet.
     void DisableMath() { math.Disable(); }
@@ -5931,6 +5966,9 @@ private:
     static constexpr char kFaceFonts[4][5] = { "/F1 ", "/F2 ", "/F4 ", "/F5 " };
     const TtfFont* faces[4] = {};
     bool multiFace = false;
+    bool probing = false;          // ProbeFallback
+    std::string_view probeSource;
+    const TtfFont* guess = nullptr;
     bool wrapBold = false;        // WrapStyledInline measures every run bold: a table's header row
     std::unique_ptr<UsedCidSet> faceCids[3];
 
@@ -8182,6 +8220,7 @@ private:
         const int tagged = TagBegin(Internal::StructType::Formula);
         if (tagged >= 0) tags->SetAlt(tagged, tex);
         MathFormula formula;
+        if (!math.Disabled()) math.MarkLaidOut();
         if (math.Disabled() || !LayoutMathToFit(tex, bodySize, true, false, available, maxHeight, &mathFallback, formula)) {
             double savedMargin = margin;
             if (quoted) margin += 14.0;
@@ -9414,6 +9453,8 @@ private:
     // The standard fonts are not embedded, so these documents are never tagged (PDF/UA): the
     // hooks of the block loops the renderers share do nothing here.
     void TagEnterBlocks() {}
+    // The block loop's test for a layout cut short (the Unicode renderer's ProbeFallback).
+    static constexpr bool StopRender() { return false; }
     void TagLeaveBlocks() {}
     void TagBlock(const Block&) {}
     void TagArtifact() {}
@@ -11816,18 +11857,38 @@ RAYOMD_COLD static bool LoadFallbackFont(size_t index, TtfFont& font) {
 #endif
 }
 
-// The font that has glyphs for more of the characters `used` than `font`, the most of them;
-// null when no fallback font does better. Each candidate is read once, for the characters it
-// covers; one stays in memory once a document is drawn in it, and is never freed then.
-RAYOMD_COLD static const TtfFont* BetterFontFor(const TtfFont& font, const CidList& used) {
+// What layout paints besides the text: spaces, page and note numbers, the dots and slash of
+// numbering, '?' for a character beyond the BMP and the ellipsis of a line cut short.
+static constexpr uint16_t kLayoutChars[] = { 0x20, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+    0x38, 0x39, 0x3F, 0x2026 };
+
+// ChooseFallbackFont's answer: `font` null when no fallback font does better. `stable` when the
+// primary font and every candidate it compared have a glyph for each of kLayoutChars: then the
+// choice is the same for any characters that differ from `used` in those only.
+struct FallbackChoice {
+    const TtfFont* font;
+    bool stable;
+};
+
+// The font that has glyphs for more of the characters `used` than `primary`, the most of them.
+// Each candidate is read once, for the characters it covers; one stays in memory once it is
+// chosen, and is never freed then.
+RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, const CidList& used) {
     // Control characters have no glyph anywhere: no reason to change fonts.
     auto missingIn = [&](auto&& hasGlyph) {
         size_t count = 0;
         for (uint16_t cid : used) count += cid >= 0x20 && !hasGlyph(cid);
         return count;
     };
-    size_t fewest = missingIn([&](uint16_t cid) { return font.HasGlyph(cid); });
-    if (fewest == 0) return nullptr;
+    auto hasLayoutChars = [](auto&& hasGlyph) {
+        for (const uint16_t cid : kLayoutChars) {
+            if (!hasGlyph(cid)) return false;
+        }
+        return true;
+    };
+    bool stable = hasLayoutChars([&](uint16_t cid) { return primary.HasGlyph(cid); });
+    size_t fewest = missingIn([&](uint16_t cid) { return primary.HasGlyph(cid); });
+    if (fewest == 0) return { nullptr, stable };
 
     struct Candidate {
         bool probed = false;
@@ -11853,7 +11914,9 @@ RAYOMD_COLD static const TtfFont* BetterFontFor(const TtfFont& font, const CidLi
             }
         }
         if (candidate.coverage.empty()) continue;
-        const size_t count = missingIn([&](uint16_t cid) { return (candidate.coverage[cid >> 6] >> (cid & 63)) & 1; });
+        const auto covers = [&](uint16_t cid) { return (candidate.coverage[cid >> 6] >> (cid & 63)) & 1; };
+        stable = stable && hasLayoutChars(covers);
+        const size_t count = missingIn(covers);
         if (count < fewest) {
             best = index;
             fewest = count;
@@ -11862,17 +11925,89 @@ RAYOMD_COLD static const TtfFont* BetterFontFor(const TtfFont& font, const CidLi
     for (size_t index = 0; index < kFallbackFontCount; index++) {
         if (index != best && !candidates[index].chosen) candidates[index].font.reset();
     }
-    if (best == kFallbackFontCount) return nullptr;
+    if (best == kFallbackFontCount) return { nullptr, stable };
     Candidate& chosen = candidates[best];
     if (!chosen.font) {
         chosen.font = std::make_unique<TtfFont>();
         if (!LoadFallbackFont(best, *chosen.font)) {
             chosen.font.reset();
-            return nullptr;
+            return { nullptr, stable };
         }
     }
     chosen.chosen = true;
-    return chosen.font.get();
+    return { chosen.font.get(), stable };
+}
+
+// Whether `text` has "svg" in any ASCII case: memchr finds each 'v' and 'V'.
+static bool ContainsSvgNoCase(std::string_view text) {
+    for (const char v : { 'v', 'V' }) {
+        for (size_t at = text.find(v, 1); at != std::string_view::npos && at + 1 < text.size(); at = text.find(v, at + 1)) {
+            if ((text[at - 1] | 0x20) == 's' && (text[at + 1] | 0x20) == 'g') return true;
+        }
+    }
+    return false;
+}
+
+// Whether a document may be drawn in a fallback font guessed before its layout (GuessFallbackFont):
+// not when what layout adds besides the text could differ between two fonts: a theme's bands and
+// cover, page numbers in the document's font, or images from URLs, which may be SVG.
+static bool FallbackGuessAllowed(const PdfOptions& options) {
+    return !Internal::HasThemeBands(options.theme) && !options.theme.cover &&
+        !((options.pdfa || options.pdfua) && options.pageNumbers) && !options.enableUrlImages;
+}
+
+// The fallback font for a document whose text has characters the primary font lacks, chosen from
+// the characters of its source, so that it is laid out in that font at once; null when the source
+// has a formula or names an SVG, which draw text in the document's font, or when the choice could
+// depend on what layout adds (FallbackChoice::stable). The build checks the guess (NeedsRebuild).
+RAYOMD_COLD static const TtfFont* GuessFallbackFont(const TtfFont& primary, std::string_view markdown) {
+    if (markdown.find('$') != std::string_view::npos || markdown.find("\\(") != std::string_view::npos ||
+        markdown.find("\\[") != std::string_view::npos || markdown.find("math") != std::string_view::npos ||
+        ContainsSvgNoCase(markdown)) {
+        return nullptr;
+    }
+    CidList scan;
+    Internal::NonAsciiCodepoints(markdown, scan);
+    const FallbackChoice choice = ChooseFallbackFont(primary, scan);
+    return choice.stable ? choice.font : nullptr;
+}
+
+// A build in the system's font, or in a guessed fallback font (GuessFallbackFont), that may have
+// to be made again: `redraw` in another font, or with `unstable`, from the start as without a guess.
+// With `stopEarly` a build in the primary font probes for a guess (Renderer::ProbeFallback); when
+// it finds `guess`, the build stops there.
+struct FallbackCheck {
+    const TtfFont* primary;
+    const TtfFont* redraw = nullptr;
+    bool rebuild = false;
+    bool unstable = false;
+    bool stopEarly = false;
+    const TtfFont* guess = nullptr;
+};
+
+// After laying out in `font` the characters `used`: whether the document is to be built again
+// (`check` says how). Drawn in the primary font, it is when a fallback font has more of them.
+// Drawn in a guessed font, the guess stands when the primary font's choice for these characters is
+// that font and would be for the characters the primary font's layout paints, which differ in
+// kLayoutChars only, as long as both fonts show a missing character as their '?' and no formula
+// or SVG drew text in the document's font.
+RAYOMD_COLD static bool NeedsRebuild(FallbackCheck& check, const TtfFont& font, const CidList& used, bool formulas, bool svg) {
+    if (&font == check.primary) {
+        check.redraw = ChooseFallbackFont(font, used).font;
+        check.rebuild = check.redraw != nullptr;
+        return check.rebuild;
+    }
+    const FallbackChoice choice = ChooseFallbackFont(*check.primary, used);
+    if (!choice.stable || !font.HasGlyph('?') || !check.primary->HasGlyph('?') || formulas || svg) {
+        check.unstable = check.rebuild = true;
+        return true;
+    }
+    if (choice.font != &font) {
+        check.redraw = choice.font ? choice.font : check.primary;
+        check.rebuild = true;
+        return true;
+    }
+    return false;
 }
 
 // PDF/UA: the streams a page draws besides its own are decoration, artifacts: a theme's header and
@@ -12036,12 +12171,12 @@ RAYOMD_COLD static void ThemeFaceStyle(const TtfFont& face, int& flags, int& ita
     stemV = bold ? 140 : 80;
 }
 
-// With `betterFont`, a document with characters that `font` has no glyph for is not built
-// when a fallback font has more of them: *betterFont is set, to build it again in that one.
+// With `check`, a document laid out in a font that is not the one it should be drawn in is not
+// built: `check` says what to build instead (NeedsRebuild).
 // With `book`, the book's files instead of `markdown`, which then has all of their text. With
 // `faces`, a theme's bold and italic faces, which draw the text in their styles.
 static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& font, const PdfOptions& options,
-    std::string& pdfBytes, const TtfFont** betterFont, size_t& missingCharacters, BuildResult& stats,
+    std::string& pdfBytes, FallbackCheck* check, size_t& missingCharacters, BuildResult& stats,
     const BookSource* book = nullptr, const ThemeFaces* faces = nullptr) {
     std::vector<Block> blocks;
     Internal::Footnotes footnotes;
@@ -12088,11 +12223,17 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     imageRegistry.SetFont(&font, &renderer.Cids(), faceFonts[1], faceFonts[1] ? renderer.FaceCidSet(1) : nullptr);
     if (!options.highlightCode) renderer.DisableHighlighting();
     if (!contents.empty()) renderer.SetContents(&contents);
+    if (check != nullptr && check->stopEarly) renderer.ProbeFallback(markdown);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover);
         else if (footnotes.notes.empty()) renderer.Render(blocks);
         else RenderWithFootnotes(renderer, blocks, footnotes);
+    }
+    // Laid out to find a fallback font to draw the document in: it was found.
+    if (renderer.Guess() != nullptr) {
+        check->guess = renderer.Guess();
+        return true;
     }
     if (tags) tags->Finish();
     // The headings without their footnote references, for anchors, bookmarks and titles.
@@ -12138,7 +12279,10 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     }
     if (tags) MarkArtifacts(bands, cover, contentsOverlays);
     const CidList& used = renderer.UsedCids();
-    if (betterFont && (*betterFont = BetterFontFor(font, used)) != nullptr) return true;
+    if (check != nullptr &&
+        NeedsRebuild(*check, font, used, renderer.FormulasLaidOut(), imageRegistry.SvgAttempted())) {
+        return true;
+    }
     missingCharacters = renderer.MissingCharacters();
     TextFontObjects fontObjects;
     SetTextFontObjects(pdf, font, used, options.compress,
@@ -12288,10 +12432,12 @@ static TextFonts ChooseFonts(const std::string& markdown, const PdfOptions& opti
 
 // A document in a TrueType font (TextFonts::TrueType): the theme's, without a fallback font: the
 // company's look; else the system's, built again in a fallback font that has more of the
-// characters it lacks. Without a font PDF/A fails, and other documents take the standard fonts,
-// which show what they can. `unicode(font, better, missing, faces)` builds in a TrueType font,
-// with a theme's bold and italic `faces` when it has them, and `lossy(missing)` in the standard
-// fonts; false with g_lastError set when nothing is built.
+// characters it lacks. When a fallback font may be guessed (FallbackGuessAllowed), the layout in
+// the system's font stops at the first such character if GuessFallbackFont picks one from the
+// source, and the document is laid out in that one. Without a font PDF/A fails, and other documents
+// take the standard fonts, which show what they can. `unicode(font, check, missing, faces)` builds
+// in a TrueType font, with a theme's bold and italic `faces` when it has them, and `lossy(missing)`
+// in the standard fonts; false with g_lastError set when nothing is built.
 template <typename Unicode, typename Lossy>
 static bool BuildInTrueType(const PdfOptions& options, uint32_t& missingCharacters, Unicode unicode, Lossy lossy) {
     size_t missing = 0;
@@ -12319,9 +12465,19 @@ static bool BuildInTrueType(const PdfOptions& options, uint32_t& missingCharacte
             font = GetCachedFont();
         }
         if (font) {
-            const TtfFont* better = nullptr;
-            built = unicode(*font, &better, missing, nullptr);
-            if (built && better) built = unicode(*better, nullptr, missing, nullptr);
+            FallbackCheck check{ font };
+            check.stopEarly = FallbackGuessAllowed(options);
+            built = unicode(*font, &check, missing, nullptr);
+            if (built && check.guess != nullptr) {
+                const TtfFont* const guess = check.guess;
+                check = FallbackCheck{ font };
+                built = unicode(*guess, &check, missing, nullptr);
+                if (built && check.unstable) {
+                    check = FallbackCheck{ font };
+                    built = unicode(*font, &check, missing, nullptr);
+                }
+            }
+            if (built && check.rebuild) built = unicode(*check.redraw, nullptr, missing, nullptr);
         } else if (options.pdfa || options.pdfua) {
             g_lastError = static_cast<int>(BuildError::PdfaFontUnavailable);
             return false;
@@ -12364,8 +12520,8 @@ static bool BuildDocument(const std::string& markdown, const PdfOptions& options
         break;
     }
     return BuildInTrueType(options, missingCharacters,
-        [&](const TtfFont& font, const TtfFont** better, size_t& missing, const ThemeFaces* faces) {
-            return BuildUnicodePdfBytes(markdown, font, options, pdfBytes, better, missing, stats, book, faces);
+        [&](const TtfFont& font, FallbackCheck* check, size_t& missing, const ThemeFaces* faces) {
+            return BuildUnicodePdfBytes(markdown, font, options, pdfBytes, check, missing, stats, book, faces);
         },
         [&](size_t& missing) {
             missing = RayoMd::Text::TranscodeToWinAnsiLossy(markdown, winAnsi);
