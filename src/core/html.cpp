@@ -34,43 +34,69 @@ constexpr int NameCode(char c) {
         : -1;
 }
 
+constexpr std::array<int8_t, 256> MakeNameCodes() {
+    std::array<int8_t, 256> codes{};
+    for (size_t index = 0; index < codes.size(); index++) codes[index] = static_cast<int8_t>(NameCode(static_cast<char>(index)));
+    return codes;
+}
+constexpr std::array<int8_t, 256> kNameCodes = MakeNameCodes();
+
 // Six bits a character, at most ten: 0 for a name no tag can have.
 constexpr uint64_t NameKey(std::string_view name) {
     if (name.empty() || name.size() > 10) return 0;
     uint64_t key = 0;
     for (char c : name) {
-        const int code = NameCode(c);
+        const int code = kNameCodes[static_cast<unsigned char>(c)];
         if (code < 0) return 0;
         key = (key << 6) | static_cast<uint64_t>(code);
     }
     return key;
 }
 
-struct KeyedTag {
-    uint64_t key;
-    Tag tag;
+// The keys in an open-addressed table of 256 slots, under half full: a name is found, or known to
+// be no tag's, in one or two probes.
+constexpr size_t kTagSlots = 256;
+
+constexpr size_t TagSlot(uint64_t key) {
+    return static_cast<size_t>((key * 0x9E3779B97F4A7C15ull) >> 56);
+}
+
+struct TagTable {
+    uint64_t keys[kTagSlots];
+    Tag tags[kTagSlots];
 };
 
-constexpr std::array<KeyedTag, kTagCount - 1> MakeTagKeys() {
-    std::array<KeyedTag, kTagCount - 1> keys{};
-    for (size_t index = 1; index < kTagCount; index++) keys[index - 1] = { NameKey(kTagNames[index]), static_cast<Tag>(index) };
-    for (size_t index = 1; index < keys.size(); index++) {
-        const KeyedTag moving = keys[index];
-        size_t at = index;
-        for (; at > 0 && keys[at - 1].key > moving.key; at--) keys[at] = keys[at - 1];
-        keys[at] = moving;
+constexpr TagTable MakeTagTable() {
+    TagTable table{};
+    for (size_t index = 1; index < kTagCount; index++) {
+        const uint64_t key = NameKey(kTagNames[index]);
+        size_t slot = TagSlot(key);
+        while (table.keys[slot] != 0) slot = (slot + 1) % kTagSlots;
+        table.keys[slot] = key;
+        table.tags[slot] = static_cast<Tag>(index);
     }
-    return keys;
+    return table;
 }
-constexpr std::array<KeyedTag, kTagCount - 1> kTagKeys = MakeTagKeys();
+constexpr TagTable kTagTable = MakeTagTable();
 
-constexpr bool KeysAscend() {
-    for (size_t index = 1; index < kTagKeys.size(); index++) {
-        if (kTagKeys[index - 1].key >= kTagKeys[index].key) return false;
+constexpr bool KeysDistinct() {
+    for (size_t index = 1; index < kTagCount; index++) {
+        if (NameKey(kTagNames[index]) == 0) return false;
+        for (size_t other = 1; other < index; other++) {
+            if (NameKey(kTagNames[other]) == NameKey(kTagNames[index])) return false;
+        }
     }
-    return kTagKeys[0].key != 0;
+    return kTagCount < kTagSlots / 2;
 }
-static_assert(KeysAscend(), "every tag name has a key of its own");
+static_assert(KeysDistinct(), "every tag name has a key of its own");
+
+// The tag whose name has `key` (not 0), or Tag::Unknown.
+inline Tag TagForKey(uint64_t key) {
+    for (size_t slot = TagSlot(key);; slot = (slot + 1) % kTagSlots) {
+        if (kTagTable.keys[slot] == key) return kTagTable.tags[slot];
+        if (kTagTable.keys[slot] == 0) return Tag::Unknown;
+    }
+}
 
 constexpr bool IsLetter(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 constexpr bool IsDigit(char c) { return c >= '0' && c <= '9'; }
@@ -99,18 +125,21 @@ size_t SkipSpace(std::string_view text, size_t at, size_t limit) {
     return at;
 }
 
+// The values RayoMD keeps, in the order of TagToken::seen.
+constexpr std::string_view kAttributeNames[] = { "align", "width", "height", "src", "alt", "href", "start", "id",
+    "name", "open" };
+constexpr std::string_view TagToken::*kAttributeFields[] = { &TagToken::align, &TagToken::width, &TagToken::height,
+    &TagToken::src, &TagToken::alt, &TagToken::href, &TagToken::start, &TagToken::id, &TagToken::name,
+    &TagToken::open };
+static_assert(std::size(kAttributeNames) == std::size(kAttributeFields), "a field for every name");
+
 // Keeps the value of an attribute RayoMD uses; of a repeated one, the first, as browsers do.
-void KeepAttribute(TagToken& token, std::string_view name, std::string_view value, uint16_t& seen) {
-    static constexpr std::string_view kNames[] = { "align", "width", "height", "src", "alt", "href", "start", "id",
-        "name", "open" };
-    std::string_view TagToken::*const kFields[] = { &TagToken::align, &TagToken::width, &TagToken::height,
-        &TagToken::src, &TagToken::alt, &TagToken::href, &TagToken::start, &TagToken::id, &TagToken::name,
-        &TagToken::open };
+void KeepAttribute(TagToken& token, std::string_view name, std::string_view value) {
     if (name.size() < 2 || name.size() > 6) return;
-    for (size_t index = 0; index < std::size(kNames); index++) {
-        if ((seen >> index) & 1 || !EqualsNoCase(name, kNames[index])) continue;
-        seen = static_cast<uint16_t>(seen | (1u << index));
-        token.*kFields[index] = value;
+    for (size_t index = 0; index < std::size(kAttributeNames); index++) {
+        if ((token.seen >> index) & 1 || !EqualsNoCase(name, kAttributeNames[index])) continue;
+        token.seen = static_cast<uint16_t>(token.seen | (1u << index));
+        token.*kAttributeFields[index] = value;
         if (index == 9) token.hasOpen = true;
         return;
     }
@@ -125,10 +154,7 @@ std::string_view TagName(Tag tag) {
 
 Tag LookupTag(std::string_view name) {
     const uint64_t key = NameKey(name);
-    if (key == 0) return Tag::Unknown;
-    const auto found = std::lower_bound(kTagKeys.begin(), kTagKeys.end(), key,
-        [](const KeyedTag& entry, uint64_t wanted) { return entry.key < wanted; });
-    return found != kTagKeys.end() && found->key == key ? found->tag : Tag::Unknown;
+    return key != 0 ? TagForKey(key) : Tag::Unknown;
 }
 
 bool IsBlockName(Tag tag) {
@@ -171,7 +197,15 @@ size_t QuoteCache::Next(std::string_view text, size_t from, char quote) {
 }
 
 uint32_t ScanTag(std::string_view text, size_t at, QuoteCache& quotes, TagToken& token) {
-    token = TagToken();
+    // Only the values the token has are cleared (TagToken::seen): clearing the whole token took a
+    // 168-byte memset per tag.
+    for (uint16_t bits = token.seen, index = 0; bits != 0; bits = static_cast<uint16_t>(bits >> 1), index++) {
+        if (bits & 1) token.*kAttributeFields[index] = std::string_view();
+    }
+    token.tag = Tag::Unknown;
+    token.closing = token.selfClosing = token.hasOpen = false;
+    token.seen = 0;
+    token.length = 0;
     if (at >= text.size() || text[at] != '<') return 0;
     const size_t limit = std::min(text.size(), at + kMaxTagBytes);
     size_t index = at + 1;
@@ -179,17 +213,27 @@ uint32_t ScanTag(std::string_view text, size_t at, QuoteCache& quotes, TagToken&
         token.closing = true;
         index++;
     }
-    const size_t nameStart = index;
+    // The name, keyed as it is read (NameKey): letters, digits and '-', which no tag of the table has.
     if (index >= limit || !IsLetter(text[index])) return 0;
-    for (index++; index < limit && (IsLetter(text[index]) || IsDigit(text[index]) || text[index] == '-'); index++) {}
-    token.tag = LookupTag(text.substr(nameStart, index - nameStart));
+    const size_t nameStart = index;
+    uint64_t key = 0;
+    bool keyed = true;
+    for (; index < limit; index++) {
+        const int code = kNameCodes[static_cast<unsigned char>(text[index])];
+        if (code < 0) {
+            if (text[index] != '-') break;
+            keyed = false;
+            continue;
+        }
+        key = (key << 6) | static_cast<uint64_t>(code);
+    }
+    token.tag = keyed && index - nameStart <= 10 ? TagForKey(key) : Tag::Unknown;
     if (token.closing) {
         index = SkipSpace(text, index, limit);
         if (index >= limit || text[index] != '>') return 0;
         token.length = static_cast<uint32_t>(index + 1 - at);
         return token.length;
     }
-    uint16_t seen = 0;
     size_t attributes = 0;
     for (;;) {
         const size_t gap = index;
@@ -226,7 +270,7 @@ uint32_t ScanTag(std::string_view text, size_t at, QuoteCache& quotes, TagToken&
                 index = next;
             }
         }
-        KeepAttribute(token, name, value, seen);
+        KeepAttribute(token, name, value);
     }
     token.length = static_cast<uint32_t>(index + 1 - at);
     return token.length;
@@ -234,24 +278,23 @@ uint32_t ScanTag(std::string_view text, size_t at, QuoteCache& quotes, TagToken&
 
 int HtmlBlockStart(std::string_view line) {
     if (line.size() < 2 || line[0] != '<') return 0;
-    const std::string_view rest = line.substr(1);
-    for (std::string_view name : { std::string_view("pre"), std::string_view("script"), std::string_view("style"),
-             std::string_view("textarea") }) {
-        if (!StartsWithNoCase(rest, name)) continue;
-        if (rest.size() == name.size()) return 1;
-        const char after = rest[name.size()];
-        if (after == ' ' || after == '\t' || after == '>') return 1;
+    const char second = line[1];
+    if (second == '!') {
+        if (line.substr(0, 4) == std::string_view("<!--", 4)) return 2;
+        if (line.size() > 2 && IsLetter(line[2])) return 4;
+        return line.substr(0, 9) == std::string_view("<![CDATA[", 9) ? 5 : 0;
     }
-    if (line.compare(0, 4, "<!--") == 0) return 2;
-    if (line[1] == '?') return 3;
-    if (line[1] == '!' && line.size() > 2 && IsLetter(line[2])) return 4;
-    if (line.compare(0, 9, "<![CDATA[") == 0) return 5;
-    size_t index = line[1] == '/' ? 2 : 1;
+    if (second == '?') return 3;
+    size_t index = second == '/' ? 2 : 1;
     const size_t nameStart = index;
     while (index < line.size() && (IsLetter(line[index]) || IsDigit(line[index]))) index++;
-    if (IsBlockName(LookupTag(line.substr(nameStart, index - nameStart))) &&
-        (index == line.size() || line[index] == ' ' || line[index] == '\t' || line[index] == '>' ||
-            (line[index] == '/' && index + 1 < line.size() && line[index + 1] == '>'))) {
+    const Tag tag = LookupTag(line.substr(nameStart, index - nameStart));
+    const bool nameEnds = index == line.size() || line[index] == ' ' || line[index] == '\t' || line[index] == '>';
+    if (second != '/' && nameEnds &&
+        (tag == Tag::Pre || tag == Tag::Script || tag == Tag::Style || tag == Tag::Textarea)) {
+        return 1;
+    }
+    if (IsBlockName(tag) && (nameEnds || (line[index] == '/' && index + 1 < line.size() && line[index + 1] == '>'))) {
         return 6;
     }
     QuoteCache quotes;

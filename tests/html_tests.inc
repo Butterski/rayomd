@@ -311,9 +311,40 @@ bool CheckHtmlBlocks() {
     return true;
 }
 
+// What HTML blocks change on the page, in both renderers: the line of a right-aligned paragraph
+// ends at the right margin with its link, a width hint sizes an image a centred element centres,
+// and a paragraph of images is a row on one bottom, left to right.
+bool CheckHtmlRendering() {
+    // The number after the first `prefix` in the PDF.
+    const auto number = [](const std::string& pdf, const char* prefix, double& value) {
+        const size_t at = pdf.find(prefix);
+        return at != std::string::npos && std::sscanf(pdf.c_str() + at + std::strlen(prefix), "%lf", &value) == 1;
+    };
+    TinyPdf::PdfOptions options;
+    options.style = TinyPdf::PdfStyle::Modern;
+    options.margin = TinyPdf::PdfMargin::Normal();
+    options.sourcePath = std::string(RAYOMD_TEST_SOURCE_DIR) + "/tester.md";
+    for (const char* text : { "Right", "Right \xE2\x86\x92" }) {   // the standard and the Unicode renderer
+        const std::string document = std::string("<p align=\"right\">") + text + " <a href=\"https://e.com\">link</a></p>\n\n"
+            "<div align=\"center\">\n<img src=\"docs/assets/branding/rayomd.png\" width=\"170\" alt=\"M\">\n</div>\n\n"
+            "<img src=\"docs/assets/branding/rayomd.png\" width=\"40\"> <img src=\"docs/assets/branding/rayomd.png\" height=\"40\">\n";
+        std::string pdf;
+        double right = 0.0, first = 0.0, second = 0.0;
+        const bool unicode = std::strlen(text) > 5;
+        if (!TinyPdf::BuildPdf(document, options, pdf).Ok() || unicode != (pdf.find("/Type0") != std::string::npos) ||
+            !number(pdf, "/Rect [", right) || std::sscanf(pdf.c_str() + pdf.find("/Rect [") + 7, "%*f %*f %lf", &right) != 1 ||
+            right < 540.99 || right > 541.01 || pdf.find("q 127.5 0 0 127.5 233.75 ") == std::string::npos ||
+            !number(pdf, "q 30 0 0 30 54 ", first) || !number(pdf, "q 30 0 0 30 90 ", second) || first != second) {
+            std::cerr << "HTML rendering mismatch: " << text << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool CheckHtmlEngine() {
     return CheckTagNames() && CheckRawHtml() && CheckHtmlBlockConditions() && CheckTagLimits() && CheckSafeUrls() &&
-        CheckInlineHtml() && CheckHtmlBlocks();
+        CheckInlineHtml() && CheckHtmlBlocks() && CheckHtmlRendering();
 }
 
 } // namespace html_tests

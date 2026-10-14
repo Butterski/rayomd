@@ -19,8 +19,10 @@
 
 #if defined(__GNUC__) || defined(__clang__)
 #define RAYOMD_NOINLINE __attribute__((noinline))
+#define RAYOMD_HOT_INLINE inline __attribute__((always_inline))
 #else
 #define RAYOMD_NOINLINE
+#define RAYOMD_HOT_INLINE inline
 #endif
 
 namespace TinyPdf::Internal {
@@ -31,24 +33,18 @@ static bool IsSpace(char c) {
 // The trims are always inlined: every line the parser classifies is trimmed, and left to GCC
 // these calls moved out of line whenever unrelated code in this file changed (+0.4 to 0.9 %
 // instructions on small documents).
-#if defined(__GNUC__) || defined(__clang__)
-#define RAYOMD_TRIM_INLINE inline __attribute__((always_inline))
-#else
-#define RAYOMD_TRIM_INLINE inline
-#endif
-
-static RAYOMD_TRIM_INLINE std::string_view LTrimView(std::string_view s) {
+static RAYOMD_HOT_INLINE std::string_view LTrimView(std::string_view s) {
     size_t i = 0;
     while (i < s.size() && IsSpace(s[i])) i++;
     return s.substr(i);
 }
 
-static RAYOMD_TRIM_INLINE std::string_view RTrimView(std::string_view s) {
+static RAYOMD_HOT_INLINE std::string_view RTrimView(std::string_view s) {
     while (!s.empty() && IsSpace(s.back())) s.remove_suffix(1);
     return s;
 }
 
-static RAYOMD_TRIM_INLINE std::string_view TrimView(std::string_view s) {
+static RAYOMD_HOT_INLINE std::string_view TrimView(std::string_view s) {
     return RTrimView(LTrimView(s));
 }
 

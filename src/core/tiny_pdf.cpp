@@ -5293,6 +5293,74 @@ static double HeadingKeep(const Block& heading, const Block* next, const Block* 
     return keep;
 }
 
+// How far an HTML element's alignment (Block::align: 2 centred, 3 right) moves a line `used`
+// wide in a column `width` wide: nothing for a line that fills it, or with no such alignment.
+static double AlignShift(double width, double used, uint8_t align) {
+    const double room = width - used;
+    return room <= 0.0 ? 0.0 : align == 2 ? room * 0.5 : align == 3 ? room : 0.0;
+}
+
+// An <img>'s width and height attributes (ImageSource::widthHint, heightHint), before the image
+// is fitted to the page: both set the size, one alone keeps the aspect ratio.
+static void ApplySizeHints(const Internal::ImageSource& source, double maxW, double& w, double& h) {
+    const double wantW = source.widthPercent ? source.widthHint * maxW : source.widthHint;
+    const double wantH = source.heightHint;
+    if (wantW > 0.0 && wantH > 0.0) {
+        w = wantW;
+        h = wantH;
+    } else if (wantW > 0.0) {
+        h *= wantW / w;
+        w = wantW;
+    } else if (wantH > 0.0) {
+        w *= wantH / h;
+        h = wantH;
+    }
+}
+
+// Where an image `w` wide stands in a text width `maxW` wide from `margin`: centred, as images
+// always are without an HTML alignment, at the margin for align 1, or against the right edge.
+static double ImageLeft(uint8_t align, double margin, double maxW, double w) {
+    return align == 1 ? margin : align == 3 ? margin + maxW - w : margin + (maxW - w) * 0.5;
+}
+
+// A row of images that cannot all be shown, as inline Markdown: each image's alt text (else its
+// source), a link where the image is one, apart by middle dots.
+RAYOMD_COLD static std::string ImageRowText(const Block& block) {
+    std::string text;
+    const auto append = [&text](const Internal::ImageSource& image, const std::string& alt) {
+        if (!text.empty()) text += " &middot; ";
+        const std::string_view shown = !alt.empty() ? std::string_view(alt) : !image.src.empty()
+            ? std::string_view(image.src) : std::string_view("image");
+        const bool linked = !image.link.empty();
+        if (linked) text.push_back('[');
+        for (const char ch : shown) {
+            switch (ch) {
+            case '\\': case '`': case '*': case '_': case '[': case ']': case '!':
+                text.push_back('\\');
+                text.push_back(ch);
+                break;
+            case '<': text += "&lt;"; break;
+            case '&': text += "&amp;"; break;
+            case '~': text += "&#126;"; break;
+            case '$': text += "&#36;"; break;
+            case '\n': text.push_back(' '); break;
+            default: text.push_back(ch); break;
+            }
+        }
+        if (!linked) return;
+        text += "](<";
+        for (const char ch : image.link) {
+            if (ch == '>') text += "%3E";
+            else if (ch == '\n' || ch == '\r') text.push_back(' ');
+            else text.push_back(ch);
+        }
+        text += ">)";
+    };
+    append(*block.image, block.text);
+    for (const Internal::ImageSource& image : block.image->row) append(image, image.alt);
+    return text;
+}
+
 // Where an entry of the table of contents ends: the page, baseline and right end of its last line,
 // for the page number and the dots the builder adds to it (ContentsNumbers).
 struct ContentsLine {
@@ -5339,10 +5407,16 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         if (pageBreakPending) { renderer.RenderPageBreak(); pageBreakPending = false; }
         renderer.TagBlock(block);
         switch (block.type) {
-        case BlockType::Heading:
-            renderer.RenderHeading(block, HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight));
+        case BlockType::Heading: {
+            const double keep = HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight);
+            if (block.align >= 2) renderer.RenderAlignedHeading(block, keep);
+            else renderer.RenderHeading(block, keep);
             break;
-        case BlockType::Paragraph: renderer.RenderParagraph(block.text); break;
+        }
+        case BlockType::Paragraph:
+            if (block.align >= 2) renderer.RenderAlignedParagraph(block.text, block.align);
+            else renderer.RenderParagraph(block.text);
+            break;
         case BlockType::Bullet: renderer.RenderBullet(block); break;
         case BlockType::Numbered: renderer.RenderNumbered(block); break;
         case BlockType::Quote: renderer.RenderQuote(block); break;
@@ -7230,7 +7304,8 @@ private:
         std::string fallback = block.text.empty() ? image.src : block.text;
         if (fallback.empty()) fallback = "image";
         if (image.link.empty()) {
-            RenderParagraph(fallback);
+            if (block.align >= 2) RenderAlignedParagraph(fallback, block.align);
+            else RenderParagraph(fallback);
             return;
         }
         const double lh = bodySize * 1.35;
@@ -7247,6 +7322,10 @@ private:
     }
 
     void RenderImage(const Block& block) {
+        if (!block.image->row.empty()) {
+            RenderImageRow(block);
+            return;
+        }
         if (!images) {
             RenderImageFallback(block);
             return;
@@ -7268,12 +7347,13 @@ private:
             return;
         }
 
+        ApplySizeHints(*block.image, maxW, w, h);
         double scale = std::min(1.0, std::min(maxW / w, maxH / h));
         w *= scale;
         h *= scale;
 
         Ensure(h + 10.0);
-        double x = margin + (maxW - w) * 0.5;
+        double x = ImageLeft(block.align, margin, maxW, w);
         const std::string& link = block.image->link;
         const int tagged = tags != nullptr ? TagFigure(block.text, link, x, y - h, x + w, y) : -1;
         DrawImage(index, x, y, w, h);
@@ -7286,6 +7366,74 @@ private:
             tags->SetArtifacts(false);
         }
         y -= h + 10.0;
+    }
+
+    // A paragraph of only images (ImageSource::row): left to right 6 points apart, on as many
+    // lines as the text width needs, each line placed as the block's alignment says (at the
+    // margin without one), each image with its link and, when tagged, its figure. When one of
+    // them cannot be shown, the row is a paragraph of their alt texts.
+    RAYOMD_COLD void RenderImageRow(const Block& block) {
+        struct Placed {
+            int index;
+            double w;
+            double h;
+            const Internal::ImageSource* source;
+            const std::string* alt;
+        };
+        const double maxW = pageW - margin * 2.0;
+        const double maxH = pageH - margin * 2.0;
+        std::vector<Placed> placed;
+        const auto add = [&](const Internal::ImageSource& source, const std::string& alt) {
+            int index = -1;
+            if (!images || !images->Resolve(source.src, alt, index)) return false;
+            const PdfImage& image = images->Get(index);
+            double w = (double)image.width * 72.0 / 96.0;
+            double h = (double)image.height * 72.0 / 96.0;
+            if (w <= 0.0 || h <= 0.0) return false;
+            ApplySizeHints(source, maxW, w, h);
+            const double scale = std::min(1.0, std::min(maxW / w, maxH / h));
+            placed.push_back({ index, w * scale, h * scale, &source, &alt });
+            return true;
+        };
+        bool shown = add(*block.image, block.text);
+        for (size_t item = 0; shown && item < block.image->row.size(); item++) {
+            shown = add(block.image->row[item], block.image->row[item].alt);
+        }
+        if (!shown) {
+            const std::string text = ImageRowText(block);
+            if (block.align >= 2) RenderAlignedParagraph(text, block.align);
+            else RenderParagraph(text);
+            return;
+        }
+        for (size_t first = 0; first < placed.size();) {
+            double used = placed[first].w;
+            double tall = placed[first].h;
+            size_t last = first + 1;
+            for (; last < placed.size() && used + 6.0 + placed[last].w <= maxW; last++) {
+                used += 6.0 + placed[last].w;
+                tall = std::max(tall, placed[last].h);
+            }
+            Ensure(tall + 10.0);
+            double x = margin + AlignShift(maxW, used, block.align);
+            for (size_t item = first; item < last; item++) {
+                const Placed& image = placed[item];
+                const double top = y - (tall - image.h);    // the images of a line stand on one bottom
+                const std::string& link = image.source->link;
+                const int tagged = tags != nullptr ? TagFigure(*image.alt, link, x, top - image.h, x + image.w, top) : -1;
+                DrawImage(image.index, x, top, image.w, image.h);
+                if (!link.empty() && !pageLinks.empty()) {
+                    pageLinks.back().push_back({ x, top - image.h, x + image.w, top, link });
+                    if (tags != nullptr) tags->LinkRect();
+                }
+                if (tags != nullptr) {
+                    tags->End(tagged);
+                    tags->SetArtifacts(false);
+                }
+                x += image.w + 6.0;
+            }
+            y -= tall + (last < placed.size() ? 6.0 : 10.0);
+            first = last;
+        }
     }
 
     // `keep` is the room under its first line that the heading needs on its page (HeadingKeep).
@@ -7307,6 +7455,31 @@ private:
         // In a theme's bold face when it has one; regular as without.
         for (const auto& line : WrapText(SpanFont(multiFace, false), headingText, pageW - margin * 2.0, size)) {
             DrawTextLine(margin, size, line, headingColor, multiFace);
+        }
+        y -= level <= 2 ? 8.0 : 5.0;
+        TagEnd(tagged);
+    }
+
+    // A heading an HTML element centres or sets right (Block::align 2 or 3): as RenderHeading
+    // draws it, each line moved by what it leaves of the text width; one with formulas as
+    // RenderHeading draws it (a call of RenderHeading here took it out of RenderBlocks).
+    RAYOMD_COLD void RenderAlignedHeading(const Block& block, double keep) {
+        const int level = std::max(1, std::min(6, block.level));
+        const double size = kHeadingSizes[level];
+        const double width = pageW - margin * 2.0;
+        if (y < pageH - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
+        Ensure(size * 1.35 + keep);
+        const int tagged = tags != nullptr ? tags->BeginHeading(level) : -1;
+        if (block.hasMath) {
+            RenderMathTextLines(block.text, level, margin, width, size, headingColor, multiFace, false);
+        } else {
+            MarkHeading(level, block.text, size * 1.35);
+            AssignUtf8ToWide(headingText, block.text);
+            const TtfFont& face = SpanFont(multiFace, false);
+            for (const auto& line : WrapText(face, headingText, width, size)) {
+                DrawTextLine(margin + AlignShift(width, TextWidth(face, line, size), block.align), size, line, headingColor,
+                    multiFace);
+            }
         }
         y -= level <= 2 ? 8.0 : 5.0;
         TagEnd(tagged);
@@ -7342,7 +7515,8 @@ private:
     // Paragraph or quote lines of a text that contains formulas. A line grows by
     // exactly what its tallest formula needs beyond the normal line box; the text
     // baseline, code backgrounds and link rectangles keep their usual offsets.
-    RAYOMD_MATH_COLD void RenderMathLines(const std::vector<std::vector<StyledSpan>>& lines, double x, double width, bool quote) {
+    RAYOMD_MATH_COLD void RenderMathLines(const std::vector<std::vector<StyledSpan>>& lines, double x, double width, bool quote,
+        uint8_t align = 0) {
         const char* textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
         const char* codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
         const char* codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
@@ -7359,6 +7533,8 @@ private:
             double cursor = x;
             if (IsDisplayMathLine(math, line)) {
                 cursor = x + std::max(0.0, (width - math.Width(line[0].math)) * 0.5);
+            } else if (align >= 2) {
+                cursor = x + AlignShift(width, MathLineWidth(line, bodySize, false), align);
             }
             double baseline = y - bodySize;
             for (const StyledSpan& span : line) {
@@ -7429,6 +7605,60 @@ private:
                 cursor += spanWidth;
             }
             y -= lh;
+        }
+        y -= 5.0;
+        TagEndParagraph(tagged);
+    }
+
+    // A paragraph an HTML element centres or sets right (Block::align 2 or 3): wrapped as
+    // RenderParagraph wraps it, each line moved by what it leaves of the text width.
+    RAYOMD_COLD void RenderAlignedParagraph(const std::string& text, uint8_t align) {
+        const double x = margin;
+        const double width = pageW - margin * 2.0;
+        const double lh = bodySize * 1.35;
+        if (math.Active()) math.Clear();
+        const int tagged = tags != nullptr ? tags->BeginParagraph() : -1;
+        if (WrapStyledRuns(text, width, bodySize, paragraphRuns)) {
+            size_t index = 0;
+            for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
+                double used = 0.0;
+                for (size_t run = index; run < lineEnd; run++) {
+                    const StyledRun& piece = paragraphRuns.runs[run];
+                    used += TextWidth(SpanFont(piece.bold, piece.italic), paragraphRuns.Text(piece), bodySize);
+                }
+                Ensure(lh);
+                PaintStyledRuns(paragraphRuns, index, lineEnd, x + AlignShift(width, used, align), y, y - bodySize, bodySize,
+                    lineHeight, kBodyRunColors);
+                index = lineEnd;
+                y -= lh;
+            }
+            y -= 5.0;
+            TagEndParagraph(tagged);
+            return;
+        }
+        const std::vector<std::vector<StyledSpan>> lines = WrapStyled(text, width, bodySize);
+        if (math.Active()) {
+            RenderMathLines(lines, x, width, false, align);
+        } else {
+            for (const auto& line : lines) {
+                Ensure(lh);
+                double cursor = x + AlignShift(width, MathLineWidth(line, bodySize, false), align);
+                const double baseline = y - bodySize;
+                for (const StyledSpan& span : line) {
+                    TagLinkRun(span.url);
+                    const double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
+                    if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, kBodyRunColors.codeFill);
+                    const char* color = span.url.empty() ? (span.code ? kBodyRunColors.code : kBodyRunColors.text) : linkColor;
+                    if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
+                    PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
+                    if (span.decor & Internal::kDecorUnderline) {
+                        PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, false, color);
+                    }
+                    AddLink(cursor, baseline, spanWidth, bodySize, span.url);
+                    cursor += spanWidth;
+                }
+                y -= lh;
+            }
         }
         y -= 5.0;
         TagEndParagraph(tagged);
@@ -9994,7 +10224,8 @@ private:
         std::string fallback = block.text.empty() ? image.src : block.text;
         if (fallback.empty()) fallback = "image";
         if (image.link.empty()) {
-            RenderParagraph(fallback);
+            if (block.align >= 2) RenderAlignedParagraph(fallback, block.align);
+            else RenderParagraph(fallback);
             return;
         }
         const double lh = bodySize * 1.35;
@@ -10008,6 +10239,10 @@ private:
     }
 
     void RenderImage(const Block& block) {
+        if (!block.image->row.empty()) {
+            RenderImageRow(block);
+            return;
+        }
         if (!images) {
             RenderImageFallback(block);
             return;
@@ -10033,16 +10268,78 @@ private:
             return;
         }
 
+        ApplySizeHints(*block.image, maxW, w, h);
         double scale = std::min(1.0, std::min(maxW / w, maxH / h));
         w *= scale;
         h *= scale;
 
         Ensure(h + 10.0);
-        double x = margin + (maxW - w) * 0.5;
+        double x = ImageLeft(block.align, margin, maxW, w);
         DrawImage(index, x, y, w, h);
         const std::string& link = block.image->link;
         if (!link.empty() && !pageLinks.empty()) pageLinks.back().push_back({ x, y - h, x + w, y, link });
         y -= h + 10.0;
+    }
+
+    // A paragraph of only images (ImageSource::row): left to right 6 points apart, on as many
+    // lines as the text width needs, each line placed as the block's alignment says (at the
+    // margin without one), each image with its link. When one of them cannot be shown, the row
+    // is a paragraph of their alt texts.
+    RAYOMD_COLD void RenderImageRow(const Block& block) {
+        struct Placed {
+            int index;
+            double w;
+            double h;
+            const Internal::ImageSource* source;
+        };
+        const double maxW = pageW - margin * 2.0;
+        const double maxH = pageH - margin * 2.0;
+        std::vector<Placed> placed;
+        const auto add = [&](const Internal::ImageSource& source, const std::string& alt) {
+            std::string utf8Source;
+            if (winAnsiText && !IsAllAscii(source.src)) utf8Source = RayoMd::Text::WinAnsiToUtf8(source.src);
+            int index = -1;
+            if (!images || !images->Resolve(utf8Source.empty() ? source.src : utf8Source, alt, index)) return false;
+            const PdfImage& image = images->Get(index);
+            double w = (double)image.width * 72.0 / 96.0;
+            double h = (double)image.height * 72.0 / 96.0;
+            if (w <= 0.0 || h <= 0.0) return false;
+            ApplySizeHints(source, maxW, w, h);
+            const double scale = std::min(1.0, std::min(maxW / w, maxH / h));
+            placed.push_back({ index, w * scale, h * scale, &source });
+            return true;
+        };
+        bool shown = add(*block.image, block.text);
+        for (size_t item = 0; shown && item < block.image->row.size(); item++) {
+            shown = add(block.image->row[item], block.image->row[item].alt);
+        }
+        if (!shown) {
+            const std::string text = ImageRowText(block);
+            if (block.align >= 2) RenderAlignedParagraph(text, block.align);
+            else RenderParagraph(text);
+            return;
+        }
+        for (size_t first = 0; first < placed.size();) {
+            double used = placed[first].w;
+            double tall = placed[first].h;
+            size_t last = first + 1;
+            for (; last < placed.size() && used + 6.0 + placed[last].w <= maxW; last++) {
+                used += 6.0 + placed[last].w;
+                tall = std::max(tall, placed[last].h);
+            }
+            Ensure(tall + 10.0);
+            double x = margin + AlignShift(maxW, used, block.align);
+            for (size_t item = first; item < last; item++) {
+                const Placed& image = placed[item];
+                const double top = y - (tall - image.h);    // the images of a line stand on one bottom
+                DrawImage(image.index, x, top, image.w, image.h);
+                const std::string& link = image.source->link;
+                if (!link.empty() && !pageLinks.empty()) pageLinks.back().push_back({ x, top - image.h, x + image.w, top, link });
+                x += image.w + 6.0;
+            }
+            y -= tall + (last < placed.size() ? 6.0 : 10.0);
+            first = last;
+        }
     }
 
     // `plain`: the text holds no byte WriteEscapedLiteral would change (HasLiteralSpecial).
@@ -10092,6 +10389,26 @@ private:
         y -= level <= 2 ? 8.0 : 5.0;
     }
 
+    // A heading an HTML element centres or sets right (Block::align 2 or 3): as RenderHeading
+    // draws it, each line moved by what it leaves of the text width; one with formulas as
+    // RenderHeading draws it (a call of RenderHeading here took it out of RenderBlocks).
+    RAYOMD_COLD void RenderAlignedHeading(const Block& block, double keep) {
+        const int level = std::max(1, std::min(6, block.level));
+        const double size = kHeadingSizes[level];
+        const double width = pageW - margin * 2.0;
+        if (y < pageH - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
+        Ensure(size * 1.35 + keep);
+        if (block.hasMath) {
+            RenderMathTextLines(block.text, level, margin, width, size, headingColor, true, false);
+        } else {
+            MarkHeading(level, block.text, size * 1.35);
+            ForEachWrappedAsciiLine(block.text, width, size, StandardTextFont::Bold, [&](std::string_view line, double used) {
+                DrawTextLine(margin + AlignShift(width, used, block.align), size, line, "F2", headingColor);
+            });
+        }
+        y -= level <= 2 ? 8.0 : 5.0;
+    }
+
     // Heading lines that contain formulas: plain text and formulas in one colour,
     // each line as tall as its tallest formula needs. `quote` adds the quote strip. The
     // heading, at `level`, is noted once its first line has found its page.
@@ -10122,7 +10439,8 @@ private:
     // Paragraph or quote lines of a text that contains formulas. A line grows by
     // exactly what its tallest formula needs beyond the normal line box; the text
     // baseline, code backgrounds and link rectangles keep their usual offsets.
-    RAYOMD_MATH_COLD void RenderMathLines(const std::vector<std::vector<AsciiSpan>>& lines, double x, double width, bool quote) {
+    RAYOMD_MATH_COLD void RenderMathLines(const std::vector<std::vector<AsciiSpan>>& lines, double x, double width, bool quote,
+        uint8_t align = 0) {
         const char* textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
         const char* codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
         const char* codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
@@ -10139,6 +10457,13 @@ private:
             double cursor = x;
             if (IsDisplayMathLine(math, line)) {
                 cursor = x + std::max(0.0, (width - math.Width(line[0].math)) * 0.5);
+            } else if (align >= 2) {
+                double used = 0.0;
+                for (const AsciiSpan& span : line) {
+                    used += span.math >= 0 ? math.Width(span.math)
+                        : MathTextWidth(span.text, bodySize, (span.style & kStyleCode) != 0, (span.style & kStyleBold) != 0);
+                }
+                cursor = x + AlignShift(width, used, align);
             }
             double baseline = y - bodySize;
             for (const AsciiSpan& span : line) {
@@ -10232,6 +10557,59 @@ private:
             ForEachWrappedAsciiLine(text, width, bodySize, StandardTextFont::Regular, emitLine);
         } else {
             WrapAsciiWords(text, width, bodySize, StandardTextFont::Regular, emitLine);
+        }
+        y -= 5.0;
+    }
+
+    // A paragraph an HTML element centres or sets right (Block::align 2 or 3): wrapped as
+    // RenderParagraph wraps it, each line moved by what it leaves of the text width. Plain text
+    // takes the runs too: a call of NeedsInlineParse here took it out of RenderParagraph.
+    RAYOMD_COLD void RenderAlignedParagraph(const std::string& text, uint8_t align) {
+        const double x = margin;
+        const double width = pageW - margin * 2.0;
+        const double lh = bodySize * 1.35;
+        if (math.Active()) math.Clear();
+        if (WrapAsciiRuns(text, width, bodySize, paragraphRuns)) {
+            size_t index = 0;
+            for (const uint32_t lineEnd : paragraphRuns.lineEnds) {
+                uint64_t units = 0;
+                for (size_t run = index; run < lineEnd; run++) units += paragraphRuns.runs[run].widthUnits;
+                Ensure(lh);
+                PaintAsciiRuns(paragraphRuns, index, lineEnd, x + AlignShift(width, UnitsToPoints(units, bodySize), align), y,
+                    y - bodySize, bodySize, lh, kBodyRunColors);
+                index = lineEnd;
+                y -= lh;
+            }
+            y -= 5.0;
+            return;
+        }
+        const std::vector<std::vector<AsciiSpan>> lines = WrapAsciiLinks(text, width, bodySize);
+        if (math.Active()) {
+            RenderMathLines(lines, x, width, false, align);
+            y -= 5.0;
+            return;
+        }
+        for (const auto& line : lines) {
+            Ensure(lh);
+            double used = 0.0;
+            for (const AsciiSpan& span : line) used += AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
+            double cursor = x + AlignShift(width, used, align);
+            const double baseline = y - bodySize;
+            for (const AsciiSpan& span : line) {
+                const bool code = (span.style & kStyleCode) != 0;
+                const double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
+                if (code) CodeBackground(cursor, y, spanWidth, lh, span.text, bodySize, kBodyRunColors.codeFill);
+                const char* color = span.url.empty() ? (code ? kBodyRunColors.code : kBodyRunColors.text) : linkColor;
+                if (span.style & kStyleMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
+                Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
+                if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
+                if (span.style & kStyleUnderline) {
+                    PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, false, color);
+                }
+                AddLink(cursor, baseline, spanWidth, bodySize, span.url);
+                cursor += spanWidth;
+            }
+            y -= lh;
         }
         y -= 5.0;
     }

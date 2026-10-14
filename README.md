@@ -269,8 +269,24 @@ and `<sub>`, `<a href>`, `<q>`, `<br>`, and `<img>` as its alt text. Other tags 
 their text kept; `<script>`, `<style>` and the like are left out with their content, and links to
 `javascript:` URLs are not made.
 
+HTML blocks become what they stand for: `align="center"` or `"right"` and `<center>` place the
+text, headings and images inside (also Markdown between an opening and a closing `<div>`),
+`<img width height>` sizes an image, a paragraph of images shows them side by side, a block
+element's `id`, `<a id>` or `<a name>` is a `#link` target, and `<details>`/`<summary>`, `<pre>`,
+`<blockquote>`, lists, tables and `<dl>` become their Markdown counterparts. Markdown inside an
+HTML block shows as written, as on GitHub.
+
 ```markdown
+<div align="center">
+  <a id="top"></a>
+  <img src="logo.png" width="120" alt="Logo"> <img src="badge.png" alt="Badge">
+
+# A centred title
+
 Press <kbd>Ctrl</kbd>+<kbd>C</kbd>, then <mark>paste</mark>: H<sub>2</sub>O, E = mc<sup>2</sup>.
+</div>
+
+<p align="right"><a href="#top">back to top</a></p>
 ```
 
 ### Code highlighting

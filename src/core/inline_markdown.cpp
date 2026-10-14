@@ -886,7 +886,9 @@ void AppendScriptText(InlineScanner& scan, std::string& text, size_t begin, size
 RAYOMD_NOINLINE size_t WriteHtmlTag(InlineScanner& scan, RunWriter& writer, InlineRuns& out, size_t at, bool bold,
     bool italic, bool strike) {
     using Html::Tag;
-    Html::TagToken token;
+    // Kept from tag to tag: ScanTag clears only what the last tag set, where a new token would be
+    // cleared whole (168 bytes) for every tag.
+    static thread_local Html::TagToken token;
     const uint32_t length = scan.Tag(at, token);
     if (length == 0) return 0;
     const size_t end = at + length;
@@ -894,7 +896,7 @@ RAYOMD_NOINLINE size_t WriteHtmlTag(InlineScanner& scan, RunWriter& writer, Inli
     writer.Flush(bold, italic, strike);
     HtmlInline& html = writer.html;
     html.active = true;
-    const auto count = [&token](uint16_t& counter) {
+    const auto count = [](uint16_t& counter) {
         if (token.closing) {
             if (counter != 0) counter--;
         } else if (!token.selfClosing && counter != 0xFFFF) {
@@ -920,12 +922,15 @@ RAYOMD_NOINLINE size_t WriteHtmlTag(InlineScanner& scan, RunWriter& writer, Inli
         if (token.closing) {
             html.urlBegin = html.urlEnd = 0;
         } else if (token.href.data() != nullptr) {
-            std::string href;
-            AppendDecoded(href, token.href);
-            if (Html::SafeUrl(href)) {
-                html.urlBegin = out.urls.size();
-                out.urls += href;
+            // Decoded where it is kept, and taken back when it is not safe.
+            const size_t begin = out.urls.size();
+            if (token.href.find('&') == std::string_view::npos) out.urls.append(token.href.data(), token.href.size());
+            else AppendDecoded(out.urls, token.href);
+            if (Html::SafeUrl(std::string_view(out.urls).substr(begin))) {
+                html.urlBegin = begin;
                 html.urlEnd = out.urls.size();
+            } else {
+                out.urls.resize(begin);
             }
         }
         break;

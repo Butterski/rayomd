@@ -9,6 +9,13 @@
 #include <memory>
 #include <utility>
 
+// The mapper's per-byte and per-tag helpers stay inline in this -Os unit.
+#if defined(__GNUC__) || defined(__clang__)
+#define RAYOMD_HOT_INLINE inline __attribute__((always_inline))
+#else
+#define RAYOMD_HOT_INLINE inline
+#endif
+
 namespace TinyPdf::Internal::Html {
 namespace {
 
@@ -66,11 +73,12 @@ std::string DecodeAscii(std::string_view value) {
 
 // Block::align of an align attribute: left and justify 1, center 2, right 3; 0 for others.
 uint8_t AlignOf(std::string_view value) {
-    const std::string decoded = DecodeAscii(value);
-    const std::string_view trimmed = std::string_view(decoded);
-    if (EqualsNoCase(trimmed, "left") || EqualsNoCase(trimmed, "justify")) return 1;
-    if (EqualsNoCase(trimmed, "center") || EqualsNoCase(trimmed, "middle")) return 2;
-    if (EqualsNoCase(trimmed, "right")) return 3;
+    if (value.empty()) return 0;
+    const std::string decoded = value.find('&') != std::string_view::npos ? DecodeAscii(value) : std::string();
+    const std::string_view name = decoded.empty() ? value : std::string_view(decoded);
+    if (EqualsNoCase(name, "left") || EqualsNoCase(name, "justify")) return 1;
+    if (EqualsNoCase(name, "center") || EqualsNoCase(name, "middle")) return 2;
+    if (EqualsNoCase(name, "right")) return 3;
     return 0;
 }
 
@@ -117,12 +125,40 @@ Range FindClose(std::string_view html, size_t from, Tag tag) {
     return { kNone, kNone };
 }
 
-// The close tag of each blockquote, ul, ol and table of an HTML block, found in one pass: a close
-// tag ends the innermost open element of its kind. Mappers ask by the address of the open tag, so
-// hundreds of such elements left open do not each search the rest of the block.
+// The close tag of each blockquote, ul, ol and table of an HTML block, found in one pass, made at
+// the first question (most blocks hold none of these): a close tag ends the innermost open element
+// of its kind. Mappers ask by the address of the open tag, so hundreds of such elements left open
+// do not each search the rest of the block.
 class Containers {
 public:
-    explicit Containers(std::string_view html) : base(html.data()), size(html.size()) {
+    explicit Containers(std::string_view html) : html(html) {}
+
+    // The close of the element whose open tag is at `tag`, when it ends at or before `limit`.
+    bool Close(const char* tag, const char* limit, const char*& closeBegin, const char*& closeEnd) const {
+        if (tag < html.data() || tag >= html.data() + html.size()) return false;
+        if (!paired) MatchPairs();
+        const size_t open = static_cast<size_t>(tag - html.data());
+        const auto found = std::lower_bound(pairs.begin(), pairs.end(), open,
+            [](const Pair& pair, size_t wanted) { return pair.open < wanted; });
+        if (found == pairs.end() || found->open != open || html.data() + found->closeEnd > limit) return false;
+        closeBegin = html.data() + found->closeBegin;
+        closeEnd = html.data() + found->closeEnd;
+        return true;
+    }
+
+private:
+    struct Pair {
+        size_t open;
+        size_t closeBegin;
+        size_t closeEnd;
+    };
+
+    static int Kind(Tag tag) {
+        return tag == Tag::Blockquote ? 0 : tag == Tag::Ul ? 1 : tag == Tag::Ol ? 2 : tag == Tag::Table ? 3 : -1;
+    }
+
+    void MatchPairs() const {
+        paired = true;
         QuoteCache quotes;
         TagToken token;
         std::vector<size_t> open[4];
@@ -143,32 +179,9 @@ public:
         std::sort(pairs.begin(), pairs.end(), [](const Pair& a, const Pair& b) { return a.open < b.open; });
     }
 
-    // The close of the element whose open tag is at `tag`, when it ends at or before `limit`.
-    bool Close(const char* tag, const char* limit, const char*& closeBegin, const char*& closeEnd) const {
-        if (tag < base || tag >= base + size) return false;
-        const size_t open = static_cast<size_t>(tag - base);
-        const auto found = std::lower_bound(pairs.begin(), pairs.end(), open,
-            [](const Pair& pair, size_t wanted) { return pair.open < wanted; });
-        if (found == pairs.end() || found->open != open || base + found->closeEnd > limit) return false;
-        closeBegin = base + found->closeBegin;
-        closeEnd = base + found->closeEnd;
-        return true;
-    }
-
-private:
-    struct Pair {
-        size_t open;
-        size_t closeBegin;
-        size_t closeEnd;
-    };
-
-    static int Kind(Tag tag) {
-        return tag == Tag::Blockquote ? 0 : tag == Tag::Ul ? 1 : tag == Tag::Ol ? 2 : tag == Tag::Table ? 3 : -1;
-    }
-
-    const char* base;
-    size_t size;
-    std::vector<Pair> pairs;
+    const std::string_view html;
+    mutable bool paired = false;
+    mutable std::vector<Pair> pairs;
 };
 
 // White space and <br> tags from `at` on: the index behind them.
@@ -272,6 +285,20 @@ Block AnchorBlock(std::string id) {
     return block;
 }
 
+// What Text does with a byte: append it (kPlain), collapse it (kSpace), escape it with a backslash
+// (kEscaped), write it as a character reference (kReference: '~' and '$'), or stop (kMarkup: '<').
+enum : uint8_t { kPlain, kSpace, kEscaped, kReference, kMarkup };
+
+constexpr std::array<uint8_t, 256> MakeTextClasses() {
+    std::array<uint8_t, 256> classes{};
+    for (const char ch : { ' ', '\t', '\n', '\r', '\f' }) classes[static_cast<unsigned char>(ch)] = kSpace;
+    for (const char ch : { '\\', '`', '*', '_', '[', ']', '!' }) classes[static_cast<unsigned char>(ch)] = kEscaped;
+    for (const char ch : { '~', '$' }) classes[static_cast<unsigned char>(ch)] = kReference;
+    classes['<'] = kMarkup;
+    return classes;
+}
+constexpr std::array<uint8_t, 256> kTextClasses = MakeTextClasses();
+
 // One HTML block, or the content of an element of one, mapped to blocks (see MapBlock).
 class BlockMapper {
 public:
@@ -279,45 +306,70 @@ public:
         : state(state), out(out), nesting(nesting), containers(containers) {}
 
     void Map(std::string_view html) {
-        for (size_t at = 0; at < html.size();) {
-            const size_t open = html.find('<', at);
-            Text(html.substr(at, (open == kNone ? html.size() : open) - at));
-            if (open == kNone) break;
-            at = Markup(html, open);
-        }
+        paragraph.reserve(std::min<size_t>(html.size(), 512));
+        for (size_t at = Text(html, 0); at < html.size(); at = Text(html, at)) at = Markup(html, at);
         Flush();
     }
 
 private:
-    // Text between tags: white space collapsed to one space, and the bytes the inline parser
-    // reads as Markdown escaped, as CommonMark shows the text of HTML as it is.
-    void Text(std::string_view text) {
-        for (const char ch : text) {
-            if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f') {
+    // The text from html[at] to the next '<' (returned, or the end): white space collapsed to one
+    // space, and the bytes the inline parser reads as Markdown escaped, as CommonMark shows the text
+    // of HTML as it is. Bytes of no class, and single spaces between them, are appended a run at a time.
+    RAYOMD_HOT_INLINE size_t Text(std::string_view html, size_t at) {
+        while (at < html.size()) {
+            size_t run = at;
+            for (;;) {
+                while (run < html.size() && kTextClasses[static_cast<unsigned char>(html[run])] == kPlain) run++;
+                if (run == at || run + 1 >= html.size() || html[run] != ' ' ||
+                    kTextClasses[static_cast<unsigned char>(html[run + 1])] != kPlain) {
+                    break;
+                }
+                run++;
+            }
+            if (run != at) {
+                Space();
+                visible = true;
+                paragraph.append(html.data() + at, run - at);
+                if (run == html.size()) return run;
+            }
+            const char ch = html[run];
+            const uint8_t kind = kTextClasses[static_cast<unsigned char>(ch)];
+            if (kind == kMarkup) return run;
+            at = run + 1;
+            if (kind == kSpace) {
                 space = true;
                 continue;
             }
             Space();
             visible = true;
-            switch (ch) {
-            case '\\': case '`': case '*': case '_': case '[': case ']': case '!':
-                paragraph.push_back('\\');
-                paragraph.push_back(ch);
-                break;
-            case '~': paragraph += "&#126;"; break;
-            case '$': paragraph += "&#36;"; break;
-            default: paragraph.push_back(ch); break;
+            if (kind == kEscaped) {
+                const char escaped[2] = { '\\', ch };
+                paragraph.append(escaped, 2);
+            } else {
+                paragraph += ch == '~' ? "&#126;" : "&#36;";
             }
         }
+        return at;
     }
 
     // Markup that the inline parser reads (an inline tag, as written, on one line) or a literal.
-    void Inline(std::string_view markup) {
+    RAYOMD_HOT_INLINE void Inline(std::string_view markup) {
         Space();
-        for (const char ch : markup) paragraph.push_back(ch == '\n' || ch == '\r' || ch == '\t' ? ' ' : ch);
+        const size_t start = paragraph.size();
+        paragraph.append(markup);
+        for (size_t index = start; index < paragraph.size(); index++) {
+            const char ch = paragraph[index];
+            if (static_cast<unsigned char>(ch) <= '\r' && (ch == '\n' || ch == '\r' || ch == '\t')) paragraph[index] = ' ';
+        }
     }
 
-    void Space() {
+    // An <a> opened, with an href or without.
+    void OpenLink(bool linked) {
+        if (links < 64) linkBits = linked ? linkBits | (uint64_t{ 1 } << links) : linkBits & ~(uint64_t{ 1 } << links);
+        links++;
+    }
+
+    RAYOMD_HOT_INLINE void Space() {
         if (space && paragraph.size() > contentStart) paragraph.push_back(' ');
         space = false;
     }
@@ -375,15 +427,15 @@ private:
     // What starts at html[at] == '<': a comment, declaration or processing instruction (left
     // out), a tag, or a '<' that is text. Returns the index behind it.
     size_t Markup(std::string_view html, size_t at) {
-        if (html.compare(at, 4, "<!--") == 0) {
-            const size_t close = html.find("-->", at + 2);
-            return close == kNone ? html.size() : close + 3;
-        }
         if (at + 1 < html.size() && (html[at + 1] == '!' || html[at + 1] == '?')) {
+            if (at + 3 < html.size() && html[at + 1] == '!' && html[at + 2] == '-' && html[at + 3] == '-') {
+                const size_t close = html.find("-->", at + 2);
+                return close == kNone ? html.size() : close + 3;
+            }
             const size_t close = html.find('>', at);
             return close == kNone ? html.size() : close + 1;
         }
-        TagToken token;
+        TagToken& token = scratch;
         const uint32_t length = ScanTag(html, at, quotes, token);
         if (length == 0) {
             Inline("&lt;");
@@ -467,19 +519,22 @@ private:
             // An <a> without href is only a target: it and its close tag stay out of the text, so
             // that it does not keep a paragraph of images from being a row.
             if (token.closing) {
-                const bool linked = !openLinks.empty() && openLinks.back();
-                if (!openLinks.empty()) openLinks.pop_back();
-                if (linked) Inline(html.substr(at, length));
+                bool linked = false;
+                if (links != 0) {
+                    links--;
+                    linked = links >= 64 || ((linkBits >> links) & 1) != 0;
+                }
+                if (linked) Inline(std::string_view(html.data() + at, length));
                 return end;
             }
             if (token.href.data() == nullptr) {
                 const std::string_view id = !token.id.empty() ? token.id : token.name;
                 if (!id.empty()) anchors.push_back(DecodeAscii(id));
-                if (!token.selfClosing) openLinks.push_back(false);
+                if (!token.selfClosing) OpenLink(false);
                 return end;
             }
-            if (!token.selfClosing) openLinks.push_back(true);
-            Inline(html.substr(at, length));
+            if (!token.selfClosing) OpenLink(true);
+            Inline(std::string_view(html.data() + at, length));
             return end;
         default:
             if (IsBlockName(tag)) {
@@ -488,7 +543,7 @@ private:
                 return end;
             }
             if (tag == Tag::Img && !token.closing) visible = true;
-            Inline(html.substr(at, length));
+            Inline(std::string_view(html.data() + at, length));
             return end;
         }
     }
@@ -663,7 +718,9 @@ private:
     int heading = 0;                // the level of an h1-h6 being read
     uint8_t paragraphAlign = 0;     // the alignment of the element the paragraph is, over state's
     std::vector<std::string> anchors;   // ids of <a> met in the paragraph, for blocks before it
-    std::vector<bool> openLinks;        // the <a> elements open, whether each has an href
+    uint64_t linkBits = 0;              // of the <a> elements open, the outermost 64: whether each has an href
+    size_t links = 0;                   // how many are open
+    TagToken scratch;                   // Markup's tag: a member, not cleared for every tag (ScanTag sets it all)
     QuoteCache quotes;
 };
 
@@ -682,13 +739,23 @@ size_t MapBlockLines(const std::vector<std::string_view>& lines, size_t start, i
     } else {
         while (end + 1 < lines.size() && !HtmlBlockEnds(lines[end + 1], condition)) end++;
     }
-    std::string html;
-    for (size_t index = start; index <= end; index++) {
-        if (index != start) html.push_back('\n');
-        html.append(lines[index].data(), lines[index].size());
+    // The block's text: a view of the source while its lines are one piece of it, else the lines joined.
+    std::string_view html = lines[start];
+    std::string joined;
+    bool joining = false;
+    for (size_t index = start + 1; index <= end; index++) {
+        const std::string_view line = lines[index];
+        if (!joining && line.data() == html.data() + html.size() + 1 && html.data()[html.size()] == '\n') {
+            html = std::string_view(html.data(), html.size() + 1 + line.size());
+            continue;
+        }
+        if (!joining) joined.assign(html.data(), html.size());
+        joining = true;
+        joined.push_back('\n');
+        joined.append(line.data(), line.size());
     }
     const size_t mapStart = out.size();
-    MapBlock(html, state, out);
+    MapBlock(joining ? std::string_view(joined) : html, state, out);
     alignments.push_back({ mapStart, out.size(), state.Align() });
     return end + 1;
 }

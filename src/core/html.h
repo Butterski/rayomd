@@ -74,6 +74,7 @@ struct TagToken {
     bool closing = false;
     bool selfClosing = false;
     bool hasOpen = false;   // the `open` attribute, which has no value
+    uint16_t seen = 0;      // which of the values below are set, in their order; the others are empty
     uint32_t length = 0;
     std::string_view align, width, height, src, alt, href, start, id, name, open;
 };

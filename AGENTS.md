@@ -54,7 +54,13 @@ both renderers paint around a run's text (`PaintDecor`; the standard renderer's 
 and 64); `<sup>`/`<sub>` are `InlineMath::Sup`/`Sub` runs that `InlineRuns::scripts` sends to
 the general paths, which box them in the `MathPool` like footnote numbers (`PaintScript`), and
 that table cells lay out as text. Elements dropped with their content and scripts skip to their
-close tag, so each byte is read once.
+close tag, so each byte is read once. HTML blocks give `Block::align` (2 centre, 3 right take the
+cold `RenderAlignedParagraph`/`RenderAlignedHeading`, each line moved by what it leaves; 0 and 1
+keep the unchanged renderers), image sizes (`ImageSource::widthHint`/`heightHint`, applied before
+the fit to the page by `ApplySizeHints`) and rows (`ImageSource::row`, `RenderImageRow`: 6 points
+apart, one bottom per line, the alt texts joined by " · " when one image cannot be shown), and
+`BlockType::Anchor`, a `#id` target where the next block starts (`MarkAnchor`, the renderers'
+`ids`).
 Footnotes as on GitHub (`[^label]` and `[^label]:` definitions, also in quotes and
 list items): numbered by first reference in reading order, drawn as raised link
 numbers (one `MathPool` box each, so they take the cold formula paths and the fast
@@ -207,23 +213,26 @@ Important image/link details:
   Built at `-O2`: per-byte code, 1.5 times as fast as at `-Os`. The renderers split a
   line into runs of one colour (`SplitCodeRuns`) and draw them in one text object.
 
-- `src/core/html.h` and `src/core/html.cpp`
+- `src/core/html.h`, `src/core/html.cpp` and `src/core/html_blocks.cpp`
   HTML inside Markdown: the elements RayoMD knows (`Html::Tag`: GitHub's sanitizer
   allowlist, `u`, `center`, CommonMark's block names and the elements dropped with their
-  content; looked up by a 60-bit key in a table sorted at compile time), CommonMark's raw
-  HTML tags (`ScanTag`: at most 4,096 bytes and 64 attributes) and HTML block conditions,
-  and which URLs a link or image may have (`SafeUrl`). `QuoteCache` answers each tag's
-  closing quote, so text of unterminated quotes stays linear; a new scan must stay bounded
+  content; looked up by a 60-bit key in an open-addressed table made at compile time),
+  CommonMark's raw HTML tags (`ScanTag`: at most 4,096 bytes and 64 attributes; it clears only
+  the values the token had, `TagToken::seen`, so hot callers keep one token) and HTML block
+  conditions, and which URLs a link or image may have (`SafeUrl`). `QuoteCache` answers each
+  tag's closing quote, so text of unterminated quotes stays linear; a new scan must stay bounded
   the same way. HTML blocks: the parser classifies their first line (`LineKind::HtmlBlock`,
   the start condition in `LineInfo::level`; condition 7 does not interrupt a paragraph),
-  collects them as CommonMark ends them and hands them to `MapBlock`, which turns text and
-  inline tags into paragraphs for the inline parser (white space collapsed, Markdown syntax
-  escaped) and block elements into blocks; an element left open keeps aligning later blocks of
-  its level (`HtmlState`, `ApplyHtmlAlign`). The close tags of quotes, lists and tables are
-  found in one pass per block (`Containers`), never searched for once per open tag.
-  `MapParagraph` turns a paragraph of only images into an Image block with a `row`, and one of
-  only an `<a id>` into an Anchor block, whose id `HeadingTargets` resolves exactly. Built at
-  `-O2`; checked by `tests/html_tests.inc`.
+  collects them as CommonMark ends them (a view of the source when their lines are one piece of
+  it) and hands them to `MapBlock` in `html_blocks.cpp`, which turns text and inline tags into
+  paragraphs for the inline parser (white space collapsed, Markdown syntax escaped) and block
+  elements into blocks; an element left open keeps aligning later blocks of its level
+  (`HtmlState`, `ApplyAlignments`). The close tags of quotes, lists and tables are found in one
+  pass per block, made at the first such element (`Containers`), never searched for once per
+  open tag. `MapParagraph` turns a paragraph of only images into an Image block with a `row`,
+  and one of only an `<a id>` into an Anchor block, whose id `HeadingTargets` resolves exactly.
+  `html.cpp` is built at `-O2`, `html_blocks.cpp` at `-Os` (at `-O2` it is 25 KB larger for 3 %
+  on documents of HTML paragraphs); checked by `tests/html_tests.inc`.
 
 - `src/core/contents.h` and `src/core/contents.cpp`
   The table of contents: turning the marker paragraph into a `BlockType::Contents` block
