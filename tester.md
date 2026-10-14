@@ -83,6 +83,7 @@ unterminated $x stays literal.
 - Second bullet item
   - Nested item A
   - Nested item B
+    - Nested item B.1, a third level
 1. First numbered item
 2. Second numbered item
 
