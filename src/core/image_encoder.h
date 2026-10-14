@@ -25,8 +25,8 @@ public:
     static constexpr unsigned kMaxHelpers = 3;
 
     // Planes of `sizes[i]` bytes, written in order; up to `helpers` helper threads (at most
-    // kMaxHelpers) are asked to join in.
-    ImagePlanesEncoder(const size_t* sizes, size_t count, unsigned helpers);
+    // kMaxHelpers) are asked to join in. `fast` compresses them in DeflateImageSegment's fast mode.
+    ImagePlanesEncoder(const size_t* sizes, size_t count, unsigned helpers, bool fast = false);
     // Abandons what is not finished and waits for the helpers to leave.
     ~ImagePlanesEncoder();
     ImagePlanesEncoder(const ImagePlanesEncoder&) = delete;

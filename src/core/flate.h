@@ -80,9 +80,12 @@ struct InputProgress {
 // Raw DEFLATE blocks of the segment data[history, history + size): `data` starts `history` bytes
 // before the segment (at most kImageSegmentHistory). Writes at most ImageSegmentBound(size) - 8
 // bytes to `out`; returns how many. `last` gives the final block. With `progress`, each block
-// waits for its bytes, and an abandoned buffer returns 0.
+// waits for its bytes, and an abandoned buffer returns 0. `fast` searches one candidate a
+// position instead of two and skips incompressible data sooner (--fast-images): seven RGBA
+// screenshots came out 0.6 to 2.6 % larger, their exports about a tenth faster (2026-10-14); the
+// output still depends only on the input and `fast`.
 size_t DeflateImageSegment(const uint8_t* data, size_t history, size_t size, bool last, uint8_t* out,
-    Scratch& scratch, const InputProgress* progress = nullptr);
+    Scratch& scratch, const InputProgress* progress = nullptr, bool fast = false);
 
 // The most bytes ZlibCompressImage writes for `size` input bytes, plus 8 bytes of slack.
 inline size_t ZlibImageBound(size_t size) {
@@ -98,8 +101,8 @@ inline size_t ZlibImageBound(size_t size) {
 
 // The whole stream of an image's rows, its segments compressed in turn: the bytes that segments
 // compressed in any threads and put together make. `out` has room for ZlibImageBound(input.size())
-// bytes.
-size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch);
+// bytes. `fast` as for DeflateImageSegment.
+size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch, bool fast = false);
 
 // The Adler-32 of two byte runs one after the other, from their own: zlib's adler32_combine.
 uint32_t Adler32Combine(uint32_t first, uint32_t second, size_t secondSize);

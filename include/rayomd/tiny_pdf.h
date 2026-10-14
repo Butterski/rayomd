@@ -127,6 +127,9 @@ struct PdfOptions {
     // FlateDecode page content, font program and CMaps where that makes the file smaller:
     // text-heavy PDFs two to five times smaller, at the cost of compressing them.
     bool compress = false;
+    // PNGs with transparency re-encoded faster (a 1024x1024 one 1 ms sooner), their image streams
+    // a few percent larger; they decode to the same pixels.
+    bool fastImages = false;
     // PDF/A-3b (ISO 19005-3): every font embedded, so all text takes a TrueType or OpenType font
     // (formulas their own embedded fonts); an sRGB output intent, XMP metadata and a file identifier.
     bool pdfa = false;

@@ -299,6 +299,7 @@ struct CliExportOptions {
     bool imageCache = true;
     bool pageNumbers = false;
     bool compress = false;
+    bool fastImages = false;
     bool pdfa = false;
     bool pdfua = false;
     bool highlightCode = true;
@@ -328,6 +329,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--no-image-cache") options.imageCache = false;
         else if (value == "--page-numbers") options.pageNumbers = true;
         else if (value == "--compress") options.compress = true;
+        else if (value == "--fast-images") options.fastImages = true;
         else if (value == "--pdfa") options.pdfa = true;
         else if (value == "--pdfua") options.pdfua = true;
         else if (value == "--no-highlight") options.highlightCode = false;
@@ -446,6 +448,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     if (options.imageCache) pdfOptions.imageCacheDirectory = ImageCacheDirectory();
     pdfOptions.pageNumbers = options.pageNumbers;
     pdfOptions.compress = options.compress;
+    pdfOptions.fastImages = options.fastImages;
     pdfOptions.pdfa = options.pdfa;
     pdfOptions.pdfua = options.pdfua;
     pdfOptions.highlightCode = options.highlightCode;
@@ -893,7 +896,8 @@ void PrintUsage() {
         "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source, --no-image-cache\n"
         "  (by default PNGs with transparency are re-encoded once and kept in ~/.cache/rayomd/images,\n"
         "  or $XDG_CACHE_HOME/rayomd/images: at most about 256 MB, the PDF the same either way).\n"
-        "Output flags: --compress (FlateDecode streams: smaller files, slower export), --pdfa (PDF/A-3b:\n"
+        "Output flags: --compress (FlateDecode streams: smaller files, slower export), --fast-images\n"
+        "  (PNGs with transparency re-encoded faster, their image streams larger), --pdfa (PDF/A-3b:\n"
         "  every font embedded, the formula fonts too), --pdfua (PDF/UA-1, tagged for screen readers:\n"
         "  headings, lists, tables, figures with their alt text, links and notes; fonts as with --pdfa,\n"
         "  formulas as TeX source; the language is the front matter's lang, else en), --theme=FILE (key =\n"

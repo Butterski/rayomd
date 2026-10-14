@@ -32,6 +32,8 @@ namespace fs = std::filesystem;
 // BuildDecodedPngImage writes (the encoder, its image mode, the filter choice), so that no build
 // reads another's streams under the same version.
 constexpr char kMagic[8] = { 'R', 'M', 'D', 'I', 'M', 'G', '0', '2' };
+// Streams of --fast-images' mode (PdfOptions::fastImages), with a generation of their own.
+constexpr char kFastMagic[8] = { 'R', 'M', 'D', 'I', 'M', 'F', '0', '1' };
 constexpr uintmax_t kDirectoryBytes = uintmax_t(256) * 1024 * 1024;
 
 // The magic, the version's length and text, then width, height, components and the lengths of
@@ -49,8 +51,8 @@ uint32_t ReadU32(const uint8_t* p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
-fs::path EntryPath(const std::string& directory, const std::string& digest) {
-    return fs::u8path(directory) / (digest + ".rimg");
+fs::path EntryPath(const std::string& directory, const std::string& digest, bool fast) {
+    return fs::u8path(directory) / (digest + (fast ? ".fast.rimg" : ".rimg"));
 }
 
 // Removes the least recently used entries until the directory holds 3/4 of kDirectoryBytes, and
@@ -89,19 +91,20 @@ void Trim(const fs::path& directory) {
 } // namespace
 
 bool LoadCachedImage(const std::string& directory, const std::string& digest, uint32_t width, uint32_t height,
-    uint32_t components, size_t maxBytes, std::string& color, std::string& mask) {
+    uint32_t components, size_t maxBytes, std::string& color, std::string& mask, bool fast) {
     const std::string_view version = RAYOMD_VERSION;
     const size_t header = HeaderBytes(version);
+    const char* const magic = fast ? kFastMagic : kMagic;
     uint8_t head[sizeof(kMagic) + 1 + 255 + 5 * 4];
     if (header > sizeof(head)) return false;
-    const fs::path path = EntryPath(directory, digest);
+    const fs::path path = EntryPath(directory, digest, fast);
     std::FILE* const file = RayoMd::File::Open(path, "rb");
     if (file == nullptr) return false;
     // The header, then the two streams straight into `color` and `mask`, then the checksum.
     const long long size = RayoMd::File::SizeOf(file);
     bool ok = size >= 0 && (uint64_t)size >= header + 4 && (uint64_t)size <= (uint64_t)header + maxBytes + 4 &&
         RayoMd::File::SeekTo(file, 0) && std::fread(head, 1, header, file) == header &&
-        std::memcmp(head, kMagic, sizeof(kMagic)) == 0 && head[8] == version.size() &&
+        std::memcmp(head, magic, sizeof(kMagic)) == 0 && head[8] == version.size() &&
         std::memcmp(head + 9, version.data(), version.size()) == 0;
     const uint8_t* const fields = head + 9 + version.size();
     const size_t colorBytes = ok ? ReadU32(fields + 12) : 0;
@@ -128,7 +131,7 @@ bool LoadCachedImage(const std::string& directory, const std::string& digest, ui
 }
 
 void StoreCachedImage(const std::string& directory, const std::string& digest, uint32_t width, uint32_t height,
-    uint32_t components, size_t maxBytes, std::string_view color, std::string_view mask) {
+    uint32_t components, size_t maxBytes, std::string_view color, std::string_view mask, bool fast) {
     const std::string_view version = RAYOMD_VERSION;
     if (version.size() > 255 || color.size() + mask.size() > maxBytes || color.size() > UINT32_MAX ||
         mask.size() > UINT32_MAX) {
@@ -136,7 +139,7 @@ void StoreCachedImage(const std::string& directory, const std::string& digest, u
     }
     std::string file;
     file.reserve(HeaderBytes(version) + color.size() + mask.size() + 4);
-    file.append(kMagic, sizeof(kMagic));
+    file.append(fast ? kFastMagic : kMagic, sizeof(kMagic));
     file += (char)version.size();
     file += version;
     AppendU32(file, width);
@@ -149,7 +152,7 @@ void StoreCachedImage(const std::string& directory, const std::string& digest, u
     AppendU32(file, RayoMd::Flate::Adler32(reinterpret_cast<const uint8_t*>(file.data()), file.size()));
 
     std::error_code error;
-    const fs::path path = EntryPath(directory, digest);
+    const fs::path path = EntryPath(directory, digest, fast);
     fs::create_directories(path.parent_path(), error);
     static std::atomic<unsigned> stores{ 0 };
     const unsigned store = stores++;

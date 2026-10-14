@@ -1675,8 +1675,8 @@ bool Inflates(std::string_view packed, const std::string& expected) {
 // the thread compressed before, nor on other threads compressing at the same time, and the
 // reversible profile still recovers its source. In both renderers.
 bool CheckCompression() {
-    // The encoder alone, in both modes, at the edges of its blocks, window and match lengths, on
-    // runs and on data it cannot compress, within the size it promises.
+    // The encoder alone, in its three modes (image rows also fast), at the edges of its blocks,
+    // window and match lengths, on runs and on data it cannot compress, within the size it promises.
     RayoMd::Flate::Scratch scratch;
     uint64_t seed = 88172645463325252ull;
     const auto next = [&]() {
@@ -1709,6 +1709,8 @@ bool CheckCompression() {
     using Compress = size_t (*)(std::string_view, uint8_t*, RayoMd::Flate::Scratch&);
     const Compress modes[] = { RayoMd::Flate::ZlibCompress, [](std::string_view in, uint8_t* out, RayoMd::Flate::Scratch& work) {
         return RayoMd::Flate::ZlibCompressImage(in, out, work);
+    }, [](std::string_view in, uint8_t* out, RayoMd::Flate::Scratch& work) {
+        return RayoMd::Flate::ZlibCompressImage(in, out, work, true);
     } };
     for (const std::string& input : inputs) {
         for (const Compress compress : modes) {
@@ -1722,10 +1724,12 @@ bool CheckCompression() {
             }
         }
     }
-    // Segments of any sizes, each ending at any bit, put together make a valid stream.
+    // Segments of any sizes, each ending at any bit, put together make a valid stream; every other
+    // trial in the fast mode, with the tables the other mode filled.
     for (const std::string& input : inputs) {
         if (input.size() > 300000) continue;
         for (int trial = 0; trial < 8; trial++) {
+            const bool fast = (trial & 1) != 0;
             std::string packed("\x78\x5E", 2);
             for (size_t start = 0;;) {
                 const size_t size = std::min<size_t>(input.size() - start, next() % 9000);
@@ -1734,7 +1738,7 @@ bool CheckCompression() {
                 std::string segment(RayoMd::Flate::ImageSegmentBound(size), '\0');
                 segment.resize(RayoMd::Flate::DeflateImageSegment(
                     reinterpret_cast<const uint8_t*>(input.data()) + start - history, history, size, last,
-                    reinterpret_cast<uint8_t*>(&segment[0]), scratch));
+                    reinterpret_cast<uint8_t*>(&segment[0]), scratch, nullptr, fast));
                 packed += segment;
                 start += size;
                 if (last) break;
@@ -1790,6 +1794,25 @@ bool CheckCompression() {
                     return false;
                 }
             }
+        }
+    }
+    // In the fast mode too a plane's bytes do not depend on the helpers.
+    std::string fastAlpha(RayoMd::Flate::ZlibImageBound(alphaRows.size()), '\0');
+    fastAlpha.resize(RayoMd::Flate::ZlibCompressImage(alphaRows, reinterpret_cast<uint8_t*>(&fastAlpha[0]), scratch, true));
+    for (const unsigned helpers : { 0u, 3u }) {
+        const size_t sizes[1] = { alphaRows.size() };
+        TinyPdf::Internal::ImagePlanesEncoder encoder(sizes, 1, helpers, true);
+        bool written = true;
+        for (size_t at = 0; written && at < alphaRows.size();) {
+            const size_t piece = std::min<size_t>(alphaRows.size() - at, next() % 300000 + 1);
+            written = encoder.Append(0, reinterpret_cast<const uint8_t*>(alphaRows.data()) + at, piece);
+            at += piece;
+            if (helpers == 0) encoder.EncodeReady();
+        }
+        std::string streams[1];
+        if (!written || !encoder.Finish(streams) || streams[0] != fastAlpha || !Inflates(fastAlpha, alphaRows)) {
+            std::cerr << "Fast image planes differ with " << helpers << " helpers" << std::endl;
+            return false;
         }
     }
     // RayoMD's inflater gives back every input of both modes, taken in pieces of any size.

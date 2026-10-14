@@ -3142,7 +3142,7 @@ static void DescribeReencodedPng(const PngInfo& png, PdfImage& image) {
 // threads while this one decodes, one for each CPU the process may run on that no other decode of
 // this process holds, within its share of the pool (so a batch whose workers already keep the
 // CPUs busy asks for none), else by this one between rows.
-static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
+static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image, bool fast) {
     size_t rowBytes = 0;
     size_t bpp = 0;
     if (!DecodedPngRows(png, rowBytes, bpp)) return false;
@@ -3181,7 +3181,7 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     // CPUs asked for three each, and kept six segment buffers apiece for helpers it did not get.
     const unsigned share = Internal::ImagePlanesEncoder::kMaxHelpers / decodes;
     const unsigned helpers = width * height >= kImageThreadPixels && cpus > decodes ? std::min(cpus - decodes, share) : 0;
-    Internal::ImagePlanesEncoder encoder(sizes, 2, helpers);
+    Internal::ImagePlanesEncoder encoder(sizes, 2, helpers, fast);
     const auto writeRow = [&](size_t plane, const uint8_t* row, const uint8_t* up, size_t bytes, size_t components) {
         uint8_t* const reserved = encoder.Reserve(plane, bytes + 1);
         uint8_t* const filtered = reserved ? reserved : spill;
@@ -3249,7 +3249,8 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image) {
     return true;
 }
 
-static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {});
+static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {},
+    bool fast = false);
 
 #ifdef _WIN32
 template<typename T>
@@ -3462,8 +3463,9 @@ static bool BuildDecodedImageWithWic(const std::vector<uint8_t>&, PdfImage&) {
 #endif
 
 // With `cacheDirectory`, a PNG that is re-encoded is first looked for there, and kept there after
-// (image_cache.h).
-static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory) {
+// (image_cache.h). `fast` re-encodes it in DeflateImageSegment's fast mode (--fast-images).
+static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory,
+    bool fast) {
     PngInfo png;
     if (!ParsePngChunks(bytes, png)) return false;
     if (BuildFastPngImage(png, bytes, image)) return true;
@@ -3477,26 +3479,27 @@ static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, co
         digest = RayoMd::PdfSource::Sha256Hex(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
         PdfImage kept;
         if (Internal::LoadCachedImage(cacheDirectory, digest, png.width, png.height, components, kMaxImageBytes,
-            kept.stream, kept.maskStream)) {
+            kept.stream, kept.maskStream, fast)) {
             DescribeReencodedPng(png, kept);
             image = std::move(kept);
             return true;
         }
     }
     JoinIdat(bytes, png.idatBytes, png.idat);
-    if (BuildDecodedPngImage(png, image)) {
+    if (BuildDecodedPngImage(png, image, fast)) {
         if (cached) {
             Internal::StoreCachedImage(cacheDirectory, digest, png.width, png.height, components, kMaxImageBytes,
-                image.stream, image.maskStream);
+                image.stream, image.maskStream, fast);
         }
         return true;
     }
     return BuildDecodedImageWithWic(bytes, image);
 }
 
-static bool DecodeImageBytes(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {}) {
+static bool DecodeImageBytes(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {},
+    bool fast = false) {
     PdfImage parsed;
-    if (ParseJpegImage(bytes, parsed) || ParsePngImage(bytes, parsed, cacheDirectory) ||
+    if (ParseJpegImage(bytes, parsed) || ParsePngImage(bytes, parsed, cacheDirectory, fast) ||
         BuildDecodedImageWithWic(bytes, parsed)) {
         image = std::move(parsed);
         return image.width > 0 && image.height > 0 && !image.stream.empty();
@@ -3559,7 +3562,8 @@ public:
             return true;
         }
         const RayoMd::File::Stamp stamp = RayoMd::File::StampOf(normalized);
-        SharedPdfImage sharedImage = LoadDecodedImageFromCache(key, stamp);
+        std::string keyStorage;
+        SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
         if (!sharedImage) {
             std::vector<uint8_t> bytes;
             if (IsKnownFailure(key, stamp) || !ReadLocalImageFile(PathToUtf8(normalized), bytes) ||
@@ -3623,7 +3627,8 @@ private:
         else
 #endif
         if (!isUrl) stamp = RayoMd::File::StampOf(PathFromUtf8(localPathUtf8));
-        SharedPdfImage sharedImage = LoadDecodedImageFromCache(key, stamp);
+        std::string keyStorage;
+        SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
         if (!sharedImage && IsKnownFailure(key, stamp)) return false;
         if (!sharedImage) {
             std::vector<uint8_t> bytes;
@@ -3673,9 +3678,18 @@ private:
             shared = std::make_shared<PdfImage>(std::move(image));
             return true;
         }
-        if (!DecodeImageBytes(bytes, image, options.imageCacheDirectory)) return false;
-        shared = StoreDecodedImageInCache(key, stamp, std::move(image));
+        if (!DecodeImageBytes(bytes, image, options.imageCacheDirectory, options.fastImages)) return false;
+        std::string keyStorage;
+        shared = StoreDecodedImageInCache(CacheKey(key, keyStorage), stamp, std::move(image));
         return true;
+    }
+
+    // The process cache's key of an image: --fast-images' streams under keys of their own, made in
+    // `storage`; others under `key` itself.
+    const std::string& CacheKey(const std::string& key, std::string& storage) const {
+        if (!options.fastImages) return key;
+        storage = "fast:" + key;
+        return storage;
     }
 
     // An SVG as a form XObject (svg.h), its text in the document's font; defined after the hosts.

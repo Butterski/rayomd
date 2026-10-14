@@ -654,7 +654,13 @@ size_t ZlibCompress(std::string_view input, uint8_t* out, Scratch& scratch) {
     return (size_t)(writer.out + 4 - out);
 }
 
-size_t DeflateImageSegment(const uint8_t* data, size_t history, size_t size, bool last, uint8_t* out,
+namespace {
+
+// --fast-images: one candidate a position, and incompressible data skipped twice as soon.
+constexpr unsigned kFastSkipShift = 4;
+
+template <bool kFast>
+size_t DeflateImageSegmentImpl(const uint8_t* data, size_t history, size_t size, bool last, uint8_t* out,
     Scratch& scratch, const InputProgress* progress) {
     // Waits until another thread has written the first `needed` bytes from data; false when it gives up.
     const auto await = [&](size_t needed) {
@@ -677,7 +683,7 @@ size_t DeflateImageSegment(const uint8_t* data, size_t history, size_t size, boo
     const unsigned longShift = 64 - bits;
     const auto insert = [&](size_t at, uint64_t sequence) {
         uint32_t* const bucket = longTable + 2 * (size_t)((sequence * kLongMultiplier) >> longShift);
-        bucket[1] = bucket[0];
+        if constexpr (!kFast) bucket[1] = bucket[0];
         bucket[0] = base + (uint32_t)at;
     };
     if (!await(std::min(end, history + 8))) return 0;
@@ -702,9 +708,11 @@ size_t DeflateImageSegment(const uint8_t* data, size_t history, size_t size, boo
             const uint64_t sequence = Load64(in + at);
             uint32_t* const bucket = longTable + 2 * (size_t)((sequence * kLongMultiplier) >> longShift);
             const uint32_t first = bucket[0];
-            const uint32_t second = bucket[1];
+            // Fast mode never reads or writes bucket[1]: what it holds is from a stream a window or
+            // more back (PrepareTables), which the other mode never matches.
+            const uint32_t second = kFast ? 0 : bucket[1];
             const uint32_t here = base + (uint32_t)at;
-            bucket[1] = first;
+            if constexpr (!kFast) bucket[1] = first;
             bucket[0] = here;
 
             // A match never runs past the segment, so the next one starts where this one ends.
@@ -715,7 +723,7 @@ size_t DeflateImageSegment(const uint8_t* data, size_t history, size_t size, boo
                 best = MatchLength(in + (first - base), in + at, limitLength);
                 bestDistance = here - first;
             }
-            if (here - second - 1 < kWindow) {
+            if (!kFast && here - second - 1 < kWindow) {
                 const uint32_t length = MatchLength(in + (second - base), in + at, limitLength);
                 if (length > best) {
                     best = length;
@@ -742,7 +750,8 @@ size_t DeflateImageSegment(const uint8_t* data, size_t history, size_t size, boo
             } else {
                 tokens[count++] = in[at];
                 litFreq[in[at++]]++;
-                for (size_t skip = ++literals >> kSkipShift; skip > 0 && at < limit; skip--) {
+                constexpr unsigned skipShift = kFast ? kFastSkipShift : kSkipShift;
+                for (size_t skip = ++literals >> skipShift; skip > 0 && at < limit; skip--) {
                     tokens[count++] = in[at];
                     litFreq[in[at++]]++;
                 }
@@ -763,7 +772,15 @@ size_t DeflateImageSegment(const uint8_t* data, size_t history, size_t size, boo
     return (size_t)(writer.out - out);
 }
 
-size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch) {
+} // namespace
+
+size_t DeflateImageSegment(const uint8_t* data, size_t history, size_t size, bool last, uint8_t* out,
+    Scratch& scratch, const InputProgress* progress, bool fast) {
+    return fast ? DeflateImageSegmentImpl<true>(data, history, size, last, out, scratch, progress)
+                : DeflateImageSegmentImpl<false>(data, history, size, last, out, scratch, progress);
+}
+
+size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch, bool fast) {
     const uint8_t* const in = reinterpret_cast<const uint8_t*>(input.data());
     const size_t size = input.size();
     out[0] = 0x78;
@@ -773,7 +790,8 @@ size_t ZlibCompressImage(std::string_view input, uint8_t* out, Scratch& scratch)
     do {
         const size_t segment = ImageSegmentSize(size - start);
         const size_t history = std::min(start, kImageSegmentHistory);
-        at += DeflateImageSegment(in + start - history, history, segment, start + segment == size, at, scratch);
+        at += DeflateImageSegment(in + start - history, history, segment, start + segment == size, at, scratch, nullptr,
+            fast);
         start += segment;
     } while (start < size);
     PutAdler(at, Adler32(in, size));

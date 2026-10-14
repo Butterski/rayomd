@@ -55,6 +55,7 @@ RayoMd::Flate::Scratch& ThreadScratch() {
 struct ImagePlanesEncoder::State {
     size_t sizes[kMaxPlanes] = {};
     size_t count = 0;
+    bool fast = false;   // DeflateImageSegment's fast mode (--fast-images)
     Buffer out[kMaxPlanes];
     std::atomic<size_t> ready[kMaxPlanes];
     // In the order their bytes arrive: the planes' rows are written side by side, so a segment
@@ -139,7 +140,7 @@ struct ImagePlanesEncoder::State {
             progress.written = &ready[segment.plane];
             progress.offset = segment.start - segment.history;
             segment.written = RayoMd::Flate::DeflateImageSegment(segment.input, segment.history, segment.size, last,
-                out[segment.plane].get() + segment.slot, ThreadScratch(), streamed ? &progress : nullptr);
+                out[segment.plane].get() + segment.slot, ThreadScratch(), streamed ? &progress : nullptr, fast);
             // Abandoned while it was compressed: no stream is made of it.
             if (segment.written != 0) segment.adler = RayoMd::Flate::Adler32(segment.input + segment.history, segment.size);
         }
@@ -305,9 +306,11 @@ void ImagePlanesEncoder::State::LeaveHelpers() {
     changed.wait(lock, [&]() { return running.load() == 0; });
 }
 
-ImagePlanesEncoder::ImagePlanesEncoder(const size_t* sizes, size_t count, unsigned helpers) : state_(new State) {
+ImagePlanesEncoder::ImagePlanesEncoder(const size_t* sizes, size_t count, unsigned helpers, bool fast)
+    : state_(new State) {
     State& state = *state_;
     state.count = count;
+    state.fast = fast;
     for (size_t plane = 0; plane < count; plane++) {
         state.sizes[plane] = sizes[plane];
         state.ready[plane].store(0, std::memory_order_relaxed);

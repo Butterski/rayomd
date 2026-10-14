@@ -137,6 +137,7 @@ struct WinExportOptions {
     bool imageCache = true;
     bool pageNumbers = false;
     bool compress = false;
+    bool fastImages = false;
     bool pdfa = false;
     bool pdfua = false;
     bool highlightCode = true;
@@ -499,6 +500,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const s
     if (exportOptions.imageCache) options.imageCacheDirectory = ImageCacheDirectory();
     options.pageNumbers = exportOptions.pageNumbers;
     options.compress = exportOptions.compress;
+    options.fastImages = exportOptions.fastImages;
     options.pdfa = exportOptions.pdfa;
     options.pdfua = exportOptions.pdfua;
     options.highlightCode = exportOptions.highlightCode;
@@ -555,6 +557,8 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.pageNumbers = true;
         } else if (lstrcmpiW(argv[i], L"--compress") == 0) {
             options.compress = true;
+        } else if (lstrcmpiW(argv[i], L"--fast-images") == 0) {
+            options.fastImages = true;
         } else if (lstrcmpiW(argv[i], L"--pdfa") == 0) {
             options.pdfa = true;
         } else if (lstrcmpiW(argv[i], L"--pdfua") == 0) {

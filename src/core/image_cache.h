@@ -23,12 +23,13 @@ constexpr size_t kImageCacheMinPixels = size_t(1) << 15;
 
 // The streams kept for the PNG whose SHA-256 is `digest` (64 hex digits), if `directory` holds a
 // sound entry for an image of that size and number of colour components, of streams within
-// `maxBytes`. A use makes the entry the most recent.
+// `maxBytes`. A use makes the entry the most recent. `fast`: the entry of streams compressed in
+// --fast-images' mode, a file of its own with a magic of its own.
 bool LoadCachedImage(const std::string& directory, const std::string& digest, uint32_t width, uint32_t height,
-    uint32_t components, size_t maxBytes, std::string& color, std::string& mask);
+    uint32_t components, size_t maxBytes, std::string& color, std::string& mask, bool fast = false);
 
 // Keeps those streams, when they are within `maxBytes`; any failure leaves the directory as it was.
 void StoreCachedImage(const std::string& directory, const std::string& digest, uint32_t width, uint32_t height,
-    uint32_t components, size_t maxBytes, std::string_view color, std::string_view mask);
+    uint32_t components, size_t maxBytes, std::string_view color, std::string_view mask, bool fast = false);
 
 } // namespace TinyPdf::Internal
