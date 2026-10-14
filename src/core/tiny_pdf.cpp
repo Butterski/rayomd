@@ -5965,6 +5965,7 @@ private:
     // classes of that text, and the runs of one colour of a line, kept from block to block.
     bool highlightCode = true;
     std::string codeText;
+    std::wstring codeWide;           // the block's text as drawn
     std::vector<uint8_t> codeClasses;
     std::vector<CodeRun> codeRuns;
     // A heading's text as wide text (RenderHeading), kept from heading to heading.
@@ -8044,14 +8045,24 @@ private:
     RAYOMD_SHARED void RenderHighlightedCode(const std::string& text, uint8_t language) {
         std::string_view body(text);
         if (body.size() >= 3 && memcmp(body.data(), "\xEF\xBB\xBF", 3) == 0) body.remove_prefix(3);   // as SplitLines
-        std::wstring wide = Utf8ToWide(body);
-        codeText.resize(wide.size());
-        for (size_t at = 0; at < wide.size(); at++) {
-            codeText[at] = wide[at] < 0x80 ? (char)wide[at] : '\x80';
-            if (wide[at] == L'\t') wide[at] = L' ';   // as WrapCodeLine draws a tab
+        std::wstring& wide = codeWide;
+        if (IsAllAscii(body)) {
+            // The lexer reads the block as it is; the units drawn are its bytes, a tab as a space.
+            wide.resize(body.size());
+            for (size_t at = 0; at < body.size(); at++) wide[at] = body[at] == '\t' ? L' ' : (wchar_t)(unsigned char)body[at];
+            codeClasses.resize(body.size());
+            Internal::ClassifyCode(language, body, codeClasses.data());
+        } else {
+            wide.resize(body.size());
+            wide.resize((size_t)(WriteUtf8Wide(&wide[0], body) - wide.data()));
+            codeText.resize(wide.size());
+            for (size_t at = 0; at < wide.size(); at++) {
+                codeText[at] = wide[at] < 0x80 ? (char)wide[at] : '\x80';
+                if (wide[at] == L'\t') wide[at] = L' ';   // as WrapCodeLine draws a tab
+            }
+            codeClasses.resize(wide.size());
+            Internal::ClassifyCode(language, codeText, codeClasses.data());
         }
-        codeClasses.resize(wide.size());
-        Internal::ClassifyCode(language, codeText, codeClasses.data());
         const double size = 9.5;
         const double lh = size * 1.35;
         const double x = margin + 8.0;
