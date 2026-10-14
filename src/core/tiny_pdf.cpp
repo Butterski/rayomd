@@ -5035,6 +5035,26 @@ static MathLineExtent MeasureMathLine(const MathPool& math, const std::vector<Sp
     return extent;
 }
 
+// A cell of a table with formulas (RenderMathTable), kept per column from row to row.
+template <typename Span, typename Plain>
+struct MathTableCell {
+    std::vector<std::vector<Span>> formulaLines;   // when the cell has a formula
+    Plain plain;                                   // otherwise
+    bool formula = false;
+    size_t Count() const { return formula ? formulaLines.size() : plain.Count(); }
+};
+
+// The Unicode renderer's plain cell lines: line i is text[i ? ends[i-1] : 0, ends[i]).
+struct WideLines {
+    std::wstring wide, text;
+    std::vector<uint32_t> ends;
+    size_t Count() const { return ends.size(); }
+    std::wstring_view Line(size_t i) const {
+        const size_t begin = i ? ends[i - 1] : 0;
+        return std::wstring_view(text.data() + begin, ends[i] - begin);
+    }
+};
+
 // True when the line is a single $$...$$ formula inside paragraph text.
 template <typename SpanType>
 static bool IsDisplayMathLine(const MathPool& math, const std::vector<SpanType>& line) {
@@ -5188,18 +5208,24 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
     double pad = 5.0;
     double cellTextWidth = std::max(16.0, colWidth - pad * 2.0);
     static const std::string emptyCell;
+    // Grows to the widest table; each row wraps its cells into these again.
+    auto& cells = renderer.mathTableCells;
+    if (cells.size() < columns) cells.resize(columns);
 
+    // A plain line keeps the line box; a formula line may grow it.
+    auto extentOf = [&](const auto& cell, size_t li) {
+        return cell.formula ? MeasureMathLine(renderer.math, cell.formulaLines[li], size, lh) : MathLineExtent{};
+    };
     // Paints lines [from, to) of one cell into the cell box whose top is `top`.
-    auto paintLines = [&](const auto& lines, size_t from, size_t to, double cellX, double top, int align, bool header) {
+    auto paintLines = [&](const auto& cell, size_t from, size_t to, double cellX, double top, int align, bool header) {
         double lineTop = top - pad;
         for (size_t li = from; li < to; li++) {
-            const auto& line = lines[li];
-            MathLineExtent extent = MeasureMathLine(renderer.math, line, size, lh);
-            double lineWidth = renderer.MathLineWidth(line, size, header);
+            MathLineExtent extent = extentOf(cell, li);
+            double lineWidth = renderer.MathCellLineWidth(cell, li, size, header);
             double tx = cellX + pad;
             if (align == 0) tx = cellX + (colWidth - lineWidth) * 0.5;
             else if (align == 1) tx = cellX + colWidth - pad - lineWidth;
-            renderer.PaintMathTextLine(line, tx, lineTop - extent.above - size, size,
+            renderer.PaintMathCellLine(cell, li, tx, lineTop - extent.above - size, size,
                 renderer.TableTextColor(header), header);
             lineTop -= lh + extent.above + extent.below;
         }
@@ -5213,14 +5239,13 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
     size_t resumeRow = 0;       // the row to draw after a repeated header row, or 0
     for (size_t r = 0; r < rows.size(); r++) {
         renderer.math.Clear();
-        std::vector<decltype(renderer.WrapMathCell(emptyCell, 0.0, 0.0, false))> wrapped(columns);
         double contentHeight = lh;
         for (size_t c = 0; c < columns; c++) {
             const std::string& cell = c < rows[r].size() ? rows[r][c] : emptyCell;
-            wrapped[c] = renderer.WrapMathCell(cell, cellTextWidth, size, r == 0);
+            renderer.WrapMathCell(cell, cellTextWidth, size, r == 0, cells[c]);
             double height = 0.0;
-            for (const auto& line : wrapped[c]) {
-                MathLineExtent extent = MeasureMathLine(renderer.math, line, size, lh);
+            for (size_t li = 0; li < cells[c].Count(); li++) {
+                MathLineExtent extent = extentOf(cells[c], li);
                 height += lh + extent.above + extent.below;
             }
             contentHeight = std::max(contentHeight, height);
@@ -5241,8 +5266,8 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
                 for (size_t c = 0; c < columns; c++) {
                     double height = 0.0;
                     size_t last = next[c];
-                    while (last < wrapped[c].size()) {
-                        MathLineExtent extent = MeasureMathLine(renderer.math, wrapped[c][last], size, lh);
+                    while (last < cells[c].Count()) {
+                        MathLineExtent extent = extentOf(cells[c], last);
                         const double lineHeight = lh + extent.above + extent.below;
                         if (height + lineHeight > room && !(freshPage && last == next[c])) break;
                         height += lineHeight;
@@ -5266,10 +5291,10 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
                     renderer.TableStroke(cellX, top, colWidth, boxHeight);
                     int align = c < block.aligns.size() ? block.aligns[c] : -1;
                     renderer.TagCell(c, true);
-                    paintLines(wrapped[c], next[c], end[c], cellX, top, align, r == 0);
+                    paintLines(cells[c], next[c], end[c], cellX, top, align, r == 0);
                     renderer.TagCell(c, false);
                     next[c] = end[c];
-                    remaining = remaining || next[c] < wrapped[c].size();
+                    remaining = remaining || next[c] < cells[c].Count();
                 }
                 renderer.y -= boxHeight;
                 if (!remaining) break;
@@ -5299,7 +5324,7 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
             renderer.TableStroke(cellX, top, colWidth, rowHeight);
             int align = c < block.aligns.size() ? block.aligns[c] : -1;
             renderer.TagCell(c, true);
-            paintLines(wrapped[c], 0, wrapped[c].size(), cellX, top, align, r == 0);
+            paintLines(cells[c], 0, cells[c].Count(), cellX, top, align, r == 0);
             renderer.TagCell(c, false);
         }
         renderer.TagTableRowEnd();
@@ -6341,15 +6366,37 @@ private:
         return WrapMathWords(words, MarkWordJoins(spans, words.size()), width, size);
     }
 
+    using MathCell = MathTableCell<StyledSpan, WideLines>;
+    std::vector<MathCell> mathTableCells;   // RenderMathTable's cells, by column
+
     // A table cell inside a table with formulas. A cell without a formula wraps
     // exactly as RenderTable wraps it.
-    RAYOMD_MATH_COLD std::vector<std::vector<StyledSpan>> WrapMathCell(const std::string& cell, double width, double size, bool bold) {
-        if (cell.find(Internal::kMathTextOpen) != std::string::npos) return WrapMathText(cell, width, size, bold);
-        std::vector<std::vector<StyledSpan>> lines;
-        for (const std::wstring& line : WrapText(SpanFont(bold, false), Utf8ToWide(cell), width, size)) {
-            MathAppend(MathAppend(lines)).text = line;
+    RAYOMD_MATH_COLD void WrapMathCell(const std::string& cell, double width, double size, bool bold, MathCell& out) {
+        out.formula = cell.find(Internal::kMathTextOpen) != std::string::npos;
+        if (out.formula) {
+            out.formulaLines = WrapMathText(cell, width, size, bold);
+            return;
         }
-        return lines;
+        WideLines& plain = out.plain;
+        plain.wide.resize(cell.size());
+        plain.wide.resize((size_t)(WriteUtf8Wide(&plain.wide[0], cell) - plain.wide.data()));
+        plain.text.clear();
+        plain.ends.clear();
+        WrapWideWords(SpanFont(bold, false), plain.wide, width, size, [&](std::wstring_view line) {
+            plain.text.append(line.data(), line.size());
+            MathAppend(plain.ends) = static_cast<uint32_t>(plain.text.size());
+        });
+    }
+
+    double MathCellLineWidth(const MathCell& cell, size_t i, double size, bool bold) const {
+        if (cell.formula) return MathLineWidth(cell.formulaLines[i], size, bold);
+        return TextWidth(SpanFont(bold, false), cell.plain.Line(i), size);
+    }
+
+    RAYOMD_MATH_COLD void PaintMathCellLine(const MathCell& cell, size_t i, double x, double baseline, double size,
+        const char* color, bool bold) {
+        if (cell.formula) PaintMathTextLine(cell.formulaLines[i], x, baseline, size, color, bold);
+        else PaintSpanText(x, baseline, size, cell.plain.Line(i), color, bold, false, false);
     }
 
     double MathLineWidth(const std::vector<StyledSpan>& line, double size, bool bold) const {
@@ -9807,18 +9854,28 @@ private:
         return WrapAsciiMathWords(words, MarkWordJoins(spans, words.size()), width, size, bold);
     }
 
+    using MathCell = MathTableCell<AsciiSpan, AsciiLines>;
+    std::vector<MathCell> mathTableCells;   // RenderMathTable's cells, by column
+
     // A table cell inside a table with formulas. A cell without a formula wraps
     // exactly as RenderTable wraps it.
-    RAYOMD_MATH_COLD std::vector<std::vector<AsciiSpan>> WrapMathCell(const std::string& cell, double width, double size, bool bold) {
-        if (cell.find(Internal::kMathTextOpen) != std::string::npos) return WrapMathText(cell, width, size, bold);
-        std::vector<std::vector<AsciiSpan>> lines;
-        AsciiLines plain;
-        WrapAsciiTextCold(cell, width, size, bold ? StandardTextFont::Bold : StandardTextFont::Regular, plain);
-        for (size_t i = 0; i < plain.Count(); i++) {
-            const std::string_view line = plain.Text(i);
-            MathAppend(MathAppend(lines)).text.assign(line.data(), line.size());
-        }
-        return lines;
+    RAYOMD_MATH_COLD void WrapMathCell(const std::string& cell, double width, double size, bool bold, MathCell& out) {
+        out.formula = cell.find(Internal::kMathTextOpen) != std::string::npos;
+        if (out.formula) out.formulaLines = WrapMathText(cell, width, size, bold);
+        else WrapAsciiTextCold(cell, width, size, bold ? StandardTextFont::Bold : StandardTextFont::Regular, out.plain);
+    }
+
+    // A plain line's width as the font shows it: not the wrapped width, which counts bytes
+    // without a glyph as RenderTable does.
+    double MathCellLineWidth(const MathCell& cell, size_t i, double size, bool bold) const {
+        if (cell.formula) return MathLineWidth(cell.formulaLines[i], size, bold);
+        return MathTextWidth(cell.plain.Text(i), size, false, bold);
+    }
+
+    RAYOMD_MATH_COLD void PaintMathCellLine(const MathCell& cell, size_t i, double x, double baseline, double size,
+        const char* color, bool bold) {
+        if (cell.formula) PaintMathTextLine(cell.formulaLines[i], x, baseline, size, color, bold);
+        else Text(x, baseline, size, cell.plain.Text(i), bold ? "F2" : "F1", color);
     }
 
     double MathLineWidth(const std::vector<AsciiSpan>& line, double size, bool bold) const {
