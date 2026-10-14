@@ -281,6 +281,12 @@ else()
         find_package(CURL REQUIRED)
     endif()
     add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
+    if(RAYOMD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
+        # No .eh_frame registration at startup: the unwinder reads PT_GNU_EH_FRAME (static_frames.cpp).
+        target_sources(rayomd PRIVATE src/cli/static_frames.cpp)
+        target_link_options(rayomd PRIVATE -Wl,--eh-frame-hdr -Wl,--wrap=__register_frame_info
+            -Wl,--wrap=__deregister_frame_info)
+    endif()
     target_include_directories(rayomd PRIVATE include)
     target_link_libraries(rayomd PRIVATE Threads::Threads)
     if(RAYOMD_USE_CURL)
