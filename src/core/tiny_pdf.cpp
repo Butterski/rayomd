@@ -413,6 +413,7 @@ struct TtfFont {
     int16_t xMax = 1000;
     int16_t yMax = 900;
     uint32_t sfntVersion = 0x00010000;  // of the font's table directory; a collection starts "ttcf"
+    char postScriptName[64];   // name ID 6, [A-Za-z0-9._-] only, else "RayoMDFont" (ParseName)
     bool loaded = false;
     bool glyphTableWritten = false;   // by a ParseCmap since the table was last cleared
     // Glyph index by BMP code point, 0 = no glyph. Zero to begin with, as the width cache is, so
@@ -634,7 +635,55 @@ struct TtfFont {
 
         if (!ParseCmap()) return false;
         if (!ParseLoca()) return false;
+        ParseName();
         return GlyphFor('A') != 0 && GlyphFor(' ') != 0;
+    }
+
+    // The PostScript name (name ID 6) that the PDF's font objects carry: from the Windows
+    // Unicode record (UTF-16BE), else the Macintosh Roman one, its printable ASCII only, and of
+    // that the characters a PDF name and a subset tag allow.
+    RAYOMD_COLD void ParseName() {
+        size_t length = 0;
+        auto found = tables.find("name");
+        if (found != tables.end() && found->second.length >= 6) {
+            const uint8_t* const table = bytes.data() + found->second.offset;
+            const size_t tableLength = found->second.length;
+            const uint16_t count = (uint16_t)(table[2] << 8 | table[3]);
+            const size_t storage = (size_t)(table[4] << 8 | table[5]);
+            size_t windows = 0, mac = 0;     // record offset + 1 of each kind
+            for (size_t index = 0; index < count && 6 + index * 12 + 12 <= tableLength; index++) {
+                const uint8_t* const record = table + 6 + index * 12;
+                const uint16_t platform = (uint16_t)(record[0] << 8 | record[1]);
+                const uint16_t encoding = (uint16_t)(record[2] << 8 | record[3]);
+                const uint16_t nameId = (uint16_t)(record[6] << 8 | record[7]);
+                if (nameId != 6) continue;
+                if (platform == 3 && encoding == 1 && windows == 0) windows = 6 + index * 12 + 1;
+                if (platform == 1 && encoding == 0 && mac == 0) mac = 6 + index * 12 + 1;
+            }
+            const size_t chosen = windows != 0 ? windows : mac;
+            if (chosen != 0) {
+                const uint8_t* const record = table + chosen - 1;
+                const size_t size = (size_t)(record[8] << 8 | record[9]);
+                const size_t at = storage + (size_t)(record[10] << 8 | record[11]);
+                if (at + size <= tableLength) {
+                    const size_t step = windows != 0 ? 2 : 1;
+                    for (size_t i = 0; i + step <= size && length < sizeof(postScriptName) - 1; i += step) {
+                        const unsigned unit = step == 2 ? (unsigned)(table[at + i] << 8 | table[at + i + 1]) : table[at + i];
+                        if (unit > 0x7E) continue;
+                        const char ch = (char)unit;
+                        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
+                            ch == '.' || ch == '_' || ch == '-') {
+                            postScriptName[length++] = ch;
+                        }
+                    }
+                }
+            }
+        }
+        if (length == 0) {
+            memcpy(postScriptName, "RayoMDFont", 10);
+            length = 10;
+        }
+        postScriptName[length] = '\0';
     }
 
     bool ParseCmap() {
@@ -1421,6 +1470,34 @@ static std::string MakeCidKey(const TtfFont& font, const CidList& used) {
         *out++ = (char)(cid & 0xff);
     }
     return key;
+}
+
+// `name` with a subset tag in front, "ABCDEF+": six letters from the SHA-256 of the name and
+// `used`, the glyphs the subset holds, so different subsets of a font get different names.
+RAYOMD_COLD static std::string TaggedFontName(std::string_view name, std::string_view used) {
+    std::string input;
+    input.reserve(name.size() + used.size());
+    input.append(name.data(), name.size());
+    input.append(used.data(), used.size());
+    const std::string digest = RayoMd::PdfSource::Sha256Hex(input);
+    auto nibble = [](char hex) { return hex <= '9' ? hex - '0' : hex - 'a' + 10; };
+    std::string tagged(7, '+');
+    for (size_t index = 0; index < 6; index++) {
+        tagged[index] = (char)('A' + (nibble(digest[index * 2]) * 16 + nibble(digest[index * 2 + 1])) % 26);
+    }
+    tagged.append(name.data(), name.size());
+    return tagged;
+}
+
+// The name of a TrueType or OpenType font's subset: its PostScript name, tagged for the CIDs it
+// shows, each high byte first.
+RAYOMD_COLD static std::string SubsetFontName(const TtfFont& font, const CidList& used) {
+    std::string cids(used.size() * 2, '\0');
+    for (size_t index = 0; index < used.size(); index++) {
+        cids[index * 2] = (char)(used[index] >> 8);
+        cids[index * 2 + 1] = (char)used[index];
+    }
+    return TaggedFontName(font.postScriptName, cids);
 }
 
 static size_t DecimalDigits(size_t value) {
@@ -10836,6 +10913,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (betterFont && (*betterFont = BetterFontFor(font, used)) != nullptr) return true;
     missingCharacters = renderer.MissingCharacters();
     std::string cidKey = MakeCidKey(font, used);
+    const std::string fontName = SubsetFontName(font, used);
     SubsetGlyphList subsetGlyphs(font, used);
     auto cidMapBytes = MakeCidToGidMap(font, used, subsetGlyphs, cidKey);
     auto toUnicodeBytes = MakeToUnicodeCMap(used, cidKey);
@@ -10855,8 +10933,10 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     SetPayloadStream(pdf, toUnicodeId, *toUnicodeBytes, options.compress, toUnicodeFlate);
 
     std::string desc;
-    desc.reserve(224);
-    AppendLit(desc, "<< /Type /FontDescriptor /FontName /RayoMDSegoe /Flags 32 /FontBBox [");
+    desc.reserve(288);
+    AppendLit(desc, "<< /Type /FontDescriptor /FontName /");
+    desc += fontName;
+    AppendLit(desc, " /Flags 32 /FontBBox [");
     AppendInt(desc, font.Metric(font.xMin));
     AppendLit(desc, " ");
     AppendInt(desc, font.Metric(font.yMin));
@@ -10876,9 +10956,10 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     pdf.Set(descriptorId, std::move(desc));
 
     std::string cidFont;
-    cidFont.reserve(256);
-    AppendLit(cidFont, "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /RayoMDSegoe"
-        " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
+    cidFont.reserve(320);
+    AppendLit(cidFont, "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /");
+    cidFont += fontName;
+    AppendLit(cidFont, " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
         " /FontDescriptor ");
     AppendInt(cidFont, descriptorId);
     AppendLit(cidFont, " 0 R /CIDToGIDMap ");
@@ -10889,9 +10970,10 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     pdf.Set(cidFontId, std::move(cidFont));
 
     std::string type0;
-    type0.reserve(160);
-    AppendLit(type0, "<< /Type /Font /Subtype /Type0 /BaseFont /RayoMDSegoe"
-        " /Encoding /Identity-H /DescendantFonts [");
+    type0.reserve(224);
+    AppendLit(type0, "<< /Type /Font /Subtype /Type0 /BaseFont /");
+    type0 += fontName;
+    AppendLit(type0, " /Encoding /Identity-H /DescendantFonts [");
     AppendInt(type0, cidFontId);
     AppendLit(type0, " 0 R] /ToUnicode ");
     AppendInt(type0, toUnicodeId);
