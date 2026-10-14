@@ -19,8 +19,8 @@ Treat the native renderer as a fast Markdown subset, not a full Pandoc clone.
 ## Release Readiness Priorities
 
 - Keep the repository root clean: source entry points, `README.md`, `LICENSE`,
-  `CMakeLists.txt`, `AGENTS.md`, `CONTRIBUTING.md`, `VERSION`, and the main
-  smoke document belong there.
+  `CMakeLists.txt`, `CMakePresets.json`, `.editorconfig`, `AGENTS.md`,
+  `CONTRIBUTING.md`, `VERSION`, and the main smoke document belong there.
 - Keep source-coupled fixtures, specifications, and decision documents under
   docs/; keep longer user guides, dated reports, benchmark results, and research
   archives in the GitHub wiki. Release benchmark records are not kept in the
@@ -466,6 +466,14 @@ HTTP/HTTPS images and can target a known distro/libcurl baseline. Release builds
 libstdc++ and libgcc statically and do without libm (`exact_math.h`), so the binary needs only libc.
 `-DRAYOMD_STATIC=ON` links glibc in as well: the `-static` release asset, about
 0.9 MB larger and 0.3 ms faster to start, with no runtime dependency.
+
+CMake 3.21 or newer can use the presets of `CMakePresets.json` instead: `release`
+(`build/linux`), `release-static`, `release-curl`, `asan` (AddressSanitizer and
+UBSan), `tsan` and, on Windows, `windows-mingw`; each writes `compile_commands.json`.
+
+```sh
+cmake --preset release && cmake --build --preset release && ctest --preset release
+```
 
 Cross-platform CLI verification (after building):
 

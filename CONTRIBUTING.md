@@ -31,6 +31,13 @@ cmake --build build/linux --config Release
 
 Linux dependencies are listed in `README.md`.
 
+With CMake 3.21 or newer, `CMakePresets.json` names the usual builds: `release`, `release-static`,
+`release-curl`, `asan`, `tsan` and, on Windows, `windows-mingw`.
+
+```sh
+cmake --preset asan && cmake --build --preset asan && ctest --preset asan
+```
+
 GCC and Clang builds compile RayoMD's own code with `-Wall -Wextra -Wshadow` (vendored
 `third_party/` code stays quiet). The warnings are not errors, but keep the build free of them.
 

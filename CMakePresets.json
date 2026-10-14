@@ -1,0 +1,109 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "release-static",
+      "displayName": "Release, fully static (glibc linked in)",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/linux-static",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "RAYOMD_STATIC": "ON"
+      }
+    },
+    {
+      "name": "release-curl",
+      "displayName": "Release with libcurl URL images",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/linux-curl",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "RAYOMD_USE_CURL": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "AddressSanitizer and UndefinedBehaviorSanitizer",
+      "description": "RelWithDebInfo: not stripped, so reports show function names.",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "ThreadSanitizer",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "RAYOMD_ENABLE_TSAN": "ON"
+      }
+    },
+    {
+      "name": "windows-mingw",
+      "displayName": "Windows release (MinGW)",
+      "inherits": "base",
+      "generator": "MinGW Makefiles",
+      "binaryDir": "${sourceDir}/build/windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "release-static", "configurePreset": "release-static" },
+    { "name": "release-curl", "configurePreset": "release-curl" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "tsan", "configurePreset": "tsan" },
+    { "name": "windows-mingw", "configurePreset": "windows-mingw" }
+  ],
+  "testPresets": [
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "name": "rayomd-core" } }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "name": "rayomd-core" } }
+    }
+  ]
+}
