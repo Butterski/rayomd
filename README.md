@@ -9,7 +9,7 @@
 **Markdown to PDF in milliseconds, from a single small executable.**<br>
 No browser. No LaTeX. No Pandoc. No runtime.
 
-<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.4.0 MathTex" src="https://img.shields.io/badge/version-4.4.0%20MathTex-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.5.0 MathTex" src="https://img.shields.io/badge/version-4.5.0%20MathTex-informational?style=for-the-badge"></a>
 <a href="https://github.com/Butterski/rayomd/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Butterski/rayomd/total?style=for-the-badge&color=2ea44f"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 
@@ -34,10 +34,11 @@ No browser. No LaTeX. No Pandoc. No runtime.
 </div>
 
 > [!TIP]
-> **New in 4.4:** a one-shot export takes **17 to 28 % less CPU** than in 4.3 (fewer page faults,
-> no `libm.so`, the PDF overwritten in place), and exports in a running process are **12 %
-> faster** on average, up to 23 % for Unicode text. Every PDF is byte for byte the same.
-> See [the numbers](#performance).
+> **New in 4.5:** OpenType fonts with PostScript outlines (Noto Sans CJK, Source Sans), so
+> Chinese, Japanese and Korean text works with the fonts Linux installs; **real bold and italic**
+> faces in themes; formulas in embedded fonts, so they look the same in every viewer and PDF/A
+> typesets them; bullets drawn as discs, circles and squares; and Hangul syllables no longer
+> overprint.
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. Windows gets a
 compact Dear ImGui app with command-line modes, Linux a small CLI, and both share one exporter
@@ -57,15 +58,15 @@ converted. Batches run on up to 64 threads.
 <td width="33%" valign="top">
 
 ### Small
-A **670 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
+A **740 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
 runtime to install.
 
 </td>
 <td width="33%" valign="top">
 
 ### Math
-A TeX subset **typeset natively**: fractions, roots, sums, matrices. No LaTeX, no embedded
-math fonts.
+A TeX subset **typeset natively**: fractions, roots, sums, matrices, in embedded fonts. No
+LaTeX.
 
 </td>
 </tr>
@@ -99,9 +100,9 @@ veraPDF.
 <summary><b>Linux</b>: download and run</summary>
 
 ```sh
-curl -LO https://github.com/Butterski/rayomd/releases/download/v4.4.0/rayomd-4.4.0-linux-x64-static.tar.gz
-tar -xzf rayomd-4.4.0-linux-x64-static.tar.gz
-./rayomd-4.4.0-linux-x64-static/rayomd --export input.md output.pdf
+curl -LO https://github.com/Butterski/rayomd/releases/download/v4.5.0/rayomd-4.5.0-linux-x64-static.tar.gz
+tar -xzf rayomd-4.5.0-linux-x64-static.tar.gz
+./rayomd-4.5.0-linux-x64-static/rayomd --export input.md output.pdf
 ```
 
 </details>
@@ -109,7 +110,7 @@ tar -xzf rayomd-4.4.0-linux-x64-static.tar.gz
 <details>
 <summary><b>Windows</b>: the app and the CLI in one <code>rayomd.exe</code></summary>
 
-Download `rayomd-4.4.0-windows-x64.zip` from
+Download `rayomd-4.5.0-windows-x64.zip` from
 [Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
 without arguments opens the app: edit or drop a file, pick a style and margins, and press
 `Ctrl+E` to export. With arguments it is the same CLI as on Linux:
@@ -135,12 +136,12 @@ cmake --build build --config Release
 
 </details>
 
-| Package | Size, 4.4.0 | For |
+| Package | Size, 4.5.0 | For |
 |---|---:|---|
-| `rayomd-<version>-windows-x64.zip` | 1,486 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
-| `rayomd-<version>-linux-x64.tar.gz` | 670 KB | Linux: needs only glibc |
-| `rayomd-<version>-linux-x64-static.tar.gz` | 1,072 KB | Linux with no dependency at all, the fastest start |
-| `rayomd-<version>-linux-x64-curl.tar.gz` | 672 KB | Linux with HTTP/HTTPS images through libcurl |
+| `rayomd-<version>-windows-x64.zip` | 1,549 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
+| `rayomd-<version>-linux-x64.tar.gz` | 739 KB | Linux: needs only glibc |
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,140 KB | Linux with no dependency at all, the fastest start |
+| `rayomd-<version>-linux-x64-curl.tar.gz` | 741 KB | Linux with HTTP/HTTPS images through libcurl |
 
 Every feature below works the same from both command lines and the
 [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
