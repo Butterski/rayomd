@@ -1,6 +1,6 @@
 # Maintainer: Milosz Kucharski <miloszkucharski at gmail dot com>
 pkgname=rayomd
-pkgver=4.6.1
+pkgver=4.7.0
 pkgrel=1
 pkgdesc='Tiny native Markdown-to-PDF converter (no browser, LaTeX or Pandoc)'
 arch=('x86_64')
@@ -13,7 +13,7 @@ options=('!debug')
 optdepends=('ttf-dejavu: TrueType font for non-Latin-1 text (Polish, Cyrillic, ...)'
             'noto-fonts: alternative TrueType font and script fallbacks')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('317d17b2cedc6fad8d3d0da4d6a529b87b1d5361cb8e397f9fad021107731099')
+sha256sums=('d1fe61c693bbc4128d60e6685ef2901e307fa71ca085b31e215b30e77abe39e6')
 
 build() {
   cmake -S "$pkgname-$pkgver" -B build \
