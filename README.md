@@ -9,7 +9,7 @@
 **Markdown to PDF in milliseconds, from a single small executable.**<br>
 No browser. No LaTeX. No Pandoc. No runtime.
 
-<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.5.0 MathTex" src="https://img.shields.io/badge/version-4.5.0%20MathTex-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.6.0 MathTex" src="https://img.shields.io/badge/version-4.6.0%20MathTex-informational?style=for-the-badge"></a>
 <a href="https://github.com/Butterski/rayomd/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Butterski/rayomd/total?style=for-the-badge&color=2ea44f"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 
@@ -34,11 +34,9 @@ No browser. No LaTeX. No Pandoc. No runtime.
 </div>
 
 > [!TIP]
-> **New in 4.5:** OpenType fonts with PostScript outlines (Noto Sans CJK, Source Sans), so
-> Chinese, Japanese and Korean text works with the fonts Linux installs; **real bold and italic**
-> faces in themes; formulas in embedded fonts, so they look the same in every viewer and PDF/A
-> typesets them; bullets drawn as discs, circles and squares; and Hangul syllables no longer
-> overprint.
+> **New in 4.6:** HTML in Markdown as GitHub shows it: centred `<div>`s and `<p align>`,
+> `<img width>` and rows of badges, `<details>`, `<kbd>`, `<sup>`, `<sub>`, `<mark>` and
+> back-to-top anchors, so a project's README exports the way it looks on GitHub.
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. Windows gets a
 compact Dear ImGui app with command-line modes, Linux a small CLI, and both share one exporter
@@ -58,7 +56,7 @@ converted. Batches run on up to 64 threads.
 <td width="33%" valign="top">
 
 ### Small
-A **740 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
+A **770 KB** Linux download and a 1.5 MB Windows app. No browser engine, TeX stack or
 runtime to install.
 
 </td>
@@ -100,9 +98,9 @@ veraPDF.
 <summary><b>Linux</b>: download and run</summary>
 
 ```sh
-curl -LO https://github.com/Butterski/rayomd/releases/download/v4.5.0/rayomd-4.5.0-linux-x64-static.tar.gz
-tar -xzf rayomd-4.5.0-linux-x64-static.tar.gz
-./rayomd-4.5.0-linux-x64-static/rayomd --export input.md output.pdf
+curl -LO https://github.com/Butterski/rayomd/releases/download/v4.6.0/rayomd-4.6.0-linux-x64-static.tar.gz
+tar -xzf rayomd-4.6.0-linux-x64-static.tar.gz
+./rayomd-4.6.0-linux-x64-static/rayomd --export input.md output.pdf
 ```
 
 </details>
@@ -110,7 +108,7 @@ tar -xzf rayomd-4.5.0-linux-x64-static.tar.gz
 <details>
 <summary><b>Windows</b>: the app and the CLI in one <code>rayomd.exe</code></summary>
 
-Download `rayomd-4.5.0-windows-x64.zip` from
+Download `rayomd-4.6.0-windows-x64.zip` from
 [Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
 without arguments opens the app: edit or drop a file, pick a style and margins, and press
 `Ctrl+E` to export. With arguments it is the same CLI as on Linux:
@@ -136,12 +134,12 @@ cmake --build build --config Release
 
 </details>
 
-| Package | Size, 4.5.0 | For |
+| Package | Size, 4.6.0 | For |
 |---|---:|---|
-| `rayomd-<version>-windows-x64.zip` | 1,549 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
-| `rayomd-<version>-linux-x64.tar.gz` | 739 KB | Linux: needs only glibc |
-| `rayomd-<version>-linux-x64-static.tar.gz` | 1,140 KB | Linux with no dependency at all, the fastest start |
-| `rayomd-<version>-linux-x64-curl.tar.gz` | 741 KB | Linux with HTTP/HTTPS images through libcurl |
+| `rayomd-<version>-windows-x64.zip` | 1,582 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
+| `rayomd-<version>-linux-x64.tar.gz` | 769 KB | Linux: needs only glibc |
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,170 KB | Linux with no dependency at all, the fastest start |
+| `rayomd-<version>-linux-x64-curl.tar.gz` | 771 KB | Linux with HTTP/HTTPS images through libcurl |
 
 Every feature below works the same from both command lines and the
 [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
@@ -482,9 +480,10 @@ It does not promise full CommonMark/Pandoc compatibility, complete LaTeX math (p
 macros, automatic numbering), highlighting for every language, citations, filters, templates,
 right-to-left scripts (Arabic and Hebrew are drawn left to right, unshaped), complete SVG
 (radial gradients and patterns are approximated; markers, filters and masks are not drawn), or
-HTML/CSS layout. Under `--pdfua` a theme's cover page is tagged as decoration and an inline
-formula is text showing its TeX source. Missing or unsupported images and malformed math degrade
-to readable fallbacks instead of failing the export. The complete matrix is in
+HTML/CSS layout (inline styles, classes and style sheets are not read). Under `--pdfua` a theme's
+cover page is tagged as decoration and an inline formula is text showing its TeX source. Missing
+or unsupported images and malformed math degrade to readable fallbacks instead of failing the
+export. The complete matrix is in
 [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support).
 
 ## Documentation
