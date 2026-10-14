@@ -9,7 +9,7 @@
 **Markdown to PDF in milliseconds, from a single small executable.**<br>
 No browser. No LaTeX. No Pandoc. No runtime.
 
-<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.6.1 MathTex" src="https://img.shields.io/badge/version-4.6.1%20MathTex-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.7.0 MathTex" src="https://img.shields.io/badge/version-4.7.0%20MathTex-informational?style=for-the-badge"></a>
 <a href="https://github.com/Butterski/rayomd/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Butterski/rayomd/total?style=for-the-badge&color=2ea44f"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 
@@ -34,9 +34,10 @@ No browser. No LaTeX. No Pandoc. No runtime.
 </div>
 
 > [!TIP]
-> **New in 4.6:** HTML in Markdown as GitHub shows it: centred `<div>`s and `<p align>`,
-> `<img width>` and rows of badges, `<details>`, `<kbd>`, `<sup>`, `<sub>`, `<mark>` and
-> back-to-top anchors, so a project's README exports the way it looks on GitHub.
+> **New in 4.7:** the same PDFs, sooner. In batches, `--serve` and the app, tables with formulas
+> take about 28 % less time, documents with formulas 11 %, highlighted code 8 % and CJK text in a
+> fallback font 28 %; one-shot exports of CJK text and of cached images 15 to 28 %. `--fast-images`
+> converts a new PNG with transparency about 10 % sooner, for image streams a few percent larger.
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. Windows gets a
 compact Dear ImGui app with command-line modes, Linux a small CLI, and both share one exporter
@@ -98,9 +99,9 @@ veraPDF.
 <summary><b>Linux</b>: download and run</summary>
 
 ```sh
-curl -LO https://github.com/Butterski/rayomd/releases/download/v4.6.1/rayomd-4.6.1-linux-x64-static.tar.gz
-tar -xzf rayomd-4.6.1-linux-x64-static.tar.gz
-./rayomd-4.6.1-linux-x64-static/rayomd --export input.md output.pdf
+curl -LO https://github.com/Butterski/rayomd/releases/download/v4.7.0/rayomd-4.7.0-linux-x64-static.tar.gz
+tar -xzf rayomd-4.7.0-linux-x64-static.tar.gz
+./rayomd-4.7.0-linux-x64-static/rayomd --export input.md output.pdf
 ```
 
 </details>
@@ -108,7 +109,7 @@ tar -xzf rayomd-4.6.1-linux-x64-static.tar.gz
 <details>
 <summary><b>Windows</b>: the app and the CLI in one <code>rayomd.exe</code></summary>
 
-Download `rayomd-4.6.1-windows-x64.zip` from
+Download `rayomd-4.7.0-windows-x64.zip` from
 [Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
 without arguments opens the app: edit or drop a file, pick a style and margins, and press
 `Ctrl+E` to export. With arguments it is the same CLI as on Linux:
