@@ -1,0 +1,187 @@
+// Needs <chrono>, <iostream>, <string>, <string_view>, <vector> and src/core/html.h.
+// The HTML engine: tag names, CommonMark's raw HTML tags (spec 0.31.2, examples 613-632) and
+// HTML block conditions (section 4.6), the limits of a tag, and which URLs a link may have.
+// Included inside the anonymous namespace of tests/core_tests.cpp.
+
+namespace html_tests {
+
+using namespace TinyPdf::Internal::Html;
+
+// The tags of `text` as the inline parser meets them: at each '<', a tag is taken whole.
+std::vector<std::string> TagsOf(std::string_view text) {
+    std::vector<std::string> tags;
+    QuoteCache quotes;
+    TagToken token;
+    for (size_t at = text.find('<'); at != std::string_view::npos; at = text.find('<', at + 1)) {
+        if (const uint32_t length = ScanTag(text, at, quotes, token)) {
+            tags.emplace_back(text.substr(at, length));
+            at += length - 1;
+        }
+    }
+    return tags;
+}
+
+bool CheckTagNames() {
+    for (size_t index = 1; index < static_cast<size_t>(Tag::Count); index++) {
+        const Tag tag = static_cast<Tag>(index);
+        std::string upper(TagName(tag));
+        for (char& c : upper) c = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
+        if (TagName(tag).empty() || LookupTag(TagName(tag)) != tag || LookupTag(upper) != tag) {
+            std::cerr << "HTML tag lookup mismatch: " << TagName(tag) << std::endl;
+            return false;
+        }
+    }
+    for (std::string_view name : { "", "x-foo", "blockquotes", "abcdefghijk", "h7", "foo", "spa n" }) {
+        if (LookupTag(name) != Tag::Unknown) {
+            std::cerr << "HTML tag lookup found an unknown name: " << name << std::endl;
+            return false;
+        }
+    }
+    if (!IsBlockName(Tag::Div) || !IsBlockName(Tag::Search) || !IsBlockName(Tag::H6) || IsBlockName(Tag::Span) ||
+        IsBlockName(Tag::Pre) || IsBlockName(Tag::Script) || !IsDroppedWithContent(Tag::Script) ||
+        !IsDroppedWithContent(Tag::Title) || !IsDroppedWithContent(Tag::Head) || IsDroppedWithContent(Tag::Div)) {
+        std::cerr << "HTML tag classes mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool CheckRawHtml() {
+    struct Example { int number; std::string_view markdown; std::vector<std::string> tags; };
+    const Example examples[] = {
+        { 613, "<a><bab><c2c>\n", { "<a>", "<bab>", "<c2c>" } },
+        { 614, "<a/><b2/>\n", { "<a/>", "<b2/>" } },
+        { 615, "<a  /><b2\ndata=\"foo\" >\n", { "<a  />", "<b2\ndata=\"foo\" >" } },
+        { 616, "<a foo=\"bar\" bam = 'baz <em>\"</em>'\n_boolean zoop:33=zoop:33 />\n",
+            { "<a foo=\"bar\" bam = 'baz <em>\"</em>'\n_boolean zoop:33=zoop:33 />" } },
+        { 617, "Foo <responsive-image src=\"foo.jpg\" />\n", { "<responsive-image src=\"foo.jpg\" />" } },
+        { 618, "<33> <__>\n", {} },
+        { 619, "<a h*#ref=\"hi\">\n", {} },
+        { 620, "<a href=\"hi'> <a href=hi'>\n", {} },
+        { 621, "< a><\nfoo><bar/ >\n<foo bar=baz\nbim!bop />\n", {} },
+        { 622, "<a href='bar'title=title>\n", {} },
+        { 623, "</a></foo >\n", { "</a>", "</foo >" } },
+        { 624, "</a href=\"foo\">\n", {} },
+        { 630, "foo <a href=\"&ouml;\">\n", { "<a href=\"&ouml;\">" } },
+        { 631, "foo <a href=\"\\*\">\n", { "<a href=\"\\*\">" } },
+        { 632, "<a href=\"\\\"\">\n", {} },
+    };
+    for (const Example& example : examples) {
+        if (TagsOf(example.markdown) != example.tags) {
+            std::cerr << "raw HTML mismatch in CommonMark example " << example.number << std::endl;
+            return false;
+        }
+    }
+    // The attributes RayoMD reads, in any case, unquoted or quoted; the first of a repeated one.
+    QuoteCache quotes;
+    TagToken img;
+    TagToken a;
+    TagToken details;
+    TagToken br;
+    TagToken close;
+    const std::string_view image = "<IMG SRC=\"a.png\" alt='A \"b\"' Width=100 height = \"50\" src=b.png>";
+    const std::string_view link = "<a href=x id=top name=\"n\" align=center start=3>";
+    if (ScanTag(image, 0, quotes, img) != image.size() || img.tag != Tag::Img || img.src != "a.png" ||
+        img.alt != "A \"b\"" || img.width != "100" || img.height != "50" || img.closing || img.selfClosing ||
+        ScanTag(link, 0, quotes, a) != link.size() || a.tag != Tag::A || a.href != "x" || a.id != "top" || a.name != "n" ||
+        a.align != "center" || a.start != "3" || a.hasOpen ||
+        ScanTag("<details open>", 0, quotes, details) != 14 || !details.hasOpen || !details.open.empty() ||
+        ScanTag("<br/>", 0, quotes, br) != 5 || !br.selfClosing || br.tag != Tag::Br ||
+        ScanTag("</DIV >", 0, quotes, close) != 7 || !close.closing || close.tag != Tag::Div ||
+        ScanTag("x<b>", 0, quotes, close) != 0) {
+        std::cerr << "HTML tag attributes mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool CheckHtmlBlockConditions() {
+    struct Start { std::string_view line; int condition; };
+    const Start starts[] = {
+        { "<pre language=\"haskell\"><code>", 1 }, { "<script type=\"text/javascript\">", 1 }, { "<style", 1 },
+        { "<TEXTAREA>", 1 }, { "<pre>", 1 }, { "<prefix>", 7 }, { "<!-- Foo", 2 }, { "<!-->", 2 }, { "<?php", 3 },
+        { "<!DOCTYPE html>", 4 }, { "<![CDATA[", 5 }, { "<table><tr><td>", 6 }, { "<div>", 6 }, { "</div>", 6 },
+        { "<DIV CLASS=\"foo\">", 6 }, { "<div id=\"foo\"", 6 }, { "<div *?\?\?-&&&-<---", 6 }, { "<td>", 6 },
+        { "<hr/>", 6 }, { "<search>", 6 }, { "<div2>", 7 }, { "<div-x>", 7 }, { "<a href=\"foo\">", 7 },
+        { "<Warning>", 7 }, { "<i class=\"foo\">", 7 }, { "</ins>", 7 }, { "<del>  ", 7 }, { "</pre>", 7 },
+        { "<del>*foo*</del>", 0 }, { "<a href=\"foo", 0 }, { "<foo", 0 }, { "<abc>x", 0 }, { "< div>", 0 },
+        { "<", 0 }, { "text", 0 }, { "<!x", 4 }, { "<!1", 0 },
+    };
+    for (const Start& start : starts) {
+        if (HtmlBlockStart(start.line) != start.condition) {
+            std::cerr << "HTML block start mismatch: " << start.line << " gives " << HtmlBlockStart(start.line) << std::endl;
+            return false;
+        }
+    }
+    struct End { std::string_view line; int condition; bool ends; };
+    const End ends[] = {
+        { "</pre>", 1, true }, { "foo </SCRIPT> bar", 1, true }, { "</style >", 1, false }, { "</textarea>", 1, true },
+        { "</div>", 1, false }, { "-->", 2, true }, { "<!-- x", 2, false }, { "a ?> b", 3, true }, { ">", 4, true },
+        { "]]>", 5, true }, { "]]", 5, false }, { "", 6, true }, { " \t", 7, true }, { "x", 6, false }, { " x", 7, false },
+    };
+    for (const End& end : ends) {
+        if (HtmlBlockEnds(end.line, end.condition) != end.ends) {
+            std::cerr << "HTML block end mismatch: " << end.line << " (" << end.condition << ")" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CheckTagLimits() {
+    QuoteCache quotes;
+    TagToken token;
+    // A tag of exactly kMaxTagBytes is read; one byte more, and 65 attributes, are not.
+    const std::string longest = "<a x=\"" + std::string(kMaxTagBytes - 8, 'y') + "\">";
+    const std::string longer = "<a x=\"" + std::string(kMaxTagBytes - 7, 'y') + "\">";
+    std::string attributes64 = "<a";
+    for (int index = 0; index < 64; index++) attributes64 += " b" + std::to_string(index);
+    const std::string attributes65 = attributes64 + " c>";
+    attributes64 += ">";
+    if (longest.size() != kMaxTagBytes || ScanTag(longest, 0, quotes, token) != kMaxTagBytes ||
+        ScanTag(longer, 0, quotes, token) != 0 ||
+        ScanTag(attributes64, 0, quotes, token) != attributes64.size() || ScanTag(attributes65, 0, quotes, token) != 0) {
+        std::cerr << "HTML tag limits mismatch" << std::endl;
+        return false;
+    }
+    // Unterminated quotes, and a tag that begins in the quoted value of one that failed, whose
+    // quote lies before the last search: linear, and the answer that search would give.
+    std::string unterminated;
+    for (int index = 0; index < 100000; index++) unterminated += "<a x=\"";
+    const auto started = std::chrono::steady_clock::now();
+    const size_t found = TagsOf(unterminated).size();
+    const auto took = std::chrono::steady_clock::now() - started;
+    if (found != 0 || took > std::chrono::seconds(2) || TagsOf("<a x=\"<b y=\" z=\">\"!") !=
+            std::vector<std::string>{ "<b y=\" z=\">" }) {
+        std::cerr << "HTML quote scanning mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool CheckSafeUrls() {
+    for (std::string_view unsafe : { "javascript:alert(1)", " JavaScript:x", "java\tscript:x", "\x01javascript:x",
+             "VBScript:x", "data:text/html,x", "data:image/png;base64,x" }) {
+        if (SafeUrl(unsafe)) {
+            std::cerr << "unsafe URL allowed: " << unsafe << std::endl;
+            return false;
+        }
+    }
+    for (std::string_view safe : { "https://example.com", "#top", "mailto:a@b.c", "javascriptish", "docs/a.md", "" }) {
+        if (!SafeUrl(safe)) {
+            std::cerr << "safe URL refused: " << safe << std::endl;
+            return false;
+        }
+    }
+    if (!SafeUrl("data:image/png;base64,x", true) || SafeUrl("data:text/plain,x", true) || SafeUrl("javascript:x", true)) {
+        std::cerr << "image URL safety mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool CheckHtmlEngine() {
+    return CheckTagNames() && CheckRawHtml() && CheckHtmlBlockConditions() && CheckTagLimits() && CheckSafeUrls();
+}
+
+} // namespace html_tests

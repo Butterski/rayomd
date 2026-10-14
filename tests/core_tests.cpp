@@ -18,6 +18,7 @@
 #include "../src/core/book.h"
 #include "../src/core/png_filter.h"
 #include "../src/core/cff.h"
+#include "../src/core/html.h"
 
 #include <algorithm>
 #include <array>
@@ -723,6 +724,7 @@ bool CheckImagePolicyCacheIsolation() {
 #include "math_parser_tests.inc"
 #include "math_layout_tests.inc"
 #include "inline_lookahead_tests.inc"
+#include "html_tests.inc"
 
 // Heights of the filled rectangles drawn with the given fill colour ("r g b").
 std::vector<double> FillRectHeights(const std::string& pdf, std::string_view color) {
@@ -3476,6 +3478,7 @@ int main() {
     if (!CheckExactMath()) return 103;
     if (!CheckComposedAdvance()) return 104;
     if (!CheckCffSubset()) return 105;
+    if (!html_tests::CheckHtmlEngine()) return 106;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

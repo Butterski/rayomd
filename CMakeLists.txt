@@ -163,8 +163,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
     # RayoMD's streams at half the code; the inflater, 1.5 % slower than -O3 at 8.9 KB of code
     # against 17.7. The highlighter's lexers read every byte of a code block: 1.5 times as fast at
-    # -O2 as at -Os.
-    set_source_files_properties(src/core/flate.cpp src/core/inflate.cpp src/core/highlight.cpp
+    # -O2 as at -Os. The HTML scanner reads every byte of the tags in a document.
+    set_source_files_properties(src/core/flate.cpp src/core/inflate.cpp src/core/highlight.cpp src/core/html.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
 endif()
 
@@ -200,6 +200,7 @@ if(WIN32)
         src/core/markdown_parser.cpp
         src/core/footnotes.cpp
         src/core/highlight.cpp
+        src/core/html.cpp
         src/core/contents.cpp
         src/core/book.cpp
         src/core/svg.cpp
@@ -274,6 +275,7 @@ else()
         src/core/markdown_parser.cpp
         src/core/footnotes.cpp
         src/core/highlight.cpp
+        src/core/html.cpp
         src/core/contents.cpp
         src/core/book.cpp
         src/core/svg.cpp
@@ -320,6 +322,7 @@ if(BUILD_TESTING)
         src/core/markdown_parser.cpp
         src/core/footnotes.cpp
         src/core/highlight.cpp
+        src/core/html.cpp
         src/core/contents.cpp
         src/core/book.cpp
         src/core/svg.cpp

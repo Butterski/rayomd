@@ -199,6 +199,15 @@ Important image/link details:
   Built at `-O2`: per-byte code, 1.5 times as fast as at `-Os`. The renderers split a
   line into runs of one colour (`SplitCodeRuns`) and draw them in one text object.
 
+- `src/core/html.h` and `src/core/html.cpp`
+  HTML inside Markdown: the elements RayoMD knows (`Html::Tag`: GitHub's sanitizer
+  allowlist, `u`, `center`, CommonMark's block names and the elements dropped with their
+  content; looked up by a 60-bit key in a table sorted at compile time), CommonMark's raw
+  HTML tags (`ScanTag`: at most 4,096 bytes and 64 attributes) and HTML block conditions,
+  and which URLs a link or image may have (`SafeUrl`). `QuoteCache` answers each tag's
+  closing quote, so text of unterminated quotes stays linear; a new scan must stay bounded
+  the same way. Built at `-O2`; checked by `tests/html_tests.inc`.
+
 - `src/core/contents.h` and `src/core/contents.cpp`
   The table of contents: turning the marker paragraph into a `BlockType::Contents` block
   (or inserting one for `--toc`) and listing the headings it shows, also a book's. Built
