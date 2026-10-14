@@ -14,26 +14,39 @@ namespace TinyPdf::Internal {
 struct MathParseResult;   // math_parser.h
 
 // ---- fonts -----------------------------------------------------------------------------
-// PDF standard-14 fonts, never embedded. A renderer that emitted at least one formula adds
-// kMathFontObjectCount objects -- MathSymbolDescriptorObject() first, then MathFontObject(0..4,
-// descriptorId) -- and lists the five fonts under kMathFonts[i].resourceName in the /Font
-// dictionary of every page. A document without a rendered formula adds nothing.
+// Five fonts, embedded: the outlines of TeX Gyre Termes and TeX Gyre Termes Math at the
+// advances of the Adobe Times and Symbol AFM files, so formulas lay out as on the standard
+// fonts. A formula's glyphs are codes of /M1 .. /M5 (in the Times-Roman, -Italic, -Bold,
+// -BoldItalic and Symbol encodings); Emit marks each code it paints in a MathGlyphUse, and the
+// renderer embeds each face it marked with those codes only (BuildMathFaceFont) and lists it
+// under kMathFonts[face].resourceName in the /Font dictionary of every page. A document
+// without a painted glyph adds nothing.
 struct MathFontResource {
     const char* resourceName;   // /Font key without the slash: "M1" .. "M5"
-    const char* baseFont;       // PDF standard-14 name
+    const char* fontName;       // the embedded font's name, before its subset tag
 };
 inline constexpr int kMathFontCount = 5;
-inline constexpr int kMathFontObjectCount = 6;
 inline constexpr MathFontResource kMathFonts[kMathFontCount] = {
-    {"M1", "Times-Roman"}, {"M2", "Times-Italic"}, {"M3", "Times-Bold"},
-    {"M4", "Times-BoldItalic"}, {"M5", "Symbol"}};
+    {"M1", "RayoMDMath-Roman"}, {"M2", "RayoMDMath-Italic"}, {"M3", "RayoMDMath-Bold"},
+    {"M4", "RayoMDMath-BoldItalic"}, {"M5", "RayoMDMath-Symbol"}};
 
-// Object body "<< /Type /FontDescriptor /FontName /Symbol /Flags 4 ... >>".
-std::string MathSymbolDescriptorObject();
-// Object body of the font dictionary of kMathFonts[index]. Index 4 (Symbol) carries
-// /FirstChar /LastChar /Widths and references `symbolDescriptorId`; 0..3 ignore the id.
-// An index outside 0..4 returns an empty string.
-std::string MathFontObject(int index, int symbolDescriptorId);
+// The codes the formulas of a document painted: a bit per code of each face.
+struct MathGlyphUse {
+    uint64_t bits[kMathFontCount][4] = {};
+
+    bool Has(int face, unsigned code) const { return (bits[face][(code >> 6) & 3] >> (code & 63)) & 1; }
+};
+
+// The parts of the embedded font of face `face` (0 .. 4) that holds the codes `use` marks.
+struct MathFaceFont {
+    std::string program;      // FontFile3 /Type1C: a CFF font with a built-in encoding of the codes
+    std::string toUnicode;    // a ToUnicode CMap of one-byte codes
+    std::string widths;       // " /FirstChar f /LastChar l /Widths [...]", 0 for codes not marked
+    std::string descriptor;   // " /Flags 4 /FontBBox [...] ... /StemV 85": FontDescriptor entries
+    std::string codes;        // the codes, a byte each, ascending: what the subset tag is made of
+};
+// False when `use` marks no code of the face that has a glyph.
+bool BuildMathFaceFont(int face, const MathGlyphUse& use, MathFaceFont& out);
 
 // ---- exact widths of the standard renderer's text fonts -----------------------------------
 // /F1 Helvetica, /F2 Helvetica-Bold, /F3 Courier, all in WinAnsiEncoding: the text is ASCII,
@@ -121,8 +134,9 @@ public:
     // [x, x + Width()] x [baseline - Descent(), baseline + Ascent()] covers everything drawn,
     // except that the first glyph may overhang the left edge by at most 0.19 em (italic f, j;
     // an accent wider than its letter); fallback text is boxed by the ascent and descent
-    // given, whatever its ink. Leaves the graphics state as found.
-    void Emit(std::string& content, double x, double baseline, const char* rgb) const;
+    // given, whatever its ink. Leaves the graphics state as found. With `use`, marks there the
+    // code of every glyph it paints.
+    void Emit(std::string& content, double x, double baseline, const char* rgb, MathGlyphUse* use = nullptr) const;
 
 private:
     friend struct MathFormulaInspector;          // item access for the layout harness only

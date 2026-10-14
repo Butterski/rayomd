@@ -2,8 +2,8 @@
 
 RayoMD typesets a defined **TeX math subset** natively. It is not LaTeX: there are no
 packages, macros, counters or cross-references, and anything outside the subset degrades
-to readable output instead of failing. No browser, TeX installation, font file or new
-dependency is involved.
+to readable output instead of failing. No browser, TeX installation, font file on the
+system or new dependency is involved: the formula fonts are built into RayoMD.
 
 This file is the engineering contract for the feature. Keep it accurate when the parser,
 the layout or the Markdown rules change.
@@ -16,7 +16,8 @@ the layout or the Markdown rules change.
   the digests hold on Windows and Linux. They move only with a deliberate change of the
   plain-text output, which re-pins them and says why.
 - An ASCII document with math stays on the standard-font path, and so does a Latin one
-  (every character in WinAnsiEncoding). Math never loads, embeds or subsets a font.
+  (every character in WinAnsiEncoding). Math loads no font file: it embeds its own formula
+  fonts, subset to the glyphs the formulas paint.
 - Malformed, unsupported or hostile input never crashes, hangs or fails the export. Every
   limit has one defined outcome (see [Limits](#limits)).
 - The module has no mutable global state; `Layout` and `Emit` are safe from several threads.
@@ -74,8 +75,8 @@ Deliberate deviations and degradations:
 - An unknown control word is set as an upright operator name without its backslash
   (`\sgn`, `\tr` come out right); an unknown environment is set as a centred matrix.
 - `%` starts a comment only in a multi-line formula, so `$50%$` prints `50%`.
-- Only five fonts exist: `\mathsf`, `\mathtt` and `\mathfrak` are set in Times-Roman;
-  `\mathbb` is outlined Times-Bold and `\mathcal` outlined Times-BoldItalic.
+- Only five fonts exist: `\mathsf`, `\mathtt` and `\mathfrak` are set in the Roman face;
+  `\mathbb` is outlined Bold and `\mathcal` outlined BoldItalic.
 - `\mathit{diff}` is spaced like the product *d·i·f·f*.
 - Symbols that neither Times nor Symbol contains are composed from available glyphs and
   strokes (for example `\mp \ll \gg \mapsto \hbar \circ \oint`); a few rare ones fall back
@@ -87,24 +88,34 @@ Deliberate deviations and degradations:
 
 ## Fonts and PDF output
 
-- Math uses the PDF standard fonts **Times-Roman, Times-Italic, Times-Bold,
-  Times-BoldItalic and Symbol**, never embedded, under the resource names `/M1`…`/M5`.
-  A renderer that painted at least one formula adds six objects (a `/FontDescriptor`
-  with `/Flags 4` for Symbol, then the five font dictionaries; Symbol also carries
-  `/FirstChar /LastChar /Widths`) and lists the fonts in every page's `/Font` resources.
-  A document without a painted formula adds nothing.
-- PDF/A (`--pdfa`) needs every font embedded, and these are not: there every formula
-  shows its complete TeX source, as over a limit (`MathPool::Disable`).
-- Symbol glyphs are shown one per text operator, so a viewer that substitutes a font with
-  different advances still places every glyph correctly.
+- Math is laid out on the metrics of the PDF standard fonts **Times-Roman, Times-Italic,
+  Times-Bold, Times-BoldItalic and Symbol** (their codes and AFM advances), and painted in
+  five embedded fonts that carry those advances: RayoMDMath-Roman, -Italic, -Bold,
+  -BoldItalic and -Symbol, under the resource names `/M1`…`/M5`. Their glyphs are the
+  outlines of TeX Gyre Termes (the Times faces, glyph by glyph name) and TeX Gyre Termes
+  Math (Symbol, by Unicode value, else Termes; scaled and centred onto the ink box of the
+  Adobe glyph), bundled as charstrings in `src/core/math_glyphs.inc`; their licence is the
+  GUST Font License (`third_party/tex-gyre/`). Every code a formula can paint has a glyph
+  (549: 113 Roman and Bold, 97 Italic and BoldItalic, 129 Symbol).
+- `MathFormula::Emit` marks each code it paints in a `MathGlyphUse`. A renderer that
+  painted a glyph of a face adds four objects for it: the font program (FontFile3
+  `/Subtype /Type1C`, a CFF font of those codes with a built-in encoding, FlateDecode under
+  `--compress`), its `/FontDescriptor` (`/Flags 4`), a ToUnicode CMap, and a Type1 font
+  dictionary with `/FirstChar /LastChar /Widths` and no `/Encoding`. The fonts are named
+  `/ABCDEF+RayoMDMath-…`, the tag made from the codes, and listed in every page's `/Font`
+  resources. A document without a painted glyph adds nothing.
+- PDF/A (`--pdfa`) typesets formulas like any export. PDF/UA (`--pdfua`) shows every
+  formula's complete TeX source, as over a limit (`MathPool::Disable`): formulas have no
+  structure tags yet.
+- Symbol glyphs are shown one per text operator, so every glyph is placed by the layout,
+  whatever its advance.
 - `MathFormula::Emit` is graphics-state neutral (one `q … Q`), writes 7-bit ASCII, and
   paints inside the box it reports, except for the documented 0.19 em left overhang of
   the first glyph.
-- The four Times dictionaries are bare. The Helvetica and Courier text fonts declare
-  `/Encoding /WinAnsiEncoding`, under which `'` and `` ` `` are the straight quote and
-  the grave accent. With `--embed-source` the file is declared PDF 2.0, which no longer
-  exempts the standard fonts from `/FirstChar`, `/LastChar`, `/Widths` and
-  `/FontDescriptor`; no viewer problem is known.
+- The Helvetica and Courier text fonts declare `/Encoding /WinAnsiEncoding`, under which
+  `'` and `` ` `` are the straight quote and the grave accent. With `--embed-source` the
+  file is declared PDF 2.0, which no longer exempts the standard fonts from `/FirstChar`,
+  `/LastChar`, `/Widths` and `/FontDescriptor`; no viewer problem is known.
 
 ## Layout rules in the renderers
 
@@ -141,9 +152,10 @@ in one paragraph, for example 20,000 repetitions of `*a $b*c$ `.
 | File | Role |
 |---|---|
 | `src/core/math_parser.{h,cpp}` | Tokenizer and parser for the subset; node arena; error recovery; limits. |
-| `src/core/math_layout.{h,cpp}` | TeX-like box layout, draw list, PDF emission, font objects, exact standard-font widths. |
-| `src/core/math_symbols.inc`, `src/core/math_font_metrics.inc` | Generated tables (commands, Unicode map, composites, per-glyph metrics). Do not edit. |
-| `scripts/generate_math_tables.py` | Regenerates both tables from the Adobe Core 14 AFM files. |
+| `src/core/math_layout.{h,cpp}` | TeX-like box layout, draw list, PDF emission, the embedded faces (`BuildMathFaceFont`), exact standard-font widths. |
+| `src/core/math_symbols.inc`, `src/core/math_font_metrics.inc`, `src/core/math_glyphs.inc` | Generated tables (commands, Unicode map, composites, per-glyph metrics, glyph outlines). Do not edit. |
+| `scripts/generate_math_tables.py` | Regenerates the tables from the Adobe Core 14 AFM files and TeX Gyre Termes. |
+| `src/core/cff.{h,cpp}` | Writes the CFF font program of an embedded face (`WriteSimpleFont`). |
 | `src/core/inline_markdown.*`, `src/core/markdown_parser.*` | Which bytes are formulas (`InlineSpan::math`, `BlockType::MathBlock`, `Block::hasMath`). |
 | `src/core/tiny_pdf.cpp` | Renderer integration: the "Native math integration" section and the `RAYOMD_MATH_COLD` functions of both renderers. |
 | `tests/math_*_tests.inc`, `tests/no_math_golden.inc` | Parser, layout, Markdown and golden tests, included by `tests/core_tests.cpp`. |
@@ -155,16 +167,21 @@ formulas. Engine rules apply: no exceptions, RTTI, iostream, regex or locale.
 
 The metrics come from the Adobe Core 14 AFM files (Times-Roman, Times-Italic, Times-Bold,
 Times-BoldItalic, Symbol, Helvetica, Helvetica-Bold, Courier, plus their `readme.txt`).
-They are not stored in the repository. The generator pins them by SHA-256 and prints the
-digests into both generated files. Matplotlib ships an identical copy under
-`mpl-data/fonts/pdfcorefonts`.
+The glyph outlines come from TeX Gyre Termes 2.004 (`texgyretermes-regular.otf`,
+`-italic`, `-bold`, `-bolditalic`, CTAN `fonts/tex-gyre/opentype/`) and TeX Gyre Termes
+Math 1.543 (`texgyretermes-math.otf`, CTAN `fonts/tex-gyre-math/opentype/`), read with
+fontTools (`pip install fonttools`). None of these files is stored in the repository. The
+generator pins them by size and SHA-256 and prints the digests into the generated files.
+Matplotlib ships an identical copy of the AFM files under `mpl-data/fonts/pdfcorefonts`.
 
 ```sh
-python scripts/generate_math_tables.py --afm-dir <directory with the AFM files>
-python scripts/generate_math_tables.py --afm-dir <directory> --check   # exit 1 if the files would change
+python scripts/generate_math_tables.py --afm-dir <AFM directory> --glyph-dir <TeX Gyre directory>
+python scripts/generate_math_tables.py --afm-dir <dir> --glyph-dir <dir> --check   # exit 1 if a file would change
 ```
 
-Adobe's notice travels at the top of both generated files and in `NOTICE`.
+Adobe's notice travels at the top of the generated files and in `NOTICE`; the TeX Gyre
+copyright lines at the top of `math_glyphs.inc`, its licence in `third_party/tex-gyre/`
+and `NOTICE`.
 
 ## Verifying a change
 

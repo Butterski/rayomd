@@ -127,17 +127,18 @@ def verify_theme(binary: Path, root: Path) -> None:
 
 
 def verify_pdfa(binary: Path, root: Path) -> None:
-    """--pdfa: PDF 1.7 with every font embedded (formulas as their source), printable links, an
-    sRGB output intent, PDF/A-3b XMP and a file identifier; with --embed-source too, still PDF 1.7,
-    and the source recovers byte for byte."""
+    """--pdfa: PDF 1.7 with every font embedded (formulas typeset in the embedded math fonts),
+    printable links, an sRGB output intent, PDF/A-3b XMP and a file identifier; with
+    --embed-source too, still PDF 1.7, and the source recovers byte for byte."""
     source = root / "archive.md"
     source.write_text("---\ntitle: Archive & <Co>\n---\n\n# Archive\n\nSee [site](https://example.com) and $x^2$.\n",
                       encoding="utf-8")
     archive_pdf = root / "archive.pdf"
     run(binary, "--export", str(source), str(archive_pdf), "--pdfa", "--page-numbers")
     archive = require_pdf(archive_pdf, b"/S /GTS_PDFA1", b'pdfaid:part="3"', b"/FontFile2", b"/Subtype /Link /F 4 ",
-                          b"Archive &amp; &lt;Co&gt;")
-    if (not archive.startswith(b"%PDF-1.7\n") or b"/Subtype /Type1" in archive or
+                          b"Archive &amp; &lt;Co&gt;", b"/Subtype /Type1C", b" /M2 ")
+    if (not archive.startswith(b"%PDF-1.7\n") or b"x^2" in archive or
+            archive.count(b"/Subtype /Type1 ") != archive.count(b"/Subtype /Type1C") or
             not re.search(rb"/ID \[<([0-9A-F]{32})> <\1>\]", archive)):
         raise AssertionError("--pdfa did not write a PDF/A-3b file")
     reversible_pdf = root / "archive-source.pdf"
@@ -586,7 +587,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         run(binary, "--stdin", str(stdin_pdf), "native", "modern", "normal", stdin="# Stdin\n\nHello **stdin**.\n")
         require_pdf(stdin_pdf)
 
-        # Native math: formulas are typeset with the PDF standard fonts, currency stays literal,
+        # Native math: formulas are typeset in the embedded math fonts, currency stays literal,
         # and a document without math gains no math fonts.
         math_md = root / "math.md"
         math_md.write_text(
@@ -600,23 +601,24 @@ def verify(binary: Path, keep: Path | None) -> None:
         math_data = require_pdf(
             math_pdf,
             b"RayoMD Native Standard PDF",
-            b"/BaseFont /Symbol",
-            b"/BaseFont /Times-Italic",
-            b" /M1 ",
+            b"+RayoMDMath-Symbol",
+            b"+RayoMDMath-Italic",
+            b"/Subtype /Type1C",
+            b" /M2 ",
             b"$5 and $10",
         )
         if b"\\frac" in math_data or b"\\int" in math_data or b"\\alpha" in math_data:
             raise AssertionError("TeX source leaked into the page content")
-        if b"/BaseFont /Symbol" in ascii_pdf.read_bytes() or b"/BaseFont /Times" in ascii_pdf.read_bytes():
+        if b"RayoMDMath" in ascii_pdf.read_bytes() or b"/BaseFont /Times" in ascii_pdf.read_bytes():
             raise AssertionError("math fonts were added to a document without math")
 
         unicode_math = root / "unicode-math.md"
         unicode_math.write_text("Zażółć $\\text{gęślą} + x^2$\n", encoding="utf-8", newline="\n")
         run(binary, "--export", str(unicode_math), str(root / "unicode-math.pdf"), "native", "modern", "normal")
-        require_pdf(root / "unicode-math.pdf", b"RayoMD Native Tiny PDF", b"/BaseFont /Times-Italic")
+        require_pdf(root / "unicode-math.pdf", b"RayoMD Native Tiny PDF", b"+RayoMDMath-Italic")
 
         run(binary, "--stdin", str(root / "stdin-math.pdf"), "native", "modern", "normal", stdin="$$\nx^2\n$$\n")
-        require_pdf(root / "stdin-math.pdf", b"/BaseFont /Times-Italic")
+        require_pdf(root / "stdin-math.pdf", b"+RayoMDMath-Italic")
 
         # Hostile math must terminate with a valid PDF; the timeout is a hang guard, not a benchmark.
         hostile = root / "hostile-math.md"

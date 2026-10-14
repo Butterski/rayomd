@@ -1,5 +1,6 @@
 #include "math_layout.h"
 
+#include "cff.h"
 #include "math_parser.h"
 #include "../common/exact_math.h"
 #include "../common/text_utils.h"
@@ -15,6 +16,7 @@ namespace TinyPdf::Internal {
 namespace {
 
 #include "math_font_metrics.inc"
+#include "math_glyphs.inc"
 
 using RayoMd::Text::AppendFixed2;
 
@@ -1414,7 +1416,8 @@ void EmitShape(std::string& out, const MathItem& item, double ox, double oy, lon
 }
 
 // One BT ... ET with every glyph: a run is a glyph item plus the joined items that follow it.
-void EmitText(std::string& out, const std::vector<MathItem>& items, double ox, double oy, long long& lineWidth) {
+void EmitText(std::string& out, const std::vector<MathItem>& items, double ox, double oy, long long& lineWidth,
+              MathGlyphUse* use) {
     static constexpr char kHex[] = "0123456789ABCDEF";
     out += " BT";
     unsigned font = 0, mode = 0;
@@ -1472,6 +1475,7 @@ void EmitText(std::string& out, const std::vector<MathItem>& items, double ox, d
         out += hex ? " <" : " (";
         for (size_t k = i; k < end; ++k) {
             const unsigned char code = items[k].code;
+            if (use != nullptr) use->bits[(head.font - 1u) % kMathFontCount][code >> 6] |= uint64_t(1) << (code & 63);
             if (hex) {
                 out += kHex[code >> 4];
                 out += kHex[code & 15];
@@ -1489,28 +1493,66 @@ void EmitText(std::string& out, const std::vector<MathItem>& items, double ox, d
 } // namespace
 
 // ---- public API ---------------------------------------------------------------------------------
-std::string MathSymbolDescriptorObject() {
-    return "<< /Type /FontDescriptor /FontName /Symbol /Flags 4 /FontBBox [-180 -293 1090 1010] "
-           "/ItalicAngle 0 /Ascent 1010 /Descent -293 /CapHeight 673 /StemV 85 >>";
-}
-
-std::string MathFontObject(int index, int symbolDescriptorId) {
-    std::string out;
-    if (index < 0 || index >= kMathFontCount) return out;
-    out = "<< /Type /Font /Subtype /Type1 /BaseFont /";
-    out += kMathFonts[index].baseFont;
-    if (index == 4) {
-        out += " /FirstChar 32 /LastChar 254 /Widths [";
-        for (int code = 0; code < 223; ++code) {
-            if (code != 0) out += ' ';
-            AppendFixed2(out, kMathGlyphMetrics[4][code].advance);
-        }
-        out += "] /FontDescriptor ";
-        AppendFixed2(out, symbolDescriptorId);
-        out += " 0 R";
+bool BuildMathFaceFont(int face, const MathGlyphUse& use, MathFaceFont& out) {
+    if (face < 0 || face >= kMathFontCount) return false;
+    // The face's programs, ascending by code: kMathGlyphPrograms is sorted by face, then code.
+    const MathGlyphProgram* const begin = std::lower_bound(std::begin(kMathGlyphPrograms), std::end(kMathGlyphPrograms),
+        face, [](const MathGlyphProgram& program, int value) { return program.face < value; });
+    std::vector<Cff::SimpleGlyph> glyphs;
+    std::vector<uint16_t> unicodes;
+    out.codes.clear();
+    for (const MathGlyphProgram* program = begin; program != std::end(kMathGlyphPrograms) && program->face == face; ++program) {
+        if (!use.Has(face, program->code)) continue;
+        const char* const name = program->sid == 0xFFFF ? kMathGlyphNames + program->nameIndex : "";
+        glyphs.push_back({program->code, program->sid, name,
+                          std::string_view(reinterpret_cast<const char*>(kMathGlyphBytes) + program->offset, program->length)});
+        unicodes.push_back(program->unicode);
+        out.codes.push_back(static_cast<char>(program->code));
     }
-    out += " >>";
-    return out;
+    if (glyphs.empty() || !Cff::WriteSimpleFont(kMathFonts[face].fontName, glyphs.data(), glyphs.size(),
+                                                kMathFaceBBox[face], out.program)) {
+        return false;
+    }
+
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    out.toUnicode =
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        "/CMapName /RayoMDMathUnicode def\n/CMapType 2 def\n"
+        "1 begincodespacerange\n<00> <FF>\nendcodespacerange\n";
+    for (size_t first = 0; first < glyphs.size(); first += 100) {
+        const size_t count = std::min<size_t>(100, glyphs.size() - first);
+        out.toUnicode += std::to_string(count);
+        out.toUnicode += " beginbfchar\n";
+        for (size_t index = first; index < first + count; ++index) {
+            out.toUnicode += '<';
+            out.toUnicode += kHex[glyphs[index].code >> 4];
+            out.toUnicode += kHex[glyphs[index].code & 15];
+            out.toUnicode += "> <";
+            for (int shift = 12; shift >= 0; shift -= 4) out.toUnicode += kHex[(unicodes[index] >> shift) & 15];
+            out.toUnicode += ">\n";
+        }
+        out.toUnicode += "endbfchar\n";
+    }
+    out.toUnicode += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
+
+    const unsigned firstChar = glyphs.front().code, lastChar = glyphs.back().code;
+    out.widths = " /FirstChar " + std::to_string(firstChar) + " /LastChar " + std::to_string(lastChar) + " /Widths [";
+    size_t next = 0;
+    for (unsigned code = firstChar; code <= lastChar; ++code) {
+        if (code != firstChar) out.widths += ' ';
+        const bool marked = next < glyphs.size() && glyphs[next].code == code;
+        out.widths += std::to_string(marked ? kMathGlyphMetrics[face][code - 0x20].advance : 0);
+        if (marked) ++next;
+    }
+    out.widths += ']';
+
+    const int16_t* const box = kMathFaceBBox[face];
+    const bool italic = face == 1 || face == 3;
+    out.descriptor = " /Flags 4 /FontBBox [" + std::to_string(box[0]) + ' ' + std::to_string(box[1]) + ' ' +
+        std::to_string(box[2]) + ' ' + std::to_string(box[3]) + "] /ItalicAngle " + (italic ? "-15" : "0") +
+        " /Ascent " + std::to_string(box[3]) + " /Descent " + std::to_string(box[1]) + " /CapHeight 662 /StemV 85";
+    return true;
 }
 
 double StandardTextWidth(std::string_view text, double size, StandardTextFont font) {
@@ -1616,7 +1658,7 @@ MathFormula MathFormula::LayoutParsed(const MathParseResult& parsed, std::string
     return formula;
 }
 
-void MathFormula::Emit(std::string& content, double x, double baseline, const char* rgb) const {
+void MathFormula::Emit(std::string& content, double x, double baseline, const char* rgb, MathGlyphUse* use) const {
     if (rgb == nullptr) rgb = "0 0 0";
     size_t glyphs = 0, paths = 0, fallbacks = 0;
     for (const MathItem& item : items_) {
@@ -1645,7 +1687,7 @@ void MathFormula::Emit(std::string& content, double x, double baseline, const ch
             ox = oy = 0.0;
         }
         long long lineWidth = -1;
-        if (glyphs != 0) EmitText(content, items_, ox, oy, lineWidth);
+        if (glyphs != 0) EmitText(content, items_, ox, oy, lineWidth, use);
         if (paths != 0) {
             for (const MathItem& item : items_) {
                 if (item.kind == kItemRule) EmitRule(content, item, ox, oy, lineWidth);

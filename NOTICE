@@ -31,6 +31,15 @@ Math font metrics are derived from the Adobe Core 14 AFM files, Copyright (c) 19
 1987, 1989, 1990, 1993, 1997 Adobe Systems Incorporated. All Rights Reserved. See the
 notice at the top of src/core/math_font_metrics.inc.
 
+The embedded formula fonts (RayoMDMath-Roman, -Italic, -Bold, -BoldItalic and -Symbol)
+carry glyph outlines of TeX Gyre Termes 2.004, Copyright 2006--2009 for TeX Gyre
+extensions by B. Jackowski and J.M. Nowacki (on behalf of TeX Users Groups), and of TeX
+Gyre Termes Math 1.543, Copyright 2012--2014 for TeX Gyre math extensions by B. Jackowski,
+P. Strzelczyk and P. Pianowski (on behalf of TeX Users Groups), licensed under the GUST
+Font License (an instance of the LaTeX Project Public License). The outlines are bundled
+in src/core/math_glyphs.inc at the Adobe advances above and renamed RayoMDMath, as the
+licence requests of derived works. See third_party/tex-gyre/GUST-FONT-LICENSE.txt.
+
 The release binaries also contain libraries linked into them:
 
 - The GCC runtime libraries (libstdc++, libgcc), licensed under the GNU GPL version 3

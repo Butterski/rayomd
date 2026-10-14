@@ -178,11 +178,9 @@ void ProbeEmit(void* context, std::string& content, std::string_view utf8, doubl
 bool Near(double value, double expected, double tolerance) { return std::fabs(value - expected) <= tolerance; }
 
 bool Run() {
-    using TinyPdf::Internal::MathFontObject;
     using TinyPdf::Internal::MathNode;
     using TinyPdf::Internal::MathNodeKind;
     using TinyPdf::Internal::MathParseResult;
-    using TinyPdf::Internal::MathSymbolDescriptorObject;
     using TinyPdf::Internal::StandardTextFont;
     using TinyPdf::Internal::StandardTextWidth;
     failed = false;
@@ -220,38 +218,55 @@ bool Run() {
             "WinAnsi codes from 0x80 have the width of their glyph");
     }
 
-    // The six font objects.
+    // The embedded faces: the codes Emit painted, and only those, in a CFF font whose glyph widths
+    // are the font object's /Widths; every code a formula can paint has a glyph.
     {
         using namespace TinyPdf::Internal;
-        Expect(kMathFontCount == 5 && kMathFontObjectCount == 6, "font counts");
-        Expect(std::string(kMathFonts[0].resourceName) == "M1" && std::string(kMathFonts[4].resourceName) == "M5" &&
-               std::string(kMathFonts[4].baseFont) == "Symbol", "font table");
-        Expect(MathSymbolDescriptorObject() ==
-               "<< /Type /FontDescriptor /FontName /Symbol /Flags 4 /FontBBox [-180 -293 1090 1010] /ItalicAngle 0 "
-               "/Ascent 1010 /Descent -293 /CapHeight 673 /StemV 85 >>", "Symbol descriptor");
-        Expect(MathFontObject(0, 7) == "<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>", "Times-Roman object");
-        Expect(MathFontObject(1, 7) == "<< /Type /Font /Subtype /Type1 /BaseFont /Times-Italic >>", "Times-Italic object");
-        Expect(MathFontObject(2, 7) == "<< /Type /Font /Subtype /Type1 /BaseFont /Times-Bold >>", "Times-Bold object");
-        Expect(MathFontObject(3, 7) == "<< /Type /Font /Subtype /Type1 /BaseFont /Times-BoldItalic >>", "Times-BoldItalic object");
-        Expect(MathFontObject(5, 7).empty() && MathFontObject(-1, 7).empty(), "font index outside 0..4");
-        const std::string symbol = MathFontObject(4, 37);
-        const std::string_view head = "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol /FirstChar 32 /LastChar 254 /Widths [250 333 713 ";
-        const std::string_view tail = " 494 494 494] /FontDescriptor 37 0 R >>";
-        Expect(symbol.rfind(head, 0) == 0, "Symbol font object, head");
-        Expect(symbol.size() > tail.size() && symbol.compare(symbol.size() - tail.size(), tail.size(), tail) == 0, "Symbol font object, tail");
-        const size_t open = symbol.find('['), close = symbol.find(']');
-        long sum = 0;
-        int widths = 0;
-        if (open != std::string::npos && close != std::string::npos) {
-            Expect(close - open - 1 == 827, "Symbol /Widths is 827 bytes long");
-            for (size_t i = open + 1; i < close;) {
-                size_t end = symbol.find_first_of(" ]", i);
-                sum += static_cast<long>(Number(std::string_view(symbol).substr(i, end - i)));
-                ++widths;
-                i = end + 1;
-            }
+        Expect(kMathFontCount == 5 && std::string(kMathFonts[0].resourceName) == "M1" &&
+               std::string(kMathFonts[4].fontName) == "RayoMDMath-Symbol", "font table");
+        MathGlyphUse use;
+        std::string content;
+        Lay("\\alpha + x").Emit(content, 72.0, 700.0, "0 0 0", &use);
+        Expect(use.Has(4, 0x61) && use.Has(4, 0x2B) && use.Has(1, 'x') && !use.Has(0, 'x') && !use.Has(4, 0x62),
+               "Emit marks the codes it paints");
+        MathFaceFont face;
+        Expect(BuildMathFaceFont(1, use, face) && face.codes == "x" &&
+               face.widths == " /FirstChar 120 /LastChar 120 /Widths [444]" && Has(face.toUnicode, "<78> <0078>") &&
+               Has(face.descriptor, "/ItalicAngle -15"), "the Italic face of one letter");
+        Expect(!BuildMathFaceFont(0, use, face) && !BuildMathFaceFont(5, use, face), "faces without a painted code");
+        MathGlyphUse all;
+        for (auto& words : all.bits) {
+            for (uint64_t& word : words) word = ~uint64_t(0);
         }
-        Expect(widths == 223 && sum == 110936, "Symbol /Widths: 223 values summing to 110,936");
+        const size_t paintable[kMathFontCount] = {113, 97, 113, 97, 129};
+        for (int index = 0; index < kMathFontCount; ++index) {
+            Cff::CffFont font;
+            const bool parsed = BuildMathFaceFont(index, all, face) &&
+                Cff::ParseCff(reinterpret_cast<const uint8_t*>(face.program.data()), face.program.size(),
+                              static_cast<uint16_t>(face.codes.size() + 1), font);
+            Expect(parsed && face.codes.size() == paintable[index], "a face holds every code a formula can paint");
+            if (!parsed) continue;
+            const size_t first = face.widths.find("/FirstChar ") + 11;
+            const unsigned firstChar = static_cast<unsigned>(std::stoul(face.widths.substr(first)));
+            std::vector<long> widths;
+            for (size_t at = face.widths.find('[') + 1; at < face.widths.size() && face.widths[at] != ']';) {
+                const size_t end = face.widths.find_first_of(" ]", at);
+                widths.push_back(static_cast<long>(Number(std::string_view(face.widths).substr(at, end - at))));
+                at = face.widths[end] == ' ' ? end + 1 : end;
+            }
+            bool same = true;
+            for (size_t glyph = 1; glyph <= face.codes.size(); ++glyph) {
+                const std::string_view program = Cff::IndexItem(font.data, font.charStrings, static_cast<uint32_t>(glyph));
+                const unsigned char b0 = program.empty() ? 0 : static_cast<unsigned char>(program[0]);
+                const unsigned char b1 = program.size() > 1 ? static_cast<unsigned char>(program[1]) : 0;
+                const unsigned char b2 = program.size() > 2 ? static_cast<unsigned char>(program[2]) : 0;
+                const long width = b0 >= 32 && b0 <= 246 ? b0 - 139L : b0 >= 247 && b0 <= 250 ? (b0 - 247L) * 256 + b1 + 108
+                    : b0 == 28 ? static_cast<int16_t>(b1 << 8 | b2) : -1;
+                const size_t slot = static_cast<unsigned char>(face.codes[glyph - 1]) - firstChar;
+                same = same && slot < widths.size() && widths[slot] == width && width > 0;
+            }
+            Expect(same, "each glyph's width is its /Widths entry");
+        }
     }
 
     // Emission structure.

@@ -756,11 +756,10 @@ double MaxTextStartX(const std::string& pdf) {
 
 bool CheckMathPdf() {
     const char* const sourceBox = "0.97 0.97 0.95 rg";
+    // Each face as the font object names it, embedded; the heading's formula paints the bold faces.
     const char* const mathFonts[] = {
-        "/BaseFont /Times-Roman >>", "/BaseFont /Times-Italic >>", "/BaseFont /Times-Bold >>",
-        "/BaseFont /Times-BoldItalic >>",
-        "/BaseFont /Symbol /FirstChar 32 /LastChar 254 /Widths [250 333 713 ",
-        "/Type /FontDescriptor /FontName /Symbol /Flags 4 "
+        "+RayoMDMath-Roman /FirstChar ", "+RayoMDMath-Italic /FirstChar ", "+RayoMDMath-Bold /FirstChar ",
+        "+RayoMDMath-BoldItalic /FirstChar ", "+RayoMDMath-Symbol /FirstChar "
     };
     const std::string mathBody =
         "# Energy $E=mc^2$\n\n"
@@ -769,8 +768,8 @@ bool CheckMathPdf() {
         "- item $x_i$\n\n> quote $q$\n\n"
         "| f | v |\n|---|---|\n| $\\alpha$ | $\\frac{a}{b}$ |\n";
 
-    // An ASCII document with math stays on the standard-font path and gains exactly the
-    // six math font objects; a document without math gains nothing.
+    // An ASCII document with math stays on the standard-font path and gains an embedded font for
+    // each math face it paints; a document without math gains nothing.
     std::string asciiPdf;
     if (!Build(mathBody, asciiPdf) || asciiPdf.find("RayoMD Native Standard PDF") == std::string::npos) {
         std::cerr << "ASCII math build mismatch" << std::endl;
@@ -784,12 +783,20 @@ bool CheckMathPdf() {
     }
     std::string plainPdf;
     if (!Build("# Plain\n\nNo math here, only $5 and $10.\n", plainPdf)) return false;
+    // The Unicode renderer sets headings in the regular face: no bold math faces there.
     for (const char* font : mathFonts) {
-        if (CountOccurrences(asciiPdf, font) != 1 || CountOccurrences(unicodePdf, font) != 1 ||
+        const bool bold = std::string_view(font).find("Bold") != std::string_view::npos;
+        if (CountOccurrences(asciiPdf, font) != 1 || CountOccurrences(unicodePdf, font) != (bold ? 0u : 1u) ||
             plainPdf.find(font) != std::string::npos) {
             std::cerr << "math font object mismatch: " << font << std::endl;
             return false;
         }
+    }
+    if (CountOccurrences(asciiPdf, "/Subtype /Type1C") != 5 || CountOccurrences(unicodePdf, "/Subtype /Type1C") != 3 ||
+        plainPdf.find("RayoMDMath") != std::string::npos || asciiPdf.find("/BaseFont /Times-") != std::string::npos ||
+        asciiPdf.find("/BaseFont /Symbol") != std::string::npos) {
+        std::cerr << "math fonts: not embedded once per face" << std::endl;
+        return false;
     }
     if (asciiPdf.find("/F3 4 0 R /M1 ") == std::string::npos || asciiPdf.find(" /M5 ") == std::string::npos ||
         unicodePdf.find(" /M1 ") == std::string::npos || plainPdf.find("/M1 ") != std::string::npos ||
@@ -2165,7 +2172,10 @@ bool CheckPdfA() {
             : std::string();
     };
     const size_t links = CountOccurrences(pdf, "/Subtype /Link");
-    if (!result.Ok() || result.pages < 2 || pdf.rfind("%PDF-1.7\n", 0) != 0 || pdf.find("/Subtype /Type1") != npos ||
+    // Formulas are typeset in the embedded math fonts: every Type1 font has its program (Type1C).
+    if (!result.Ok() || result.pages < 2 || pdf.rfind("%PDF-1.7\n", 0) != 0 || pdf.find(" /M5 ") == npos ||
+        CountOccurrences(pdf, "/Subtype /Type1 ") != CountOccurrences(pdf, "/Subtype /Type1C") ||
+        pdf.find("/Subtype /Type1C") == npos || pdf.find("\\sum") != npos ||
         pdf.find("/FontFile2 ") == npos || links != 2 || CountOccurrences(pdf, "/Subtype /Link /F 4 ") != links ||
         CountOccurrences(pdf, "q 0.45 0.45 0.45 rg\nBT /F1 9 Tf") != result.pages ||
         pdf.find("/OutputIntents [<< /Type /OutputIntent /S /GTS_PDFA1 ") == npos ||

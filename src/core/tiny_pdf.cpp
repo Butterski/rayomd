@@ -4841,9 +4841,12 @@ public:
     void Clear() { items.clear(); sourceShown = false; }
     bool Used() const { return used; }
     void MarkSourceShown() { sourceShown = true; }
-    // PDF/A: every formula is shown as its source, as the math fonts are not embedded.
+    // PDF/UA: every formula is shown as its source, as formulas have no structure tags yet.
     void Disable() { disabled = true; }
     bool Disabled() const { return disabled; }
+    // The codes of the math faces the formulas painted, which the embedded math fonts hold.
+    Internal::MathGlyphUse* GlyphUse() { return &glyphUse; }
+    const Internal::MathGlyphUse& Glyphs() const { return glyphUse; }
 
     int Add(std::string_view tex, double size, bool display, bool bold, double maxWidth, double maxHeight,
         const MathFallbackFont* fallback) {
@@ -4883,7 +4886,7 @@ public:
 
     double Emit(int index, std::string& content, double x, double baseline, const char* rgb) {
         used = true;
-        items[(size_t)index].formula.Emit(content, x, baseline, rgb);
+        items[(size_t)index].formula.Emit(content, x, baseline, rgb, &glyphUse);
         return items[(size_t)index].formula.Width();
     }
 
@@ -4898,6 +4901,7 @@ private:
         double noteSize = 0.0;      // the size of the text around the reference
     };
     std::vector<Item> items;
+    Internal::MathGlyphUse glyphUse;
     bool used = false;
     bool sourceShown = false;
     bool disabled = false;
@@ -4968,18 +4972,38 @@ RAYOMD_MATH_COLD static std::string MathSourceText(const Internal::InlineSpan& s
     return delimiter + span.text + delimiter;
 }
 
-RAYOMD_MATH_COLD static std::vector<int> AddMathFontObjects(PdfObjects& pdf) {
-    std::vector<int> ids;
-    ids.reserve(Internal::kMathFontCount);
-    int descriptorId = pdf.Add(Internal::MathSymbolDescriptorObject());
+// The embedded math faces whose codes `use` marks: for each, its font program (FontFile3 /Type1C),
+// FontDescriptor, ToUnicode CMap and font dictionary. Returns the font of each face, 0 for a face
+// no formula painted.
+RAYOMD_MATH_COLD static std::vector<int> AddMathFontObjects(PdfObjects& pdf, const Internal::MathGlyphUse& use, bool compress) {
+    std::vector<int> ids(Internal::kMathFontCount, 0);
+    Internal::MathFaceFont face;
     for (int index = 0; index < Internal::kMathFontCount; index++) {
-        ids.push_back(pdf.Add(Internal::MathFontObject(index, descriptorId)));
+        if (!Internal::BuildMathFaceFont(index, use, face)) continue;
+        const std::string name = TaggedFontName(Internal::kMathFonts[index].fontName, face.codes);
+        std::string packed;
+        const bool flate = compress && CompressPayload(face.program, packed);
+        const int fileId = pdf.AddStream(flate ? "/Filter /FlateDecode /Subtype /Type1C" : "/Subtype /Type1C",
+            flate ? packed : face.program);
+        const bool flateMap = compress && CompressPayload(face.toUnicode, packed);
+        const int toUnicodeId = pdf.AddStream(flateMap ? "/Filter /FlateDecode" : "", flateMap ? packed : face.toUnicode);
+        std::string descriptor = "<< /Type /FontDescriptor /FontName /" + name + face.descriptor + " /FontFile3 ";
+        AppendInt(descriptor, fileId);
+        descriptor += " 0 R >>";
+        const int descriptorId = pdf.Add(std::move(descriptor));
+        std::string font = "<< /Type /Font /Subtype /Type1 /BaseFont /" + name + face.widths + " /FontDescriptor ";
+        AppendInt(font, descriptorId);
+        font += " 0 R /ToUnicode ";
+        AppendInt(font, toUnicodeId);
+        font += " 0 R >>";
+        ids[(size_t)index] = pdf.Add(std::move(font));
     }
     return ids;
 }
 
 RAYOMD_MATH_COLD static void AppendMathFontResources(std::string& page, const std::vector<int>& mathFontIds) {
     for (size_t i = 0; i < mathFontIds.size(); i++) {
+        if (mathFontIds[i] == 0) continue;
         page += " /";
         page += Internal::kMathFonts[i].resourceName;
         page += " ";
@@ -5535,7 +5559,8 @@ public:
     UsedCidSet& Cids() { return usedCids; }
     uint32_t MissingCharacters() const { return usedCids.missing; }
     bool MathUsed() const { return math.Used(); }
-    // PDF/A: formulas show their TeX source, as the math fonts are not embedded.
+    const Internal::MathGlyphUse& MathGlyphs() const { return math.Glyphs(); }
+    // PDF/UA: formulas show their TeX source, as they have no structure tags yet.
     void DisableMath() { math.Disable(); }
     // PdfOptions::highlightCode off: every code block in one colour.
     void DisableHighlighting() { highlightCode = false; }
@@ -7446,7 +7471,7 @@ private:
         }
         if (tags != nullptr) tags->Content();
         formula.Emit(content, left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
-            quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08");
+            quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08", math.GlyphUse());
         math.MarkUsed();
         y -= total;
         y -= quoted ? 7.0 : kDisplayMathBelow;
@@ -8474,6 +8499,7 @@ public:
     std::vector<size_t>& PageStarts() { return pageStarts; }
     const std::vector<std::vector<LinkRect>>& PageLinks() const { return pageLinks; }
     bool MathUsed() const { return math.Used(); }
+    const Internal::MathGlyphUse& MathGlyphs() const { return math.Glyphs(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
     const NoteMarks& Notes() const { return noteMarks; }
     double Margin() const { return margin; }
@@ -10132,7 +10158,7 @@ private:
             QuoteStrip(total + 3.0);
         }
         formula.Emit(content, left + (available - formula.Width()) * 0.5, y - padTop - formula.Ascent(),
-            quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08");
+            quoted ? "0.18 0.22 0.25" : "0.08 0.08 0.08", math.GlyphUse());
         math.MarkUsed();
         y -= total;
         y -= quoted ? 7.0 : kDisplayMathBelow;
@@ -10627,7 +10653,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         : AddBookLinkAnnotations(pdf, renderer.PageLinks(), winAnsi, headings, *book->book, *bookParse,
             renderer.PageHeight(), contents.empty() ? nullptr : &contentsTargets, internalLinks, false);
     std::vector<int> mathFontIds;
-    if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
+    if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf, renderer.MathGlyphs(), options.compress);
     // The italic faces only when emphasis used them, so other documents keep their bytes.
     const int fontObliqueId = renderer.ObliqueUsed()
         ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding >>") : 0;
@@ -10938,8 +10964,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     PrepareOutput(pdfBytes, markdown.size() * 8 + 256 * 1024);
     const ThemePalette palette(options.theme);
     Renderer renderer(pdfBytes, font, type0FontId, options.style, options.margin, options.pageSize, &imageRegistry, palette);
-    // PDF/A and PDF/UA embed every font, so formulas show their TeX source.
-    if (options.pdfa || options.pdfua) renderer.DisableMath();
+    // PDF/UA shows formulas as their TeX source: they have no structure tags yet.
+    if (options.pdfua) renderer.DisableMath();
     // PDF/UA: the structure tree that the pages' marked content goes into; off the stack, which
     // untagged documents keep as it was.
     std::unique_ptr<Internal::StructTree> tags;
@@ -10979,7 +11005,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
             options.pdfa, tags.get())
         : AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa);
     std::vector<int> mathFontIds;
-    if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf);
+    if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf, renderer.MathGlyphs(), options.compress);
 
     // A theme's header and footer, one stream per page, PDF/A's and PDF/UA's page numbers, and a
     // theme's cover page, before the font subset is made, which then has their glyphs.

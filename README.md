@@ -276,9 +276,10 @@ def greet(name):
 
 ### Math
 
-A TeX subset typeset natively, with no LaTeX and no embedded math fonts, in text, lists, quotes,
-headings and table cells. Unknown or malformed input degrades to readable output; see
-[`native_math.md`](docs/development/native_math.md).
+A TeX subset typeset natively, with no LaTeX, in text, lists, quotes, headings and table cells,
+also in PDF/A. The formula fonts are built in (TeX Gyre Termes outlines) and embedded with the
+glyphs a document uses, so formulas look the same in every viewer. Unknown or malformed input
+degrades to readable output; see [`native_math.md`](docs/development/native_math.md).
 
 ```markdown
 The roots are $x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$.
@@ -397,14 +398,14 @@ cat notes.md | rayomd --stdin notes.pdf
 
 - `--compress` writes page content, fonts and CMaps as FlateDecode streams with RayoMD's own
   DEFLATE encoder: text-heavy PDFs come out two to five times smaller.
-- `--pdfa` writes PDF/A-3b for archiving: every font embedded, an sRGB output intent, XMP
-  metadata and a file identifier.
+- `--pdfa` writes PDF/A-3b for archiving: every font embedded (the formula fonts too), an sRGB
+  output intent, XMP metadata and a file identifier.
 - `--pdfua` writes tagged PDF/UA-1 for screen readers: headings, lists, tables with header
   scope, figures with their alt text, formulas, links and footnotes in reading order, decoration
   marked as artifacts; the language is the front matter's `lang`, else `en`.
 
-PDF/A and PDF/UA need a TrueType or OpenType font to embed and show formulas as their TeX
-source; together the file claims both, and every test document passes veraPDF. See
+PDF/A and PDF/UA need a TrueType or OpenType font to embed; PDF/UA shows formulas as their TeX
+source. Together the file claims both, and every test document passes veraPDF. See
 [Archival and Accessible PDFs](https://github.com/Butterski/rayomd/wiki/Archival-and-Accessible-PDFs).
 
 ```sh

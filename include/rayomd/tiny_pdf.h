@@ -118,8 +118,8 @@ struct PdfOptions {
     // FlateDecode page content, font program and CMaps where that makes the file smaller:
     // text-heavy PDFs two to five times smaller, at the cost of compressing them.
     bool compress = false;
-    // PDF/A-3b (ISO 19005-3): every font embedded, so all text takes a TrueType or OpenType font and
-    // formulas show their TeX source; an sRGB output intent, XMP metadata and a file identifier.
+    // PDF/A-3b (ISO 19005-3): every font embedded, so all text takes a TrueType or OpenType font
+    // (formulas their own embedded fonts); an sRGB output intent, XMP metadata and a file identifier.
     bool pdfa = false;
     // PDF/UA-1 (ISO 14289-1), a tagged PDF for assistive technology: a structure tree of the
     // headings, paragraphs, lists, tables, figures (their alt text), links and notes in reading

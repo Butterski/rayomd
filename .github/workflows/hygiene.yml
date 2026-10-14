@@ -39,6 +39,7 @@ jobs:
           test -f tools/benchmark.py
           test -f third_party/imgui/LICENSE.txt
           test -f third_party/libdeflate/COPYING
+          test -f third_party/tex-gyre/GUST-FONT-LICENSE.txt
       - name: Python helper syntax and entry points
         run: |
           python3 -m py_compile tests/verify_cli.py tools/benchmark.py scripts/perf_watch.py scripts/engine_ab.py scripts/fresh_process_ab.py scripts/compare_markdown_pdf_tools.py scripts/concurrency_benchmark.py scripts/reversible_pdf_benchmark.py scripts/generate_math_tables.py
