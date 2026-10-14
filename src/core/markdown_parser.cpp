@@ -4,6 +4,7 @@
 #include "html.h"
 #include "inline_markdown.h"
 #include "../common/text_utils.h"
+#include "../common/compiler.h"
 
 #include <algorithm>
 #include <cctype>
@@ -15,14 +16,6 @@
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_IX86)
 #include <emmintrin.h>
 #define FAST_MD_SSE2 1
-#endif
-
-#if defined(__GNUC__) || defined(__clang__)
-#define RAYOMD_NOINLINE __attribute__((noinline))
-#define RAYOMD_HOT_INLINE inline __attribute__((always_inline))
-#else
-#define RAYOMD_NOINLINE
-#define RAYOMD_HOT_INLINE inline
 #endif
 
 namespace TinyPdf::Internal {

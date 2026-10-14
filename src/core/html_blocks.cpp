@@ -4,17 +4,11 @@
 #include "html.h"
 #include "inline_markdown.h"
 #include "markdown_parser.h"
+#include "../common/compiler.h"
 
 #include <algorithm>
 #include <memory>
 #include <utility>
-
-// The mapper's per-byte and per-tag helpers stay inline in this -Os unit.
-#if defined(__GNUC__) || defined(__clang__)
-#define RAYOMD_HOT_INLINE inline __attribute__((always_inline))
-#else
-#define RAYOMD_HOT_INLINE inline
-#endif
 
 namespace TinyPdf::Internal::Html {
 namespace {

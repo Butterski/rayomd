@@ -1,4 +1,5 @@
 #include "highlight.h"
+#include "../common/compiler.h"
 
 #include <array>
 #include <atomic>
@@ -7,12 +8,6 @@
 #include <mutex>
 #include <optional>
 #include <vector>
-
-#if defined(__GNUC__) || defined(__clang__)
-#define RAYOMD_NOINLINE __attribute__((noinline))
-#else
-#define RAYOMD_NOINLINE
-#endif
 
 namespace TinyPdf::Internal {
 namespace {

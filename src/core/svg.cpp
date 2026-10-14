@@ -16,6 +16,7 @@
 
 #include "../common/exact_math.h"
 #include "../common/text_utils.h"
+#include "../common/compiler.h"
 
 #if defined(RAYOMD_LIBM_DLOPEN) && defined(__GLIBC__)
 #include <dlfcn.h>
@@ -118,14 +119,6 @@ constexpr double kPxToPt = 0.75;
 // ---------------------------------------------------------------------------------------------
 // Characters and numbers
 
-// Helpers on the per-byte paths, inlined even at -Os, where GCC leaves small functions (and
-// std::string_view's) out of line.
-#if defined(__GNUC__) || defined(__clang__)
-#define SVG_INLINE inline __attribute__((always_inline))
-#else
-#define SVG_INLINE inline
-#endif
-
 // Byte classes for one-lookup scans.
 enum : uint8_t {
     kByteSpace = 1,       // SVG white space: space, tab, line feed, carriage return, form feed
@@ -147,13 +140,15 @@ constexpr std::array<uint8_t, 256> MakeByteClasses() {
 }
 constexpr std::array<uint8_t, 256> kByteClasses = MakeByteClasses();
 
-SVG_INLINE bool HasClass(char ch, uint8_t mask) { return (kByteClasses[static_cast<unsigned char>(ch)] & mask) != 0; }
-SVG_INLINE bool IsDigit(char ch) { return static_cast<unsigned char>(ch - '0') < 10; }
-SVG_INLINE bool IsSpace(char ch) { return HasClass(ch, kByteSpace); }
-SVG_INLINE bool IsAlpha(char ch) { return static_cast<unsigned char>((ch | 0x20) - 'a') < 26; }
-SVG_INLINE char Lower(char ch) { return static_cast<unsigned char>(ch - 'A') < 26 ? static_cast<char>(ch + 32) : ch; }
+// Helpers on the per-byte paths, inlined even at -Os, where GCC leaves small functions (and
+// std::string_view's) out of line.
+RAYOMD_HOT_INLINE bool HasClass(char ch, uint8_t mask) { return (kByteClasses[static_cast<unsigned char>(ch)] & mask) != 0; }
+RAYOMD_HOT_INLINE bool IsDigit(char ch) { return static_cast<unsigned char>(ch - '0') < 10; }
+RAYOMD_HOT_INLINE bool IsSpace(char ch) { return HasClass(ch, kByteSpace); }
+RAYOMD_HOT_INLINE bool IsAlpha(char ch) { return static_cast<unsigned char>((ch | 0x20) - 'a') < 26; }
+RAYOMD_HOT_INLINE char Lower(char ch) { return static_cast<unsigned char>(ch - 'A') < 26 ? static_cast<char>(ch + 32) : ch; }
 
-SVG_INLINE bool Equal(const char* a, const char* b, size_t size) {
+RAYOMD_HOT_INLINE bool Equal(const char* a, const char* b, size_t size) {
     for (size_t index = 0; index < size; index++) {
         if (a[index] != b[index]) return false;
     }
@@ -162,17 +157,17 @@ SVG_INLINE bool Equal(const char* a, const char* b, size_t size) {
 
 // `text` equals a literal: its length known when compiled, without strlen or a call.
 template <size_t N>
-SVG_INLINE bool operator==(std::string_view text, const char (&literal)[N]) {
+RAYOMD_HOT_INLINE bool operator==(std::string_view text, const char (&literal)[N]) {
     return text.size() == N - 1 && Equal(text.data(), literal, N - 1);
 }
 template <size_t N>
-SVG_INLINE bool operator!=(std::string_view text, const char (&literal)[N]) {
+RAYOMD_HOT_INLINE bool operator!=(std::string_view text, const char (&literal)[N]) {
     return !(text == literal);
 }
 
 // `text` holds a literal at `at`.
 template <size_t N>
-SVG_INLINE bool StartsAt(std::string_view text, size_t at, const char (&literal)[N]) {
+RAYOMD_HOT_INLINE bool StartsAt(std::string_view text, size_t at, const char (&literal)[N]) {
     return at <= text.size() && text.size() - at >= N - 1 && Equal(text.data() + at, literal, N - 1);
 }
 
@@ -180,11 +175,11 @@ SVG_INLINE bool StartsAt(std::string_view text, size_t at, const char (&literal)
 struct Name {
     std::string_view text;
     template <size_t N>
-    SVG_INLINE constexpr Name(const char (&literal)[N]) : text(literal, N - 1) {}
-    SVG_INLINE constexpr Name(std::string_view view) : text(view) {}
+    RAYOMD_HOT_INLINE constexpr Name(const char (&literal)[N]) : text(literal, N - 1) {}
+    RAYOMD_HOT_INLINE constexpr Name(std::string_view view) : text(view) {}
 };
 
-SVG_INLINE bool Same(std::string_view a, std::string_view b) {
+RAYOMD_HOT_INLINE bool Same(std::string_view a, std::string_view b) {
     return a.size() == b.size() && Equal(a.data(), b.data(), a.size());
 }
 
@@ -209,12 +204,12 @@ bool StartsWithIgnoreCase(std::string_view text, Name prefix) {
     return text.size() >= prefix.text.size() && EqualsIgnoreCase(std::string_view(text.data(), prefix.text.size()), prefix);
 }
 
-SVG_INLINE void SkipSpace(const char*& at, const char* end) {
+RAYOMD_HOT_INLINE void SkipSpace(const char*& at, const char* end) {
     while (at < end && IsSpace(*at)) at++;
 }
 
 // Skips SVG's comma-wsp: white space with at most one comma.
-SVG_INLINE void SkipCommaSpace(const char*& at, const char* end) {
+RAYOMD_HOT_INLINE void SkipCommaSpace(const char*& at, const char* end) {
     SkipSpace(at, end);
     if (at < end && *at == ',') {
         at++;

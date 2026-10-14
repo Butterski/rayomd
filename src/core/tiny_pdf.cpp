@@ -7,6 +7,7 @@
 #include "../common/profiling.h"
 #include "../common/exact_math.h"
 #include "../common/text_utils.h"
+#include "../common/compiler.h"
 #include "book.h"
 #include "cff.h"
 #include "image_cache.h"
@@ -91,21 +92,6 @@ namespace TinyPdf {
 // out of line and optimised for size, so they stay away from the hot text path.
 // RAYOMD_SHARED keeps one copy of a sizeable helper that several block types call, instead
 // of one inlined into each or a clone for the constant arguments of one caller.
-#if defined(__GNUC__) || defined(__clang__)
-#define RAYOMD_HOT_INLINE inline __attribute__((always_inline))
-#define RAYOMD_HOT_LAMBDA __attribute__((always_inline))
-#define RAYOMD_COLD __attribute__((cold, noinline))
-#if defined(__clang__)
-#define RAYOMD_SHARED __attribute__((noinline))
-#else
-#define RAYOMD_SHARED __attribute__((noinline, noclone))
-#endif
-#else
-#define RAYOMD_HOT_INLINE inline
-#define RAYOMD_HOT_LAMBDA
-#define RAYOMD_COLD
-#define RAYOMD_SHARED
-#endif
 
 using CidList = std::vector<uint16_t>;
 

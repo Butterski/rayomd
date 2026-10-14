@@ -1,19 +1,12 @@
 #include "inline_markdown.h"
 #include "html.h"
 #include "../common/text_utils.h"
+#include "../common/compiler.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <memory>
-
-#if defined(__GNUC__) || defined(__clang__)
-#define RAYOMD_NOINLINE __attribute__((noinline))
-#define RAYOMD_HOT_INLINE inline __attribute__((always_inline))
-#else
-#define RAYOMD_NOINLINE
-#define RAYOMD_HOT_INLINE inline
-#endif
 
 namespace TinyPdf::Internal {
 namespace {

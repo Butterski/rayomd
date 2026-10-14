@@ -1,5 +1,7 @@
 #pragma once
 
+#include "compiler.h"
+
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -115,10 +117,7 @@ inline constexpr std::array<unsigned char, 256> kByteClasses = MakeByteClasses()
 
 // True when `text` contains a byte of any class in `mask`. Always inlined: its callers are hot
 // scanners, and tiny_pdf.cpp sits at GCC's inlining limit, where an edit left it out of line.
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((always_inline))
-#endif
-inline bool ContainsByteClass(std::string_view text, unsigned char mask) {
+RAYOMD_HOT_INLINE bool ContainsByteClass(std::string_view text, unsigned char mask) {
     const unsigned char* at = reinterpret_cast<const unsigned char*>(text.data());
     size_t left = text.size();
     const auto& classes = Detail::kByteClasses;

@@ -327,6 +327,10 @@ Important image/link details:
   `sincos` and `tan` are loaded from libm.so.6 on first use; a new transcendental function goes
   there too.
 
+- `src/common/compiler.h`
+  The inlining hints every translation unit uses: `RAYOMD_HOT_INLINE`, `RAYOMD_HOT_LAMBDA`,
+  `RAYOMD_NOINLINE`, `RAYOMD_COLD` and `RAYOMD_SHARED`. Define them here only, never per file.
+
 - `src/hot.ld` and `scripts/hot_sections.py`
   The order in which GNU ld places the code fresh exports run (Release, Linux, dynamic and
   static). Generated, never edited by hand; regenerate with the script (its docstring has the

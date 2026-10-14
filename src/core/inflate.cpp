@@ -1,6 +1,7 @@
 #include "inflate.h"
 
 #include "flate.h"
+#include "../common/compiler.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -13,12 +14,6 @@
 
 namespace RayoMd::Inflate {
 namespace {
-
-#if defined(__GNUC__)
-#define RAYOMD_INFLATE_INLINE inline __attribute__((always_inline))
-#else
-#define RAYOMD_INFLATE_INLINE inline
-#endif
 
 constexpr size_t kWindow = 32768;
 // Past the target the fast loop may write two literals and a match of 258 bytes, whose copy goes
@@ -170,7 +165,7 @@ inline uint64_t Load64(const uint8_t* at) {
 inline void Store64(uint8_t* at, uint64_t value) { std::memcpy(at, &value, 8); }
 
 // The entry for the code at the bottom of `bits`, through its subtable when it is longer than `root`.
-RAYOMD_INFLATE_INLINE uint32_t Lookup(const uint32_t* table, uint64_t bits, unsigned root) {
+RAYOMD_HOT_INLINE uint32_t Lookup(const uint32_t* table, uint64_t bits, unsigned root) {
     uint32_t entry = table[bits & ((uint64_t(1) << root) - 1)];
     if ((entry & kKindMask) == kSubtable) {
         entry = table[Value(entry) + ((bits >> root) & ((uint64_t(1) << Field(entry)) - 1))];
@@ -179,7 +174,7 @@ RAYOMD_INFLATE_INLINE uint32_t Lookup(const uint32_t* table, uint64_t bits, unsi
 }
 
 // Copies a match of `length` bytes from `back` bytes before `to`, up to 31 bytes past its end.
-RAYOMD_INFLATE_INLINE void CopyMatch(uint8_t* to, size_t back, size_t length) {
+RAYOMD_HOT_INLINE void CopyMatch(uint8_t* to, size_t back, size_t length) {
     const uint8_t* from = to - back;
     uint8_t* const stop = to + length;
 #if RAYOMD_INFLATE_SSE2
