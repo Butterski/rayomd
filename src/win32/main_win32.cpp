@@ -50,12 +50,6 @@
 #endif
 
 #ifdef _WIN32
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "comdlg32.lib")
-#pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "ole32.lib")
-
 #include "imgui/imgui.h"
 #include "imgui/backends/imgui_impl_win32.h"
 #include "imgui/backends/imgui_impl_dx11.h"
@@ -1918,8 +1912,6 @@ void RenderMainFrame(HWND hWnd, ImGuiIO& io) {
     draw->AddRectFilled(win, ImVec2(win.x + width, win.y + headerH), Rgba32(9, 12, 18));
     draw->AddLine(ImVec2(win.x, win.y + headerH), ImVec2(win.x + width, win.y + headerH), Rgba32(31, 39, 53, 210));
 
-    ImFont* strongFont = g_fontStrong ? g_fontStrong : ImGui::GetFont();
-    float strongSize = strongFont->LegacySize;
     ImFont* titleFont = g_fontTitle ? g_fontTitle : ImGui::GetFont();
     float titleSizePx = titleFont->LegacySize;
 

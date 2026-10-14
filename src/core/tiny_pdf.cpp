@@ -1041,13 +1041,6 @@ static void AppendF(std::string& out, double v) {
     RayoMd::Text::AppendFixed2(out, v);
 }
 
-static std::string F(double v) {
-    std::string s;
-    s.reserve(16);
-    AppendF(s, v);
-    return s;
-}
-
 static void AppendInt(std::string& out, int value) {
     char buf[24];
     auto result = std::to_chars(buf, buf + sizeof(buf), value);
@@ -2326,7 +2319,7 @@ static bool TryCanonicalForPolicy(
 }
 
 static bool PathPartEqualForPolicy(
-    const std::filesystem::path& a, const std::filesystem::path& b, bool exact) {
+    const std::filesystem::path& a, const std::filesystem::path& b, [[maybe_unused]] bool exact) {
     std::string left = a.u8string();
     std::string right = b.u8string();
 #ifdef _WIN32
@@ -10350,7 +10343,7 @@ private:
         out.Lit(") Tj ET Q\n");
     }
 
-    void DrawTextLine(double x, double size, std::string_view line, const char* fontName = "F1", const char* color = "0.08 0.08 0.08", bool mono = false) {
+    void DrawTextLine(double x, double size, std::string_view line, const char* fontName = "F1", const char* color = "0.08 0.08 0.08", [[maybe_unused]] bool mono = false) {
         double lh = size * 1.35;
         Ensure(lh);
         Text(x, y - size, size, line, fontName, color);

@@ -49,23 +49,9 @@ static std::string ToString(std::string_view s) {
     return std::string(s.data(), s.size());
 }
 
-static std::string LTrim(std::string s) {
-    std::string_view v = LTrimView(s);
-    return ToString(v);
-}
-
-static std::string RTrim(std::string s) {
-    std::string_view v = RTrimView(s);
-    return ToString(v);
-}
-
 static std::string Trim(std::string s) {
     std::string_view v = TrimView(s);
     return ToString(v);
-}
-
-static bool StartsWith(const std::string& s, const char* prefix) {
-    return StartsWith(std::string_view(s), std::string_view(prefix, strlen(prefix)));
 }
 
 // The lines of `text` into `lines`, which it empties first.
@@ -194,18 +180,6 @@ static std::string_view TrimHeadingClosingSequence(std::string_view view) {
     return RTrimView(view.substr(0, hashStart));
 }
 
-static bool ParseHeading(std::string_view line, int& level, std::string& text) {
-    std::string_view s = LTrimView(line);
-    int count = 0;
-    while (count < (int)s.size() && s[count] == '#') count++;
-    if (count < 1 || count > 6) return false;
-    if ((int)s.size() > count && !IsSpace(s[count])) return false;
-    level = count;
-    std::string_view view = TrimHeadingClosingSequence(TrimView(s.substr(count)));
-    text = ToString(view);
-    return true;
-}
-
 static bool ParseHeadingView(std::string_view line, int& level, std::string_view& text) {
     std::string_view s = LTrimView(line);
     int count = 0;
@@ -227,17 +201,6 @@ static int CountIndent(std::string_view line) {
     return indent;
 }
 
-static bool ParseBullet(std::string_view line, int& level, std::string& text) {
-    std::string_view s = LTrimView(line);
-    if (s.size() < 2) return false;
-    if ((s[0] == '-' || s[0] == '*' || s[0] == '+') && IsSpace(s[1])) {
-        level = std::min(4, CountIndent(line) / 4);
-        text = ToString(TrimView(s.substr(2)));
-        return true;
-    }
-    return false;
-}
-
 static bool ParseBulletView(std::string_view line, int& level, std::string_view& text) {
     std::string_view s = LTrimView(line);
     if (s.size() < 2) return false;
@@ -247,19 +210,6 @@ static bool ParseBulletView(std::string_view line, int& level, std::string_view&
         return true;
     }
     return false;
-}
-
-static bool ParseNumbered(std::string_view line, int& level, int& number, std::string& text) {
-    std::string_view s = LTrimView(line);
-    size_t i = 0;
-    while (i < s.size() && std::isdigit((unsigned char)s[i])) i++;
-    if (i == 0 || i >= s.size()) return false;
-    if ((s[i] != '.' && s[i] != ')') || i + 1 >= s.size() || !IsSpace(s[i + 1])) return false;
-    level = std::min(4, CountIndent(line) / 4);
-    number = 0;
-    for (size_t j = 0; j < i; j++) number = number * 10 + (s[j] - '0');
-    text = ToString(TrimView(s.substr(i + 2)));
-    return true;
 }
 
 static bool ParseNumberedView(std::string_view line, int& level, int& number, std::string_view& text) {
