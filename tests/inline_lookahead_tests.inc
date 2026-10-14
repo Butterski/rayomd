@@ -130,6 +130,10 @@ bool CheckInlineLookahead() {
     large.push_back(Repeat("<a x=\"", 100000) + "\n");
     large.push_back(Repeat("<b>", 200000) + "\n");
     large.push_back(Repeat("<sup>", 100000) + "\n");
+    // HTML blocks: 100,000 lines of open elements, and lists, quotes and tables never closed,
+    // whose close tags must not be searched for once each.
+    large.push_back(Repeat("<div>\n", 100000) + "text\n");
+    large.push_back(Repeat("<ul>\n<blockquote>\n<table>\n", 30000) + "text\n");
     const auto started = std::chrono::steady_clock::now();
     for (const std::string& input : large) {
         std::vector<TinyPdf::Internal::Block> blocks = TinyPdf::Internal::ParseMarkdown(input);

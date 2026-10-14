@@ -1,6 +1,7 @@
 #include "markdown_parser.h"
 #include "footnotes.h"
 #include "highlight.h"
+#include "html.h"
 #include "inline_markdown.h"
 #include "../common/text_utils.h"
 
@@ -27,18 +28,27 @@ static bool IsSpace(char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
-static std::string_view LTrimView(std::string_view s) {
+// The trims are always inlined: every line the parser classifies is trimmed, and left to GCC
+// these calls moved out of line whenever unrelated code in this file changed (+0.4 to 0.9 %
+// instructions on small documents).
+#if defined(__GNUC__) || defined(__clang__)
+#define RAYOMD_TRIM_INLINE inline __attribute__((always_inline))
+#else
+#define RAYOMD_TRIM_INLINE inline
+#endif
+
+static RAYOMD_TRIM_INLINE std::string_view LTrimView(std::string_view s) {
     size_t i = 0;
     while (i < s.size() && IsSpace(s[i])) i++;
     return s.substr(i);
 }
 
-static std::string_view RTrimView(std::string_view s) {
+static RAYOMD_TRIM_INLINE std::string_view RTrimView(std::string_view s) {
     while (!s.empty() && IsSpace(s.back())) s.remove_suffix(1);
     return s;
 }
 
-static std::string_view TrimView(std::string_view s) {
+static RAYOMD_TRIM_INLINE std::string_view TrimView(std::string_view s) {
     return RTrimView(LTrimView(s));
 }
 
@@ -637,6 +647,32 @@ static bool ParseStandaloneImage(std::string_view line, ImageSyntax* image) {
     return true;
 }
 
+// For HTML's rows of images (html.cpp): ParseStandaloneImage at a position, without the rest
+// of the line. Out of line, apart from the line classifier's use.
+RAYOMD_NOINLINE size_t ParseImageAt(std::string_view s, size_t at, std::string& alt, ImageSource& source) {
+    const size_t start = at + 2 < s.size() && s[at] == '[' && s[at + 1] == '!' && s[at + 2] == '[' ? at + 1 : at;
+    if (s.size() < start + 5 || s[start] != '!' || s[start + 1] != '[') return 0;
+    MarkdownInlineLink link;
+    if (!ParseInlineLinkSyntaxAt(s, start, 2, link)) return 0;
+    size_t end = link.end;
+    std::string target;
+    if (start != at) {
+        if (end + 1 >= s.size() || s[end] != ']' || s[end + 1] != '(') return 0;
+        const size_t targetEnd = FindInlineDestinationEnd(s, end + 1);
+        if (targetEnd == std::string_view::npos ||
+            !ExtractMarkdownDestination(s.substr(end + 2, targetEnd - (end + 2)), target)) {
+            return 0;
+        }
+        end = targetEnd + 1;
+    }
+    std::string src;
+    if (!ExtractMarkdownDestination(link.target, src)) return 0;
+    alt = StripInlineMarkdown(link.label);
+    source.src = std::move(src);
+    source.link = std::move(target);
+    return end;
+}
+
 static Block ImageBlock(ImageSyntax&& image) {
     Block block;
     block.type = BlockType::Image;
@@ -840,7 +876,8 @@ enum class LineKind {
     Quote,
     PageBreak,
     Image,
-    HtmlComment     // starts with "<!--": not shown, up to the line with "-->"
+    HtmlComment,    // starts with "<!--": not shown, up to the line with "-->"
+    HtmlBlock       // starts an HTML block; LineInfo::level is its start condition (1-7)
 };
 
 struct LineInfo {
@@ -953,6 +990,22 @@ static bool ClassifyMathLine(LineInfo& info) {
     return true;
 }
 
+// A line that begins with '<': an HTML comment, or the start of an HTML block (CommonMark's start
+// condition, after at most three columns of indentation) in `info`; false for neither. Out of
+// line: ClassifyLine reads every line of every document, and this little of them.
+static RAYOMD_NOINLINE bool ClassifyHtmlLine(std::string_view line, LineInfo& info) {
+    const std::string_view trimmed = info.trimmed;
+    if (trimmed.size() >= 4 && trimmed[1] == '!' && trimmed[2] == '-' && trimmed[3] == '-') {
+        info.kind = LineKind::HtmlComment;
+        return true;
+    }
+    const int condition = LeadingColumns(line) > 3 ? 0 : Html::HtmlBlockStart(trimmed);
+    if (condition == 0) return false;
+    info.kind = LineKind::HtmlBlock;
+    info.level = condition;
+    return true;
+}
+
 static LineInfo ClassifyLine(std::string_view line) {
     LineInfo info;
     info.trimmed = TrimView(line);
@@ -978,11 +1031,7 @@ static LineInfo ClassifyLine(std::string_view line) {
         info.kind = LineKind::PageBreak;
         return info;
     }
-    if (info.trimmed.size() >= 4 && info.trimmed[0] == '<' && info.trimmed[1] == '!' && info.trimmed[2] == '-' &&
-        info.trimmed[3] == '-') {
-        info.kind = LineKind::HtmlComment;
-        return info;
-    }
+    if (info.trimmed[0] == '<' && ClassifyHtmlLine(line, info)) return info;
     if (ParseStandaloneImage(info.trimmed, nullptr)) {
         info.kind = LineKind::Image;
         return info;
@@ -1014,8 +1063,10 @@ static LineInfo ClassifyLine(std::string_view line) {
     return info;
 }
 
+// A line that interrupts a paragraph. An HTML block of start condition 7 (any other complete tag
+// alone on its line) does not.
 static bool IsBlockStart(const LineInfo& info) {
-    return info.kind != LineKind::Plain;
+    return info.kind != LineKind::Plain && (info.kind != LineKind::HtmlBlock || info.level != 7);
 }
 
 // True when ParseMarkdownImpl would turn `text` into exactly one paragraph whose text is
@@ -1263,6 +1314,10 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
     std::vector<Block> blocks;
     blocks.reserve(std::min(lines.size(), std::max<size_t>(8, lines.size() / 2)));
     size_t i = 0;
+    // The HTML elements HTML blocks left open at this level, and where each HTML block's blocks
+    // are with the alignment those elements give the blocks after it (Html::ApplyAlignments).
+    Html::HtmlState htmlState;
+    std::vector<Html::Alignment> alignments;
 
     if (!infos.empty() && infos[0].trimmed == "---") {
         size_t frontMatterEnd = 1;
@@ -1275,6 +1330,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
     }
 
     while (i < lines.size()) {
+
         if (isSuppressed(i)) {
             i++;
             continue;
@@ -1508,6 +1564,11 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             continue;
         }
 
+        if (info.kind == LineKind::HtmlBlock) {
+            i = Html::MapBlockLines(lines, i, info.level, htmlState, blocks, alignments);
+            continue;
+        }
+
         if (info.kind == LineKind::Image) {
             ImageSyntax image;
             ParseStandaloneImage(line, &image);
@@ -1635,8 +1696,13 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             i++;
         }
         if (!definitions.empty() && paragraph.find('[') != std::string::npos) paragraph = ResolveReferenceLinks(paragraph, definitions);
+        // A paragraph of only images (a row of them) or only an <a id>: html.cpp's.
+        if ((paragraph[0] == '<' || paragraph[0] == '!' || paragraph[0] == '[') && Html::MapParagraph(paragraph, blocks)) {
+            continue;
+        }
         AppendBlock(blocks, BlockType::Paragraph).text = std::move(paragraph);
     }
+    if (!alignments.empty()) Html::ApplyAlignments(blocks, alignments);
 
     return blocks;
 }

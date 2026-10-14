@@ -4655,13 +4655,14 @@ RAYOMD_COLD static void AppendFootnoteRule(std::string& c, const char* color, do
 // it, whose annotation is then reserved, or nowhere, when the place it names does not exist.
 enum class LinkTarget : uint8_t { External, Reserved, Dropped };
 
-// The headings that links to "#anchor" name. The anchors are made at the first such link, so a
-// document without one (links to footnotes and table entries do not count) does no work for them.
+// The headings that links to "#anchor" name, and the ids of HTML elements (Block::Anchor), each
+// exactly as written. The anchors are made at the first such link, so a document without one
+// (links to footnotes and table entries do not count) does no work for them.
 class HeadingTargets {
 public:
     HeadingTargets(const std::vector<HeadingMark>& headingMarks, bool winAnsiText, double pageHeight,
-        const NoteMarks& noteMarks)
-        : headings(headingMarks), winAnsi(winAnsiText), pageTop(pageHeight), notes(noteMarks) {}
+        const NoteMarks& noteMarks, const std::vector<HeadingMark>* idMarks = nullptr)
+        : headings(headingMarks), winAnsi(winAnsiText), pageTop(pageHeight), notes(noteMarks), ids(idMarks) {}
 
     // The heading of each entry of the table of contents, an index into the headings, or npos.
     void SetContents(const std::vector<size_t>* entryHeadings) { contents = entryHeadings; }
@@ -4694,7 +4695,7 @@ public:
         auto found = anchors.find(fragment);
         if (found == anchors.end()) found = anchors.find(HeadingSlug(fragment));
         if (found != anchors.end()) {
-            const HeadingMark& heading = headings[found->second.heading];
+            const HeadingMark& heading = Mark(found->second.heading);
             out.push_back({ pdf.Reserve(), &link, heading.page, heading.top + 4.0 });
             return true;
         }
@@ -4717,7 +4718,7 @@ private:
     };
 
     // Every heading's anchor, a repeated one numbered "-1", "-2", ... as on GitHub, skipping a
-    // number that is already another heading's anchor.
+    // number that is already another heading's anchor; then every HTML id that is no heading's.
     RAYOMD_COLD void Index() {
         indexed = true;
         std::string utf8;
@@ -4735,6 +4736,16 @@ private:
             }
             anchors.emplace(std::move(anchor), Anchor{ index, 0 });
         }
+        for (size_t index = 0; ids != nullptr && index < ids->size(); index++) {
+            std::string id((*ids)[index].text);
+            if (winAnsi && !IsAllAscii(id)) id = RayoMd::Text::WinAnsiToUtf8(id);
+            anchors.emplace(std::move(id), Anchor{ headings.size() + index, 0 });
+        }
+    }
+
+    // Heading `index`, or after the headings, HTML id `index - headings.size()`.
+    const HeadingMark& Mark(size_t index) const {
+        return index < headings.size() ? headings[index] : (*ids)[index - headings.size()];
     }
 
     // A link to a footnote or back to its first reference; false when it names neither.
@@ -4760,6 +4771,7 @@ private:
     std::unordered_map<std::string, Anchor> anchors;
     const NoteMarks& notes;
     const std::vector<size_t>* contents = nullptr;
+    const std::vector<HeadingMark>* ids = nullptr;     // where the HTML ids are, in their text
 };
 
 // "<< /Type /Annot /Subtype /Link /Rect [...] /Border [0 0 0]": the start of a link annotation;
@@ -5269,10 +5281,11 @@ constexpr double kHeadingSizes[] = { 0, 26, 22, 18, 15, 13, 12 };
 
 // The room a heading keeps under its first line, so that it never ends a page: the space after
 // it, the headings right after it (each with its space before and after and its first line)
-// and two lines of what follows them, unless nothing or a page break does.
+// and two lines of what follows them, unless nothing or a page break does. Anchors draw nothing.
 static double HeadingKeep(const Block& heading, const Block* next, const Block* end, double lineHeight) {
     double keep = std::max(1, std::min(6, heading.level)) <= 2 ? 8.0 : 5.0;
-    for (; next != end && next->type == BlockType::Heading; next++) {
+    for (; next != end && (next->type == BlockType::Heading || next->type == BlockType::Anchor); next++) {
+        if (next->type == BlockType::Anchor) continue;
         const int level = std::max(1, std::min(6, next->level));
         keep += (level <= 2 ? 20.0 : 13.0) + kHeadingSizes[level] * 1.35;
     }
@@ -5343,6 +5356,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         case BlockType::PageBreak: break;
         case BlockType::Image: renderer.RenderImage(block); break;
         case BlockType::Contents: renderer.RenderContents(); break;
+        case BlockType::Anchor: renderer.MarkAnchor(block.text); break;
         }
     }
     renderer.TagLeaveBlocks();
@@ -5450,18 +5464,21 @@ RAYOMD_COLD static void RenderBook(RendererType& renderer, ImageRegistry& images
 // of the table of contents to their headings.
 class BookTargets {
 public:
-    RAYOMD_COLD BookTargets(const std::vector<HeadingMark>& headings, const Book& book, const BookParse& bookParse,
-        bool winAnsiText, double pageHeight, const std::vector<size_t>* contentsHeadings)
+    RAYOMD_COLD BookTargets(const std::vector<HeadingMark>& headings, const std::vector<HeadingMark>& ids, const Book& book,
+        const BookParse& bookParse, bool winAnsiText, double pageHeight, const std::vector<size_t>* contentsHeadings)
         : marks(headings), chapters(book.chapters), parse(bookParse), winAnsi(winAnsiText), pageTop(pageHeight),
           contents(contentsHeadings), files(book.chapters.size()) {
         size_t mark = 0;
+        size_t id = 0;
         for (size_t index = 0; index < files.size(); index++) {
             File& file = files[index];
             // The marks of the pages from the file's first to the next one's; none of those before.
             const size_t end = index + 1 < files.size() ? parse.firstPages[index + 1] : std::string::npos;
             while (mark < marks.size() && marks[mark].page < parse.firstPages[index]) mark++;
             while (mark < marks.size() && marks[mark].page < end) file.marks.push_back(marks[mark++]);
-            file.targets = std::make_unique<HeadingTargets>(file.marks, winAnsi, pageTop, parse.noteMarks[index]);
+            while (id < ids.size() && ids[id].page < parse.firstPages[index]) id++;
+            while (id < ids.size() && ids[id].page < end) file.ids.push_back(ids[id++]);
+            file.targets = std::make_unique<HeadingTargets>(file.marks, winAnsi, pageTop, parse.noteMarks[index], &file.ids);
             if (!chapters[index].part) file.path = PathToUtf8(PathFromUtf8(chapters[index].path).lexically_normal());
         }
     }
@@ -5490,11 +5507,12 @@ public:
 private:
     static constexpr size_t kNone = std::string::npos;
 
-    // A file's path, normalized (none for a part), its headings, and the targets of its links
-    // (HeadingTargets keeps references to the headings).
+    // A file's path, normalized (none for a part), its headings and HTML ids, and the targets of
+    // its links (HeadingTargets keeps references to the headings and ids).
     struct File {
         std::string path;
         std::vector<HeadingMark> marks;
+        std::vector<HeadingMark> ids;
         std::unique_ptr<HeadingTargets> targets;
     };
 
@@ -5693,6 +5711,7 @@ public:
     // PdfOptions::highlightCode off: every code block in one colour.
     void DisableHighlighting() { highlightCode = false; }
     const std::vector<HeadingMark>& Headings() const { return headings; }
+    const std::vector<HeadingMark>& Ids() const { return ids; }
     const NoteMarks& Notes() const { return noteMarks; }
     double Margin() const { return margin; }
     double PageWidth() const { return pageW; }
@@ -5724,6 +5743,7 @@ private:
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     std::vector<HeadingMark> headings;
+    std::vector<HeadingMark> ids;   // where the HTML ids (Block::Anchor) are, for "#id" links
     // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
     // the alert it is in.
     const char* const headingColor;
@@ -5739,6 +5759,10 @@ private:
         if (text.empty()) return;
         if (firstLine > 0.0) Ensure(firstLine);
         headings.push_back({ level, text, pageStarts.size() - 1, y });
+    }
+    // An HTML id: "#id" links go where the next block starts.
+    RAYOMD_COLD void MarkAnchor(const std::string& id) {
+        if (!id.empty()) ids.push_back({ 0, id, pageStarts.size() - 1, y });
     }
     KeptCidSet keptCids;
     UsedCidSet& usedCids = keptCids.Get();
@@ -7112,7 +7136,7 @@ private:
         if (tags != nullptr) tags->LeaveBlocks();
     }
     void TagBlock(const Block& block) {
-        if (tags == nullptr) return;
+        if (tags == nullptr || block.type == BlockType::Anchor) return;
         const bool item = block.type == BlockType::Bullet || block.type == BlockType::Numbered;
         tags->Block(item, block.task != 0 ? Internal::ListKind::Task
             : block.type == BlockType::Numbered ? Internal::ListKind::Ordered : Internal::ListKind::Bullet, block.level,
@@ -7498,6 +7522,7 @@ private:
             }
             case BlockType::PageBreak: RenderPageBreak(); break;
             case BlockType::Contents: break;
+            case BlockType::Anchor: MarkAnchor(child.text); break;
             }
         }
     }
@@ -8891,6 +8916,7 @@ public:
     bool MathUsed() const { return math.Used(); }
     const Internal::MathGlyphUse& MathGlyphs() const { return math.Glyphs(); }
     const std::vector<HeadingMark>& Headings() const { return headings; }
+    const std::vector<HeadingMark>& Ids() const { return ids; }
     const NoteMarks& Notes() const { return noteMarks; }
     double Margin() const { return margin; }
     double PageWidth() const { return pageW; }
@@ -8926,6 +8952,7 @@ private:
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     std::vector<HeadingMark> headings;
+    std::vector<HeadingMark> ids;   // where the HTML ids (Block::Anchor) are, for "#id" links
     // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
     // the alert it is in.
     const char* const headingColor;
@@ -8941,6 +8968,10 @@ private:
         if (text.empty()) return;
         if (firstLine > 0.0) Ensure(firstLine);
         headings.push_back({ level, text, pageStarts.size() - 1, y });
+    }
+    // An HTML id: "#id" links go where the next block starts.
+    RAYOMD_COLD void MarkAnchor(const std::string& id) {
+        if (!id.empty()) ids.push_back({ 0, id, pageStarts.size() - 1, y });
     }
     MathPool math;
     const Internal::Footnotes* footnotes = nullptr;
@@ -10286,6 +10317,7 @@ private:
             }
             case BlockType::PageBreak: RenderPageBreak(); break;
             case BlockType::Contents: break;
+            case BlockType::Anchor: MarkAnchor(child.text); break;
             }
         }
     }
@@ -11024,12 +11056,13 @@ RAYOMD_COLD static DocumentMetadata BookMetadata(const Book& book) {
 }
 
 // The link annotations of a book's pages (AddLinkAnnotationObjects, BookTargets), tagged with
-// `tags` (PDF/UA).
+// `tags` (PDF/UA). `ids` are where the HTML ids of its files are drawn.
 RAYOMD_COLD static std::vector<std::vector<int>> AddBookLinkAnnotations(PdfObjects& pdf,
     const std::vector<std::vector<LinkRect>>& links, bool winAnsi, const std::vector<HeadingMark>& headings,
-    const Book& book, const BookParse& parse, double pageTop, const std::vector<size_t>* contents,
-    std::vector<InternalLink>& internalLinks, bool print, Internal::StructTree* tags = nullptr) {
-    BookTargets targets(headings, book, parse, winAnsi, pageTop, contents);
+    const std::vector<HeadingMark>& ids, const Book& book, const BookParse& parse, double pageTop,
+    const std::vector<size_t>* contents, std::vector<InternalLink>& internalLinks, bool print,
+    Internal::StructTree* tags = nullptr) {
+    BookTargets targets(headings, ids, book, parse, winAnsi, pageTop, contents);
     if (tags != nullptr) return AddLinkAnnotationObjects<BookTargets, true>(pdf, links, winAnsi, targets, internalLinks, print, tags);
     return AddLinkAnnotationObjects(pdf, links, winAnsi, targets, internalLinks, print);
 }
@@ -11097,12 +11130,12 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images(), fontRegularId, fontBoldId, options.compress);
     std::vector<size_t> contentsTargets;   // the heading of each entry of the table of contents
     const std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);
-    HeadingTargets headingTargets(headings, winAnsi, renderer.PageHeight(), renderer.Notes());
+    HeadingTargets headingTargets(headings, winAnsi, renderer.PageHeight(), renderer.Notes(), &renderer.Ids());
     if (!contents.empty()) headingTargets.SetContents(&contentsTargets);
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds = book == nullptr
         ? AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks, false)
-        : AddBookLinkAnnotations(pdf, renderer.PageLinks(), winAnsi, headings, *book->book, *bookParse,
+        : AddBookLinkAnnotations(pdf, renderer.PageLinks(), winAnsi, headings, renderer.Ids(), *book->book, *bookParse,
             renderer.PageHeight(), contents.empty() ? nullptr : &contentsTargets, internalLinks, false);
     std::vector<int> mathFontIds;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf, renderer.MathGlyphs(), options.compress);
@@ -11579,11 +11612,11 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     // The table of contents' page numbers, before the font subset is made, which then has their glyphs.
     std::vector<size_t> contentsTargets;   // the heading of each entry of the table of contents
     std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);
-    HeadingTargets headingTargets(headings, false, renderer.PageHeight(), renderer.Notes());
+    HeadingTargets headingTargets(headings, false, renderer.PageHeight(), renderer.Notes(), &renderer.Ids());
     if (!contents.empty()) headingTargets.SetContents(&contentsTargets);
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds = book != nullptr
-        ? AddBookLinkAnnotations(pdf, renderer.PageLinks(), false, headings, *book->book, *bookParse,
+        ? AddBookLinkAnnotations(pdf, renderer.PageLinks(), false, headings, renderer.Ids(), *book->book, *bookParse,
             renderer.PageHeight(), contents.empty() ? nullptr : &contentsTargets, internalLinks, options.pdfa, tags.get())
         : tags ? AddLinkAnnotationObjects<HeadingTargets, true>(pdf, renderer.PageLinks(), false, headingTargets, internalLinks,
             options.pdfa, tags.get())

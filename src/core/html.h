@@ -10,7 +10,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <vector>
+
+namespace TinyPdf::Internal {
+struct Block;
+}
 
 namespace TinyPdf::Internal::Html {
 
@@ -89,5 +95,52 @@ bool HtmlBlockEnds(std::string_view line, int condition);
 // white space and control characters and ignoring tabs and line breaks as browsers do, to a
 // javascript:, vbscript: or data: URL, except data:image/ for an image's source.
 bool SafeUrl(std::string_view url, bool image = false);
+
+// The HTML elements open at one level of a document (the document, a list item, a quote) while
+// ParseMarkdown reads it. An element an HTML block leaves open stays open for the blocks after
+// it, so `<div align="center">`, Markdown, `</div>` centres the Markdown; a later HTML block's
+// close tag ends it. At most kMaxOpen deep; elements beyond are transparent.
+struct HtmlState {
+    static constexpr size_t kMaxOpen = 32;
+    struct Open {
+        Tag tag;
+        uint8_t align;      // Block::align
+    };
+    Open open[kMaxOpen];
+    size_t depth = 0;
+
+    // The alignment of the innermost open element that has one; 0 for none.
+    uint8_t Align() const;
+};
+
+// Appends the blocks of `html`, an HTML block as CommonMark ends it, to `out`: text and inline
+// tags as paragraphs for the inline parser (white space collapsed, Markdown syntax escaped, as
+// CommonMark reads no Markdown inside HTML), and p, div, headings, hr, pre, blockquote, lists,
+// tables, dl, details/summary, captions and images as the blocks they stand for. Each block gets
+// the alignment of the innermost element around it; an id makes an Anchor block.
+void MapBlock(std::string_view html, HtmlState& state, std::vector<Block>& out);
+
+// Where an HTML block's blocks are in a level's blocks, [mapStart, mapEnd), and the alignment the
+// elements it leaves open give the blocks after it, up to the next HTML block (ApplyAlignments).
+struct Alignment {
+    size_t mapStart;
+    size_t mapEnd;
+    uint8_t align;
+};
+
+// MapBlock for the HTML block that starts at lines[start] with start condition `condition`: up to
+// the line that meets its end condition (1-5) or up to a blank line (6, 7), or to the end of the
+// level, its Alignment appended to `alignments`. Returns the index of the line after it.
+size_t MapBlockLines(const std::vector<std::string_view>& lines, size_t start, int condition, HtmlState& state,
+    std::vector<Block>& out, std::vector<Alignment>& alignments);
+
+// Gives each block between HTML blocks that has no alignment of its own the one of the elements
+// left open before it (<div align="center">, Markdown, </div>).
+void ApplyAlignments(std::vector<Block>& blocks, const std::vector<Alignment>& alignments);
+
+// A Markdown paragraph that is HTML's: only an <a id> or <a name> (an Anchor block), or only
+// images, Markdown or <img>, each perhaps linked, apart by white space or <br> (an Image block,
+// with a row for more than one). Appends the block and returns true, or returns false.
+bool MapParagraph(std::string_view paragraph, std::vector<Block>& out);
 
 } // namespace TinyPdf::Internal::Html

@@ -230,9 +230,90 @@ bool CheckInlineHtml() {
     return true;
 }
 
+// HTML blocks as ParseMarkdown maps them: an element left open aligning the Markdown after it,
+// anchors, details and summary, nested lists with a start, a table with its header alignment,
+// <pre>, a quote, headings with ids, sized and linked images in rows, elements dropped with their
+// content, Markdown syntax shown as text, and start condition 7 not interrupting a paragraph.
+bool CheckHtmlBlocks() {
+    using TinyPdf::Internal::Block;
+    using TinyPdf::Internal::BlockType;
+    using TinyPdf::Internal::ParseMarkdown;
+    const auto fail = [](const char* what) {
+        std::cerr << "HTML block mismatch: " << what << std::endl;
+        return false;
+    };
+    std::vector<Block> blocks = ParseMarkdown("<div align=\"center\">\n\n# Title\n\nText\n\n</div>\n\nAfter\n");
+    if (blocks.size() != 3 || blocks[0].type != BlockType::Heading || blocks[0].align != 2 || blocks[1].text != "Text" ||
+        blocks[1].align != 2 || blocks[2].text != "After" || blocks[2].align != 0) {
+        return fail("open div");
+    }
+    blocks = ParseMarkdown("<p align=\"right\"><a href=\"#top\">back</a></p>\n");
+    if (blocks.size() != 1 || blocks[0].type != BlockType::Paragraph || blocks[0].align != 3 ||
+        blocks[0].text != "<a href=\"#top\">back</a>") {
+        return fail("aligned paragraph");
+    }
+    blocks = ParseMarkdown("<a id=\"top\"></a>\n\n# H\n\n<a name=\"low\"></a>\n\n<h2 id=\"sec\">Section *x*</h2>\n");
+    if (blocks.size() != 5 || blocks[0].type != BlockType::Anchor || blocks[0].text != "top" ||
+        blocks[2].type != BlockType::Anchor || blocks[2].text != "low" || blocks[3].type != BlockType::Anchor ||
+        blocks[3].text != "sec" || blocks[4].type != BlockType::Heading || blocks[4].level != 2 ||
+        blocks[4].text != "Section *x*") {
+        return fail("anchors and headings");
+    }
+    blocks = ParseMarkdown("<details open>\n<summary>More</summary>\n\nHidden **md**\n\n</details>\n");
+    if (blocks.size() != 2 || blocks[0].text != "<b>More" || blocks[1].text != "Hidden **md**") return fail("details");
+    blocks = ParseMarkdown("<ul>\n<li>one</li>\n<li>two\n<ol start=\"3\"><li>a</li><li>b</li></ol></li>\n</ul>\n");
+    if (blocks.size() != 2 || blocks[0].type != BlockType::Bullet || blocks[0].text != "one" || blocks[1].text != "two" ||
+        blocks[1].children.size() != 2 || blocks[1].children[0].type != BlockType::Numbered ||
+        blocks[1].children[0].number != 3 || blocks[1].children[1].number != 4 || blocks[1].children[1].text != "b") {
+        return fail("lists");
+    }
+    blocks = ParseMarkdown("<table>\n<tr><th align=\"center\">A</th><th>B</th></tr>\n<tr><td><b>1</b></td></tr>\n</table>\n");
+    if (blocks.size() != 1 || blocks[0].type != BlockType::Table || blocks[0].rows.size() != 2 ||
+        blocks[0].rows[0] != std::vector<std::string>{ "A", "B" } || blocks[0].rows[1] != std::vector<std::string>{ "<b>1</b>", "" } ||
+        blocks[0].aligns != std::vector<int>{ 0, -1 }) {
+        return fail("table");
+    }
+    blocks = ParseMarkdown("<table><tr><td><p>a</p><p>b</p></td></tr></table>\n");
+    if (blocks.size() != 2 || blocks[0].text != "a" || blocks[1].text != "b") return fail("table of blocks");
+    blocks = ParseMarkdown("<pre>\n  x &lt; y\n<b>z</b>\n</pre>\n\n<blockquote>\n<p>quoted</p>\n</blockquote>\n\n<hr>\n");
+    if (blocks.size() != 3 || blocks[0].type != BlockType::Code || blocks[0].text != "  x < y\nz" ||
+        blocks[1].type != BlockType::Quote || blocks[1].children.size() != 1 || blocks[1].children[0].text != "quoted" ||
+        blocks[2].type != BlockType::Rule) {
+        return fail("pre, blockquote, hr");
+    }
+    blocks = ParseMarkdown("<p>\n<img src=\"a.png\" width=\"170\" alt=\"A\">\n</p>\n\n"
+        "[![a](a.png)](https://x.y) <a href=\"https://b.c\"><img src=\"b.png\" alt=\"B\" width=\"50%\"></a><br> ![c](c.png)\n");
+    if (blocks.size() != 2 || blocks[0].type != BlockType::Image || blocks[0].text != "A" || !blocks[0].image ||
+        blocks[0].image->src != "a.png" || blocks[0].image->widthHint != 127.5f || !blocks[0].image->row.empty() ||
+        blocks[1].type != BlockType::Image || blocks[1].image->link != "https://x.y" || blocks[1].image->row.size() != 2 ||
+        blocks[1].image->row[0].src != "b.png" || blocks[1].image->row[0].link != "https://b.c" ||
+        !blocks[1].image->row[0].widthPercent || blocks[1].image->row[0].widthHint != 0.5f ||
+        blocks[1].image->row[0].alt != "B" || blocks[1].image->row[1].src != "c.png") {
+        return fail("images");
+    }
+    blocks = ParseMarkdown("<div>\n<a id=\"row\"></a> <img src=\"a.png\"> <img src=\"b.png\">\n</div>\n");
+    if (blocks.size() != 2 || blocks[0].type != BlockType::Anchor || blocks[0].text != "row" ||
+        blocks[1].type != BlockType::Image || blocks[1].image->row.size() != 1) {
+        return fail("an anchor before images");
+    }
+    blocks = ParseMarkdown("<script>\nalert(1)\n</script>\n\n<div>\na*b*c $x$ ~~s~~ [l](u)\n</div>\n\ntext\n<span>\nmore\n");
+    if (blocks.size() != 2 || blocks[1].text != "text <span> more") return fail("dropped content and condition 7");
+    const std::vector<TinyPdf::Internal::InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(blocks[0].text);
+    if (spans.size() != 1 || spans[0].text != "a*b*c $x$ ~~s~~ [l](u)" || spans[0].bold || spans[0].italic || spans[0].strike) {
+        return fail("Markdown inside HTML");
+    }
+    // An id is a link target, the name exactly as written; a link to an id no element has is dropped.
+    std::string pdf;
+    if (!Build("<a id=\"Target-X\"></a>\n\n# Title\n\n\\pagebreak\n\n[to](#Target-X) and [gone](#nope).\n", pdf) ||
+        CountOccurrences(pdf, "/Subtype /Link") != 1 || pdf.find("/Dest [") == std::string::npos) {
+        return fail("links to ids");
+    }
+    return true;
+}
+
 bool CheckHtmlEngine() {
     return CheckTagNames() && CheckRawHtml() && CheckHtmlBlockConditions() && CheckTagLimits() && CheckSafeUrls() &&
-        CheckInlineHtml();
+        CheckInlineHtml() && CheckHtmlBlocks();
 }
 
 } // namespace html_tests

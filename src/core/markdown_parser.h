@@ -23,6 +23,9 @@ enum class BlockType {
     Image,
     // The table of contents (contents.h), which the builder places after the parse.
     Contents,
+    // An HTML element's id (or an <a name>): a target for "#id" links where it stands. Its
+    // text is the id; it draws nothing.
+    Anchor,
 };
 
 // Where an image block's picture comes from, and for a linked image, "[![alt](src)](target)",
@@ -30,6 +33,15 @@ enum class BlockType {
 struct ImageSource {
     std::string src;
     std::string link;
+    // An HTML <img>'s width and height attributes in points (pixels times 0.75), 0 when not
+    // given; with `widthPercent`, widthHint is a fraction of the text width.
+    float widthHint = 0.0f;
+    float heightHint = 0.0f;
+    bool widthPercent = false;
+    // In a row of images (a paragraph of nothing else): the alt text of this one, and in the
+    // first, the images after it. The first image's alt text is its block's text.
+    std::string alt;
+    std::vector<ImageSource> row;
 };
 
 struct Block {
@@ -62,7 +74,11 @@ struct Block {
     // The renderers look for those bytes only when this flag is set, so control
     // bytes in ordinary input can never be mistaken for a formula.
     bool hasMath = false;
+    // The alignment of an HTML element around the block (align="center", <center>): 0 for
+    // none, 1 left, 2 centred, 3 right. In the padding after hasMath.
+    uint8_t align = 0;
 };
+static_assert(sizeof(Block) <= 136, "Block keeps its size: align lives in the padding");
 
 constexpr char kMathTextOpen = '\x01';
 constexpr char kMathTextClose = '\x02';
@@ -90,6 +106,9 @@ std::string StripInlineMarkdownKeepMath(std::string_view input, bool& hasMath);
 // With `footnotes`, "[^label]: text" starts a footnote definition, which leaves the text, and
 // "[^label]" refers to it; see Footnotes. Without, both are text.
 std::vector<Block> ParseMarkdown(const std::string& markdown, Footnotes* footnotes = nullptr);
+// The Markdown image "![alt](src)" or linked image "[![alt](src)](target)" at text[at]: the
+// index behind it, with its alt text (inline Markdown stripped) and source, or 0 for none.
+size_t ParseImageAt(std::string_view text, size_t at, std::string& alt, ImageSource& source);
 
 // Walks text produced by StripInlineMarkdownKeepMath for a block whose hasMath is
 // set: fn(segment, isMath) is called for every non-empty text or TeX segment.

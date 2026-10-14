@@ -214,7 +214,16 @@ Important image/link details:
   HTML tags (`ScanTag`: at most 4,096 bytes and 64 attributes) and HTML block conditions,
   and which URLs a link or image may have (`SafeUrl`). `QuoteCache` answers each tag's
   closing quote, so text of unterminated quotes stays linear; a new scan must stay bounded
-  the same way. Built at `-O2`; checked by `tests/html_tests.inc`.
+  the same way. HTML blocks: the parser classifies their first line (`LineKind::HtmlBlock`,
+  the start condition in `LineInfo::level`; condition 7 does not interrupt a paragraph),
+  collects them as CommonMark ends them and hands them to `MapBlock`, which turns text and
+  inline tags into paragraphs for the inline parser (white space collapsed, Markdown syntax
+  escaped) and block elements into blocks; an element left open keeps aligning later blocks of
+  its level (`HtmlState`, `ApplyHtmlAlign`). The close tags of quotes, lists and tables are
+  found in one pass per block (`Containers`), never searched for once per open tag.
+  `MapParagraph` turns a paragraph of only images into an Image block with a `row`, and one of
+  only an `<a id>` into an Anchor block, whose id `HeadingTargets` resolves exactly. Built at
+  `-O2`; checked by `tests/html_tests.inc`.
 
 - `src/core/contents.h` and `src/core/contents.cpp`
   The table of contents: turning the marker paragraph into a `BlockType::Contents` block
