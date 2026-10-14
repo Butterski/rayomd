@@ -49,7 +49,7 @@ you can also embed through the [C++ API](https://github.com/Butterski/rayomd/wik
 <td width="33%" valign="top">
 
 ### Fast
-A short note in under **1 ms**, start to exit; a 1024×1024 PNG in 7 to 11 ms, 2 ms once
+A short note in under **1 ms**, start to exit; a 1024×1024 PNG in 8 to 11 ms, 2 ms once
 converted. Batches run on up to 64 threads.
 
 </td>
@@ -146,8 +146,8 @@ Every feature below works the same from both command lines and the
 
 ## Performance
 
-Measured on 2026-10-13 on an AMD Ryzen 5 PRO 4650GE in an Arch Linux container without network.
-A one-shot export is a fresh process, start to exit.
+Measured on an AMD Ryzen 5 PRO 4650GE in an Arch Linux container without network: RayoMD on
+2026-10-14, the other tools on 2026-10-13. A one-shot export is a fresh process, start to exit.
 
 ### Against other tools
 
@@ -160,25 +160,25 @@ xychart-beta
     title "tester.md without images, in ms (lower is better)"
     x-axis ["RayoMD", "glu", "Qt 6", "Pandoc + Typst", "Pandoc + WeasyPrint", "md-to-pdf", "Pandoc + XeLaTeX"]
     y-axis "Milliseconds" 0 --> 2200
-    bar [1.2, 54, 69, 346, 968, 1805, 2097]
+    bar [1.4, 54, 69, 346, 968, 1805, 2097]
 ```
 
 | Tool | Version | Without images | With a 1024×1024 PNG | Peak memory | Installed size¹ | Formulas |
 |---|---|---:|---:|---:|---:|---|
-| **RayoMD** | 4.4.0 | **1.2 ms** | **7.5 ms** | **3.4 MiB** | **1.2 MiB** | typeset |
-| glu | 0.0.46 | 54 ms (45×) | 85 ms (11×) | 33 MiB | 25 MiB | TeX source |
-| Qt 6 `QTextDocument` + `QPrinter` | 6.12.0 | 69 ms (57×) | 112 ms (15×) | 39 MiB | 373 MiB | TeX source |
-| Pandoc + Typst | 3.11, Typst 0.15.1 | 346 ms (286×) | 376 ms (50×) | 239 MiB² | 0.65 GiB | typeset |
-| Pandoc + WeasyPrint | 3.11, WeasyPrint 70.0 | 968 ms (800×) | 1,238 ms (166×) | 241 MiB² | 0.9 GiB | MathML text and TeX |
-| md-to-pdf | 5.2.5, Chromium 154 | 1,805 ms (1,492×) | 1,903 ms (255×) | 205 MiB² | 1.0 GiB | TeX source |
-| Pandoc + XeLaTeX | 3.11, TeX Live 2026 | 2,097 ms (1,733×) | 3,351 ms (449×) | 340 MiB² | 1.4 GiB | typeset |
+| **RayoMD** | 4.6.0 | **1.4 ms** | **7.6 ms** | **3.6 MiB** | **1.4 MiB** | typeset |
+| glu | 0.0.46 | 54 ms (40×) | 85 ms (11×) | 33 MiB | 25 MiB | TeX source |
+| Qt 6 `QTextDocument` + `QPrinter` | 6.12.0 | 69 ms (51×) | 112 ms (15×) | 39 MiB | 373 MiB | TeX source |
+| Pandoc + Typst | 3.11, Typst 0.15.1 | 346 ms (252×) | 376 ms (49×) | 239 MiB² | 0.65 GiB | typeset |
+| Pandoc + WeasyPrint | 3.11, WeasyPrint 70.0 | 968 ms (706×) | 1,238 ms (162×) | 241 MiB² | 0.9 GiB | MathML text and TeX |
+| md-to-pdf | 5.2.5, Chromium 154 | 1,805 ms (1,317×) | 1,903 ms (249×) | 205 MiB² | 1.0 GiB | TeX source |
+| Pandoc + XeLaTeX | 3.11, TeX Live 2026 | 2,097 ms (1,530×) | 3,351 ms (439×) | 340 MiB² | 1.4 GiB | typeset |
 
 ¹ Approximate: the tool's packages and their dependencies beyond a base Arch Linux image. Qt
 comes with any Qt desktop. ² The largest single process; these tools run several.
 
-On one core RayoMD takes 1.25 ms (11.0 ms with the PNG, which it re-encodes on up to four cores)
+On one core RayoMD takes 1.39 ms (11.2 ms with the PNG, which it re-encodes on up to four cores)
 and the others 64 ms to 2.2 s. In a running process (`--serve`, `--batch`, `--bench`) each
-further export takes **0.20 ms**.
+further export takes **0.23 ms**.
 
 > [!NOTE]
 > The documents are `tester.md` without the five lines that test fallbacks: the remote and
@@ -197,21 +197,27 @@ The big steps only: 4.0 rewrote the text path in lower-level code and linked the
 4.1 and 4.2 replaced zlib with RayoMD's own PNG decoder and encoder, a row at a time and on up
 to four cores; 4.3 writes Unicode text in two bytes a character; 4.4 cuts what a fresh process
 costs around the export (page faults, `libm.so`, the output write) and the work per word and
-per allocation in the export itself. One-shot export onto an existing PDF, one pinned core,
-median of 40:
+per allocation in the export itself. 4.5 and 4.6 add work instead: formulas embed their fonts
+(`tester.md`'s PDF grows from 75 to 86 KB) and HTML is read, 1 to 9 % on these documents.
+One-shot export onto an existing PDF, one pinned core, median of 40, the four releases measured
+in one session:
 
-| Document | 3.2.0 | 4.0.0 | 4.4.0 |
-|---|---:|---:|---:|
-| Short note, ASCII | 1.72 ms | 1.01 ms | **0.70 ms** |
-| Short note, Polish | 2.67 ms | 1.33 ms | **0.78 ms** |
-| Essay, 10,000 words | 2.40 ms | 1.67 ms | **1.22 ms** |
-| `tester.md`, no images | 3.14 ms | 1.79 ms | **1.16 ms** |
-| README of 4.3.1 (Unicode text) | 3.80 ms, 270 KB | 2.40 ms, 270 KB | **1.62 ms**, 221 KB |
-| One 1024×1024 RGBA PNG | 92.7 ms | 27.4 ms | **10.6 ms** |
+| Document | 3.2.0 | 4.0.0 | 4.4.0 | 4.6.0 |
+|---|---:|---:|---:|---:|
+| Short note, ASCII | 1.67 ms | 0.87 ms | 0.75 ms | **0.76 ms** |
+| Short note, Polish | 2.68 ms | 1.20 ms | 0.83 ms | **0.86 ms** |
+| Essay, 10,000 words | 2.37 ms | 1.54 ms | 1.27 ms | **1.29 ms** |
+| `tester.md`, no images | 3.12 ms | 1.65 ms | 1.22 ms | **1.33 ms** |
+| README of 4.3.1 (Unicode text) | 3.75 ms, 270 KB | 2.26 ms, 270 KB | 1.65 ms, 221 KB | **1.77 ms**, 216 KB |
+| One 1024×1024 RGBA PNG | 90.7 ms | 28.9 ms | 10.6 ms | **10.7 ms** |
+
+The README row leaves out the README's two images: 4.6.0 draws them as GitHub shows them (15.4 ms
+with both converted, 3.1 ms from the image cache), where earlier releases printed the HTML as text.
 
 From 32,768 pixels a converted image is kept in the user cache directory, so its next export, in
 any process, takes about 2 ms; `--no-image-cache` turns that off. Text and pixels are the same
-from release to release; the fully static Linux edition starts another 0.2 to 0.3 ms sooner.
+from 3.2.0 to 4.4.0; 4.5.0 draws bullets as markers and formulas in embedded fonts, and 4.6.0
+renders HTML. The fully static Linux edition starts another 0.2 to 0.3 ms sooner.
 
 Every change is profiled on a real export, rewritten, and kept only if a pinned A/B shows it
 faster and the PDF bytes (for a re-encoded image, the pixels) stay the same, unless changing
