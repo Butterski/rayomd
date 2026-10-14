@@ -35,7 +35,8 @@ Treat the native renderer as a fast Markdown subset, not a full Pandoc clone.
 ## Current Feature Surface
 
 Native PDF mode supports the core document features listed in `README.md`,
-including headings, paragraphs, lists (with GitHub task lists), block quotes and
+including headings, paragraphs, lists (with GitHub task lists; bullets are drawn as paths by
+depth, `AppendBulletMarker`, except in quotes), block quotes and
 GitHub alerts, fenced code blocks, pipe tables (whose header row repeats on every
 page), rule lines, natively typeset math for a TeX subset, inline emphasis
 cleanup, clickable Markdown links (also bare URLs, email addresses and shortcut

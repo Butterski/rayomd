@@ -1238,6 +1238,82 @@ static void AppendCheckbox(std::string& content, double x, double bottom, double
     out.Lit(" Q\n");
 }
 
+// The path of a bullet list item's marker at one nesting depth, for text of `size`, relative to
+// the item's origin: made once per thread, depth and size (notes are smaller), then placed with
+// `cm`, which saves writing its 14 coordinates for every item and remaking it for every document.
+struct BulletMarker {
+    double size = 0.0;
+    std::string path;
+};
+
+// A filled disc, then a circle, then a filled square, as browsers draw them; paths, not a
+// glyph, so every font shows them. Each sets its colour inside the item's q ... Q.
+RAYOMD_COLD static void MakeBulletMarker(BulletMarker& marker, double size, int depth) {
+    marker.size = size;
+    marker.path.clear();
+    const double r = size * 0.14;
+    const double cx = size * 0.22;
+    const double cy = size * 0.33;
+    TailWriter out(marker.path, 64 + kOperandBytes * 16);
+    if (depth >= 2) {
+        const double half = size * 0.13;
+        out.Lit("0.08 g ");
+        out.Fixed(cx - half);
+        out.Lit(" ");
+        out.Fixed(cy - half);
+        out.Lit(" ");
+        out.Fixed(half * 2.0);
+        out.Lit(" ");
+        out.Fixed(half * 2.0);
+        out.Lit(" re f");
+        return;
+    }
+    if (depth == 0) {
+        out.Lit("0.08 g ");
+    } else {
+        out.Lit("0.08 G ");
+        out.Fixed(size * 0.07);
+        out.Lit(" w ");
+    }
+    // Four Bezier quarters from the right, counterclockwise.
+    const double k = r * 0.5523;
+    const double points[4][6] = {
+        { cx + r, cy + k, cx + k, cy + r, cx, cy + r },
+        { cx - k, cy + r, cx - r, cy + k, cx - r, cy },
+        { cx - r, cy - k, cx - k, cy - r, cx, cy - r },
+        { cx + k, cy - r, cx + r, cy - k, cx + r, cy },
+    };
+    out.Fixed(cx + r);
+    out.Lit(" ");
+    out.Fixed(cy);
+    out.Lit(" m");
+    for (const auto& curve : points) {
+        for (double value : curve) {
+            out.Lit(" ");
+            out.Fixed(value);
+        }
+        out.Lit(" c");
+    }
+    if (depth == 0) out.Lit(" h f");
+    else out.Lit(" h S");
+}
+
+// The marker of a bullet list item at nesting `depth`, beside text of `size` on `baseline` from x.
+static void AppendBulletMarker(std::string& content, double x, double baseline, double size, int depth) {
+    static thread_local BulletMarker markers[3];
+    if (depth > 2) depth = 2;
+    BulletMarker& marker = markers[depth];
+    if (marker.size != size) MakeBulletMarker(marker, size, depth);
+    TailWriter out(content, 24 + kOperandBytes * 2 + marker.path.size());
+    out.Lit("q 1 0 0 1 ");
+    out.Fixed(x);
+    out.Lit(" ");
+    out.Fixed(baseline);
+    out.Lit(" cm ");
+    out.Bytes(marker.path.data(), marker.path.size());
+    out.Lit(" Q\n");
+}
+
 // "00" to "FF": the four hex digits of a CID are two copies.
 static constexpr std::array<char, 512> MakeHexPairs() {
     std::array<char, 512> pairs{};
@@ -5617,6 +5693,7 @@ private:
     double y = 0.0;
     double pageW = 595.0;
     double pageH = 842.0;
+    int listDepth = 0;   // the list items the blocks being drawn are nested in
     // The page being rendered is the tail of `content`, so painting is a plain append.
     std::string& content;
     std::vector<size_t> pageStarts;
@@ -5716,12 +5793,19 @@ private:
         return (pageH - margin * 2.0) * 0.5;
     }
 
+    // A bullet list item: its marker, by nesting depth, and its text indented after it.
     void RenderBullet(const Block& block) {
         if (block.task != 0) {
             RenderTaskItem(block);
             return;
         }
-        RenderListItem("- ", block);
+        const double x = margin + 16.0 + block.level * 18.0;
+        const double width = pageW - margin * 2.0 - 16.0 - block.level * 18.0;
+        const int depth = listDepth + block.level;
+        Ensure(bodySize * 1.35);
+        if (tags != nullptr) tags->LabelContent(depth == 0 ? u"\u2022" : depth == 1 ? u"\u25E6" : u"\u25AA");
+        AppendBulletMarker(content, x, y - bodySize, bodySize, depth);
+        RenderParagraph(block.text, x + bodySize * 0.75, width - bodySize * 0.75);
         y -= 2.0;
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
@@ -5752,10 +5836,13 @@ private:
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
 
+    // Blocks nested in a list item: one list level deeper.
     void RenderIndentedBlocks(const std::vector<Block>& blocks, double inset) {
         double savedMargin = margin;
         margin += inset;
+        listDepth++;
         RenderBlocks(*this, blocks);
+        listDepth--;
         margin = savedMargin;
     }
 
@@ -6959,7 +7046,8 @@ private:
         if (tags == nullptr) return;
         const bool item = block.type == BlockType::Bullet || block.type == BlockType::Numbered;
         tags->Block(item, block.task != 0 ? Internal::ListKind::Task
-            : block.type == BlockType::Numbered ? Internal::ListKind::Ordered : Internal::ListKind::Bullet, block.level);
+            : block.type == BlockType::Numbered ? Internal::ListKind::Ordered : Internal::ListKind::Bullet, block.level,
+            listDepth + block.level);
     }
     void TagArtifact() {
         if (tags != nullptr) tags->Artifact();
@@ -7458,7 +7546,7 @@ private:
     // page has one that reaches 3 points above it, the others one that starts at their top, below
     // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
     // points into the next, so that the block is one tint. Out of line: written into RenderCode,
-    // it moved GCC's inlining and outlined "- " + text in RenderBullet (+0.3 % on baseline.md).
+    // it moved GCC's inlining of hot calls elsewhere (+0.3 % on baseline.md).
     RAYOMD_SHARED void CodeTile(double lh, bool& first, const char* color) {
         const size_t pages = pageStarts.size();
         Ensure(lh + 4.0);
@@ -8750,6 +8838,7 @@ private:
     double y = 0.0;
     double pageW = 595.0;
     double pageH = 842.0;
+    int listDepth = 0;   // the list items the blocks being drawn are nested in
     // The page being rendered is the tail of `content`, so painting is a plain append.
     std::string& content;
     std::vector<size_t> pageStarts;
@@ -8827,17 +8916,17 @@ private:
     }
     const MathFallbackFont* MathFallback() const { return winAnsiText ? &latinMathFallback : nullptr; }
 
+    // A bullet list item: its marker, by nesting depth, and its text indented after it.
     void RenderBullet(const Block& block) {
         if (block.task != 0) {
             RenderTaskItem(block);
             return;
         }
-        // "- " + text spelled out: GCC outlined operator+ here when unrelated code changed.
-        std::string item;
-        item.reserve(block.text.size() + 2);
-        item.append("- ", 2);
-        item.append(block.text);
-        RenderParagraph(item, margin + 16.0 + block.level * 18.0, pageW - margin * 2.0 - 16.0 - block.level * 18.0);
+        const double x = margin + 16.0 + block.level * 18.0;
+        const double width = pageW - margin * 2.0 - 16.0 - block.level * 18.0;
+        Ensure(bodySize * 1.35);
+        AppendBulletMarker(content, x, y - bodySize, bodySize, listDepth + block.level);
+        RenderParagraph(block.text, x + bodySize * 0.75, width - bodySize * 0.75);
         y -= 2.0;
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
@@ -8869,10 +8958,13 @@ private:
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
 
+    // Blocks nested in a list item: one list level deeper.
     void RenderIndentedBlocks(const std::vector<Block>& blocks, double inset) {
         double savedMargin = margin;
         margin += inset;
+        listDepth++;
         RenderBlocks(*this, blocks);
+        listDepth--;
         margin = savedMargin;
     }
 
@@ -10180,7 +10272,7 @@ private:
     // page has one that reaches 3 points above it, the others one that starts at their top, below
     // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
     // points into the next, so that the block is one tint. Out of line: written into RenderCode,
-    // it moved GCC's inlining and outlined "- " + text in RenderBullet (+0.3 % on baseline.md).
+    // it moved GCC's inlining of hot calls elsewhere (+0.3 % on baseline.md).
     RAYOMD_SHARED void CodeTile(double lh, bool& first, const char* color) {
         const size_t pages = pageStarts.size();
         Ensure(lh + 4.0);

@@ -68,10 +68,12 @@ public:
     // any other block closes the lists of its sequence.
     void EnterBlocks();
     void LeaveBlocks();
-    void Block(bool listItem, ListKind kind, int level);
-    // The next `characters` of text painted are the open list item's label ("- ", "2. "), which
-    // the renderer paints after LabelContent(); TakeLabel returns and clears the count. A task's
-    // checkbox is the label's content, with the box's state as `actualText`.
+    // `depth` is the list nesting of the item's marker, for a bullet list's /ListNumbering.
+    void Block(bool listItem, ListKind kind, int level, int depth);
+    // The next `characters` of text painted are the open list item's label ("2. "), which the
+    // renderer paints after LabelContent(); TakeLabel returns and clears the count. A bullet's
+    // marker and a task's checkbox, drawn as paths, are the label's content, with the character
+    // they stand for (the box's state) as `actualText`.
     void Label(size_t characters) { labelCharacters = characters; }
     size_t TakeLabel();
     void LabelContent(std::u16string_view actualText = {});

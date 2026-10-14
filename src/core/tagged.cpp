@@ -371,7 +371,7 @@ void StructTree::CloseLists(int level) {
     while (!lists.empty() && lists.back().scope == scope && lists.back().level > level) End(lists.back().list);
 }
 
-void StructTree::Block(bool listItem, ListKind kind, int level) {
+void StructTree::Block(bool listItem, ListKind kind, int level, int depth) {
     if (!listItem) {
         CloseLists(-1);
         return;
@@ -388,8 +388,11 @@ void StructTree::Block(bool listItem, ListKind kind, int level) {
     }
     if (lists.empty() || lists.back().scope != scope || lists.back().level < level) {
         const int list = Begin(StructType::L);
+        // A bullet list's markers are drawn by depth: a disc, a circle, then squares.
         AppendAttributes(list, kind == ListKind::Ordered ? " /A << /O /List /ListNumbering /Decimal >>"
-            : kind == ListKind::Bullet ? " /A << /O /List /ListNumbering /Disc >>" : " /A << /O /List /ListNumbering /None >>");
+            : kind == ListKind::Task ? " /A << /O /List /ListNumbering /None >>"
+            : depth == 0 ? " /A << /O /List /ListNumbering /Disc >>"
+            : depth == 1 ? " /A << /O /List /ListNumbering /Circle >>" : " /A << /O /List /ListNumbering /Square >>");
         lists.push_back({ scope, level, kind, list, -1 });
     }
     lists.back().item = Begin(StructType::LI);

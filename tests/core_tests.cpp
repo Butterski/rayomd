@@ -955,14 +955,15 @@ bool CheckMathPdf() {
 // document title started to come from the first heading, after headings started to make the
 // PDF outline, code backgrounds started at the first glyph of the code, the standard-font
 // renderer started to show bold, italic and strike-through, exact AFM widths,
-// WinAnsiEncoding, CommonMark list nesting, source-faithful word spacing and code tiles that
-// no longer cover the descenders and underscores of the line above. That renderer does not
-// depend on the platform or on installed fonts, so they hold on Windows and Linux.
+// WinAnsiEncoding, CommonMark list nesting, source-faithful word spacing, code tiles that
+// no longer cover the descenders and underscores of the line above, and (4.5.0) bullets
+// drawn as markers. That renderer does not depend on the platform or on installed fonts, so
+// they hold on Windows and Linux.
 bool CheckNoMathGolden() {
     struct Golden { TinyPdf::PdfStyle style; size_t size; const char* sha256; };
     const Golden goldens[] = {
-        {TinyPdf::PdfStyle::Modern, 7355, "d19e491636cc75bc83d5079a4878ae1220690aa1ff5c6084708eb1aa409e9e22"},
-        {TinyPdf::PdfStyle::Tech, 7409, "8a61b40ae384e02a880a7b2f68290252e6ed9eaaf6f3c6dad42f45f6ebc7d427"},
+        {TinyPdf::PdfStyle::Modern, 7883, "8df480b6a98e4f4f9d38e7147d08f90e4471c9757335de167ee1ec70ac8e1d4b"},
+        {TinyPdf::PdfStyle::Tech, 7911, "df9f7235d18e915b290b467d056890f2c6b9ec0fd80b44f2f26bc3d27c07445f"},
     };
     for (const Golden& golden : goldens) {
         TinyPdf::PdfOptions options;
@@ -2817,7 +2818,9 @@ bool CheckTaggedPdf() {
         CountOccurrences(pdf, "/S /P ") != 2 ||
         pdf.find("/S /H1 ") == npos || pdf.find("/S /H2 ") == npos || pdf.find("/S /H4 ") != npos ||
         CountOccurrences(pdf, "/S /L ") != 2 || CountOccurrences(pdf, "/S /LI ") != 3 || CountOccurrences(pdf, "/S /LBody ") != 3 ||
-        pdf.find("/ActualText <FEFF2611>") == npos || CountOccurrences(pdf, "/S /TH ") != 2 ||
+        pdf.find("/ActualText <FEFF2611>") == npos || pdf.find("/ActualText <FEFF2022>") == npos ||
+        pdf.find("/ActualText <FEFF25E6>") == npos || pdf.find("/ListNumbering /Disc") == npos ||
+        pdf.find("/ListNumbering /Circle") == npos || CountOccurrences(pdf, "/S /TH ") != 2 ||
         CountOccurrences(pdf, "/Scope /Column") != 2 || CountOccurrences(pdf, "/S /TD ") != 120 ||
         CountOccurrences(pdf, "/S /Figure ") != 1 || pdf.find("/Alt (RayoMD)") == npos ||
         CountOccurrences(pdf, " Do Q") != 2 || pdf.find("/S /Note ") == npos || pdf.find("/IDTree ") == npos ||
@@ -2837,14 +2840,19 @@ bool CheckTaggedPdf() {
 
 // A list item that starts with "[ ]" or "[x]" shows a checkbox, with a check mark when done,
 // where its bullet or number would be, and its text without the marker. "[ ]" elsewhere, and
-// a task item in a quote, keep it as text. In both renderers.
+// a task item in a quote, keep it as text. A bullet is drawn, not written: a disc, a circle one
+// level deeper, then a square. In both renderers.
 bool CheckTaskLists() {
-    const std::string document = "- [ ] open\n- [x] done\n1. [X] numbered\n- normal\n\nText [ ] literal.\n\n> - [ ] quoted\n";
+    const std::string document = "- [ ] open\n- [x] done\n1. [X] numbered\n- normal\n  - nested\n    - deeper\n\n"
+        "Text [ ] literal.\n\n> - [ ] quoted\n";
     for (const std::string& text : { document, "Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n" + document }) {
         std::string pdf;
         const bool unicode = text != document;
         if (!Build(text, pdf) || CountOccurrences(pdf, "0.42 0.47 0.53 RG") != 3 || CountOccurrences(pdf, " 1 J 1 j ") != 2 ||
-            (!unicode && (pdf.find("(open) Tj") == std::string::npos || pdf.find("(- normal) Tj") == std::string::npos ||
+            CountOccurrences(pdf, " h f Q\n") != 1 || CountOccurrences(pdf, " h S Q\n") != 1 ||
+            CountOccurrences(pdf, " cm 0.08 g ") != 2 || CountOccurrences(pdf, " cm 0.08 G ") != 1 ||
+            (!unicode && (pdf.find("(open) Tj") == std::string::npos || pdf.find("(normal) Tj") == std::string::npos ||
+                pdf.find("(deeper) Tj") == std::string::npos || pdf.find("(- normal) Tj") != std::string::npos ||
                 pdf.find("(Text [ ] literal.) Tj") == std::string::npos || pdf.find("(- [ ] quoted) Tj") == std::string::npos))) {
             std::cerr << "task lists mismatch (" << (unicode ? "Unicode" : "standard") << " renderer)" << std::endl;
             return false;

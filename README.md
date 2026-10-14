@@ -229,7 +229,8 @@ older reports are in the [benchmark index](https://github.com/Butterski/rayomd/w
 ### Markdown
 
 GitHub-flavoured Markdown as people write it. Headings become PDF bookmarks and `#anchor`
-targets, and a table's header row repeats on every page it reaches:
+targets, bullets are drawn as a browser draws them (a disc, a circle one level in, then
+squares), and a table's header row repeats on every page it reaches:
 
 ```markdown
 # Report
