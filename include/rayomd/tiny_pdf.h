@@ -47,8 +47,15 @@ struct PdfTheme {
     static constexpr int32_t kStyleColor = -1;
 
     // A TrueType or OpenType font (.ttf, .otf, or .ttc for its first face) for all text, embedded
-    // as a subset; the standard fonts are then not used. Bold and italic are drawn from it.
+    // as a subset; the standard fonts are then not used.
     std::string fontPath;
+    // Its bold, italic and bold italic faces, each optional: bold text, headings, table header
+    // rows and alert titles in the bold face, emphasis in the italic one. Without one, that style
+    // is drawn from `fontPath` (bold by a second copy, italic slanted); bold italic falls back to
+    // the bold face slanted, else the italic face drawn bold. They need `fontPath`.
+    std::string fontBoldPath;
+    std::string fontItalicPath;
+    std::string fontBoldItalicPath;
     // Colours as 0xRRGGBB, or kStyleColor.
     int32_t headingColor = kStyleColor;
     int32_t linkColor = kStyleColor;

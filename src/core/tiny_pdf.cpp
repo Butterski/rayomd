@@ -3427,10 +3427,13 @@ public:
     void SetChapter(const std::string& pathUtf8) { localPolicy.SetChapter(pathUtf8); }
 
     // The document's TrueType font and the glyphs it shows, which show the text of its SVG images
-    // (svg.h); without, that text takes the standard fonts.
-    void SetFont(const TtfFont* textFont, UsedCidSet* cids) {
+    // (svg.h), and a theme's bold face for their bold text, if any; without, that text takes the
+    // standard fonts.
+    void SetFont(const TtfFont* textFont, UsedCidSet* cids, const TtfFont* boldFont = nullptr, UsedCidSet* boldCids = nullptr) {
         svgFont = textFont;
         svgCids = cids;
+        svgBoldFont = boldFont;
+        svgBoldCids = boldCids;
     }
 
     // A raster image of an SVG (a data: URI) for this document only: its index, with its size in
@@ -3598,6 +3601,8 @@ private:
     uint32_t failed = 0;
     const TtfFont* svgFont = nullptr;   // the document's TrueType font (SetFont), or none
     UsedCidSet* svgCids = nullptr;
+    const TtfFont* svgBoldFont = nullptr;   // a theme's bold face (SetFont), /F2 of the forms, or none
+    UsedCidSet* svgBoldCids = nullptr;
     // Decoded images and failed sources for later documents of the process, each with the stamp of
     // its file when it was read (none for a URL): a lookup with another stamp misses, and storing
     // replaces the entry, so a file changed on disk is read again.
@@ -3718,30 +3723,34 @@ private:
 };
 
 // The text of an SVG in the document's TrueType font (BuildUnicodePdfBytes), whose subset then has
-// its glyphs; the form draws bold itself, the font having no bold face.
+// its glyphs; bold text in a theme's bold face, /F2, when it has one, else the form draws bold.
 class UnicodeSvgHost : public Internal::SvgHost {
 public:
-    UnicodeSvgHost(const TtfFont& textFont, UsedCidSet& usedCids, ImageRegistry& registry)
-        : font(textFont), cids(usedCids), images(registry) {}
+    UnicodeSvgHost(const TtfFont& textFont, UsedCidSet& usedCids, ImageRegistry& registry, const TtfFont* boldFont,
+        UsedCidSet* boldCids)
+        : font(textFont), cids(usedCids), images(registry), bold(boldFont), boldSet(boldCids) {}
 
-    double TextWidth(std::string_view text, double size, bool) override {
-        return TinyPdf::TextWidth(font, Utf8ToWide(text), size);
+    double TextWidth(std::string_view text, double size, bool isBold) override {
+        return TinyPdf::TextWidth(isBold && bold != nullptr ? *bold : font, Utf8ToWide(text), size);
     }
 
-    void AppendText(std::string& out, std::string_view text, bool) override {
+    void AppendText(std::string& out, std::string_view text, bool isBold) override {
         const std::wstring wide = Utf8ToWide(text);
         const size_t start = out.size();
+        const bool face = isBold && bold != nullptr;
         out.resize(start + CidTextBytes(wide));
-        out.resize((size_t)(WriteCidText(&out[start], font, wide, cids) - out.data()));
+        out.resize((size_t)(WriteCidText(&out[start], face ? *bold : font, wide, face ? *boldSet : cids) - out.data()));
     }
 
-    bool HasBoldFace() const override { return false; }
+    bool HasBoldFace() const override { return bold != nullptr; }
     int AddImage(std::string_view bytes, int& width, int& height) override { return images.AddDecoded(bytes, width, height); }
 
 private:
     const TtfFont& font;
     UsedCidSet& cids;
     ImageRegistry& images;
+    const TtfFont* bold;
+    UsedCidSet* boldSet;
 };
 
 bool ImageRegistry::ConvertSvgImage(std::string_view svg, PdfImage& image) {
@@ -3749,7 +3758,7 @@ bool ImageRegistry::ConvertSvgImage(std::string_view svg, PdfImage& image) {
     const size_t rasters = images.size();   // its data: images go after them (AddDecoded)
     bool converted = false;
     if (svgFont != nullptr) {
-        UnicodeSvgHost host(*svgFont, *svgCids, *this);
+        UnicodeSvgHost host(*svgFont, *svgCids, *this, svgBoldFont, svgBoldCids);
         converted = Internal::ConvertSvg(svg, host, *form);
     } else {
         StandardSvgHost host(*this);
@@ -5520,6 +5529,20 @@ public:
     void SetContents(const std::vector<Internal::ContentsEntry>* entries) { contents = entries; }
     // PDF/UA: the structure tree the pages' marked content goes into (tagged.h); none untagged.
     void SetTags(Internal::StructTree* tree) { tags = tree; }
+    // A theme's own bold, italic and bold italic faces, each of them optional; with any, every
+    // styled text takes the face ChooseFace gives its style. Set before rendering.
+    RAYOMD_COLD void SetFaces(const TtfFont* bold, const TtfFont* italic, const TtfFont* boldItalic) {
+        faces[0] = &font;
+        faces[1] = bold;
+        faces[2] = italic;
+        faces[3] = boldItalic;
+        multiFace = bold != nullptr || italic != nullptr || boldItalic != nullptr;
+        for (int face = 1; face < 4; face++) {
+            if (faces[face] != nullptr && !faceCids[face - 1]) faceCids[face - 1].reset(new UsedCidSet());
+        }
+    }
+    // The CIDs face `face` (1 .. 3) showed, which its subset holds; null for a face it lacks.
+    UsedCidSet* FaceCidSet(int face) { return faces[face] != nullptr ? faceCids[face - 1].get() : nullptr; }
 
     // The page numbers of the table's entries, right-aligned on the last line of each and after a
     // row of dots below the top level: one stream for each page, for the builder to add to the
@@ -5535,8 +5558,8 @@ public:
             char digits[24];
             char* const digitsEnd = std::to_chars(digits, digits + sizeof(digits), pages[line.entry] + 1).ptr;
             const std::wstring number(digits + 0, digitsEnd);
-            const double numberLeft = pageW - margin - TextWidth(font, number, bodySize);
             const bool top = (*contents)[line.entry].level == 1;
+            const double numberLeft = pageW - margin - TextWidth(SpanFont(top, false), number, bodySize);
             std::string& out = overlays[line.page];
             // The dots stand on a grid from the left margin, so that those of all entries line up.
             const double first = margin + RayoMd::ExactMath::Ceil((line.end + em * 0.3 - margin) / pitch) * pitch;
@@ -5557,7 +5580,11 @@ public:
     // For text drawn outside the pages' streams, such as a theme's header, whose glyphs the font
     // subset needs too.
     UsedCidSet& Cids() { return usedCids; }
-    uint32_t MissingCharacters() const { return usedCids.missing; }
+    uint32_t MissingCharacters() const {
+        uint32_t missing = usedCids.missing;
+        for (const std::unique_ptr<UsedCidSet>& set : faceCids) missing += set ? set->missing : 0;
+        return missing;
+    }
     bool MathUsed() const { return math.Used(); }
     const Internal::MathGlyphUse& MathGlyphs() const { return math.Glyphs(); }
     // PDF/UA: formulas show their TeX source, as they have no structure tags yet.
@@ -5630,6 +5657,36 @@ private:
     std::vector<ContentsLine> contentsLines;
     // PDF/UA's structure tree, or none: every hook below tests it before anything else.
     Internal::StructTree* tags = nullptr;
+
+    // A theme's faces by index bold | italic << 1 (SetFaces); [0] is `font`. With `multiFace`
+    // false there are none: every style is drawn from `font`, bold twice and italic slanted, by
+    // the code paths that do not look at faces.
+    struct FaceChoice {
+        uint8_t face;     // 0 .. 3, the font resources /F1, /F2, /F4 and /F5
+        bool fauxBold;    // drawn twice, a little apart
+        bool skew;        // slanted
+    };
+    static constexpr char kFaceFonts[4][5] = { "/F1 ", "/F2 ", "/F4 ", "/F5 " };
+    const TtfFont* faces[4] = {};
+    bool multiFace = false;
+    bool wrapBold = false;        // WrapStyledInline measures every run bold: a table's header row
+    std::unique_ptr<UsedCidSet> faceCids[3];
+
+    // The face of a style: its own, else for bold italic the bold face slanted or the italic one
+    // drawn bold, else `font` drawn bold or slanted as without faces.
+    FaceChoice ChooseFace(bool bold, bool italic) const {
+        const uint8_t wanted = (uint8_t)((bold ? 1 : 0) | (italic ? 2 : 0));
+        if (wanted != 0 && faces[wanted] != nullptr) return { wanted, false, false };
+        if (bold && italic) {
+            if (faces[1] != nullptr) return { 1, false, true };
+            if (faces[2] != nullptr) return { 2, true, false };
+        }
+        return { 0, bold, italic };
+    }
+    const TtfFont& FaceFont(uint8_t face) const { return face == 0 ? font : *faces[face]; }
+    // The font text in a style is measured with: `font` without faces.
+    const TtfFont& SpanFont(bool bold, bool italic) const { return multiFace ? FaceFont(ChooseFace(bold, italic).face) : font; }
+    UsedCidSet& FaceCids(uint8_t face) { return face == 0 ? usedCids : *faceCids[face - 1]; }
 
     // Text the standard math fonts cannot show (\text{...} in another script) is
     // measured and painted with the embedded document font, at the text size the
@@ -5813,7 +5870,11 @@ private:
         std::vector<StyledSpan> spans;
         Internal::ForEachMathTextSegment(text, [&](std::string_view segment, bool isMath) {
             if (!isMath) {
-                if (!segment.empty()) MathAppend(spans).text = Utf8ToWide(segment);
+                if (!segment.empty()) {
+                    StyledSpan& added = MathAppend(spans);
+                    added.text = Utf8ToWide(segment);
+                    added.bold = bold && multiFace;   // measured and painted in the theme's bold face
+                }
                 return;
             }
             Internal::InlineSpan span;
@@ -5887,7 +5948,7 @@ private:
         std::vector<double> widths(words.size());
         for (size_t index = 0; index < words.size(); index++) {
             const StyledWord& word = words[index];
-            widths[index] = word.math >= 0 ? math.Width(word.math) : TextWidth(font, word.text, size);
+            widths[index] = word.math >= 0 ? math.Width(word.math) : TextWidth(SpanFont(word.span->bold, word.span->italic), word.text, size);
         }
         const std::string noUrl;
         // Appends text to the line, after a space when `spaced`: merged into the previous span
@@ -5927,6 +5988,9 @@ private:
         bool groupOverflows = false;
         for (size_t index = 0; index < words.size(); index++) {
             const StyledWord& word = words[index];
+            // The space before a word joins its span, in its face; a formula's or struck word's is unstyled.
+            const double wordSpace = multiFace && word.math < 0 && !word.span->strike
+                ? TextWidth(SpanFont(word.span->bold, word.span->italic), L" ", size) : spaceWidth;
             if (word.math >= 0 && math.IsDisplay(word.math)) {
                 flush();
                 MathAppend(MathAppend(lines)).math = word.math;
@@ -5940,11 +6004,11 @@ private:
                     !(words[next].math >= 0 && math.IsDisplay(words[next].math)); next++) {
                     groupWidth += widths[next];
                 }
-                if (!line.empty() && lineWidth + groupWidth + (needsSpace ? spaceWidth : 0.0) > width) {
+                if (!line.empty() && lineWidth + groupWidth + (needsSpace ? wordSpace : 0.0) > width) {
                     flush();
                     needsSpace = false;
                 }
-                groupOverflows = lineWidth + groupWidth + (needsSpace ? spaceWidth : 0.0) > width;
+                groupOverflows = lineWidth + groupWidth + (needsSpace ? wordSpace : 0.0) > width;
             } else if (groupOverflows && !line.empty() && lineWidth + widths[index] > width) {
                 // Words that touch but are wider than a line together break where they touch.
                 flush();
@@ -5965,7 +6029,7 @@ private:
                 double partWidth = 0.0;
                 const double scale = size * 0.001;
                 for (wchar_t ch : word.text) {
-                    double chWidth = CodepointWidth(font, (uint16_t)ch, scale);
+                    double chWidth = CodepointWidth(SpanFont(word.span->bold, word.span->italic), (uint16_t)ch, scale);
                     if (!part.empty() && partWidth + chWidth > width) {
                         appendText(part, false, word, true);
                         flush();
@@ -5987,7 +6051,7 @@ private:
                     lineWidth += spaceWidth;
                 } else {
                     spaced = true;
-                    wordWidth += spaceWidth;
+                    wordWidth += wordSpace;
                 }
             }
             appendText(word.text, spaced, word, true);
@@ -6011,16 +6075,16 @@ private:
     RAYOMD_MATH_COLD std::vector<std::vector<StyledSpan>> WrapMathCell(const std::string& cell, double width, double size, bool bold) {
         if (cell.find(Internal::kMathTextOpen) != std::string::npos) return WrapMathText(cell, width, size, bold);
         std::vector<std::vector<StyledSpan>> lines;
-        for (const std::wstring& line : WrapText(font, Utf8ToWide(cell), width, size)) {
+        for (const std::wstring& line : WrapText(SpanFont(bold, false), Utf8ToWide(cell), width, size)) {
             MathAppend(MathAppend(lines)).text = line;
         }
         return lines;
     }
 
-    double MathLineWidth(const std::vector<StyledSpan>& line, double size, bool) const {
+    double MathLineWidth(const std::vector<StyledSpan>& line, double size, bool bold) const {
         double width = 0.0;
         for (const StyledSpan& span : line) {
-            width += span.math >= 0 ? math.Width(span.math) : TextWidth(font, span.text, size);
+            width += span.math >= 0 ? math.Width(span.math) : TextWidth(SpanFont(bold || span.bold, span.italic), span.text, size);
         }
         return width;
     }
@@ -6035,8 +6099,8 @@ private:
                     : math.Emit(span.math, content, cursor, baseline, color);
                 continue;
             }
-            PaintText(cursor, baseline, size, span.text, color, bold);
-            cursor += TextWidth(font, span.text, size);
+            PaintSpanText(cursor, baseline, size, span.text, color, bold || span.bold, span.italic, false);
+            cursor += TextWidth(SpanFont(bold || span.bold, span.italic), span.text, size);
         }
     }
 
@@ -6099,8 +6163,9 @@ private:
     // run is measured only when its width is drawn.
     RAYOMD_SHARED void PaintStyledRuns(const StyledRuns& runs, size_t begin, size_t end, double x, double top,
         double baseline, double size, double lh, const RunColors& colors, bool bold = false) {
-        if (tags != nullptr) {
-            PaintTaggedRuns(runs, begin, end, x, top, baseline, size, lh, colors, bold);
+        if (tags != nullptr || multiFace) {
+            if (multiFace) PaintFaceRuns(runs, begin, end, x, top, baseline, size, lh, colors, bold);
+            else PaintTaggedRuns(runs, begin, end, x, top, baseline, size, lh, colors, bold);
             return;
         }
         PaintRuns<false>(runs, begin, end, x, top, baseline, size, lh, colors, bold);
@@ -6224,7 +6289,8 @@ private:
                 partStart = ch;
                 partWidth = 0.0;
             }
-            const double chWidth = CodepointWidth(font, (uint16_t)source[ch], scale);
+            const TtfFont& pieceFont = multiFace ? SpanFont(out.parsed.runs[piece].bold || wrapBold, out.parsed.runs[piece].italic) : font;
+            const double chWidth = CodepointWidth(pieceFont, (uint16_t)source[ch], scale);
             if (lineWidth + partWidth + chWidth > width && (ch > partStart || out.runs.size() != lineStart)) {
                 if (ch > partStart) AppendStyledPiece(out, lineStart, piece, partStart, ch, false);
                 out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
@@ -6243,9 +6309,10 @@ private:
     // everything between two white spaces of the source, so it may cross style and link
     // boundaries ("**a**b", "[link](u)."): it gets no space and no line break inside, and is cut
     // by character only when it is wider than a whole line. Returns false for text with
-    // explicit line breaks or possible formulas, which take the general path.
+    // explicit line breaks or possible formulas, and with a theme's faces, which take the
+    // general path.
     bool WrapStyledRuns(const std::string& text, double width, double size, StyledRuns& out) {
-        if (text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
+        if (multiFace || text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
             text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
             return false;
         }
@@ -6271,7 +6338,7 @@ private:
             // fills only what it grows by. NeedsInlineParse saw every byte, also any 0xE2.
             if ((seen & RayoMd::Text::kByteSymbolLead) == 0) AssignUtf8ToWide(out.wide, text);
             else AssignUtf8ToWide(out.wide, NormalizeSymbols(std::string(text)));
-            WrapWideWords(font, std::wstring_view(out.wide), width, size, [&](std::wstring_view line) {
+            WrapWideWords(wrapBold ? SpanFont(true, false) : font, std::wstring_view(out.wide), width, size, [&](std::wstring_view line) {
                 out.runs.emplace_back();
                 StyledRun& run = out.runs.back();
                 run.begin = static_cast<uint32_t>(out.text.size());
@@ -6330,6 +6397,13 @@ private:
                 const size_t wordStart = at;
                 double wordWidth;
                 at = ScanWideWord(font, source.data(), wordStart, total, scale, wordWidth);
+                // With a theme's faces, each piece of the word in the face of its run, and the space
+                // before it in that of the run it joins.
+                double spanSpace = spaceWidth;
+                if (multiFace) {
+                    wordWidth = FaceWordWidth(out, index, wordStart, at, size);
+                    spanSpace = FaceSpaceWidth(span, size);
+                }
                 const size_t wordEnd = at;
                 // A word that reaches the end of its run goes on in the runs after it unless
                 // white space follows: "**a**b" and "[link](u)." are one word each. It ends in
@@ -6339,7 +6413,7 @@ private:
 
                 const bool lineEmpty = out.runs.size() == lineStart;
                 bool needsSpace = !lineEmpty;
-                double addWidth = wordWidth + (needsSpace ? spaceWidth : 0.0);
+                double addWidth = wordWidth + (needsSpace ? spanSpace : 0.0);
 
                 if (!lineEmpty && lineWidth + addWidth > width) {
                     out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
@@ -6359,10 +6433,10 @@ private:
                             FlushPendingWide(out, pending);
                             AppendStyledRunText(out, lineStart, std::wstring_view(L" ", 1), false, false, false, false,
                                 std::string_view(), false);
-                            lineWidth += spaceWidth;
+                            lineWidth += spanSpace;
                         } else {
                             spaced = true;
-                            wordWidth += spaceWidth;
+                            wordWidth += spanSpace;
                         }
                     }
                     lineWidth += wordWidth;
@@ -6455,7 +6529,7 @@ private:
                 const std::wstring& following = spans[next].text;
                 size_t end = 0;
                 while (end < following.size() && !IsWideSpace(following[end])) end++;
-                glued += TextWidth(font, std::wstring_view(following.data(), end), size);
+                glued += TextWidth(SpanFont(spans[next].bold, spans[next].italic), std::wstring_view(following.data(), end), size);
                 if (end < following.size()) break;
             }
             return glued;
@@ -6469,6 +6543,9 @@ private:
         for (size_t index = 0; index < spans.size(); index++) {
             const StyledSpan& span = spans[index];
             const std::wstring& source = span.text;
+            // The span's face, and that of the space before its words (a struck word's is unstyled).
+            const TtfFont& spanFont = SpanFont(span.bold, span.italic);
+            const double spanSpace = multiFace && !span.strike ? TextWidth(spanFont, L" ", size) : spaceWidth;
             for (size_t at = 0; at < source.size();) {
                 const bool glued = at == 0 && endsInWord && !IsWideSpace(source[0]);
                 while (at < source.size() && IsWideSpace(source[at])) at++;
@@ -6478,7 +6555,7 @@ private:
                 std::wstring_view word(source.data() + at, end - at);
                 at = end;
 
-                double wordWidth = TextWidth(font, word, size);
+                double wordWidth = TextWidth(spanFont, word, size);
                 bool needsSpace = false;
                 if (glued) {
                     // Only words glued into something wider than a line break where they touch.
@@ -6486,12 +6563,12 @@ private:
                 } else {
                     const double groupWidth = end == source.size() ? wordWidth + gluedWidth(index) : wordWidth;
                     needsSpace = !line.empty();
-                    double addWidth = groupWidth + (needsSpace ? spaceWidth : 0.0);
+                    double addWidth = groupWidth + (needsSpace ? spanSpace : 0.0);
                     if (!line.empty() && lineWidth + addWidth > width) {
                         newLine();
                         needsSpace = false;
                     }
-                    groupOverflows = lineWidth + groupWidth + (needsSpace ? spaceWidth : 0.0) > width;
+                    groupOverflows = lineWidth + groupWidth + (needsSpace ? spanSpace : 0.0) > width;
                 }
 
                 if (wordWidth > width) {
@@ -6500,7 +6577,7 @@ private:
                     size_t partStart = 0;
                     double partWidth = 0.0;
                     for (size_t ch = 0; ch < word.size(); ch++) {
-                        const double chWidth = CodepointWidth(font, (uint16_t)word[ch], scale);
+                        const double chWidth = CodepointWidth(spanFont, (uint16_t)word[ch], scale);
                         if (lineWidth + partWidth + chWidth > width && (ch > partStart || !line.empty())) {
                             if (ch > partStart) {
                                 AppendStyledWord(line, word.substr(partStart, ch - partStart), false, span.bold,
@@ -6525,7 +6602,7 @@ private:
                         lineWidth += spaceWidth;
                     } else {
                         spaced = true;
-                        wordWidth += spaceWidth;
+                        wordWidth += spanSpace;
                     }
                 }
                 AppendStyledWord(line, word, spaced, span.bold, span.italic, span.strike, span.url, span.code);
@@ -6609,10 +6686,12 @@ private:
         w.Lit(" Q\n");
     }
 
-    void DrawTextLine(double x, double size, std::wstring_view line, const char* color = "0.08 0.08 0.08") {
+    // A line of text at x, `bold` (a theme's bold face draws headings) in the face for it.
+    void DrawTextLine(double x, double size, std::wstring_view line, const char* color = "0.08 0.08 0.08", bool bold = false) {
         double lh = size * 1.35;
         Ensure(lh);
-        PaintText(x, y - size, size, line, color);
+        if (bold) PaintSpanText(x, y - size, size, line, color, true, false, false);
+        else PaintText(x, y - size, size, line, color);
         y -= lh;
     }
 
@@ -6736,6 +6815,136 @@ private:
             w.Lit(" l S");
         }
         w.Lit(" Q\n");
+    }
+
+    // PaintText for text in a style: in the theme's face for it, when it has faces.
+    void PaintSpanText(double x, double baseline, double size, std::wstring_view line, const char* color, bool bold,
+        bool italic, bool strike) {
+        if (multiFace) PaintFaceText(ChooseFace(bold, italic), x, baseline, size, line, color, strike);
+        else PaintText(x, baseline, size, line, color, bold, italic, strike);
+    }
+
+    // `line` in face `choice`: PaintText for `font`, else in the theme's face, its CIDs that face's.
+    // Tagged as PaintTaggedText tags it: a list item's label first, bold drawn once.
+    RAYOMD_COLD void PaintFaceText(FaceChoice choice, double x, double baseline, double size, std::wstring_view line,
+        const char* color, bool strike) {
+        if (choice.face == 0) {
+            PaintText(x, baseline, size, line, color, choice.fauxBold, choice.skew, strike);
+            return;
+        }
+        if (tags == nullptr) {
+            WriteFaceText(choice, x, baseline, size, line, color, strike, false);
+            return;
+        }
+        const size_t label = std::min(tags->TakeLabel(), line.size());
+        for (int part = label != 0 ? 0 : 1; part < 2 && !line.empty(); part++) {
+            const std::wstring_view text = part == 0 ? line.substr(0, label) : line;
+            if (part == 0) tags->LabelContent();
+            else tags->Content(text);
+            WriteFaceText(choice, x, baseline, size, text, color, strike, true);
+            if (part == 0) {
+                x += TextWidth(FaceFont(choice.face), text, size);
+                line.remove_prefix(label);
+            }
+        }
+    }
+
+    // The text object of PaintFaceText: in /F2, /F4 or /F5, slanted with `skew`, bold drawn twice
+    // (or `once`, filled and outlined, as PaintStrokedBold draws it) with `fauxBold`.
+    RAYOMD_COLD void WriteFaceText(FaceChoice choice, double x, double baseline, double size, std::wstring_view line,
+        const char* color, bool strike, bool once) {
+        const TtfFont& faceFont = FaceFont(choice.face);
+        const size_t colorSize = strlen(color);
+        TailWriter w(content, 160 + colorSize * 3 + kOperandBytes * 10 + CidTextBytes(line) * 2);
+        const bool stroked = choice.fauxBold && once;
+        w.Lit("q ");
+        w.Bytes(color, colorSize);
+        w.Lit(" rg ");
+        if (stroked) {
+            w.Bytes(color, colorSize);
+            w.Lit(" RG 0.28 w 1 j ");
+        }
+        w.Lit("BT ");
+        w.Bytes(kFaceFonts[choice.face], 4);
+        w.Fixed(size);
+        if (stroked) w.Lit(" Tf 2 Tr 1 0 ");
+        else w.Lit(" Tf 1 0 ");
+        if (choice.skew) w.Lit("0.18 ");
+        else w.Lit("0 ");
+        w.Lit("1 ");
+        w.Fixed(stroked ? x + 0.14 : x);
+        w.Lit(" ");
+        w.Fixed(baseline);
+        w.Lit(" Tm ");
+        const char* shown = w.cursor;
+        w.cursor = WriteCidText(w.cursor, faceFont, line, FaceCids(choice.face));
+        const size_t shownSize = (size_t)(w.cursor - shown);
+        w.Lit(" Tj");
+        if (choice.fauxBold && !once) {
+            w.Lit(" 1 0 ");
+            if (choice.skew) w.Lit("0.18 ");
+            else w.Lit("0 ");
+            w.Lit("1 ");
+            w.Fixed(x + 0.28);
+            w.Lit(" ");
+            w.Fixed(baseline);
+            w.Lit(" Tm ");
+            w.Bytes(shown, shownSize);
+            w.Lit(" Tj");
+        }
+        w.Lit(" ET");
+        if (strike && !line.empty()) {
+            const double width = TextWidth(faceFont, line, size);
+            w.Lit(" ");
+            w.Bytes(color, colorSize);
+            w.Lit(" RG 0.55 w ");
+            w.Fixed(x);
+            w.Lit(" ");
+            w.Fixed(baseline + size * 0.34);
+            w.Lit(" m ");
+            w.Fixed(x + width);
+            w.Lit(" ");
+            w.Fixed(baseline + size * 0.34);
+            w.Lit(" l S");
+        }
+        w.Lit(" Q\n");
+    }
+
+    // PaintRuns with faces: each run measured and painted in the face of its style.
+    RAYOMD_COLD void PaintFaceRuns(const StyledRuns& runs, size_t begin, size_t end, double x, double top,
+        double baseline, double size, double lh, const RunColors& colors, bool bold) {
+        for (size_t index = begin; index < end; index++) {
+            const StyledRun& run = runs.runs[index];
+            const std::wstring_view runText = runs.Text(run);
+            if (tags != nullptr) tags->LinkRun(run.url);
+            const FaceChoice choice = ChooseFace(run.bold || bold, run.italic);
+            const double spanWidth = TextWidth(FaceFont(choice.face), runText, size);
+            if (run.code) CodeBackground(x, top, spanWidth, lh, runText, size, colors.codeFill);
+            const char* color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
+            PaintFaceText(choice, x, baseline, size, runText, color, run.strike);
+            AddLink(x, baseline, spanWidth, size, run.url);
+            x += spanWidth;
+        }
+    }
+
+    // The width of the space before a word of parsed run `span`, in the face of the run it joins:
+    // the word's, or an unstyled one before a struck word.
+    RAYOMD_COLD double FaceSpaceWidth(const Internal::InlineRun& span, double size) const {
+        return TextWidth(SpanFont((span.bold && !span.strike) || wrapBold, span.italic && !span.strike), L" ", size);
+    }
+
+    // The width of out.wide[wordStart, wordEnd), which starts in parsed run `index`, each piece in
+    // the face of its run's style (WrapStyledInline with faces).
+    RAYOMD_COLD double FaceWordWidth(const StyledRuns& out, size_t index, size_t wordStart, size_t wordEnd, double size) const {
+        double width = 0.0;
+        for (size_t piece = index, begin = wordStart; begin < wordEnd && piece < out.parsed.runs.size(); piece++) {
+            const size_t end = std::min<size_t>(wordEnd, out.wideEnds[piece]);
+            if (end <= begin) continue;
+            const Internal::InlineRun& part = out.parsed.runs[piece];
+            width += TextWidth(SpanFont(part.bold || wrapBold, part.italic), std::wstring_view(out.wide).substr(begin, end - begin), size);
+            begin = end;
+        }
+        return width;
     }
 
     // PDF/UA hooks of the block loops the renderers share (RenderBlocks, RenderFootnoteSection):
@@ -6907,15 +7116,16 @@ private:
         const int tagged = tags != nullptr ? tags->BeginHeading(level) : -1;
 
         if (block.hasMath) {
-            RenderMathTextLines(block.text, level, margin, pageW - margin * 2.0, size, headingColor, false, false);
+            RenderMathTextLines(block.text, level, margin, pageW - margin * 2.0, size, headingColor, multiFace, false);
             y -= level <= 2 ? 8.0 : 5.0;
             TagEnd(tagged);
             return;
         }
         MarkHeading(level, block.text, size * 1.35);
         AssignUtf8ToWide(headingText, block.text);
-        for (const auto& line : WrapText(font, headingText, pageW - margin * 2.0, size)) {
-            DrawTextLine(margin, size, line, headingColor);
+        // In a theme's bold face when it has one; regular as without.
+        for (const auto& line : WrapText(SpanFont(multiFace, false), headingText, pageW - margin * 2.0, size)) {
+            DrawTextLine(margin, size, line, headingColor, multiFace);
         }
         y -= level <= 2 ? 8.0 : 5.0;
         TagEnd(tagged);
@@ -6977,10 +7187,10 @@ private:
                     continue;
                 }
                 TagLinkRun(span.url);
-                double spanWidth = TextWidth(font, span.text, bodySize);
+                double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
                 const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : linkColor;
-                PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
+                PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
             }
@@ -7021,10 +7231,10 @@ private:
             double baseline = y - bodySize;
             for (const auto& span : line) {
                 TagLinkRun(span.url);
-                double spanWidth = TextWidth(font, span.text, bodySize);
+                double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.94 0.94 0.92");
                 const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
-                PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
+                PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
             }
@@ -7058,7 +7268,7 @@ private:
         QuoteStrip(lineHeight + 3.0);
         const std::string_view title = kAlertTitles[block.alert];
         const int tagged = TagBegin(Internal::StructType::P);
-        PaintText(margin + 14.0, y - bodySize, bodySize, std::wstring(title.begin(), title.end()), quoteBar, true);
+        PaintSpanText(margin + 14.0, y - bodySize, bodySize, std::wstring(title.begin(), title.end()), quoteBar, true, false, false);
         TagEnd(tagged);
         y -= lineHeight;
         if (block.children.empty()) RenderQuote(block.text);
@@ -7142,10 +7352,10 @@ private:
         }
         MarkHeading(level, block.text, height + 2.0);
         std::wstring text = Utf8ToWide(block.text);
-        for (const std::wstring& line : WrapText(font, text, width, size)) {
+        for (const std::wstring& line : WrapText(SpanFont(true, false), text, width, size)) {
             Ensure(height + 2.0);
             QuoteStrip(height + 3.0);
-            PaintText(x, y - size, size, line, "0.10 0.15 0.18", true);
+            PaintSpanText(x, y - size, size, line, "0.10 0.15 0.18", true, false, false);
             y -= height;
         }
         y -= 7.0;
@@ -7183,10 +7393,10 @@ private:
             double baseline = y - bodySize;
             for (const StyledSpan& span : line) {
                 TagLinkRun(span.url);
-                double spanWidth = TextWidth(font, span.text, bodySize);
+                double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
                 const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
-                PaintText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
+                PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
             }
@@ -7351,11 +7561,14 @@ private:
     RAYOMD_COLD void RenderTitlePage(const std::string& text, bool mark) {
         RenderPageBreak();
         const double size = kHeadingSizes[1];
-        const std::vector<std::wstring> lines = WrapText(font, Utf8ToWide(text), pageW - margin * 2.0, size);
+        const TtfFont& titleFont = SpanFont(multiFace, false);
+        const std::vector<std::wstring> lines = WrapText(titleFont, Utf8ToWide(text), pageW - margin * 2.0, size);
         y = std::min(pageH - margin, pageH * 0.6 + (double)lines.size() * size * 1.35 * 0.5);
         if (mark) MarkHeading(1, text, 0.0);
         const int tagged = tags != nullptr ? tags->BeginHeading(1) : -1;
-        for (const std::wstring& line : lines) DrawTextLine((pageW - TextWidth(font, line, size)) * 0.5, size, line, headingColor);
+        for (const std::wstring& line : lines) {
+            DrawTextLine((pageW - TextWidth(titleFont, line, size)) * 0.5, size, line, headingColor, multiFace);
+        }
         TagEnd(tagged);
     }
 
@@ -7372,7 +7585,7 @@ private:
         // artifacts.
         const int tagged = TagBegin(Internal::StructType::TOC);
         const int caption = TagBegin(Internal::StructType::Caption);
-        DrawTextLine(margin, titleSize, std::wstring(L"Contents"), headingColor);
+        DrawTextLine(margin, titleSize, std::wstring(L"Contents"), headingColor, multiFace);
         TagEnd(caption);
         y -= 8.0;
         const double em = bodySize;
@@ -7390,11 +7603,12 @@ private:
             const int item = TagBegin(Internal::StructType::TOCI);
             TagBegin(Internal::StructType::Reference);
             TagBegin(Internal::StructType::Link);
-            for (const std::wstring& line : WrapText(font, Utf8ToWide(entry.text), pageW - margin - x - 2.55 * em, bodySize)) {
+            const TtfFont& entryFont = SpanFont(top, false);
+            for (const std::wstring& line : WrapText(entryFont, Utf8ToWide(entry.text), pageW - margin - x - 2.55 * em, bodySize)) {
                 Ensure(lh);
                 const double baseline = y - bodySize;
-                const double width = TextWidth(font, line, bodySize);
-                PaintText(x, baseline, bodySize, line, "0.08 0.08 0.08", top);
+                const double width = TextWidth(entryFont, line, bodySize);
+                PaintSpanText(x, baseline, bodySize, line, "0.08 0.08 0.08", top, false, false);
                 AddLink(x, baseline, width, bodySize, link);
                 last = { index, pageStarts.size() - 1, baseline, x + width };
                 y -= lh;
@@ -7406,13 +7620,16 @@ private:
     }
 
     // Text at (x, baseline) in the body size, appended to `out`, a stream of its own; `spacing` is
-    // added after each character (Tc), and `bold` draws it twice, a little apart, as PaintText does.
+    // added after each character (Tc), and `bold` is the bold face, or draws it twice, a little
+    // apart, as PaintText does.
     RAYOMD_COLD void AppendOverlayText(std::string& out, double x, double baseline, std::wstring_view text,
         const char* color, bool bold, double spacing) {
+        const FaceChoice choice = multiFace ? ChooseFace(bold, false) : FaceChoice{ 0, bold, false };
         TailWriter w(out, 128 + kOperandBytes * 6 + CidTextBytes(text) * 2);
         w.Lit("q ");
         w.Bytes(color, strlen(color));
-        w.Lit(" rg BT /F1 ");
+        w.Lit(" rg BT ");
+        w.Bytes(kFaceFonts[choice.face], 4);
         w.Fixed(bodySize);
         w.Lit(" Tf ");
         if (spacing > 0.0) {
@@ -7425,10 +7642,10 @@ private:
         w.Fixed(baseline);
         w.Lit(" Tm ");
         const char* shown = w.cursor;
-        w.cursor = WriteCidText(w.cursor, font, text, usedCids);
+        w.cursor = WriteCidText(w.cursor, FaceFont(choice.face), text, FaceCids(choice.face));
         const size_t shownSize = (size_t)(w.cursor - shown);
         w.Lit(" Tj");
-        if (bold) {
+        if (choice.fauxBold) {
             w.Lit(" 1 0 0 1 ");
             w.Fixed(x + 0.28);
             w.Lit(" ");
@@ -7528,10 +7745,12 @@ private:
         size_t resumeRow = 0;       // the row to draw after a repeated header row, or 0
         for (size_t r = 0; r < rows.size(); r++) {
             size_t maxLines = 1;
+            wrapBold = multiFace && r == 0;     // a theme's bold face draws the header row
             for (size_t c = 0; c < columns; c++) {
                 WrapStyledInline(c < rows[r].size() ? rows[r][c] : emptyCell, cellTextWidth, size, tableCells[c]);
                 maxLines = std::max(maxLines, tableCells[c].lineEnds.size());
             }
+            wrapBold = false;
 
             // A row taller than a page is drawn in slices, each with cell borders of its own.
             size_t first = 0;
@@ -7572,7 +7791,8 @@ private:
                         if (align == 0 || align == 1) {
                             double lineWidth = 0.0;
                             for (size_t run = runBegin; run < runEnd; run++) {
-                                lineWidth += TextWidth(font, cellRuns.Text(cellRuns.runs[run]), size);
+                                const StyledRun& piece = cellRuns.runs[run];
+                                lineWidth += TextWidth(SpanFont(piece.bold || r == 0, piece.italic), cellRuns.Text(piece), size);
                             }
                             if (align == 0) tx = cellX + (colWidth - lineWidth) * 0.5;
                             else tx = cellX + colWidth - pad - lineWidth;
@@ -10383,15 +10603,21 @@ private:
     }
 };
 
-// A theme's text in the document's TrueType font, /F1, whose subset gets its glyphs; bold is
-// drawn twice, a little apart, as the renderer does.
+// A theme's text in the document's TrueType font, /F1, whose subset gets its glyphs; bold text in
+// the theme's bold face, /F2, when it has one, else drawn twice, a little apart, as the renderer
+// draws it.
 class UnicodeThemeText final : public Internal::ThemeTextFont {
 public:
-    UnicodeThemeText(const TtfFont& documentFont, UsedCidSet& usedCids) : font(documentFont), cids(usedCids) {}
-    double Width(std::string_view utf8, double size, bool) const override { return TextWidth(font, Utf8ToWide(utf8), size); }
-    void Emit(std::string& out, std::string_view utf8, double x, double baseline, double size, bool bold) const override {
+    UnicodeThemeText(const TtfFont& documentFont, UsedCidSet& usedCids, const TtfFont* boldFont = nullptr,
+        UsedCidSet* boldCids = nullptr)
+        : font(documentFont), cids(usedCids), bold(boldFont), boldSet(boldCids) {}
+    double Width(std::string_view utf8, double size, bool isBold) const override {
+        return TextWidth(isBold && bold != nullptr ? *bold : font, Utf8ToWide(utf8), size);
+    }
+    void Emit(std::string& out, std::string_view utf8, double x, double baseline, double size, bool isBold) const override {
         const std::wstring text = Utf8ToWide(utf8);
-        out += "BT /F1 ";
+        const bool face = isBold && bold != nullptr;
+        out += face ? "BT /F2 " : "BT /F1 ";
         AppendF(out, size);
         out += " Tf 1 0 0 1 ";
         AppendF(out, x);
@@ -10400,10 +10626,10 @@ public:
         out += " Tm ";
         const size_t at = out.size();
         out.resize(at + CidTextBytes(text));
-        out.resize((size_t)(WriteCidText(&out[at], font, text, cids) - out.data()));
+        out.resize((size_t)(WriteCidText(&out[at], face ? *bold : font, text, face ? *boldSet : cids) - out.data()));
         const size_t textBytes = out.size() - at;
         out += " Tj";
-        if (bold) {
+        if (isBold && !face) {
             out.reserve(out.size() + textBytes + 64);   // the copy below reads `out` itself
             out += " 1 0 0 1 ";
             AppendF(out, x + size * 0.025);
@@ -10420,6 +10646,8 @@ public:
 private:
     const TtfFont& font;
     UsedCidSet& cids;
+    const TtfFont* bold;
+    UsedCidSet* boldSet;
 };
 
 // The theme's logo registered with the document's images, when the theme has one.
@@ -10929,12 +11157,135 @@ RAYOMD_COLD static void TaggedDocumentDefaults(DocumentMetadata& metadata, const
     if (metadata.title.empty()) metadata.title = "Document";
 }
 
+// A theme's own bold, italic and bold italic faces (PdfTheme::fontBoldPath ...), each optional.
+struct ThemeFaces {
+    const TtfFont* bold = nullptr;
+    const TtfFont* italic = nullptr;
+    const TtfFont* boldItalic = nullptr;
+};
+
+// The object ids of a text font (SetTextFontObjects) and what has to outlive BuildInto: the
+// cached objects it references, a subset's plan that BuildInto writes, compressed CMaps.
+struct TextFontIds {
+    int file = 0;
+    int cidMap = 0;
+    int toUnicode = 0;
+    int descriptor = 0;
+    int cidFont = 0;
+    int type0 = 0;
+};
+struct TextFontObjects {
+    SubsetFontPlan plan;
+    const SubsetFontWriter writer{ plan };
+    std::shared_ptr<const std::string> file;
+    std::shared_ptr<const std::string> cidMap;
+    std::shared_ptr<const std::string> toUnicode;
+    std::string cidMapFlate;
+    std::string toUnicodeFlate;
+};
+
+// The objects of a text font showing `used`: its program (a TrueType subset, FontFile2, or a
+// CID-keyed CFF whose CIDs are those of the page content, FontFile3, with no CIDToGIDMap then:
+// that object is null), the CIDToGIDMap, the ToUnicode CMap, the FontDescriptor with `flags`,
+// `italicAngle` and `stemV`, the CIDFont and the Type0 font, under `ids`.
+static void SetTextFontObjects(PdfObjects& pdf, const TtfFont& font, const CidList& used, bool compress,
+    const TextFontIds& ids, int flags, int italicAngle, int stemV, TextFontObjects& keep) {
+    std::string cidKey = MakeCidKey(font, used);
+    const std::string fontName = SubsetFontName(font, used);
+    const bool cff = font.cff != nullptr;
+    SubsetGlyphList subsetGlyphs(font, used);
+    keep.cidMap = cff ? nullptr : MakeCidToGidMap(font, used, subsetGlyphs, cidKey);
+    keep.toUnicode = MakeToUnicodeCMap(used, cidKey);
+
+    // The cached font objects are referenced, not copied: the shared pointers keep them alive
+    // until BuildInto. A subset not cached is written by BuildInto from its plan.
+    keep.file = cff ? CachedCffFontFileObject(font, used, cidKey, compress)
+        : CachedFontFileObject(font, subsetGlyphs, cidKey, compress, keep.plan);
+    if (keep.file) pdf.SetView(ids.file, *keep.file);
+    else pdf.SetStreamWriter(ids.file, FontFileHeader(keep.plan.size), keep.plan.size, keep.writer);
+    if (cff) pdf.Set(ids.cidMap, std::string("null"));
+    else SetPayloadStream(pdf, ids.cidMap, *keep.cidMap, compress, keep.cidMapFlate);
+    SetPayloadStream(pdf, ids.toUnicode, *keep.toUnicode, compress, keep.toUnicodeFlate);
+
+    std::string desc;
+    desc.reserve(288);
+    AppendLit(desc, "<< /Type /FontDescriptor /FontName /");
+    desc += fontName;
+    AppendLit(desc, " /Flags ");
+    AppendInt(desc, flags);
+    AppendLit(desc, " /FontBBox [");
+    AppendInt(desc, font.Metric(font.xMin));
+    AppendLit(desc, " ");
+    AppendInt(desc, font.Metric(font.yMin));
+    AppendLit(desc, " ");
+    AppendInt(desc, font.Metric(font.xMax));
+    AppendLit(desc, " ");
+    AppendInt(desc, font.Metric(font.yMax));
+    AppendLit(desc, "] /ItalicAngle ");
+    AppendInt(desc, italicAngle);
+    AppendLit(desc, " /Ascent ");
+    AppendInt(desc, font.Metric(font.ascent));
+    AppendLit(desc, " /Descent ");
+    AppendInt(desc, font.Metric(font.descent));
+    AppendLit(desc, " /CapHeight ");
+    AppendInt(desc, (int)(font.Metric(font.ascent) * 0.72));
+    AppendLit(desc, " /StemV ");
+    AppendInt(desc, stemV);
+    AppendLit(desc, cff ? " /FontFile3 " : " /FontFile2 ");
+    AppendInt(desc, ids.file);
+    AppendLit(desc, " 0 R >>");
+    pdf.Set(ids.descriptor, std::move(desc));
+
+    std::string cidFont;
+    cidFont.reserve(320);
+    AppendLit(cidFont, cff ? "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /" : "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /");
+    cidFont += fontName;
+    AppendLit(cidFont, " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
+        " /FontDescriptor ");
+    AppendInt(cidFont, ids.descriptor);
+    if (!cff) {
+        AppendLit(cidFont, " 0 R /CIDToGIDMap ");
+        AppendInt(cidFont, ids.cidMap);
+    }
+    AppendLit(cidFont, " 0 R /DW 500 /W ");
+    cidFont += *MakeWidths(font, used, cidKey);
+    AppendLit(cidFont, " >>");
+    pdf.Set(ids.cidFont, std::move(cidFont));
+
+    std::string type0;
+    type0.reserve(224);
+    AppendLit(type0, "<< /Type /Font /Subtype /Type0 /BaseFont /");
+    type0 += fontName;
+    AppendLit(type0, " /Encoding /Identity-H /DescendantFonts [");
+    AppendInt(type0, ids.cidFont);
+    AppendLit(type0, " 0 R] /ToUnicode ");
+    AppendInt(type0, ids.toUnicode);
+    AppendLit(type0, " 0 R >>");
+    pdf.Set(ids.type0, std::move(type0));
+}
+
+// A theme face's FontDescriptor entries: nonsymbolic, italic (64) when its post table gives an
+// italic angle, and that angle; a bold stem from weight class 600 (OS/2).
+RAYOMD_COLD static void ThemeFaceStyle(const TtfFont& face, int& flags, int& italicAngle, int& stemV) {
+    italicAngle = 0;
+    auto post = face.tables.find("post");
+    if (post != face.tables.end() && post->second.length >= 8) {
+        const int32_t fixed = (int32_t)ReadU32(face.bytes, post->second.offset + 4);
+        italicAngle = (int)RayoMd::ExactMath::LRound(fixed / 65536.0);
+    }
+    flags = 32 | (italicAngle != 0 ? 64 : 0);
+    auto os2 = face.tables.find("OS/2");
+    const bool bold = os2 != face.tables.end() && os2->second.length >= 6 && ReadU16(face.bytes, os2->second.offset + 4) >= 600;
+    stemV = bold ? 140 : 80;
+}
+
 // With `betterFont`, a document with characters that `font` has no glyph for is not built
 // when a fallback font has more of them: *betterFont is set, to build it again in that one.
-// With `book`, the book's files instead of `markdown`, which then has all of their text.
+// With `book`, the book's files instead of `markdown`, which then has all of their text. With
+// `faces`, a theme's bold and italic faces, which draw the text in their styles.
 static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& font, const PdfOptions& options,
     std::string& pdfBytes, const TtfFont** betterFont, size_t& missingCharacters, BuildResult& stats,
-    const BookSource* book = nullptr) {
+    const BookSource* book = nullptr, const ThemeFaces* faces = nullptr) {
     std::vector<Block> blocks;
     Internal::Footnotes footnotes;
     std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
@@ -10973,7 +11324,11 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         tags = std::make_unique<Internal::StructTree>(pdfBytes);
         renderer.SetTags(tags.get());
     }
-    imageRegistry.SetFont(&font, &renderer.Cids());
+    // A theme's bold and italic faces, which the renderer draws those styles in and the SVG text its bold.
+    const TtfFont* const faceFonts[4] = { &font, faces ? faces->bold : nullptr, faces ? faces->italic : nullptr,
+        faces ? faces->boldItalic : nullptr };
+    if (faces != nullptr) renderer.SetFaces(faceFonts[1], faceFonts[2], faceFonts[3]);
+    imageRegistry.SetFont(&font, &renderer.Cids(), faceFonts[1], faceFonts[1] ? renderer.FaceCidSet(1) : nullptr);
     if (!options.highlightCode) renderer.DisableHighlighting();
     if (!contents.empty()) renderer.SetContents(&contents);
     {
@@ -10991,7 +11346,12 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         : TitledHeadings(renderer.Headings(), titledHeadings, headingTitles);
     RayoMd::Profiling::ScopedPhase assemblyProfile(RayoMd::Profiling::Phase::Assembly);
     const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
-    std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images(), type0FontId, 0, options.compress);
+    // A Type0 font for each face of a theme, /F2, /F4 and /F5, before the SVG forms that name its bold one.
+    int faceType0[4] = { type0FontId, 0, 0, 0 };
+    for (int face = 1; face < 4; face++) {
+        if (faceFonts[face] != nullptr) faceType0[face] = pdf.Reserve();
+    }
+    std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images(), type0FontId, faceType0[1], options.compress);
     // The table of contents' page numbers, before the font subset is made, which then has their glyphs.
     std::vector<size_t> contentsTargets;   // the heading of each entry of the table of contents
     std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);
@@ -11013,7 +11373,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     std::vector<std::string> bands;
     std::string cover;
     if (Internal::HasThemeBands(options.theme) || options.theme.cover || ((options.pdfa || options.pdfua) && options.pageNumbers)) {
-        LayOutTheme(options, UnicodeThemeText(font, renderer.Cids()), metadata, headings, false,
+        LayOutTheme(options, UnicodeThemeText(font, renderer.Cids(), faceFonts[1], faceFonts[1] ? renderer.FaceCidSet(1) : nullptr),
+            metadata, headings, false,
             renderer.PageStarts().size(), { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin() }, logo, palette,
             bands, cover);
     }
@@ -11021,80 +11382,41 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     const CidList& used = renderer.UsedCids();
     if (betterFont && (*betterFont = BetterFontFor(font, used)) != nullptr) return true;
     missingCharacters = renderer.MissingCharacters();
-    std::string cidKey = MakeCidKey(font, used);
-    const std::string fontName = SubsetFontName(font, used);
-    // An OpenType font with PostScript outlines is embedded as a CID-keyed CFF subset whose
-    // CIDs are those of the page content: no CIDToGIDMap then.
-    const bool cff = font.cff != nullptr;
-    SubsetGlyphList subsetGlyphs(font, used);
-    auto cidMapBytes = cff ? nullptr : MakeCidToGidMap(font, used, subsetGlyphs, cidKey);
-    auto toUnicodeBytes = MakeToUnicodeCMap(used, cidKey);
-
-    // The cached font objects are referenced, not copied: the shared pointers keep them
-    // alive until BuildInto below. A subset not cached is written by BuildInto from its plan.
-    SubsetFontPlan fontPlan;
-    const SubsetFontWriter fontWriter(fontPlan);
-    std::shared_ptr<const std::string> fontFileObject = cff ? CachedCffFontFileObject(font, used, cidKey, options.compress)
-        : CachedFontFileObject(font, subsetGlyphs, cidKey, options.compress, fontPlan);
-    if (fontFileObject) pdf.SetView(fontFileId, *fontFileObject);
-    else pdf.SetStreamWriter(fontFileId, FontFileHeader(fontPlan.size), fontPlan.size, fontWriter);
-
-    // With --compress, the compressed CMaps, which have to outlive BuildInto.
-    std::string cidMapFlate;
-    std::string toUnicodeFlate;
-    if (cff) pdf.Set(cidMapId, std::string("null"));
-    else SetPayloadStream(pdf, cidMapId, *cidMapBytes, options.compress, cidMapFlate);
-    SetPayloadStream(pdf, toUnicodeId, *toUnicodeBytes, options.compress, toUnicodeFlate);
-
-    std::string desc;
-    desc.reserve(288);
-    AppendLit(desc, "<< /Type /FontDescriptor /FontName /");
-    desc += fontName;
-    AppendLit(desc, " /Flags 32 /FontBBox [");
-    AppendInt(desc, font.Metric(font.xMin));
-    AppendLit(desc, " ");
-    AppendInt(desc, font.Metric(font.yMin));
-    AppendLit(desc, " ");
-    AppendInt(desc, font.Metric(font.xMax));
-    AppendLit(desc, " ");
-    AppendInt(desc, font.Metric(font.yMax));
-    AppendLit(desc, "] /ItalicAngle 0 /Ascent ");
-    AppendInt(desc, font.Metric(font.ascent));
-    AppendLit(desc, " /Descent ");
-    AppendInt(desc, font.Metric(font.descent));
-    AppendLit(desc, " /CapHeight ");
-    AppendInt(desc, (int)(font.Metric(font.ascent) * 0.72));
-    AppendLit(desc, cff ? " /StemV 80 /FontFile3 " : " /StemV 80 /FontFile2 ");
-    AppendInt(desc, fontFileId);
-    AppendLit(desc, " 0 R >>");
-    pdf.Set(descriptorId, std::move(desc));
-
-    std::string cidFont;
-    cidFont.reserve(320);
-    AppendLit(cidFont, cff ? "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /" : "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /");
-    cidFont += fontName;
-    AppendLit(cidFont, " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
-        " /FontDescriptor ");
-    AppendInt(cidFont, descriptorId);
-    if (!cff) {
-        AppendLit(cidFont, " 0 R /CIDToGIDMap ");
-        AppendInt(cidFont, cidMapId);
+    TextFontObjects fontObjects;
+    SetTextFontObjects(pdf, font, used, options.compress,
+        { fontFileId, cidMapId, toUnicodeId, descriptorId, cidFontId, type0FontId }, 32, 0, 80, fontObjects);
+    // A theme's faces, each with objects of its own; one that drew nothing still gets a subset
+    // (of the space) for its reserved font, and stays out of the pages' resources.
+    std::unique_ptr<TextFontObjects> faceObjects[4];
+    bool faceShown[4] = { true, false, false, false };
+    for (int face = 1; face < 4; face++) {
+        if (faceFonts[face] == nullptr) continue;
+        UsedCidSet& faceCids = *renderer.FaceCidSet(face);
+        faceShown[face] = !faceCids.Values().empty();
+        if (!faceShown[face]) faceCids.Add(0x20);
+        int flags = 32, italicAngle = 0, stemV = 80;
+        ThemeFaceStyle(*faceFonts[face], flags, italicAngle, stemV);
+        TextFontIds ids;
+        ids.file = pdf.Reserve();
+        ids.cidMap = pdf.Reserve();
+        ids.toUnicode = pdf.Reserve();
+        ids.descriptor = pdf.Reserve();
+        ids.cidFont = pdf.Reserve();
+        ids.type0 = faceType0[face];
+        faceObjects[face] = std::make_unique<TextFontObjects>();
+        SetTextFontObjects(pdf, *faceFonts[face], faceCids.Values(), options.compress, ids, flags, italicAngle, stemV,
+            *faceObjects[face]);
     }
-    AppendLit(cidFont, " 0 R /DW 500 /W ");
-    cidFont += *MakeWidths(font, used, cidKey);
-    AppendLit(cidFont, " >>");
-    pdf.Set(cidFontId, std::move(cidFont));
-
-    std::string type0;
-    type0.reserve(224);
-    AppendLit(type0, "<< /Type /Font /Subtype /Type0 /BaseFont /");
-    type0 += fontName;
-    AppendLit(type0, " /Encoding /Identity-H /DescendantFonts [");
-    AppendInt(type0, cidFontId);
-    AppendLit(type0, " 0 R] /ToUnicode ");
-    AppendInt(type0, toUnicodeId);
-    AppendLit(type0, " 0 R >>");
-    pdf.Set(type0FontId, std::move(type0));
+    // " /F2 n 0 R" ... for the faces of a theme that drew something.
+    std::string faceResources;
+    static constexpr char kFaceResources[4][5] = { " /F1", " /F2", " /F4", " /F5" };
+    for (int face = 1; face < 4; face++) {
+        if (!faceShown[face]) continue;
+        faceResources += kFaceResources[face];
+        faceResources += ' ';
+        AppendInt(faceResources, faceType0[face]);
+        faceResources += " 0 R";
+    }
 
     // Helvetica for the page numbers; a theme's header and footer, and PDF/A's numbers, use the document's font.
     const int numberFontId = options.pageNumbers && bands.empty()
@@ -11123,6 +11445,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         AppendLit(page, "] /Resources << /Font << /F1 ");
         AppendInt(page, type0FontId);
         AppendLit(page, " 0 R");
+        page += faceResources;
         if (numberFontId != 0) {
             AppendLit(page, " /FN ");
             AppendInt(page, numberFontId);
@@ -11144,6 +11467,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         std::string fonts = "/F1 ";
         AppendInt(fonts, type0FontId);
         fonts += " 0 R";
+        fonts += faceResources;
         coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.PageHeight(), fonts, imageObjectIds, cover);
     }
     pdf.Set(pagesId, PagesDictionary(pageIds, coverId));
@@ -11207,19 +11531,29 @@ static TextFonts ChooseFonts(const std::string& markdown, const PdfOptions& opti
 // A document in a TrueType font (TextFonts::TrueType): the theme's, without a fallback font: the
 // company's look; else the system's, built again in a fallback font that has more of the
 // characters it lacks. Without a font PDF/A fails, and other documents take the standard fonts,
-// which show what they can. `unicode(font, better, missing)` builds in a TrueType font and
-// `lossy(missing)` in the standard fonts; false with g_lastError set when nothing is built.
+// which show what they can. `unicode(font, better, missing, faces)` builds in a TrueType font,
+// with a theme's bold and italic `faces` when it has them, and `lossy(missing)` in the standard
+// fonts; false with g_lastError set when nothing is built.
 template <typename Unicode, typename Lossy>
 static bool BuildInTrueType(const PdfOptions& options, uint32_t& missingCharacters, Unicode unicode, Lossy lossy) {
     size_t missing = 0;
     bool built = false;
     if (!options.theme.fontPath.empty()) {
         const TtfFont* font = ThemeFont(options.theme.fontPath);
-        if (!font) {
+        ThemeFaces faces;
+        bool facesLoaded = true;
+        for (const auto& [path, face] : { std::pair<const std::string*, const TtfFont**>{ &options.theme.fontBoldPath, &faces.bold },
+                 { &options.theme.fontItalicPath, &faces.italic }, { &options.theme.fontBoldItalicPath, &faces.boldItalic } }) {
+            if (path->empty()) continue;
+            *face = ThemeFont(*path);
+            facesLoaded = facesLoaded && *face != nullptr;
+        }
+        if (!font || !facesLoaded) {
             g_lastError = static_cast<int>(BuildError::ThemeFontUnavailable);
             return false;
         }
-        built = unicode(*font, nullptr, missing);
+        const bool anyFace = faces.bold != nullptr || faces.italic != nullptr || faces.boldItalic != nullptr;
+        built = unicode(*font, nullptr, missing, anyFace ? &faces : nullptr);
     } else {
         const TtfFont* font = nullptr;
         {
@@ -11228,8 +11562,8 @@ static bool BuildInTrueType(const PdfOptions& options, uint32_t& missingCharacte
         }
         if (font) {
             const TtfFont* better = nullptr;
-            built = unicode(*font, &better, missing);
-            if (built && better) built = unicode(*better, nullptr, missing);
+            built = unicode(*font, &better, missing, nullptr);
+            if (built && better) built = unicode(*better, nullptr, missing, nullptr);
         } else if (options.pdfa || options.pdfua) {
             g_lastError = static_cast<int>(BuildError::PdfaFontUnavailable);
             return false;
@@ -11272,8 +11606,8 @@ static bool BuildDocument(const std::string& markdown, const PdfOptions& options
         break;
     }
     return BuildInTrueType(options, missingCharacters,
-        [&](const TtfFont& font, const TtfFont** better, size_t& missing) {
-            return BuildUnicodePdfBytes(markdown, font, options, pdfBytes, better, missing, stats, book);
+        [&](const TtfFont& font, const TtfFont** better, size_t& missing, const ThemeFaces* faces) {
+            return BuildUnicodePdfBytes(markdown, font, options, pdfBytes, better, missing, stats, book, faces);
         },
         [&](size_t& missing) {
             missing = RayoMd::Text::TranscodeToWinAnsiLossy(markdown, winAnsi);

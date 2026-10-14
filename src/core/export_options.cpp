@@ -222,6 +222,9 @@ bool ParseTheme(std::string_view text, std::string_view directory, PdfTheme& the
             *field = value;
         } else if (key == "font" || key == "logo") {
             (key == "font" ? theme.fontPath : theme.logoPath) = path(value);
+        } else if (key == "font-bold" || key == "font-italic" || key == "font-bold-italic") {
+            (key == "font-bold" ? theme.fontBoldPath : key == "font-italic" ? theme.fontItalicPath
+                : theme.fontBoldItalicPath) = path(value);
         } else if (key == "cover") {
             const std::string flag = Lower(value);
             if (flag != "yes" && flag != "no" && flag != "true" && flag != "false") {
@@ -233,6 +236,11 @@ bool ParseTheme(std::string_view text, std::string_view directory, PdfTheme& the
             error = where + "unknown key '" + key + "'";
             return false;
         }
+    }
+    if (theme.fontPath.empty() &&
+        (!theme.fontBoldPath.empty() || !theme.fontItalicPath.empty() || !theme.fontBoldItalicPath.empty())) {
+        error = "font-bold, font-italic and font-bold-italic need font";
+        return false;
     }
     return true;
 }

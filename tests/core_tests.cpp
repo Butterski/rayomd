@@ -2000,6 +2000,18 @@ bool CheckTheme() {
         std::cerr << "theme parsing mismatch: " << error << unknown << color << flag << std::endl;
         return false;
     }
+    // A theme's bold, italic and bold italic faces: paths of the theme's folder, and only with a font.
+    TinyPdf::PdfTheme faced;
+    TinyPdf::PdfTheme fontless;
+    std::string facesError;
+    std::string orphan;
+    if (!TinyPdf::Internal::ParseTheme("font = a.ttf\nfont-bold = b.ttf\nfont-italic = /i.ttf\nfont-bold-italic = \"bi.ttf\"\n",
+            "t", faced, facesError) || faced.fontBoldPath != "t/b.ttf" || faced.fontItalicPath != "/i.ttf" ||
+        faced.fontBoldItalicPath != "t/bi.ttf" || TinyPdf::Internal::ParseTheme("font-italic = i.ttf\n", "t", fontless, orphan) ||
+        orphan.find("need font") == std::string::npos) {
+        std::cerr << "theme faces parsing mismatch: " << facesError << orphan << std::endl;
+        return false;
+    }
     theme = TinyPdf::PdfTheme();
     theme.headingColor = 0x0B3D91;
     theme.linkColor = 0xCC3399;
@@ -2035,6 +2047,24 @@ bool CheckTheme() {
         if (!TinyPdf::BuildPdf(document, options, pdf).Ok() || pdf.find("/FontFile2") == std::string::npos ||
             pdf.find("/Helvetica") != std::string::npos) {
             std::cerr << "the theme font did not show the ASCII document" << std::endl;
+            return false;
+        }
+    }
+    // A theme's bold face draws bold text and headings as /F2; bold italic without a face of its
+    // own is the bold face slanted; a face that drew nothing stays out of the pages' resources.
+    const std::string boldPath = fontPath.empty() ? std::string()
+        : fontPath.substr(0, fontPath.size() - 4) + (fontPath.find("arial") != std::string::npos ? "bd.ttf" : "-Bold.ttf");
+    if (std::ifstream(fontPath, std::ios::binary) && std::ifstream(boldPath, std::ios::binary)) {
+        TinyPdf::PdfOptions boldTheme;
+        boldTheme.theme.fontPath = fontPath;
+        boldTheme.theme.fontBoldPath = boldPath;
+        std::string plain;
+        if (!TinyPdf::BuildPdf("# Head\n\nPlain, **bold** and ***both***.\n", boldTheme, pdf).Ok() ||
+            CountOccurrences(pdf, "BT /F2 ") < 2 || pdf.find("BT /F2 11.5 Tf 1 0 0.18 1 ") == std::string::npos ||
+            pdf.find(" /F2 ") == std::string::npos || CountOccurrences(pdf, "/Subtype /Type0 ") != 2 ||
+            !TinyPdf::BuildPdf("Plain.\n", boldTheme, plain).Ok() || plain.find("/F2 ") != std::string::npos ||
+            CountOccurrences(plain, "/Subtype /Type0 ") != 2) {
+            std::cerr << "the theme's bold face did not draw bold text" << std::endl;
             return false;
         }
     }

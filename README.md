@@ -347,16 +347,20 @@ rayomd --export handbook.md handbook.pdf --toc --toc-depth=2
 
 ### Themes
 
-`--theme=FILE` lays a company look over a style: your TrueType or OpenType font, heading, link
-and accent colours, a header and footer with placeholders (`{title}`, `{author}`, `{subject}`,
-`{date}`, `{page}`, `{pages}`, `{logo}`) and a logo, and a cover page. Paths are relative to the
-theme file; see [Themes](https://github.com/Butterski/rayomd/wiki/Themes).
+`--theme=FILE` lays a company look over a style: your TrueType or OpenType font with its bold,
+italic and bold italic faces (each optional; headings, bold text and table headers in the bold
+one), heading, link and accent colours, a header and footer with placeholders (`{title}`,
+`{author}`, `{subject}`, `{date}`, `{page}`, `{pages}`, `{logo}`) and a logo, and a cover page.
+Paths are relative to the theme file; see [Themes](https://github.com/Butterski/rayomd/wiki/Themes).
 
 <details>
 <summary>Example theme file</summary>
 
 ```ini
-font = fonts/AcmeSans.ttf
+font = fonts/AcmeSans-Regular.ttf
+font-bold = fonts/AcmeSans-Bold.ttf
+font-italic = fonts/AcmeSans-Italic.ttf
+font-bold-italic = fonts/AcmeSans-BoldItalic.ttf
 heading-color = #0B3D91
 link-color = #0B6E4F
 accent-color = #F2A900

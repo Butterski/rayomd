@@ -83,8 +83,12 @@ font program and both CMaps as FlateDecode where that makes the file smaller, wi
 RayoMD's own DEFLATE encoder; never the XMP metadata or an embedded source, which
 the reversible profile reads uncompressed. Without it the PDF bytes stay as they
 are.
-Company themes (`--theme=FILE`, `PdfOptions::theme`): a TrueType font for all text
-(no fallback font then), heading, link and accent colours (the renderers'
+Company themes (`--theme=FILE`, `PdfOptions::theme`): a TrueType or OpenType font for all
+text (no fallback font then), with optional bold, italic and bold italic faces (`/F2`, `/F4`,
+`/F5`; the Unicode renderer's `faces`, `ChooseFace`): with any of them `multiFace` is set,
+paragraphs take the general `WrapStyled` path, and every width and paint of styled text goes
+through `SpanFont`/`PaintSpanText`, so measure and paint use the same face; without them every
+one of those calls is `font`/`PaintText` as before. Heading, link and accent colours (the renderers'
 `headingColor`/`linkColor`/`ruleColor`/`plainQuoteBar`, from `ThemePalette`, never
 literals), header and footer fields with placeholders and a logo (one overlay stream
 per page, like the page numbers, whose glyphs join the subset before it is cut), and a

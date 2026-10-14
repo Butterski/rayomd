@@ -459,7 +459,14 @@ std::string ExportFailure(const TinyPdf::BuildResult& result, const std::string&
     if (!inputLabel.empty()) message += " for " + inputLabel;
     message += " (code " + std::to_string(10 + static_cast<int>(result.error)) + ").";
     if (result.error == TinyPdf::BuildError::ThemeFontUnavailable) {
-        message += " The theme's font cannot be read or is no TrueType/OpenType font: " + options.theme.fontPath;
+        std::string paths;
+        for (const std::string* path : { &options.theme.fontPath, &options.theme.fontBoldPath, &options.theme.fontItalicPath,
+                 &options.theme.fontBoldItalicPath }) {
+            if (path->empty()) continue;
+            if (!paths.empty()) paths += ", ";
+            paths += *path;
+        }
+        message += " The theme's fonts cannot be read or are no TrueType/OpenType fonts: " + paths;
     }
     if (result.error == TinyPdf::BuildError::PdfaFontUnavailable) {
         message += " PDF/A embeds every font, but no TrueType/OpenType font was found; set RAYOMD_FONT to one.";
@@ -885,12 +892,12 @@ void PrintUsage() {
         "  (by default PNGs with transparency are re-encoded once and kept in ~/.cache/rayomd/images,\n"
         "  or $XDG_CACHE_HOME/rayomd/images: at most about 256 MB, the PDF the same either way).\n"
         "Output flags: --compress (FlateDecode streams: smaller files, slower export), --pdfa (PDF/A-3b:\n"
-        "  every font embedded, formulas as TeX source), --pdfua (PDF/UA-1, tagged for screen readers:\n"
-        "  headings, lists, tables, figures with their alt text, links and notes; fonts and formulas as\n"
-        "  with --pdfa; the language is the front matter's lang, else en), --theme=FILE (key = value\n"
-        "  lines: font, logo, heading-color, link-color, accent-color, header-left/center/right,\n"
-        "  footer-left/center/right with {title} {author} {subject} {date} {page} {pages} {logo},\n"
-        "  cover), --no-highlight (code\n"
+        "  every font embedded, the formula fonts too), --pdfua (PDF/UA-1, tagged for screen readers:\n"
+        "  headings, lists, tables, figures with their alt text, links and notes; fonts as with --pdfa,\n"
+        "  formulas as TeX source; the language is the front matter's lang, else en), --theme=FILE (key =\n"
+        "  value lines: font, font-bold, font-italic, font-bold-italic, logo, heading-color, link-color,\n"
+        "  accent-color, header-left/center/right, footer-left/center/right with {title} {author}\n"
+        "  {subject} {date} {page} {pages} {logo}, cover), --no-highlight (code\n"
         "  blocks in one colour; by default fenced code in a language GitHub knows is coloured), --toc\n"
         "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
         "  --toc-depth=N (heading levels it lists, 1-6; default 3).\n"
