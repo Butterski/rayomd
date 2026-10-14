@@ -41,6 +41,79 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## After 4.6.1: formula fonts, tables, fallback fonts, images, code, static start
+
+Measured together on 2026-10-14 against 4.6.1, both built with g++ 13.3 (Release), CPU 3,
+Docker. The 2,875 PDFs of the byte check are identical for the dynamic and the static build, and
+so are those of a CJK matrix (24 documents under five option sets with Noto Sans CJK and with
+WenQuanYi Micro Hei as the fallback font, exported singly, as a batch and as a book).
+
+Warm `--bench` (`tools/benchmark.py ab`, 11 rounds), instructions and time against 4.6.1:
+
+| Fixture | Instructions | Time |
+| --- | ---: | ---: |
+| `tester.md` without images | -15.0 % | -10.8 % |
+| Tables, most with formulas or notes (table-heavy) | -34.2 % | -28.2 % |
+| 500 plain table rows | -3.5 % | -1.4 % |
+| Highlighted code (code-heavy) | -12.2 % | -8.4 % |
+| The same in the Unicode renderer | -12.1 % | -6.8 % |
+| README, essay, notes, polish, native math | -0.7 to +0.3 % | -0.1 to +3.2 % |
+
+The time of the last row is mostly code placement: against the same code with the old
+`src/hot.ld`, warm builds take 0.5 % longer (geometric mean; notes +1.6 %, README +1.4 %) while
+fresh exports gain up to 3 %. `cjkmany.md` (CJK text the system font lacks), warm with Noto Sans
+CJK: 0.48 → 0.35 ms (-28 %).
+
+Fresh `--export` (`perfstat.sh`, 100 runs), task-clock and page faults:
+
+| Document | Dynamic 4.6.1 | Dynamic now | Static 4.6.1 | Static now |
+| --- | ---: | ---: | ---: | ---: |
+| Short ASCII note | 0.52 ms, 89 | 0.53 ms, 91 | 0.35 ms, 57 | **0.32 ms**, 56 |
+| Short Polish note | 0.61 ms, 116 | **0.57 ms**, 112 | 0.44 ms, 84 | **0.38 ms**, 76 |
+| Essay, 10,000 words | 1.04 ms, 175 | **0.99 ms**, 173 | 0.82 ms, 143 | **0.77 ms**, 137 |
+| `tester.md`, no images | 1.03 ms, 157 | **0.99 ms**, 154 | 0.83 ms, 124 | **0.78 ms**, 119 |
+| One 1024x1024 PNG, no cache | 10.35 ms, 722 | **10.02 ms**, 704 | 9.93 ms, 687 | **9.78 ms**, 667 |
+| The same PNG from the image cache | 1.55 ms, 445 | **1.22 ms**, 305 | 1.37 ms, 411 | **0.98 ms**, 268 |
+| `cjkmany.md`, Noto Sans CJK | 17.36 ms | **14.23 ms** | 16.23 ms | **13.87 ms** |
+
+What changed:
+
+- **Formula fonts** (the 4.5/4.6 regression of `tester.md`): `BuildMathFaceFont` appends with
+  `to_chars` into reserved strings, and each embedded face's objects, which depend only on the
+  face, its codes and `--compress`, are kept between exports (`CachedMathFace`, 32 entries) and
+  added as stream views.
+- **Tables**: plain cells are wrapped into one buffer per column (`AsciiLines`, kept between
+  exports like `tableCells`), the stripped text a view (`StripInlineMarkdownView`); a table with
+  formulas keeps its cells per column (`MathTableCell`) instead of a vector of lines of spans per
+  row, a plain line measured and painted with the same arithmetic.
+- **Fallback fonts**: CFF glyphs are flattened into one raw buffer (fresh `cjkmany.md` -24 %
+  instructions); and a layout in the system font that comes to a character of the BMP the font
+  lacks probes for a fallback font from the source (`ProbeFallback`, `GuessFallbackFont`): when
+  one is picked, the layout stops and the document is laid out in it. That build checks its guess
+  (`NeedsRebuild`): only when the system font's choice for the characters painted is that font and
+  could not differ for the characters the system font's layout paints (`kLayoutChars`,
+  `FallbackChoice::stable`), no formula was laid out and no SVG converted, does it stand;
+  otherwise the document is built as before. Not with a theme's bands or cover, PDF/A or PDF/UA
+  page numbers, or URL images.
+- **PNG from the cache**: IDAT is joined only for the stream that uses it, and a cache entry is
+  read straight into the colour and alpha streams.
+- **Highlighted code**: `CodeColor` returns a `string_view`; the Unicode renderer widens a block
+  into a kept buffer (an ASCII block in one loop, lexed as it is), and draws a line whose integer
+  width fits whole, without the floating-point wrap loop (exact: each of that loop's sums is at
+  most the exact one times 1 + 1e-9 for lines under a million characters). Both changes to the
+  Unicode renderer also made the standard renderer's code-heavy build 10 % cheaper through GCC's
+  inlining of `tiny_pdf.cpp`.
+- **`--fast-images`** (`PdfOptions::fastImages`): the image encoder's fast mode, one candidate a
+  position and incompressible data skipped after half as many literals. On one CPU without the
+  cache, the mascot 10.33 → 9.31 ms, a 3570x1444 RGBA screenshot 34.1 → 30.4 ms; the image
+  streams of seven RGBA screenshots 0.6 to 2.6 % larger, the pixels the same. Its streams are
+  cached under keys and `.fast.rimg` files of their own.
+- **Static start**: GCC 13's libgcc sorts every FDE at startup when crtbeginT.o registers
+  `.eh_frame`. `RAYOMD_STATIC` builds with GCC 13 or newer link with `--eh-frame-hdr` and wrap the
+  registration into no-ops (`src/cli/static_frames.cpp`): 0.42 M fewer user instructions a
+  process, 40-50 µs. The release's static asset, built by GCC 11, registers lazily. `rayomd-bin`
+  on Arch now installs the static asset.
+
 ## Phases 1 and 2 against 4.3.1
 
 All of the work below, measured together on 2026-10-13: the 4.3.1 code and the final code
@@ -392,6 +465,15 @@ change can reach (`--compress`, `--page-numbers`, `--toc`, `--pdfa`, `--pdfua`,
 `--embed-source`, a theme, letter pages, the three styles). `ab` and `fresh`
 already report whether the two binaries agree on their fixtures.
 
+A change that can reach the fallback fonts (font loading, the Unicode renderer's layout, what it
+paints besides the text) needs CJK documents too, where the system font lacks characters: with
+`fonts-noto-cjk` and `fonts-wqy-microhei` installed, export documents with CJK text early, late,
+only in a comment or link, beside a formula, `[TOC]`, an SVG (also one named `.png`) and
+footnotes, and a `--book` folder of CJK files, singly, as a `--batch` (its report's
+`missing_characters` too) and as a book; each plain and with `--toc`, `--pdfa --page-numbers`,
+`--pdfua --page-numbers` and `--compress`, once as the system finds the fallback font (Noto Sans
+CJK, a CFF font) and once with `RAYOMD_FALLBACK_FONT` set to WenQuanYi Micro Hei (TrueType).
+
 Where bytes change on purpose, show what did not change: the PDFs differ only in
 the objects the change names (a dictionary entry, image streams), `qpdf --check`
 passes, and Poppler or MuPDF give the same text (`pdftotext`, `mutool draw -F
@@ -716,6 +798,15 @@ set of cell buffers in the hot loop. **Inserting the TOC block** moves every lat
 block (0.35 % of that build); a slot left by the parser would avoid it at the price
 of a test there.
 
+**Fallback-font documents whose first missing character comes late.** The probe stops the
+layout in the system font at the first block with such a character; when it is near the end,
+that layout is nearly whole, and the source is scanned on top (`NonAsciiCodepoints`, about 80
+instructions a CJK character): the essay with CJK lines at its end is 2 % slower warm than
+4.6.1. A source whose only characters the system font lacks are not drawn (a comment, a URL)
+has the fallback fonts probed for its guess, about 2 M instructions in a fresh process. Both
+parse the document again for the second layout; keeping the parse between the two would save
+that.
+
 ## Tried and rejected
 
 Each was measured, lost, and is described in full in the
@@ -776,6 +867,15 @@ Text and layout:
   line per 16 bytes instead of 48: essay +5 faults fresh.
 - Headings wrapped through `WrapWideWords` directly instead of `WrapText`'s vector of lines:
   the new instantiation moved GCC's inlining of `WrapText` (table-heavy +0.8 %, aligned too).
+- The fallback font guessed from the source before every Unicode layout (2026-10-14): the scan
+  of the source cost the Polish note 5.7 % of its instructions; stopping at the first missing
+  character without the guess laid `tester.md` with CJK lines out three times (+43 %). The probe
+  at that character is kept.
+- `StripInlineMarkdownView` in `markdown_parser.cpp`: GCC inlined less into `ClassifyLine`
+  (+2 %, notes +0.4 %); it lives in `inline_markdown.cpp`. Plain table cells in buffers not
+  kept between exports: notes +0.4 % in malloc.
+- The CFF flattener's tokens copied with `memcpy`: at `-Os` that is `rep movsb`, 25 % fewer
+  instructions and 8 % more time than the `std::string` it replaced; a byte loop is kept.
 
 Images and compression:
 

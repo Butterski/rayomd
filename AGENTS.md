@@ -169,9 +169,13 @@ Important image/link details:
   CPU has it). The library default is off; the CLI and the Windows app use the user
   cache directory unless `--no-image-cache`; `--bench` never does. An entry holds the
   RayoMD version and, in `kMagic` of `src/core/image_cache.cpp`, the encoding's
-  generation: raise it with any change to the bytes `BuildDecodedPngImage` writes, and
-  compare image output between builds with `--no-image-cache`, or one build reads the
-  other's streams.
+  generation: raise it with any change to the bytes `BuildDecodedPngImage` writes (`kFastMagic`
+  for `--fast-images`' mode, whose entries are `*.fast.rimg`), and compare image output between
+  builds with `--no-image-cache`, or one build reads the other's streams.
+- `--fast-images` (`PdfOptions::fastImages`) re-encodes such a PNG in the encoder's fast mode
+  (`DeflateImageSegment(..., fast)`: one match candidate a position, incompressible data skipped
+  sooner): its image streams a few percent larger, the same pixels. Without it the PDF bytes stay
+  as they are; its streams are kept apart in both image caches.
 - Failed images should degrade to useful fallback text instead of failing the
   whole conversion.
 - An SVG image (a file or URL) is converted by `src/core/svg.cpp`, without a
@@ -608,6 +612,15 @@ GitHub CI entry points:
   directories). Without any font, the document degrades to the standard fonts
   and `BuildResult::missingCharacters` counts what they could not show; never
   fail the export for a missing font.
+- A document the system font lacks characters of is laid out in it only up to the first block
+  that drew one (`Renderer::ProbeFallback`); the fallback font `GuessFallbackFont` picks from the
+  source then draws it, and `NeedsRebuild` keeps that build only when the system font's choice
+  could not differ (`kLayoutChars`, `FallbackChoice::stable`). Anything new that layout paints in
+  the document's font besides the text (numbers, marks, substitutes) must be in `kLayoutChars`,
+  or set a flag that makes the guess unstable, as formulas (`MathPool::LaidOut`) and SVG text
+  (`ImageRegistry::SvgAttempted`) do; a theme's bands and cover, PDF/A and PDF/UA page numbers
+  and URL images turn the probe off (`FallbackGuessAllowed`). Compare such changes on CJK
+  documents in both fallback fonts (`docs/development/performance.md`, *Comparing whole PDFs*).
 - Keep PDF syntax valid: object ids, xrefs, page resources, image XObjects, and
   link annotations must remain consistent.
 - `BuildOptions::sourcePath` matters for relative images; pass it from every

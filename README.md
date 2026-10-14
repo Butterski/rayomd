@@ -335,6 +335,12 @@ $$
   cache directory (`~/.cache/rayomd/images`, on Windows `%LOCALAPPDATA%\RayoMD\cache\images`;
   at most about 256 MB), so later exports of the same image skip the work. The PDF is the same
   either way; `--no-image-cache` keeps nothing.
+- `--fast-images` re-encodes such a PNG faster, for image streams a few percent larger (the
+  pixels are the same): a 1024x1024 one about 1 ms sooner on one CPU.
+
+  ```sh
+  rayomd --export report.md report.pdf --fast-images
+  ```
 - SVG drawn as vectors by RayoMD's own converter: paths, shapes, transforms, clipping, linear
   gradients, opacity, text in the document's font, embedded PNG/JPEG, and Illustrator style
   sheets. Charts from matplotlib, Vega-Lite, Plotly and Graphviz draw close to a browser; an SVG
