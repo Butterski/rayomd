@@ -2878,7 +2878,8 @@ struct PngInfo {
     int compression = 0;
     int filter = 0;
     int interlace = 0;
-    std::string idat;
+    size_t idatBytes = 0;       // the IDAT chunks' payload, which JoinIdat puts together
+    std::string idat;           // that payload, for decoding (BuildDecodedPngImage)
     std::string palette;
     std::vector<uint8_t> transparency;
 };
@@ -2910,8 +2911,8 @@ static bool ParsePngChunks(const std::vector<uint8_t>& bytes, PngInfo& png) {
         } else if (memcmp(type, "tRNS", 4) == 0) {
             png.transparency.assign(bytes.begin() + data, bytes.begin() + data + length);
         } else if (memcmp(type, "IDAT", 4) == 0) {
-            if (png.idat.size() + length > kMaxImageBytes) return false;
-            png.idat.append((const char*)bytes.data() + data, length);
+            if (png.idatBytes + length > kMaxImageBytes) return false;
+            png.idatBytes += length;
         } else if (memcmp(type, "IEND", 4) == 0) {
             break;
         }
@@ -2919,10 +2920,28 @@ static bool ParsePngChunks(const std::vector<uint8_t>& bytes, PngInfo& png) {
         pos += 12 + (size_t)length;
     }
 
-    return seenIhdr && !png.idat.empty() && png.compression == 0 && png.filter == 0 && png.width <= 20000 && png.height <= 20000;
+    return seenIhdr && png.idatBytes != 0 && png.compression == 0 && png.filter == 0 && png.width <= 20000 && png.height <= 20000;
 }
 
-static bool BuildFastPngImage(const PngInfo& png, PdfImage& image) {
+// The IDAT chunks' payload of a PNG ParsePngChunks accepted, `idatBytes` long, into `out`.
+static void JoinIdat(const std::vector<uint8_t>& bytes, size_t idatBytes, std::string& out) {
+    out.clear();
+    out.reserve(idatBytes);
+    size_t pos = 8;
+    while (pos + 12 <= bytes.size()) {
+        const uint32_t length = ReadU32(bytes, pos);
+        if (length > kMaxImageBytes || pos + 12 + (size_t)length > bytes.size()) return;
+        const char* type = (const char*)bytes.data() + pos + 4;
+        if (memcmp(type, "IDAT", 4) == 0) {
+            out.append((const char*)bytes.data() + pos + 8, length);
+        } else if (memcmp(type, "IEND", 4) == 0) {
+            return;
+        }
+        pos += 12 + (size_t)length;
+    }
+}
+
+static bool BuildFastPngImage(const PngInfo& png, const std::vector<uint8_t>& bytes, PdfImage& image) {
     if (png.interlace != 0 || !png.transparency.empty()) return false;
 
     int colors = 0;
@@ -2961,7 +2980,7 @@ static bool BuildFastPngImage(const PngInfo& png, PdfImage& image) {
     image.decodeParms += " /Columns ";
     AppendInt(image.decodeParms, (int)png.width);
     image.decodeParms += " >>";
-    image.stream = png.idat;
+    JoinIdat(bytes, png.idatBytes, image.stream);
     return true;
 }
 
@@ -3447,7 +3466,7 @@ static bool BuildDecodedImageWithWic(const std::vector<uint8_t>&, PdfImage&) {
 static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory) {
     PngInfo png;
     if (!ParsePngChunks(bytes, png)) return false;
-    if (BuildFastPngImage(png, image)) return true;
+    if (BuildFastPngImage(png, bytes, image)) return true;
     size_t rowBytes = 0;
     size_t bpp = 0;
     const bool cached = !cacheDirectory.empty() && DecodedPngRows(png, rowBytes, bpp) &&
@@ -3464,6 +3483,7 @@ static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, co
             return true;
         }
     }
+    JoinIdat(bytes, png.idatBytes, png.idat);
     if (BuildDecodedPngImage(png, image)) {
         if (cached) {
             Internal::StoreCachedImage(cacheDirectory, digest, png.width, png.height, components, kMaxImageBytes,

@@ -92,24 +92,36 @@ bool LoadCachedImage(const std::string& directory, const std::string& digest, ui
     uint32_t components, size_t maxBytes, std::string& color, std::string& mask) {
     const std::string_view version = RAYOMD_VERSION;
     const size_t header = HeaderBytes(version);
+    uint8_t head[sizeof(kMagic) + 1 + 255 + 5 * 4];
+    if (header > sizeof(head)) return false;
     const fs::path path = EntryPath(directory, digest);
-    std::string file;
-    if (!RayoMd::File::ReadAll(path, header + maxBytes + 4, file)) return false;
-    if (file.size() < header + 4 || std::memcmp(file.data(), kMagic, sizeof(kMagic)) != 0 ||
-        (uint8_t)file[8] != version.size() || file.compare(9, version.size(), version) != 0) {
-        return false;
+    std::FILE* const file = RayoMd::File::Open(path, "rb");
+    if (file == nullptr) return false;
+    // The header, then the two streams straight into `color` and `mask`, then the checksum.
+    const long long size = RayoMd::File::SizeOf(file);
+    bool ok = size >= 0 && (uint64_t)size >= header + 4 && (uint64_t)size <= (uint64_t)header + maxBytes + 4 &&
+        RayoMd::File::SeekTo(file, 0) && std::fread(head, 1, header, file) == header &&
+        std::memcmp(head, kMagic, sizeof(kMagic)) == 0 && head[8] == version.size() &&
+        std::memcmp(head + 9, version.data(), version.size()) == 0;
+    const uint8_t* const fields = head + 9 + version.size();
+    const size_t colorBytes = ok ? ReadU32(fields + 12) : 0;
+    const size_t maskBytes = ok ? ReadU32(fields + 16) : 0;
+    ok = ok && ReadU32(fields) == width && ReadU32(fields + 4) == height && ReadU32(fields + 8) == components &&
+        colorBytes != 0 && colorBytes + maskBytes == (uint64_t)size - header - 4;
+    uint8_t tail[4];
+    if (ok) {
+        color.resize(colorBytes);
+        mask.resize(maskBytes);
+        ok = std::fread(&color[0], 1, colorBytes, file) == colorBytes &&
+            (maskBytes == 0 || std::fread(&mask[0], 1, maskBytes, file) == maskBytes) &&
+            std::fread(tail, 1, 4, file) == 4;
     }
-    const auto* const bytes = reinterpret_cast<const uint8_t*>(file.data());
-    const uint8_t* const fields = bytes + 9 + version.size();
-    const size_t colorBytes = ReadU32(fields + 12);
-    const size_t maskBytes = ReadU32(fields + 16);
-    if (ReadU32(fields) != width || ReadU32(fields + 4) != height || ReadU32(fields + 8) != components ||
-        colorBytes == 0 || colorBytes + maskBytes != file.size() - header - 4 ||
-        ReadU32(bytes + file.size() - 4) != RayoMd::Flate::Adler32(bytes, file.size() - 4)) {
-        return false;
-    }
-    color.assign(file, header, colorBytes);
-    mask.assign(file, header + colorBytes, maskBytes);
+    std::fclose(file);
+    if (!ok) return false;
+    uint32_t adler = RayoMd::Flate::Adler32(head, header);
+    adler = RayoMd::Flate::Adler32(reinterpret_cast<const uint8_t*>(color.data()), colorBytes, adler);
+    adler = RayoMd::Flate::Adler32(reinterpret_cast<const uint8_t*>(mask.data()), maskBytes, adler);
+    if (ReadU32(tail) != adler) return false;
     std::error_code ignored;
     fs::last_write_time(path, fs::file_time_type::clock::now(), ignored);
     return true;
