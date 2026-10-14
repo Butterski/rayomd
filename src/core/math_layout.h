@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // Native TeX-subset math: box layout and PDF content-stream emission for one formula.

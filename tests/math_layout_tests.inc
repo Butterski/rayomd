@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Needs <algorithm>, <chrono>, <cmath>, <cstdint>, <iostream>, <string>, <string_view>, <utility>, <vector>; calls no helper of tests/core_tests.cpp.
 // Box layout and PDF emission of native math (src/core/math_layout.h, math_parser.h).
 // Included inside the anonymous namespace of tests/core_tests.cpp, after its helpers.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // A zlib (RFC 1950) and DEFLATE (RFC 1951) decoder that hands out its output a piece at a time,

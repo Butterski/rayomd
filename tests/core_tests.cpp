@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #include "rayomd/tiny_pdf.h"
 #include "../src/common/batch_report.h"
 #include "../src/common/exact_math.h"

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #include "file_io.h"
 
 #ifdef _WIN32

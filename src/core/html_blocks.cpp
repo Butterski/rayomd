@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // HTML blocks (html.h's MapBlock and MapParagraph): what an HTML block of a document stands for
 // as blocks. Run once per HTML block and per paragraph that starts with '<', '!' or '[', built at
 // -Os apart from the tag scanner in html.cpp, which reads every tag of a document.

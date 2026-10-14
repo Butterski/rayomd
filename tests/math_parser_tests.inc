@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Needs <cstdint> <cstdio> <iostream> <string> <string_view> <vector> and "../src/core/math_parser.h"; calls no helper of core_tests.cpp.
 // Tests of the TeX-subset math parser (src/core/math_parser.cpp). Everything of this fragment
 // lives in namespace math_parser_tests; only CheckMathParser() is defined outside it.

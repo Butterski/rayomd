@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // A theme's header, footer and cover page as PDF content operators. Kept apart from the engine

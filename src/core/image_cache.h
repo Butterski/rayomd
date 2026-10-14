@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // Re-encoded PNGs kept between processes (PdfOptions::imageCacheDirectory): a file per image, named

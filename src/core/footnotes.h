@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // Footnotes in the parser (see Footnotes in markdown_parser.h): the definitions it collects, the

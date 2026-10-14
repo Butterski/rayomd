@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Needs <chrono>, <iostream>, <string>, <string_view>, <vector>; calls InlineVisible of tests/core_tests.cpp.
 // Markdown front end of native math: which bytes become formulas, display blocks, or stay text.
 // Included inside the anonymous namespace of tests/core_tests.cpp, after its helpers.

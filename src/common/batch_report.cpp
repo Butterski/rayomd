@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #include "batch_report.h"
 
 #include "file_io.h"

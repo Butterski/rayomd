@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Generate RayoMD's native math tables from the Adobe Core 14 AFM files and TeX Gyre Termes.
 
 Writes three files (default: src/core):

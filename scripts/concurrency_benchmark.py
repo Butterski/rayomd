@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Benchmark deterministic RayoMD batch scaling at explicit worker counts."""
 
 from __future__ import annotations

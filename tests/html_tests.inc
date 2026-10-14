@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Needs <chrono>, <iostream>, <string>, <string_view>, <vector> and src/core/html.h.
 // The HTML engine: tag names, CommonMark's raw HTML tags (spec 0.31.2, examples 613-632) and
 // HTML block conditions (section 4.6), the limits of a tag, and which URLs a link may have.

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Cross-platform black-box CLI verification for an already-built RayoMD binary."""
 from __future__ import annotations
 

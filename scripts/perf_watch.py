@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Watch RayoMD conversion speed across versions.
 
 It generates a deterministic supported-Markdown corpus, runs the existing

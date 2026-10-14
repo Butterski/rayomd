@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Order-balanced fresh-process A/B benchmark for RayoMD one-shot exports."""
 
 from __future__ import annotations

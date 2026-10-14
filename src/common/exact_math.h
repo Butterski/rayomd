@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // Rounding, square root and remainder without libm. Each has exactly one correct result for

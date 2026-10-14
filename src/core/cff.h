@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // OpenType fonts with PostScript outlines: the 'CFF ' table read once when the font is loaded,

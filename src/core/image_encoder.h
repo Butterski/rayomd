@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // The zlib streams of a re-encoded image's planes (the /Predictor 15 rows of its colour and

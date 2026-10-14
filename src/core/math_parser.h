@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // TeX-subset math parser: source text -> flat node arena. Renderer- and layout-neutral.

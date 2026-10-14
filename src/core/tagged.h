@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // Tagged PDF for PDF/UA-1 (PdfOptions::pdfua): the structure tree the Unicode renderer builds as

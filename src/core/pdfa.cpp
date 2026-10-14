@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #include "pdfa.h"
 
 #include "rayomd_pdf_source.h"

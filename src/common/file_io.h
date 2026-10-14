@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // Whole-file reads and writes through C stdio. RayoMD does not use iostreams: statically linked,

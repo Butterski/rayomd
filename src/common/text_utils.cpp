@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #include "text_utils.h"
 
 #include <cstdint>

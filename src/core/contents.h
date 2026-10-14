@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // The table of contents: where a document has it, and the headings it lists. The page numbers are

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Needs <chrono>, <iostream>, <string>, <string_view>, <vector>; uses math_markdown_tests::Repeat
 // and ParseAllInline, so it is included after math_markdown_tests.inc.
 // The inline parser looks ahead for closing delimiters. Past a byte budget it answers those

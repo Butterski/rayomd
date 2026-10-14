@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // A DEFLATE (RFC 1951) encoder in the zlib format (RFC 1950), for the FlateDecode streams of

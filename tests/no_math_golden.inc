@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // An ASCII document without any math syntax (no '$', no "\(", no "\[", no math fence).
 // It goes through the standard-font renderer, whose output does not depend on the
 // platform or on installed fonts, so its PDF bytes are a stable fingerprint.

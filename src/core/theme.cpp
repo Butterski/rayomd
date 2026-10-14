@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #include "theme.h"
 
 #include "../common/text_utils.h"

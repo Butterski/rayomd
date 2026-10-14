@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Generate src/hot.ld, the GNU ld script that groups the code a fresh export runs.
 
 A one-shot `rayomd --export` faults its code in by 64 KB windows of the executable. Release

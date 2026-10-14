@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #include "markdown_parser.h"
 #include "footnotes.h"
 #include "highlight.h"

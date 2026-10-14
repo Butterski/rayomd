@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Fresh-process Markdown-to-PDF comparison: RayoMD against Pandoc (XeLaTeX, Typst), md-to-pdf and glu.
 
 Each tool is optional except RayoMD: one that is not installed (or not given) is skipped. Every

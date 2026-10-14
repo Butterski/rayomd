@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // The pieces of a PDF/A-3b file (ISO 19005-3, level B) that ordinary exports do not have: the

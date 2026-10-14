@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // What both command lines share for batch export: the JSON Lines report, the up-to-date check

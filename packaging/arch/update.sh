@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Sets both Arch packages to a release: pkgver, pkgrel, sha256sums and .SRCINFO.
 #
 #   packaging/arch/update.sh 4.3.1

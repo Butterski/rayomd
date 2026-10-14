@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // A book: reading its files for --book (RayoMd::Book), their order and titles, from a SUMMARY.md

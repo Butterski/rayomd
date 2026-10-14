@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // SVG images: a static subset of SVG drawn as a PDF form XObject, for the charts and diagrams

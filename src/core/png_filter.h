@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // PNG row filters (PNG specification, section 9): undoing them when RayoMD decodes a PNG, and

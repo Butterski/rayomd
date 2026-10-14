@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #include "inline_markdown.h"
 #include "html.h"
 #include "../common/text_utils.h"

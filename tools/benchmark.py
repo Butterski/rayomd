@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Maintained entry point for RayoMD performance workflows."""
 from __future__ import annotations
 

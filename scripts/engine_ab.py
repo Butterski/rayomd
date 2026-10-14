@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Warm-engine A/B benchmark of two RayoMD binaries, with an A/A noise control.
 
 Runs `--bench` for a baseline binary, an identical copy of that binary, and a candidate

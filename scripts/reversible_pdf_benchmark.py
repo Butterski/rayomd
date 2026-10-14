@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Benchmark and validate the rayomd-source/1 reversible PDF profile."""
 from __future__ import annotations
 

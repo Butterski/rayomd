@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // HTML inside Markdown: where CommonMark 0.31.2 recognises it (raw HTML tags in text, the seven

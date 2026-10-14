@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 // Syntax highlighting of fenced code blocks. The first word of a fence's info string names the

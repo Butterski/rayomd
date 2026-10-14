@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #include "rayomd/tiny_pdf.h"
 #include "flate.h"
 #include "export_options.h"
