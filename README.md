@@ -262,6 +262,17 @@ the one `RAYOMD_FONT` names, TrueType or OpenType: `.ttf`, `.otf`, `.ttc`) with 
 for other scripts, Noto Sans CJK first for Chinese, Japanese and Korean; Latin text stays on the
 PDF standard fonts, which keeps those files small.
 
+### HTML in Markdown
+
+Inline HTML as GitHub shows it: `<b>`, `<i>`, `<s>`, `<code>`, `<kbd>`, `<u>`, `<mark>`, `<sup>`
+and `<sub>`, `<a href>`, `<q>`, `<br>`, and `<img>` as its alt text. Other tags are removed and
+their text kept; `<script>`, `<style>` and the like are left out with their content, and links to
+`javascript:` URLs are not made.
+
+```markdown
+Press <kbd>Ctrl</kbd>+<kbd>C</kbd>, then <mark>paste</mark>: H<sub>2</sub>O, E = mc<sup>2</sup>.
+```
+
 ### Code highlighting
 
 Fenced code in one of 29 languages is coloured as GitHub's light theme colours it: shell,

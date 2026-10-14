@@ -15,7 +15,18 @@ enum class InlineMath : unsigned char {
     Inline,   // $...$ or \( ... \)
     Display,  // $$...$$ inside paragraph text
     Note,     // a footnote reference, "[^label]", whose text is the label: one box, like a formula
+    Sup,      // <sup>: its text, plain, raised and smaller in a box of its own, like a note
+    Sub,      // <sub>: the same, lowered
 };
+
+// <sup> or <sub>: text in a box, which readers of formulas and notes take as text.
+constexpr bool IsScript(InlineMath math) {
+    return math == InlineMath::Sup || math == InlineMath::Sub;
+}
+
+// InlineRun::decor and InlineSpan::decor bits: HTML's <u> and <ins>, and <mark>.
+constexpr uint8_t kDecorUnderline = 1;
+constexpr uint8_t kDecorMark = 2;
 
 // Source-size caps for math recognised inside inline text, so one stray '$' can
 // never turn a whole paragraph into a single unbreakable box. A complete candidate
@@ -31,6 +42,8 @@ struct InlineSpan {
     bool italic = false;
     bool strike = false;
     bool code = false;
+    bool lineBreak = false;
+    uint8_t decor = 0;  // kDecor* bits
     InlineMath math = InlineMath::None;
 };
 
@@ -47,6 +60,7 @@ struct InlineRun {
     bool strike = false;
     bool code = false;
     bool lineBreak = false; // <br>: one space, at which the wrappers end the line
+    uint8_t decor = 0;      // kDecor* bits
     InlineMath math = InlineMath::None;
 };
 
@@ -54,6 +68,7 @@ struct InlineRuns {
     std::string text;
     std::string urls;
     std::vector<InlineRun> runs;
+    bool scripts = false;   // a run is InlineMath::Sup or Sub, which the paragraph fast paths do not lay out
 
     std::string_view Text(const InlineRun& run) const {
         return std::string_view(text.data() + run.begin, run.end - run.begin);

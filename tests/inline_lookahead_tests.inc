@@ -125,6 +125,11 @@ bool CheckInlineLookahead() {
     large.push_back(manyRuns + "\n");
     large.push_back("a" + std::string(120000, '*') + "b\n");
     large.push_back("a " + std::string(120000, '`') + " b\n");
+    // HTML tags: attribute quotes never closed (each tag's search for its quote must not reach
+    // the end of the text), elements opened by the thousand, and scripts that never close.
+    large.push_back(Repeat("<a x=\"", 100000) + "\n");
+    large.push_back(Repeat("<b>", 200000) + "\n");
+    large.push_back(Repeat("<sup>", 100000) + "\n");
     const auto started = std::chrono::steady_clock::now();
     for (const std::string& input : large) {
         std::vector<TinyPdf::Internal::Block> blocks = TinyPdf::Internal::ParseMarkdown(input);

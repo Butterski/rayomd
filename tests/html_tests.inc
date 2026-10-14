@@ -180,8 +180,59 @@ bool CheckSafeUrls() {
     return true;
 }
 
+// Inline HTML as GitHub shows it: each kind of element's effect on the runs, an element left
+// open lasting to the end of its paragraph, a script element's content left out, an unsafe link
+// kept as text, and <sup> and <sub> as runs of their own; in both renderers, the fill of <mark>,
+// and scripts at the size of a note's number.
+bool CheckInlineHtml() {
+    using TinyPdf::Internal::InlineMath;
+    using TinyPdf::Internal::InlineSpan;
+    const std::vector<InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(
+        "a <b>b</b> <i>c</i> <s>d</s> <kbd>e</kbd> <u>f</u> <mark>g</mark> <a href=\"https://x.y/&amp;\">h</a> "
+        "x<sup>2</sup> H<sub>2</sub>O <q>q</q> <img src=a.png alt=\"Logo\"> <span>s</span> "
+        "<script>bad()</script><a href=\"javascript:x\">j</a> <STRONG>end");
+    std::string visible;
+    for (const InlineSpan& span : spans) visible += span.text;
+    const auto find = [&spans](std::string_view text, InlineMath math = InlineMath::None) -> const InlineSpan* {
+        for (const InlineSpan& span : spans) {
+            if (span.text == text && span.math == math) return &span;
+        }
+        return nullptr;
+    };
+    const InlineSpan* b = find("b");
+    const InlineSpan* c = find("c");
+    const InlineSpan* d = find("d");
+    const InlineSpan* e = find("e");
+    const InlineSpan* f = find("f");
+    const InlineSpan* g = find("g");
+    const InlineSpan* h = find("h");
+    const InlineSpan* j = nullptr;     // plain text, joined with the text around it
+    for (const InlineSpan& span : spans) {
+        if (span.text.find(" j ") != std::string::npos) j = &span;
+    }
+    const InlineSpan* end = find("end");
+    if (visible != "a b c d e f g h x2 H2O \xE2\x80\x9Cq\xE2\x80\x9D image: Logo s j end" || !b || !b->bold || !c ||
+        !c->italic || c->bold || !d || !d->strike || !e || !e->code || !f || f->decor != TinyPdf::Internal::kDecorUnderline ||
+        !g || g->decor != TinyPdf::Internal::kDecorMark || !h || h->url != "https://x.y/&" ||
+        !find("2", InlineMath::Sup) || !find("2", InlineMath::Sub) || !j || !j->url.empty() || !end || !end->bold) {
+        std::cerr << "inline HTML spans mismatch: " << visible << std::endl;
+        return false;
+    }
+    const std::string text = "A <mark>m</mark>, <u>u</u> and x<sup>2</sup>.\n";
+    for (const std::string& document : { text, "\xC5\xBC " + text }) {
+        std::string pdf;
+        if (!Build(document, pdf) || pdf.find("1 0.973 0.773 rg") == std::string::npos ||
+            pdf.find(" 8.05 Tf") == std::string::npos || pdf.find("<sup>") != std::string::npos) {
+            std::cerr << "inline HTML painting mismatch" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool CheckHtmlEngine() {
-    return CheckTagNames() && CheckRawHtml() && CheckHtmlBlockConditions() && CheckTagLimits() && CheckSafeUrls();
+    return CheckTagNames() && CheckRawHtml() && CheckHtmlBlockConditions() && CheckTagLimits() && CheckSafeUrls() &&
+        CheckInlineHtml();
 }
 
 } // namespace html_tests

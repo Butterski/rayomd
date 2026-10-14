@@ -47,6 +47,14 @@ the YAML subset), opt-in page numbers, page sizes (A4 by default, presets,
 landscape and custom sizes; the renderers' `pageW`/`pageH`, never constants),
 standalone local images (PNG, JPEG, and SVG drawn as vectors), and HTTP/HTTPS
 images on Windows or curl-enabled Linux builds with fallback text.
+Inline HTML (`WriteHtmlTag` in `inline_markdown.cpp`, on `html.h`'s `ScanTag`): emphasis,
+code and link tags set counters in `RunWriter::html`, which only then (`html.active`) takes the
+out-of-line `FlushHtml`/`CloseHtml`; `<u>`/`<ins>` and `<mark>` are `InlineRun::decor`, which
+both renderers paint around a run's text (`PaintDecor`; the standard renderer's style bits 32
+and 64); `<sup>`/`<sub>` are `InlineMath::Sup`/`Sub` runs that `InlineRuns::scripts` sends to
+the general paths, which box them in the `MathPool` like footnote numbers (`PaintScript`), and
+that table cells lay out as text. Elements dropped with their content and scripts skip to their
+close tag, so each byte is read once.
 Footnotes as on GitHub (`[^label]` and `[^label]:` definitions, also in quotes and
 list items): numbered by first reference in reading order, drawn as raised link
 numbers (one `MathPool` box each, so they take the cold formula paths and the fast

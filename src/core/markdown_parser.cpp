@@ -549,12 +549,13 @@ std::string StripInlineMarkdownKeepMath(std::string_view input, bool& hasMath) {
     if (!MayContainMath(input)) return StripInlineMarkdown(input);
     InlineRuns runs;
     ParseInlineRuns(input, runs);
-    for (const InlineRun& run : runs.runs) hasMath = hasMath || run.math != InlineMath::None;
+    // A script (<sup>, <sub>) is text here; a formula or note keeps its bytes around it.
+    for (const InlineRun& run : runs.runs) hasMath = hasMath || (run.math != InlineMath::None && !IsScript(run.math));
     if (!hasMath) return Trim(std::move(runs.text));
     std::string visible;
     visible.reserve(input.size() + 8);
     for (const InlineRun& run : runs.runs) {
-        if (run.math == InlineMath::None) {
+        if (run.math == InlineMath::None || IsScript(run.math)) {
             AppendWithoutMathTextBytes(visible, runs.Text(run));
             continue;
         }

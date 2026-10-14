@@ -1,4 +1,5 @@
 #include "inline_markdown.h"
+#include "html.h"
 #include "../common/text_utils.h"
 
 #include <algorithm>
@@ -343,6 +344,24 @@ void AppendDestination(std::string_view target, std::string& urls) {
     }
 }
 
+// What the HTML tags of a paragraph have opened so far: counters of the open elements by effect,
+// and the link of an open <a href>, out.urls[urlBegin, urlEnd). Counters end with the paragraph.
+struct HtmlInline {
+    bool active = false;    // a tag was met: the runs from here on take this state into account
+    uint16_t bold = 0;
+    uint16_t italic = 0;
+    uint16_t strike = 0;
+    uint16_t code = 0;
+    uint16_t underline = 0;
+    uint16_t mark = 0;
+    size_t urlBegin = 0;
+    size_t urlEnd = 0;
+
+    uint8_t Decor() const {
+        return static_cast<uint8_t>((underline != 0 ? kDecorUnderline : 0) | (mark != 0 ? kDecorMark : 0));
+    }
+};
+
 // The output side of the parser. Text is appended to the buffer of InlineRuns as it is
 // read and a run is a range of that buffer, so text that continues in the same style
 // joins the run before it by moving one end.
@@ -352,10 +371,15 @@ public:
         out.text.clear();
         out.urls.clear();
         out.runs.clear();
+        out.scripts = false;
     }
 
     // Ends the plain text appended since the last run: one run in the given emphasis.
     void Flush(bool bold, bool italic, bool strike) {
+        if (html.active) {
+            FlushHtml(bold, italic, strike);
+            return;
+        }
         const size_t end = out.text.size();
         if (end == pending) return;
         if (!out.runs.empty()) {
@@ -377,6 +401,10 @@ public:
     // autolink or a code span. Its link target is out.urls from `urlBegin` on. Empty text
     // adds nothing, and a run that repeats the style and target of the one before joins it.
     RAYOMD_HOT_INLINE void Close(bool bold, bool italic, bool strike, size_t urlBegin, bool code) {
+        if (html.active) {
+            CloseHtml(bold, italic, strike, urlBegin, code);
+            return;
+        }
         const size_t end = out.text.size();
         if (end != pending && !out.runs.empty()) {
             InlineRun& last = out.runs.back();
@@ -413,6 +441,12 @@ public:
         Add(out.text.size()).math = InlineMath::Note;
     }
 
+    // <sup> or <sub>: the text appended since the last run as a script of its own, like a note.
+    void Script(bool sub) {
+        Add(out.text.size()).math = sub ? InlineMath::Sub : InlineMath::Sup;
+        out.scripts = true;
+    }
+
     // A <br>: one space in a run of its own, at which the wrappers end the line and which
     // other readers take as the space it is. Text after it never joins it.
     void Break() {
@@ -428,6 +462,15 @@ public:
             out.urls.resize(urlBegin);
             return;
         }
+        uint8_t decor = 0;
+        bool code = false;
+        if (html.active) {
+            bold = bold || html.bold != 0;
+            italic = italic || html.italic != 0;
+            strike = strike || html.strike != 0;
+            code = html.code != 0;
+            decor = html.Decor();
+        }
         for (const InlineRun& part : label.runs) {
             out.text.append(label.text, part.begin, part.end - part.begin);
             InlineRun& run = Add(out.text.size());
@@ -436,9 +479,87 @@ public:
             run.bold = bold || part.bold;
             run.italic = italic || part.italic;
             run.strike = strike || part.strike;
-            run.code = part.code;
+            run.code = code || part.code;
+            run.decor = static_cast<uint8_t>(decor | part.decor);
         }
     }
+
+    HtmlInline html;
+
+private:
+    // Flush in the state of the paragraph's open HTML elements, which add to the emphasis and
+    // may give the text code style, decoration and a link.
+    RAYOMD_NOINLINE void FlushHtml(bool bold, bool italic, bool strike) {
+        const size_t end = out.text.size();
+        if (end == pending) return;
+        StyledRun(end, bold || html.bold != 0, italic || html.italic != 0, strike || html.strike != 0, html.code != 0,
+            html.Decor(), html.urlBegin, html.urlEnd);
+    }
+
+    // Close in that state. A code span inside an <a href> takes the element's link.
+    RAYOMD_NOINLINE void CloseHtml(bool bold, bool italic, bool strike, size_t urlBegin, bool code) {
+        const size_t end = out.text.size();
+        if (!code) {
+            bold = bold || html.bold != 0;
+            italic = italic || html.italic != 0;
+            strike = strike || html.strike != 0;
+        }
+        code = code || html.code != 0;
+        const uint8_t decor = html.Decor();
+        if (urlBegin == out.urls.size() && html.urlBegin != html.urlEnd) {
+            if (end != pending) StyledRun(end, bold, italic, strike, code, decor, html.urlBegin, html.urlEnd);
+            return;
+        }
+        if (end != pending && !out.runs.empty()) {
+            InlineRun& last = out.runs.back();
+            if (last.bold == bold && last.italic == italic && last.strike == strike && last.code == code &&
+                last.decor == decor && !last.lineBreak && last.math == InlineMath::None &&
+                out.Url(last) == std::string_view(out.urls).substr(urlBegin)) {
+                last.end = end;
+                pending = end;
+                out.urls.resize(urlBegin);
+                return;
+            }
+        }
+        if (end == pending) {
+            out.urls.resize(urlBegin);
+            return;
+        }
+        InlineRun& run = Add(end);
+        run.urlBegin = urlBegin;
+        run.urlEnd = out.urls.size();
+        run.bold = bold;
+        run.italic = italic;
+        run.strike = strike;
+        run.code = code;
+        run.decor = decor;
+    }
+
+    // The text [pending, end) as a run in this state, linking to out.urls[urlBegin, urlEnd); it
+    // joins the run before when that has the same state, as Flush joins plain text.
+    void StyledRun(size_t end, bool bold, bool italic, bool strike, bool code, uint8_t decor, size_t urlBegin,
+        size_t urlEnd) {
+        if (!out.runs.empty()) {
+            InlineRun& last = out.runs.back();
+            const bool sameUrl = urlBegin == urlEnd ? last.urlBegin == last.urlEnd
+                : last.urlBegin == urlBegin && last.urlEnd == urlEnd;
+            if (last.bold == bold && last.italic == italic && last.strike == strike && last.code == code &&
+                last.decor == decor && sameUrl && !last.lineBreak && last.math == InlineMath::None) {
+                last.end = end;
+                pending = end;
+                return;
+            }
+        }
+        InlineRun& run = Add(end);
+        run.bold = bold;
+        run.italic = italic;
+        run.strike = strike;
+        run.code = code;
+        run.decor = decor;
+        run.urlBegin = urlBegin;
+        run.urlEnd = urlEnd;
+    }
+
 
 private:
     InlineRun& Add(size_t end) {
@@ -598,6 +719,12 @@ public:
         return greaterAt;
     }
 
+    // The length of the HTML tag at source[at] == '<' with `token` filled in, or 0. The scanner
+    // keeps where the closing quotes of attribute values are, so unterminated quotes stay linear.
+    uint32_t Tag(size_t at, Html::TagToken& token) {
+        return Html::ScanTag(source, at, quotes, token);
+    }
+
     // First "-->" at or after `from`: the end of an HTML comment.
     size_t NextCommentClose(size_t from) {
         if (from < commentFrom || (commentAt != std::string_view::npos && from > commentAt)) {
@@ -693,8 +820,133 @@ private:
     size_t greaterAt = std::string_view::npos;
     size_t commentFrom = std::string_view::npos;
     size_t commentAt = std::string_view::npos;
+    Html::QuoteCache quotes;
     std::unique_ptr<Tables> tables;
 };
+
+// Where the close tag "</name>" (any case; white space may come before its '>') of an element
+// begins and ends at or after `from`; source.size() for both when the text has none. Callers
+// go on after what it returns, so each byte is searched once.
+struct CloseTag {
+    size_t begin;
+    size_t end;
+};
+
+CloseTag FindCloseTag(std::string_view source, size_t from, std::string_view name) {
+    for (size_t at = source.find("</", from); at != std::string_view::npos; at = source.find("</", at + 2)) {
+        size_t index = at + 2;
+        if (source.size() - index < name.size()) break;
+        bool same = true;
+        for (size_t k = 0; k < name.size() && same; k++) {
+            const char ch = source[index + k];
+            same = (ch >= 'A' && ch <= 'Z' ? static_cast<char>(ch - 'A' + 'a') : ch) == name[k];
+        }
+        if (!same) continue;
+        index += name.size();
+        while (index < source.size() && (source[index] == ' ' || source[index] == '\t' || source[index] == '\n' ||
+                                            source[index] == '\r')) {
+            index++;
+        }
+        if (index < source.size() && source[index] == '>') return { at, index + 1 };
+    }
+    return { source.size(), source.size() };
+}
+
+// The text of a <sup> or <sub>, source[begin, end), as plain text: character references
+// decoded, tags left out, line breaks as spaces.
+void AppendScriptText(InlineScanner& scan, std::string& text, size_t begin, size_t end) {
+    const std::string_view source = scan.source;
+    Html::TagToken token;
+    for (size_t at = begin; at < end;) {
+        const char ch = source[at];
+        if (ch == '<') {
+            const uint32_t length = scan.Tag(at, token);
+            if (length != 0 && at + length <= end) {
+                at += length;
+                continue;
+            }
+        } else if (ch == '&') {
+            uint32_t codePoint = 0;
+            const size_t length = MatchCharacterReference(source, at, codePoint);
+            if (length != 0 && at + length <= end) {
+                AppendReference(text, codePoint);
+                at += length;
+                continue;
+            }
+        }
+        text.push_back(ch == '\n' || ch == '\r' ? ' ' : ch);
+        at++;
+    }
+}
+
+// The HTML tag at source[at] == '<', as GitHub shows it: emphasis, code, decoration, a link, a
+// script, an image's alt text, quotation marks or a line break; an element whose content is not
+// shown left out up to its close tag; any other tag removed and its text kept. Returns the index
+// behind what it covers, or 0 when no tag starts there. Out of the parse loop: most text has none.
+RAYOMD_NOINLINE size_t WriteHtmlTag(InlineScanner& scan, RunWriter& writer, InlineRuns& out, size_t at, bool bold,
+    bool italic, bool strike) {
+    using Html::Tag;
+    Html::TagToken token;
+    const uint32_t length = scan.Tag(at, token);
+    if (length == 0) return 0;
+    const size_t end = at + length;
+    // The text before the tag ends its run in the state before it.
+    writer.Flush(bold, italic, strike);
+    HtmlInline& html = writer.html;
+    html.active = true;
+    const auto count = [&token](uint16_t& counter) {
+        if (token.closing) {
+            if (counter != 0) counter--;
+        } else if (!token.selfClosing && counter != 0xFFFF) {
+            counter++;
+        }
+    };
+    switch (token.tag) {
+    case Tag::B: case Tag::Strong: count(html.bold); break;
+    case Tag::I: case Tag::Em: case Tag::Cite: case Tag::Dfn: case Tag::Var: count(html.italic); break;
+    case Tag::S: case Tag::Strike: case Tag::Del: count(html.strike); break;
+    case Tag::Code: case Tag::Tt: case Tag::Kbd: case Tag::Samp: count(html.code); break;
+    case Tag::U: case Tag::Ins: count(html.underline); break;
+    case Tag::Mark: count(html.mark); break;
+    case Tag::Sup:
+    case Tag::Sub: {
+        if (token.closing || token.selfClosing) break;
+        const CloseTag close = FindCloseTag(scan.source, end, Html::TagName(token.tag));
+        AppendScriptText(scan, out.text, end, close.begin);
+        writer.Script(token.tag == Tag::Sub);
+        return close.end;
+    }
+    case Tag::A:
+        if (token.closing) {
+            html.urlBegin = html.urlEnd = 0;
+        } else if (token.href.data() != nullptr) {
+            std::string href;
+            AppendDecoded(href, token.href);
+            if (Html::SafeUrl(href)) {
+                html.urlBegin = out.urls.size();
+                out.urls += href;
+                html.urlEnd = out.urls.size();
+            }
+        }
+        break;
+    case Tag::Img:
+        if (!token.closing) {
+            out.text += "image: ";
+            AppendDecoded(out.text, token.alt);
+        }
+        break;
+    case Tag::Q: AppendReference(out.text, token.closing ? 0x201D : 0x201C); break;
+    case Tag::Br:
+        if (!token.closing) writer.Break();
+        break;
+    default:
+        if (!token.closing && !token.selfClosing && Html::IsDroppedWithContent(token.tag)) {
+            return FindCloseTag(scan.source, end, Html::TagName(token.tag)).end;
+        }
+        break;
+    }
+    return end;
+}
 
 bool ParseLinkAt(InlineScanner& scan, size_t start, size_t labelOffset, InlineLink& link) {
     const std::string_view source = scan.source;
@@ -1400,6 +1652,11 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
                     i = end + 1;
                     continue;
                 }
+                const size_t tagEnd = WriteHtmlTag(scan, writer, out, i, bold, italic, strike);
+                if (tagEnd != 0) {
+                    i = tagEnd;
+                    continue;
+                }
             }
         }
         if (source[i] == '$' && recognizeMath) {
@@ -1510,6 +1767,8 @@ std::vector<InlineSpan> ParseInlineSpans(std::string_view input, bool recognizeM
         span.italic = run.italic;
         span.strike = run.strike;
         span.code = run.code;
+        span.lineBreak = run.lineBreak;
+        span.decor = run.decor;
         span.math = run.math;
     }
     return spans;

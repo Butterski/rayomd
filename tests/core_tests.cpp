@@ -534,7 +534,8 @@ bool CheckClassicInlineExactness() {
         return false;
     }
 
-    const std::string invalidAutolinks = "<not-an-email> and <user@localhost>";
+    // "<not-an-email>" would be an HTML tag (a custom element), which is left out as on GitHub.
+    const std::string invalidAutolinks = "<1-not-an-email> and <user@localhost>";
     std::vector<InlineSpan> invalid = TinyPdf::Internal::ParseInlineSpans(invalidAutolinks);
     bool hasUrl = false;
     std::string invalidVisible;

@@ -114,12 +114,12 @@ private:
         special = false;
         if (!MayContainMath(input) && input.find("[^") == std::string_view::npos) return StripInlineMarkdown(input);
         ParseInlineRuns(input, runs);
-        for (const InlineRun& run : runs.runs) special = special || run.math != InlineMath::None;
+        for (const InlineRun& run : runs.runs) special = special || (run.math != InlineMath::None && !IsScript(run.math));
         if (!special) return Trimmed(runs.text);
         std::string visible;
         visible.reserve(input.size() + 8);
         for (const InlineRun& run : runs.runs) {
-            if (run.math == InlineMath::None) {
+            if (run.math == InlineMath::None || IsScript(run.math)) {
                 AppendWithoutMarkers(visible, runs.Text(run));
                 continue;
             }

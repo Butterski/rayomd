@@ -4595,6 +4595,11 @@ constexpr double kNoteSizeFactor = 0.7;
 constexpr double kNoteRiseFactor = 0.36;
 constexpr double kNoteTextFactor = 0.85;
 constexpr double kNoteIndent = 16.0;
+// HTML's <sup> is set as a footnote number is; <sub> at the same size, lowered by 0.18 of the
+// size of the text around it.
+constexpr double kScriptDropFactor = 0.18;
+// The fill behind HTML's <mark>: the yellow browsers draw.
+constexpr const char* kMarkFill = "1 0.973 0.773";
 
 // Where the footnotes are drawn: note N's text and its first reference, at [N - 1]; a negative
 // top where it is not drawn.
@@ -4955,17 +4960,35 @@ public:
     int Note(int index) const { return items[(size_t)index].note; }
     double NoteSize(int index) const { return items[(size_t)index].noteSize; }
 
+    // HTML's <sup> or <sub> (`sub`) in text of `size`: `text`, `width` wide at the size of a note's
+    // number, which the renderer paints (PaintScript); no formula.
+    int AddScript(std::string text, double width, double size, bool sub) {
+        Item item;
+        item.script = sub ? 2 : 1;
+        item.scriptText = std::move(text);
+        item.noteWidth = width;
+        item.noteSize = size;
+        items.push_back(std::move(item));
+        return (int)items.size() - 1;
+    }
+    // 1 for a <sup>, 2 for a <sub>, 0 for anything else.
+    int Script(int index) const { return items[(size_t)index].script; }
+    const std::string& ScriptText(int index) const { return items[(size_t)index].scriptText; }
+
     double Width(int index) const {
         const Item& item = items[(size_t)index];
-        return item.note != 0 ? item.noteWidth : item.formula.Width();
+        return item.note != 0 || item.script != 0 ? item.noteWidth : item.formula.Width();
     }
     double Ascent(int index) const {
         const Item& item = items[(size_t)index];
-        return item.note != 0 ? item.noteSize * (kNoteRiseFactor + kNoteSizeFactor * 0.75) : item.formula.Ascent();
+        if (item.script == 2) return item.noteSize * (kNoteSizeFactor * 0.75 - kScriptDropFactor);
+        return item.note != 0 || item.script != 0 ? item.noteSize * (kNoteRiseFactor + kNoteSizeFactor * 0.75)
+            : item.formula.Ascent();
     }
     double Descent(int index) const {
         const Item& item = items[(size_t)index];
-        return item.note != 0 ? 0.0 : item.formula.Descent();
+        if (item.script == 2) return item.noteSize * kScriptDropFactor;
+        return item.note != 0 || item.script != 0 ? 0.0 : item.formula.Descent();
     }
     bool IsDisplay(int index) const { return items[(size_t)index].display; }
 
@@ -4982,8 +5005,10 @@ private:
         MathFormula formula;
         bool display = false;
         int note = 0;               // a footnote reference's number; 0 for a formula
+        int script = 0;             // 1 for a <sup>, 2 for a <sub>; 0 for a formula
         double noteWidth = 0.0;
-        double noteSize = 0.0;      // the size of the text around the reference
+        double noteSize = 0.0;      // the size of the text around the reference or script
+        std::string scriptText;
     };
     std::vector<Item> items;
     Internal::MathGlyphUse glyphUse;
@@ -5853,6 +5878,7 @@ private:
         bool italic = false;
         bool strike = false;
         bool code = false;
+        uint8_t decor = 0;  // Internal::kDecor* bits: HTML's underline and mark
         int math = -1;   // index into `math` when the span is a formula; text is empty then
     };
 
@@ -5865,12 +5891,12 @@ private:
     };
 
     void PushSpan(std::vector<StyledSpan>& spans, std::string_view text, bool bold, bool italic, bool strike,
-        std::string&& url, bool code) {
+        std::string&& url, bool code, uint8_t decor = 0) {
         if (text.empty()) return;
         std::wstring wide = Utf8ToWide(text);
         if (!spans.empty() && spans.back().bold == bold && spans.back().italic == italic &&
             spans.back().strike == strike && spans.back().url == url && spans.back().code == code &&
-            spans.back().math < 0) {
+            spans.back().decor == decor && spans.back().math < 0) {
             spans.back().text += wide;
         } else {
             spans.emplace_back();
@@ -5881,6 +5907,7 @@ private:
             span.italic = italic;
             span.strike = strike;
             span.code = code;
+            span.decor = decor;
         }
     }
 
@@ -5888,6 +5915,10 @@ private:
     // or cannot fit the line is shown as its TeX source in code style instead.
     RAYOMD_MATH_COLD void PushMathSpan(std::vector<StyledSpan>& spans, const Internal::InlineSpan& span, double size,
         double width, bool bold) {
+        if (Internal::IsScript(span.math)) {
+            PushScriptSpan(spans, span, size);
+            return;
+        }
         const int note = FootnoteNumber(footnotes, span);
         if (note != 0 || span.math == Internal::InlineMath::Note) {
             PushNoteSpan(spans, note, span.text, size);
@@ -5914,6 +5945,21 @@ private:
         const std::string number = std::to_string(note);
         const double width = TextWidth(font, std::wstring(number.begin(), number.end()), size * kNoteSizeFactor);
         MathAppend(spans).math = math.AddNote(note, width, size);
+    }
+
+    // <sup> or <sub>: its text as one box in the pool, at the size of a note's number.
+    RAYOMD_MATH_COLD void PushScriptSpan(std::vector<StyledSpan>& spans, const Internal::InlineSpan& span, double size) {
+        const double width = TextWidth(font, Utf8ToWide(span.text), size * kNoteSizeFactor);
+        MathAppend(spans).math = math.AddScript(span.text, width, size, span.math == Internal::InlineMath::Sub);
+    }
+
+    // A script: its text in the body colour, raised as a note's number or lowered, no link.
+    RAYOMD_MATH_COLD double PaintScript(int index, double x, double baseline, const char* color) {
+        const double size = math.NoteSize(index);
+        const double shift = math.Script(index) == 2 ? -size * kScriptDropFactor : size * kNoteRiseFactor;
+        if (tags != nullptr) tags->LinkRun({});
+        PaintText(x, baseline + shift, size * kNoteSizeFactor, Utf8ToWide(math.ScriptText(index)), color);
+        return math.Width(index);
     }
 
     // A footnote reference: its number raised, in the link colour, linking to the note ("#^N").
@@ -5946,7 +5992,7 @@ private:
                 PushMathSpan(spans, span, size, width, false);
                 continue;
             }
-            PushSpan(spans, span.text, span.bold, span.italic, span.strike, std::move(span.url), span.code);
+            PushSpan(spans, span.text, span.bold, span.italic, span.strike, std::move(span.url), span.code, span.decor);
         }
         return spans;
     }
@@ -6001,11 +6047,11 @@ private:
     // Appends one word to the line being filled, with a leading space when `spaced`. It is
     // merged into the previous span when the style is the same.
     void AppendStyledWord(std::vector<StyledSpan>& line, std::wstring_view word, bool spaced, bool bold, bool italic,
-        bool strike, const std::string& url, bool code) {
+        bool strike, const std::string& url, bool code, uint8_t decor = 0) {
         if (!line.empty()) {
             StyledSpan& last = line.back();
             if (last.bold == bold && last.italic == italic && last.strike == strike && last.url == url &&
-                last.code == code) {
+                last.code == code && last.decor == decor) {
                 if (spaced) last.text.push_back(L' ');
                 last.text.append(word.data(), word.size());
                 return;
@@ -6021,6 +6067,7 @@ private:
         span.italic = italic;
         span.strike = strike;
         span.code = code;
+        span.decor = decor;
     }
 
     // Line filling for text that contains at least one formula. Same greedy rule as
@@ -6047,10 +6094,11 @@ private:
             const bool italic = styled && word.span->italic;
             const bool strike = styled && word.span->strike;
             const bool code = styled && word.span->code;
+            const uint8_t decor = styled ? word.span->decor : 0;
             if (!line.empty()) {
                 StyledSpan& last = line.back();
                 if (last.math < 0 && last.bold == bold && last.italic == italic && last.strike == strike &&
-                    last.code == code && last.url == url) {
+                    last.code == code && last.decor == decor && last.url == url) {
                     if (spaced) last.text.push_back(L' ');
                     last.text.append(text.data(), text.size());
                     return;
@@ -6065,6 +6113,7 @@ private:
             added.italic = italic;
             added.strike = strike;
             added.code = code;
+            added.decor = decor;
         };
         auto flush = [&]() {
             if (!line.empty()) MathAppend(lines).swap(line);
@@ -6204,6 +6253,7 @@ private:
         bool italic = false;
         bool strike = false;
         bool code = false;
+        uint8_t decor = 0;          // Internal::kDecor* bits: HTML's underline and mark
     };
 
     // The wrapped lines of one paragraph, kept flat: the text of every run lies in one
@@ -6245,6 +6295,18 @@ private:
         DrawRect(x + skip - 1.5, top + 1.0, width - skip + 3.0, lh, fill);
     }
 
+    // HTML's <mark> behind a run of text (`mark`, painted before the text) or <u> under it (after
+    // it, in the text's colour), from its first glyph: a space the run begins with stays clear.
+    RAYOMD_COLD void PaintDecor(double x, double baseline, double width, double size, std::wstring_view text, bool mark,
+        const char* color) {
+        size_t spaces = 0;
+        while (spaces < text.size() && text[spaces] == L' ') spaces++;
+        const double skip = spaces != 0 ? TextWidth(font, text.substr(0, spaces), size) : 0.0;
+        if (width <= skip) return;
+        if (mark) DrawRect(x + skip, baseline + size * 0.88, width - skip, size * 1.10, kMarkFill);
+        else DrawRect(x + skip, baseline - size * 0.0825, width - skip, size * 0.055, color);
+    }
+
     // Paints runs [begin, end) of `runs` as one line from x: code backgrounds `lh` high from
     // `top`, the text on `baseline` (all of it bold when `bold`) and link rectangles. The last
     // run is measured only when its width is drawn.
@@ -6271,11 +6333,13 @@ private:
             const StyledRun& run = runs.runs[index];
             const std::wstring_view runText = runs.Text(run);
             if constexpr (Tagged) tags->LinkRun(run.url);
-            const bool measured = index + 1 < end || run.code || !run.url.empty();
+            const bool measured = index + 1 < end || run.code || !run.url.empty() || run.decor != 0;
             const double spanWidth = measured ? TextWidth(font, runText, size) : 0.0;
             if (run.code) CodeBackground(x, top, spanWidth, lh, runText, size, colors.codeFill);
             const char* color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
+            if (run.decor & Internal::kDecorMark) PaintDecor(x, baseline, spanWidth, size, runText, true, color);
             PaintText(x, baseline, size, runText, color, run.bold || bold, run.italic, run.strike);
+            if (run.decor & Internal::kDecorUnderline) PaintDecor(x, baseline, spanWidth, size, runText, false, color);
             AddLink(x, baseline, spanWidth, size, run.url);
             x += spanWidth;
         }
@@ -6284,10 +6348,10 @@ private:
     // Appends `text` to the line whose first run is `lineStart`, after a space when `spaced`.
     // The text joins the last run of the line when the style is the same.
     static RAYOMD_HOT_INLINE void AppendStyledRunText(StyledRuns& out, size_t lineStart, std::wstring_view text,
-        bool spaced, bool bold, bool italic, bool strike, std::string_view url, bool code) {
+        bool spaced, bool bold, bool italic, bool strike, std::string_view url, bool code, uint8_t decor = 0) {
         StyledRun* run = out.runs.size() != lineStart ? &out.runs.back() : nullptr;
         if (!run || run->bold != bold || run->italic != italic || run->strike != strike || run->code != code ||
-            !SameText(run->url, url)) {
+            run->decor != decor || !SameText(run->url, url)) {
             out.runs.emplace_back();
             run = &out.runs.back();
             run->begin = static_cast<uint32_t>(out.text.size());
@@ -6296,6 +6360,7 @@ private:
             run->italic = italic;
             run->strike = strike;
             run->code = code;
+            run->decor = decor;
         }
         if (spaced) out.text.push_back(L' ');
         out.text.append(text.data(), text.size());
@@ -6307,7 +6372,7 @@ private:
         size_t end, bool spaced) {
         const Internal::InlineRun& span = out.parsed.runs[index];
         AppendStyledRunText(out, lineStart, std::wstring_view(out.wide.data() + begin, end - begin), spaced, span.bold,
-            span.italic, span.strike, out.parsed.Url(span), span.code);
+            span.italic, span.strike, out.parsed.Url(span), span.code, span.decor);
     }
 
     // Wide text of a paragraph that comes next in out.text but is not copied yet:
@@ -6342,10 +6407,10 @@ private:
     // AppendStyledRunText for out.wide[from, from + length) through QueueWide: run offsets count
     // the pending text.
     static RAYOMD_HOT_INLINE void AppendStyledWide(StyledRuns& out, PendingWide& pending, size_t lineStart, size_t from,
-        size_t length, bool spaced, bool bold, bool italic, bool strike, std::string_view url, bool code) {
+        size_t length, bool spaced, bool bold, bool italic, bool strike, std::string_view url, bool code, uint8_t decor) {
         StyledRun* run = out.runs.size() != lineStart ? &out.runs.back() : nullptr;
         if (!run || run->bold != bold || run->italic != italic || run->strike != strike || run->code != code ||
-            !SameText(run->url, url)) {
+            run->decor != decor || !SameText(run->url, url)) {
             out.runs.emplace_back();
             run = &out.runs.back();
             run->begin = static_cast<uint32_t>(out.text.size() + pending.length);
@@ -6354,6 +6419,7 @@ private:
             run->italic = italic;
             run->strike = strike;
             run->code = code;
+            run->decor = decor;
         }
         QueueWide(out, pending, from, length, spaced);
         run->end = static_cast<uint32_t>(out.text.size() + pending.length);
@@ -6396,14 +6462,14 @@ private:
     // everything between two white spaces of the source, so it may cross style and link
     // boundaries ("**a**b", "[link](u)."): it gets no space and no line break inside, and is cut
     // by character only when it is wider than a whole line. Returns false for text with
-    // explicit line breaks or possible formulas, and with a theme's faces, which take the
-    // general path.
+    // explicit line breaks, possible formulas or HTML scripts (<sup>, <sub>), and with a theme's
+    // faces, which take the general path.
     bool WrapStyledRuns(const std::string& text, double width, double size, StyledRuns& out) {
         if (multiFace || text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
             text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
             return false;
         }
-        return WrapStyledInline(text, width, size, out, false);
+        return WrapStyledInline(text, width, size, out, false) && !out.parsed.scripts;
     }
 
     // WrapStyledRuns for one line of inline Markdown without formulas, such as a table cell.
@@ -6423,6 +6489,7 @@ private:
             // No inline syntax: every line is one unstyled run, also when it is empty.
             // The wide buffer keeps its size from paragraph to paragraph, so that resizing it
             // fills only what it grows by. NeedsInlineParse saw every byte, also any 0xE2.
+            out.parsed.scripts = false;
             if ((seen & RayoMd::Text::kByteSymbolLead) == 0) AssignUtf8ToWide(out.wide, text);
             else AssignUtf8ToWide(out.wide, NormalizeSymbols(std::string(text)));
             WrapWideWords(wrapBold ? SpanFont(true, false) : font, std::wstring_view(out.wide), width, size, [&](std::wstring_view line) {
@@ -6534,7 +6601,7 @@ private:
                             if (end == begin) continue;
                             const Internal::InlineRun& part = parsed[piece];
                             AppendStyledWide(out, pending, lineStart, begin, end - begin, spaced, part.bold, part.italic,
-                                part.strike, out.parsed.Url(part), part.code);
+                                part.strike, out.parsed.Url(part), part.code, part.decor);
                             spaced = false;
                             begin = end;
                         }
@@ -6543,7 +6610,7 @@ private:
                         out.runs.back().end = static_cast<uint32_t>(out.text.size() + pending.length);
                     } else {
                         AppendStyledWide(out, pending, lineStart, wordStart, wordEnd - wordStart, spaced, span.bold,
-                            span.italic, span.strike, url, span.code);
+                            span.italic, span.strike, url, span.code, span.decor);
                         // A struck word gets an unstyled space run before it, so it never joins.
                         joinLast = !span.strike;
                     }
@@ -6668,7 +6735,7 @@ private:
                         if (lineWidth + partWidth + chWidth > width && (ch > partStart || !line.empty())) {
                             if (ch > partStart) {
                                 AppendStyledWord(line, word.substr(partStart, ch - partStart), false, span.bold,
-                                    span.italic, span.strike, span.url, span.code);
+                                    span.italic, span.strike, span.url, span.code, span.decor);
                             }
                             newLine();
                             partStart = ch;
@@ -6677,7 +6744,7 @@ private:
                         partWidth += chWidth;
                     }
                     AppendStyledWord(line, word.substr(partStart), false, span.bold, span.italic, span.strike,
-                        span.url, span.code);
+                        span.url, span.code, span.decor);
                     lineWidth += partWidth;
                     continue;
                 }
@@ -6692,7 +6759,7 @@ private:
                         wordWidth += spanSpace;
                     }
                 }
-                AppendStyledWord(line, word, spaced, span.bold, span.italic, span.strike, span.url, span.code);
+                AppendStyledWord(line, word, spaced, span.bold, span.italic, span.strike, span.url, span.code, span.decor);
                 lineWidth += wordWidth;
             }
             if (!source.empty()) endsInWord = !IsWideSpace(source.back());
@@ -7008,7 +7075,9 @@ private:
             const double spanWidth = TextWidth(FaceFont(choice.face), runText, size);
             if (run.code) CodeBackground(x, top, spanWidth, lh, runText, size, colors.codeFill);
             const char* color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
+            if (run.decor & Internal::kDecorMark) PaintDecor(x, baseline, spanWidth, size, runText, true, color);
             PaintFaceText(choice, x, baseline, size, runText, color, run.strike);
+            if (run.decor & Internal::kDecorUnderline) PaintDecor(x, baseline, spanWidth, size, runText, false, color);
             AddLink(x, baseline, spanWidth, size, run.url);
             x += spanWidth;
         }
@@ -7270,7 +7339,8 @@ private:
             double baseline = y - bodySize;
             for (const StyledSpan& span : line) {
                 if (span.math >= 0) {
-                    cursor += math.Note(span.math) != 0 ? PaintNote(span.math, cursor, baseline)
+                    cursor += math.Script(span.math) != 0 ? PaintScript(span.math, cursor, baseline, textColor)
+                        : math.Note(span.math) != 0 ? PaintNote(span.math, cursor, baseline)
                         : math.Emit(span.math, content, cursor, baseline, textColor);
                     continue;
                 }
@@ -7278,7 +7348,11 @@ private:
                 double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
                 const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : linkColor;
+                if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                 PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
+                if (span.decor & Internal::kDecorUnderline) {
+                    PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, false, color);
+                }
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
             }
@@ -7322,7 +7396,11 @@ private:
                 double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.94 0.94 0.92");
                 const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
+                if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                 PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
+                if (span.decor & Internal::kDecorUnderline) {
+                    PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, false, color);
+                }
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
             }
@@ -7484,7 +7562,11 @@ private:
                 double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
                 const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
+                if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                 PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
+                if (span.decor & Internal::kDecorUnderline) {
+                    PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, false, color);
+                }
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
             }
@@ -9028,16 +9110,22 @@ private:
     enum : uint8_t { kStyleBold = 1, kStyleItalic = 2, kStyleCode = 4, kStyleStrike = 8 };
     // A <br> in a run of its own (Internal::InlineRun::lineBreak); never part of a face.
     static constexpr uint8_t kStyleBreak = 16;
+    // HTML's <u> and <mark> (Internal::kDecorUnderline and kDecorMark, shifted): drawn with the
+    // text, never part of a face.
+    static constexpr uint8_t kStyleUnderline = 32;
+    static constexpr uint8_t kStyleMark = 64;
+    static constexpr int kStyleDecorShift = 5;
     // The state of an Internal::InlineSpan or Internal::InlineRun.
     template <typename Span>
     static uint8_t SpanStyle(const Span& span) {
         return static_cast<uint8_t>((span.bold ? kStyleBold : 0) | (span.italic ? kStyleItalic : 0) |
-            (span.code ? kStyleCode : 0) | (span.strike ? kStyleStrike : 0));
+            (span.code ? kStyleCode : 0) | (span.strike ? kStyleStrike : 0) | (span.decor << kStyleDecorShift));
     }
     // The same for an Internal::InlineRun, whose <br> (lineBreak) gives a segment of its own.
     static uint8_t SpanStyle(const Internal::InlineRun& run) {
         return static_cast<uint8_t>((run.bold ? kStyleBold : 0) | (run.italic ? kStyleItalic : 0) |
-            (run.code ? kStyleCode : 0) | (run.strike ? kStyleStrike : 0) | (run.lineBreak ? kStyleBreak : 0));
+            (run.code ? kStyleCode : 0) | (run.strike ? kStyleStrike : 0) | (run.lineBreak ? kStyleBreak : 0) |
+            (run.decor << kStyleDecorShift));
     }
     // The font whose advances measure text in `style`: Helvetica-Oblique has those of Helvetica.
     static StandardTextFont StyleFont(uint8_t style) {
@@ -9097,6 +9185,18 @@ private:
         out.Lit(" l S Q\n");
     }
 
+    // HTML's <mark> behind a piece of text (`mark`, painted before the text) or <u> under it (after
+    // it, in the text's colour), from its first glyph: a leading space of the piece stays clear.
+    RAYOMD_COLD void PaintDecor(double x, double baseline, double width, double size, std::string_view text,
+        uint8_t style, bool mark, const char* color) {
+        size_t spaces = 0;
+        while (spaces < text.size() && text[spaces] == ' ') spaces++;
+        const double skip = UnitsToPoints(StyleAdvances(style).space * spaces, size);
+        if (width <= skip) return;
+        if (mark) Rect(x + skip, baseline + size * 0.88, width - skip, size * 1.10, kMarkFill);
+        else Rect(x + skip, baseline - size * 0.0825, width - skip, size * 0.055, color);
+    }
+
     struct AsciiSpan {
         std::string text;
         std::string url;
@@ -9133,6 +9233,12 @@ private:
     // or cannot fit the line is shown as its TeX source in code style instead.
     RAYOMD_MATH_COLD void PushAsciiMathSpan(std::vector<AsciiSpan>& spans, const Internal::InlineSpan& span, double size,
         double width, bool bold) {
+        if (Internal::IsScript(span.math)) {
+            // <sup> or <sub>: its text as one box in the pool, at the size of a note's number.
+            const double scriptWidth = AsciiTextWidth(span.text, size * kNoteSizeFactor, StandardTextFont::Regular);
+            MathAppend(spans).math = math.AddScript(span.text, scriptWidth, size, span.math == Internal::InlineMath::Sub);
+            return;
+        }
         const int note = FootnoteNumber(footnotes, span);
         if (note != 0 || span.math == Internal::InlineMath::Note) {
             PushAsciiNoteSpan(spans, note, span.text, size);
@@ -9174,6 +9280,14 @@ private:
         AddLink(x, raised, width, size * kNoteSizeFactor, "#^" + number);
         noteMarks.MarkReference(note, pageStarts.size() - 1, baseline + size);
         return width;
+    }
+
+    // A script: its text in `color`, raised as a note's number or lowered, no link.
+    RAYOMD_MATH_COLD double PaintScript(int index, double x, double baseline, const char* color) {
+        const double size = math.NoteSize(index);
+        const double shift = math.Script(index) == 2 ? -size * kScriptDropFactor : size * kNoteRiseFactor;
+        Text(x, baseline + shift, size * kNoteSizeFactor, math.ScriptText(index), "F1", color);
+        return math.Width(index);
     }
 
     std::vector<AsciiSpan> ParseAsciiLinkSpans(const std::string& text, double size, double width) {
@@ -9475,8 +9589,10 @@ private:
             const bool code = (run.style & kStyleCode) != 0;
             if (code) CodeBackground(x, top, spanWidth, lh, runs.Text(run), size, colors.codeFill);
             const char* color = run.url.empty() ? (code ? colors.code : colors.text) : linkColor;
+            if (run.style & kStyleMark) PaintDecor(x, baseline, spanWidth, size, runs.Text(run), run.style, true, color);
             Text(x, baseline, size, runs.Text(run), StyleFontName(run.style), color, runs.plain);
             if (run.style & kStyleStrike) StrikeThrough(x, baseline, spanWidth, size, runs.Text(run), run.style, color);
+            if (run.style & kStyleUnderline) PaintDecor(x, baseline, spanWidth, size, runs.Text(run), run.style, false, color);
             AddLink(x, baseline, spanWidth, size, run.url);
             x += spanWidth;
         }
@@ -9579,7 +9695,8 @@ private:
             text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
             return false;
         }
-        return WrapAsciiInline(text, width, size, 0, out, false);
+        // A paragraph with HTML scripts (<sup>, <sub>) takes the general path, which boxes them.
+        return WrapAsciiInline(text, width, size, 0, out, false) && !out.parsed.scripts;
     }
 
     // WrapAsciiRuns for one line of inline Markdown without formulas, such as a table cell;
@@ -9995,7 +10112,8 @@ private:
             double baseline = y - bodySize;
             for (const AsciiSpan& span : line) {
                 if (span.math >= 0) {
-                    cursor += math.Note(span.math) != 0 ? PaintNote(span.math, cursor, baseline)
+                    cursor += math.Script(span.math) != 0 ? PaintScript(span.math, cursor, baseline, textColor)
+                        : math.Note(span.math) != 0 ? PaintNote(span.math, cursor, baseline)
                         : math.Emit(span.math, content, cursor, baseline, textColor);
                     continue;
                 }
@@ -10003,8 +10121,12 @@ private:
                 double spanWidth = MathTextWidth(span.text, bodySize, code, (span.style & kStyleBold) != 0);
                 if (code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
                 const char* color = span.url.empty() ? (code ? codeColor : textColor) : linkColor;
+                if (span.style & kStyleMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
+                if (span.style & kStyleUnderline) {
+                    PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, false, color);
+                }
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
             }
@@ -10048,8 +10170,14 @@ private:
                     double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
                     if (code) CodeBackground(cursor, y, spanWidth, lh, span.text, bodySize, "0.94 0.94 0.92");
                     const char* color = span.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
+                    if (span.style & kStyleMark) {
+                        PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
+                    }
                     Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                     if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
+                    if (span.style & kStyleUnderline) {
+                        PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, false, color);
+                    }
                     AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                     cursor += spanWidth;
                 }
@@ -10215,8 +10343,12 @@ private:
                 double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
                 if (code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
                 const char* color = span.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
+                if (span.style & kStyleMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
+                if (span.style & kStyleUnderline) {
+                    PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, false, color);
+                }
                 AddLink(cursor, baseline, spanWidth, bodySize, span.url);
                 cursor += spanWidth;
             }
