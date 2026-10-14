@@ -136,9 +136,9 @@ cmake --build build --config Release
 
 | Package | Size, 4.6.0 | For |
 |---|---:|---|
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,175 KB | Linux, recommended: no dependency, the fastest start |
 | `rayomd-<version>-windows-x64.zip` | 1,589 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
 | `rayomd-<version>-linux-x64.tar.gz` | 776 KB | Linux: needs only glibc |
-| `rayomd-<version>-linux-x64-static.tar.gz` | 1,175 KB | Linux with no dependency at all, the fastest start |
 | `rayomd-<version>-linux-x64-curl.tar.gz` | 778 KB | Linux with HTTP/HTTPS images through libcurl |
 
 Every feature below works the same from both command lines and the

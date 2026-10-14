@@ -2,22 +2,21 @@
 pkgname=rayomd-bin
 _pkgname=rayomd
 pkgver=4.6.1
-pkgrel=1
-pkgdesc='Tiny native Markdown-to-PDF converter (prebuilt release binary)'
+pkgrel=2
+pkgdesc='Tiny native Markdown-to-PDF converter (prebuilt static release binary)'
 arch=('x86_64')
 url='https://github.com/Butterski/rayomd'
-license=('Apache-2.0')
-depends=('glibc')
+license=('Apache-2.0' 'LGPL-2.1-or-later')
 optdepends=('ttf-dejavu: TrueType font for non-Latin-1 text (Polish, Cyrillic, ...)'
             'noto-fonts: alternative TrueType font and script fallbacks')
 provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname")
 options=('!strip' '!debug')
-source=("$url/releases/download/v$pkgver/$_pkgname-$pkgver-linux-x64.tar.gz")
-sha256sums=('02f84a5215f086050e7f72baf43c8ed230a4f5bbcb85bd3544ffe83faf130b38')
+source=("$url/releases/download/v$pkgver/$_pkgname-$pkgver-linux-x64-static.tar.gz")
+sha256sums=('27967079bcca97c1f5d59c8362c3201fd92ad0d0fe6958b830076b95cc4fb0c1')
 
 package() {
-  cd "$_pkgname-$pkgver-linux-x64"
+  cd "$_pkgname-$pkgver-linux-x64-static"
   install -Dm755 rayomd "$pkgdir/usr/bin/rayomd"
   install -Dm644 LICENSE NOTICE -t "$pkgdir/usr/share/licenses/$_pkgname/"
   install -Dm644 README.md -t "$pkgdir/usr/share/doc/$_pkgname/"

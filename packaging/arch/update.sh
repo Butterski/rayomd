@@ -44,4 +44,4 @@ update() {
 }
 
 update rayomd "$(checksum "$url/archive/refs/tags/v$version.tar.gz")"
-update rayomd-bin "$(checksum "$url/releases/download/v$version/rayomd-$version-linux-x64.tar.gz")"
+update rayomd-bin "$(checksum "$url/releases/download/v$version/rayomd-$version-linux-x64-static.tar.gz")"
