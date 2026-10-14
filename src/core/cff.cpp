@@ -3,6 +3,7 @@
 #include "cff.h"
 
 #include <cstring>
+#include <memory>
 
 namespace TinyPdf::Internal::Cff {
 namespace {
@@ -170,11 +171,17 @@ bool LoadPrivate(const uint8_t* data, size_t size, uint32_t privateSize, uint32_
 }
 
 // The Type 2 charstring interpreter of Desubroutinize: it follows the operand stack only as far
-// as it needs to, for subroutine numbers and the hints a hint mask covers.
+// as it needs to, for subroutine numbers and the hints a hint mask covers. It writes into `out`,
+// which has room for kMaxGlyphBytes + 1 bytes: a token that does not fit makes the glyph longer
+// than kMaxGlyphBytes, which fails after that token anyway, and endchar adds one byte to at most
+// kMaxGlyphBytes.
 struct Flattener {
+    static constexpr size_t kCapacity = kMaxGlyphBytes + 1;
+
     const CffFont& font;
     const FontDict& fd;
-    std::string& out;
+    char* out;
+    size_t written = 0;               // the bytes in `out`
     uint32_t operandAt[48] = {};      // where each operand on the stack starts in `out`
     int32_t operandValue[48] = {};
     bool operandInteger[48] = {};
@@ -182,6 +189,21 @@ struct Flattener {
     uint32_t stems = 0;
     size_t budget = kMaxInterpretedBytes;
     bool ended = false;
+
+    // Tokens are a few bytes, copied a byte at a time: -Os makes memcpy `rep movsb`, which takes
+    // dozens of cycles to start.
+    bool Put(const uint8_t* p, size_t n) {
+        if (n > kCapacity - written) return false;
+        char* const to = out + written;
+        for (size_t i = 0; i < n; i++) to[i] = (char)p[i];
+        written += n;
+        return true;
+    }
+    bool PutByte(uint8_t b) {
+        if (written == kCapacity) return false;
+        out[written++] = (char)b;
+        return true;
+    }
 
     bool Run(std::string_view code, int depth) {
         const uint8_t* const bytes = (const uint8_t*)code.data();
@@ -207,11 +229,11 @@ struct Flattener {
                     value = (int16_t)(fixed >> 16);
                     integer = (fixed & 0xffff) == 0;
                 }
-                operandAt[operands] = (uint32_t)out.size();
+                operandAt[operands] = (uint32_t)written;
                 operandValue[operands] = value;
                 operandInteger[operands] = integer;
                 operands++;
-                out.append((const char*)bytes + at, length);
+                if (!Put(bytes + at, length)) return false;
                 at += length;
                 budget -= length;
             } else {
@@ -222,7 +244,7 @@ struct Flattener {
                 case 29: {   // callgsubr
                     if (operands == 0 || !operandInteger[operands - 1] || depth >= kMaxSubrDepth) return false;
                     operands--;
-                    out.resize(operandAt[operands]);
+                    written = operandAt[operands];
                     const Index& subrs = b0 == 10 ? fd.localSubrs : font.globalSubrs;
                     if (b0 == 10 && !fd.hasLocalSubrs) return false;
                     const int32_t bias = subrs.count < 1240 ? 107 : subrs.count < 33900 ? 1131 : 32768;
@@ -238,7 +260,7 @@ struct Flattener {
                     return depth > 0;
                 case 14:     // endchar; with 4 or 5 operands seac, an accented glyph made of two
                     if (operands == 4 || operands == 5) return false;
-                    out.push_back((char)14);
+                    if (!PutByte(14)) return false;
                     ended = true;
                     return true;
                 case 1:      // hstem
@@ -246,7 +268,7 @@ struct Flattener {
                 case 18:     // hstemhm
                 case 23:     // vstemhm
                     stems += (uint32_t)operands / 2;
-                    out.push_back((char)b0);
+                    if (!PutByte(b0)) return false;
                     at++;
                     break;
                 case 19:     // hintmask
@@ -255,25 +277,25 @@ struct Flattener {
                     const size_t length = 1 + (stems + 7) / 8;
                     if (length > size - at || length > budget + 1) return false;
                     budget -= length - 1;
-                    out.append((const char*)bytes + at, length);
+                    if (!Put(bytes + at, length)) return false;
                     at += length;
                     break;
                 }
                 case 12:
                     if (2 > size - at) return false;
-                    out.append((const char*)bytes + at, 2);
+                    if (!Put(bytes + at, 2)) return false;
                     at += 2;
                     break;
                 case 0: case 2: case 9: case 13: case 15: case 16: case 17:
                     return false;    // reserved
                 default:
-                    out.push_back((char)b0);
+                    if (!PutByte(b0)) return false;
                     at++;
                     break;
                 }
                 operands = 0;
             }
-            if (out.size() > kMaxGlyphBytes) return false;
+            if (written > kMaxGlyphBytes) return false;
         }
         // A subroutine may end without return; a glyph must end with endchar.
         return depth > 0;
@@ -507,14 +529,30 @@ bool ParseCff(const uint8_t* data, size_t size, uint16_t glyphCount, CffFont& fo
     return ReadU16(data + at + 2 + ranges * 3) > previous;
 }
 
-bool Desubroutinize(const CffFont& font, uint16_t glyph, std::string& out) {
-    out.clear();
+namespace {
+
+// The glyph's charstring without subroutines in `buffer`, which has room for Flattener::kCapacity
+// bytes; `length` gets its size.
+bool FlattenGlyph(const CffFont& font, uint16_t glyph, char* buffer, size_t& length) {
     if (glyph >= font.charStrings.count || font.fds.empty()) return false;
     const std::string_view code = IndexItem(font.data, font.charStrings, glyph);
     if (code.data() == nullptr) return false;
     const uint8_t fd = font.FdFor(glyph);
-    Flattener flattener{ font, font.fds[fd < font.fds.size() ? fd : 0], out };
-    return flattener.Run(code, 0) && flattener.ended;
+    Flattener flattener{ font, font.fds[fd < font.fds.size() ? fd : 0], buffer };
+    if (!flattener.Run(code, 0) || !flattener.ended) return false;
+    length = flattener.written;
+    return true;
+}
+
+} // namespace
+
+bool Desubroutinize(const CffFont& font, uint16_t glyph, std::string& out) {
+    out.clear();
+    const std::unique_ptr<char[]> buffer(new char[Flattener::kCapacity]);
+    size_t length = 0;
+    if (!FlattenGlyph(font, glyph, buffer.get(), length)) return false;
+    out.assign(buffer.get(), length);
+    return true;
 }
 
 bool WriteCidKeyedSubset(const CffFont& font, const char* fontName, const std::vector<CidGlyph>& glyphs,
@@ -531,7 +569,7 @@ bool WriteCidKeyedSubset(const CffFont& font, const char* fontName, const std::v
     std::vector<uint32_t> charEnds;
     charEnds.reserve(glyphCount);
     charSelect.reserve(glyphCount);
-    std::string program;
+    const std::unique_ptr<char[]> program(new char[Flattener::kCapacity]);
     for (size_t index = 0; index < glyphCount; index++) {
         const uint16_t source = index == 0 ? 0 : glyphs[index - 1].glyph;
         uint8_t fd = source < font.glyphCount ? font.FdFor(source) : 0;
@@ -541,8 +579,9 @@ bool WriteCidKeyedSubset(const CffFont& font, const char* fontName, const std::v
             usedFds.push_back(fd);
         }
         charSelect.push_back((char)fdOrder[fd]);
-        if (!Desubroutinize(font, source, program)) program.assign("\x8B\x0E", 2);
-        charData += program;
+        size_t length = 0;
+        if (FlattenGlyph(font, source, program.get(), length)) charData.append(program.get(), length);
+        else charData.append("\x8B\x0E", 2);
         charEnds.push_back((uint32_t)charData.size());
     }
     std::vector<std::string> privates(usedFds.size());
