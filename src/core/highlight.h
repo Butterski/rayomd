@@ -38,9 +38,10 @@ uint8_t CodeLanguage(std::string_view info);
 void ClassifyCode(uint8_t language, std::string_view code, uint8_t* classes);
 
 // The colour of each class: classes of one colour share an index, so that the renderers paint
-// a stretch of them as one run. CodeColor gives the fill colour of an index as "r g b" operands.
+// a stretch of them as one run. CodeColor gives the fill colour of an index as "r g b" operands,
+// a view of a null-terminated string.
 constexpr uint8_t kCodeColorOfClass[kCodeClassCount] = { 0, 1, 2, 3, 4, 3, 5, 3, 6, 7, 8, 9 };
-const char* CodeColor(uint8_t colorIndex);
+std::string_view CodeColor(uint8_t colorIndex);
 
 // The tile behind a line whose first byte has class `codeClass`: a diff's added and removed lines
 // are tinted; null for the others, which keep the tile of the code block.

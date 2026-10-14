@@ -8094,17 +8094,17 @@ private:
     RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::wstring_view text, const uint8_t* classes) {
         SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
         if (codeRuns.size() == 1) {
-            PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color));
+            PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color).data());
             return;
         }
         if (tags != nullptr) tags->Content();
         TailWriter w(content, 64 + kOperandBytes * 3 + text.size() * 4 + codeRuns.size() * 32);
         size_t begin = 0;
         for (const CodeRun& run : codeRuns) {
-            const char* color = Internal::CodeColor(run.color);
+            const std::string_view color = Internal::CodeColor(run.color);
             if (begin == 0) {
                 w.Lit("q ");
-                w.Bytes(color, strlen(color));
+                w.Bytes(color.data(), color.size());
                 w.Lit(" rg BT /F1 ");
                 w.Fixed(size);
                 w.Lit(" Tf 1 0 0 1 ");
@@ -8113,7 +8113,7 @@ private:
                 w.Fixed(baseline);
                 w.Lit(" Tm ");
             } else {
-                w.Bytes(color, strlen(color));
+                w.Bytes(color.data(), color.size());
                 w.Lit(" rg ");
             }
             w.cursor = WriteCidText(w.cursor, font, text.substr(begin, run.end - begin), usedCids);
@@ -11061,16 +11061,16 @@ private:
         if (text.empty()) return;
         SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
         if (codeRuns.size() == 1) {
-            Text(x, baseline, size, text, "F3", Internal::CodeColor(codeRuns[0].color));
+            Text(x, baseline, size, text, "F3", Internal::CodeColor(codeRuns[0].color).data());
             return;
         }
         TailWriter out(content, 48 + kOperandBytes * 3 + text.size() * 2 + codeRuns.size() * 32);
         size_t begin = 0;
         for (const CodeRun& run : codeRuns) {
-            const char* color = Internal::CodeColor(run.color);
+            const std::string_view color = Internal::CodeColor(run.color);
             if (begin == 0) {
                 out.Lit("q ");
-                out.Bytes(color, strlen(color));
+                out.Bytes(color.data(), color.size());
                 out.Lit(" rg BT /F3 ");
                 out.Fixed(size);
                 out.Lit(" Tf 1 0 0 1 ");
@@ -11079,7 +11079,7 @@ private:
                 out.Fixed(baseline);
                 out.Lit(" Tm (");
             } else {
-                out.Bytes(color, strlen(color));
+                out.Bytes(color.data(), color.size());
                 out.Lit(" rg (");
             }
             out.cursor = WriteEscapedLiteral(out.cursor, text.substr(begin, run.end - begin));

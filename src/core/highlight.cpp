@@ -1932,7 +1932,7 @@ void ClassifyDiff(const Text& t, size_t n) {
 }
 
 // The colours of kCodeColorOfClass's indices: GitHub's light theme (Primer's prettylights).
-constexpr const char* kColors[] = {
+constexpr std::string_view kColors[] = {
     "0.12 0.12 0.12",   // plain: the colour of code without highlighting
     ".349 .388 .431",   // comment
     ".039 .188 .412",   // string
@@ -2022,7 +2022,7 @@ void ClassifyCode(uint8_t language, std::string_view code, uint8_t* classes) {
     }
 }
 
-const char* CodeColor(uint8_t colorIndex) {
+std::string_view CodeColor(uint8_t colorIndex) {
     return colorIndex < sizeof(kColors) / sizeof(kColors[0]) ? kColors[colorIndex] : kColors[0];
 }
 
