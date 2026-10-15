@@ -278,7 +278,7 @@ bool CheckLinkSchemes() {
         std::string visible;
         for (const InlineSpan& span : TinyPdf::Internal::ParseInlineSpans(text)) {
             if (!span.url.empty()) {
-                std::cerr << "unsafe Markdown link made: " << text << " -> " << span.url << std::endl;
+                std::cerr << "unsafe Markdown link made: " << text << " -> " << span.url.View() << std::endl;
                 return false;
             }
             visible += span.text;
@@ -325,9 +325,29 @@ bool CheckLinkSchemes() {
     return true;
 }
 
+// The spans of one link share its target: "[*a*b*a*b...](long URL)" made a copy for every piece
+// of its text, 10,000 x 100 KiB here.
+bool CheckLinkSpans() {
+    using math_markdown_tests::Repeat;
+    const std::string url = "https://example.com/" + std::string(size_t(100) << 10, 'u');
+    const std::string text = "[" + Repeat("*a*b", 5000) + "](" + url + ") and [c](" + url + ")";
+    return Bounded("10,000 styled pieces of a link to 100 KiB", 10.0, 64, [&]() {
+        const std::vector<TinyPdf::Internal::InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(text);
+        if (spans.size() != 10002 || spans[9999].url != url || spans[10001].url != url || !spans[10000].url.empty()) {
+            return false;
+        }
+        for (size_t index = 1; index < 10000; index++) {
+            if (spans[index].italic == spans[index - 1].italic || spans[index].url.View().data() != spans[0].url.View().data()) {
+                return false;
+            }
+        }
+        return spans[10001].url.View().data() != spans[0].url.View().data();
+    });
+}
+
 } // namespace parse_limits_tests
 
 bool CheckParseLimits() {
     return parse_limits_tests::CheckStatusSymbols() && parse_limits_tests::CheckReferenceLinks() &&
-        parse_limits_tests::CheckTables() && parse_limits_tests::CheckLinkSchemes();
+        parse_limits_tests::CheckTables() && parse_limits_tests::CheckLinkSchemes() && parse_limits_tests::CheckLinkSpans();
 }

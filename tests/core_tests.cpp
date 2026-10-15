@@ -175,7 +175,7 @@ bool CheckClassicMarkdownPhaseOne() {
 
     std::vector<InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(blocks[2].text);
     std::vector<std::string> urls;
-    for (const InlineSpan& span : spans) if (!span.url.empty()) urls.push_back(span.url);
+    for (const InlineSpan& span : spans) if (!span.url.empty()) urls.emplace_back(span.url.View());
     const std::vector<std::string> expectedUrls = {
         "https://example.com/path", "https://example.com/path", "https://example.com/path",
         "https://example.net", "mailto:person@example.net"
@@ -405,7 +405,7 @@ bool CheckClassicBlockAmbiguities() {
     for (const TinyPdf::Internal::InlineSpan& span :
         TinyPdf::Internal::ParseInlineSpans(blocks[0].text)) {
         visible += span.text;
-        if (!span.url.empty()) urls.push_back(span.url);
+        if (!span.url.empty()) urls.emplace_back(span.url.View());
     }
     const std::vector<std::string> expectedUrls = {
         "https://example.com/id", "https://example.com/id",

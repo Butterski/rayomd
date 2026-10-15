@@ -6391,7 +6391,7 @@ private:
                 PushMathSpan(spans, span, size, width, false);
                 continue;
             }
-            PushSpan(spans, span.text, span.bold, span.italic, span.strike, std::move(span.url), span.code, span.decor);
+            PushSpan(spans, span.text, span.bold, span.italic, span.strike, std::string(span.url.View()), span.code, span.decor);
         }
         return spans;
     }
@@ -9934,7 +9934,7 @@ private:
                 PushAsciiMathSpan(spans, span, size, width, false);
                 continue;
             }
-            PushAsciiSpan(spans, std::move(span.text), std::move(span.url), SpanStyle(span));
+            PushAsciiSpan(spans, std::move(span.text), std::string(span.url.View()), SpanStyle(span));
         }
         return spans;
     }
