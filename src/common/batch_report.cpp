@@ -22,11 +22,7 @@ bool Report::Open(const std::string& path) {
         file = stdout;
         ownsFile = false;
     } else {
-#ifdef _WIN32
-        file = RayoMd::File::Open(fs::u8path(path), "wb");
-#else
-        file = RayoMd::File::Open(fs::path(path), "wb");
-#endif
+        file = RayoMd::File::Open(RayoMd::File::PathFromUtf8(path), "wb");
         ownsFile = file != nullptr;
     }
     failed = false;
@@ -152,7 +148,7 @@ bool CollectMarkdown(const fs::path& inputDir, const fs::path& outputDir, bool r
         for (const fs::recursive_directory_iterator end; !iterError && it != end; it.increment(iterError)) {
             std::error_code entryError;
             if (it->is_directory(entryError)) {
-                const std::string name = it->path().filename().u8string();
+                const std::string name = RayoMd::File::PathToUtf8(it->path().filename());
                 if (!name.empty() && name[0] == '.') it.disable_recursion_pending();
                 continue;
             }
@@ -166,7 +162,7 @@ bool CollectMarkdown(const fs::path& inputDir, const fs::path& outputDir, bool r
         return false;
     }
     std::sort(files.begin(), files.end(), [](const File& left, const File& right) {
-        return left.input.u8string() < right.input.u8string();
+        return RayoMd::File::PathToUtf8(left.input) < RayoMd::File::PathToUtf8(right.input);
     });
     return true;
 }

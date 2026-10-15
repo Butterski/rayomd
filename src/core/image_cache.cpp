@@ -52,7 +52,7 @@ uint32_t ReadU32(const uint8_t* p) {
 }
 
 fs::path EntryPath(const std::string& directory, const std::string& digest, bool fast) {
-    return fs::u8path(directory) / (digest + (fast ? ".fast.rimg" : ".rimg"));
+    return RayoMd::File::PathFromUtf8(directory) / (digest + (fast ? ".fast.rimg" : ".rimg"));
 }
 
 // Removes the least recently used entries until the directory holds 3/4 of kDirectoryBytes, and

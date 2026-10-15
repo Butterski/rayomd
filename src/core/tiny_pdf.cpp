@@ -2184,13 +2184,11 @@ static bool IsHttpUrl(std::string_view src) {
 
 static char* WriteEscapedLiteral(char* out, std::string_view text);
 
-static std::filesystem::path PathFromUtf8(std::string_view s) {
-    return std::filesystem::u8path(s.begin(), s.end());
-}
-
-static std::string PathToUtf8(const std::filesystem::path& path) {
-    return path.u8string();
-}
+// Paths of UTF-8 names and back without exceptions (file_io.h): std::filesystem::u8path and
+// path::u8string threw on Windows for invalid UTF-8 in a document's image path or link and for an
+// unpaired surrogate in a file name, which ended the process.
+using RayoMd::File::PathFromUtf8;
+using RayoMd::File::PathToUtf8;
 
 #ifdef _WIN32
 struct WinLocalImageFile {
@@ -2446,17 +2444,23 @@ static bool TryCanonicalForPolicy(
     return true;
 }
 
+// Whether two components of paths are the same name: on Windows their UTF-16 as it is, with ASCII
+// letters folded unless `exact`. Never converted to UTF-8, which threw on an unpaired surrogate and
+// would make two different such names one.
 static bool PathPartEqualForPolicy(
     const std::filesystem::path& a, const std::filesystem::path& b, [[maybe_unused]] bool exact) {
-    std::string left = a.u8string();
-    std::string right = b.u8string();
 #ifdef _WIN32
-    if (!exact) {
-        std::transform(left.begin(), left.end(), left.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-        std::transform(right.begin(), right.end(), right.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    const std::wstring& left = a.native();
+    const std::wstring& right = b.native();
+    if (exact || left.size() != right.size()) return left == right;
+    const auto fold = [](wchar_t c) { return c >= L'A' && c <= L'Z' ? (wchar_t)(c - L'A' + L'a') : c; };
+    for (size_t at = 0; at < left.size(); at++) {
+        if (fold(left[at]) != fold(right[at])) return false;
     }
+    return true;
+#else
+    return a.native() == b.native();
 #endif
-    return left == right;
 }
 
 struct DirectRootCacheEntry {

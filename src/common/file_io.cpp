@@ -3,6 +3,7 @@
 #include "file_io.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstring>
 
 #ifdef _WIN32
@@ -248,6 +249,34 @@ Stamp StampOf(const std::filesystem::path& path) {
     stamp.id = (uint64_t)info.st_ino ^ (uint64_t)info.st_dev << 32;
 #endif
     return stamp;
+}
+
+std::filesystem::path PathFromUtf8(std::string_view utf8) {
+#ifdef _WIN32
+    if (utf8.empty() || utf8.size() > (size_t)INT_MAX) return std::filesystem::path();
+    // UTF-16 never needs more code units than UTF-8 needs bytes.
+    std::wstring wide(utf8.size(), L'\0');
+    const int length = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), &wide[0], (int)wide.size());
+    wide.resize(length > 0 ? (size_t)length : 0);
+    return std::filesystem::path(std::move(wide));
+#else
+    return std::filesystem::path(utf8.begin(), utf8.end());
+#endif
+}
+
+std::string PathToUtf8(const std::filesystem::path& path) {
+#ifdef _WIN32
+    const std::wstring& wide = path.native();
+    if (wide.empty() || wide.size() > (size_t)INT_MAX / 3) return std::string();
+    // A UTF-16 code unit takes at most three UTF-8 bytes.
+    std::string utf8(wide.size() * 3, '\0');
+    const int length = WideCharToMultiByte(CP_UTF8, 0, wide.data(), (int)wide.size(), &utf8[0], (int)utf8.size(),
+        nullptr, nullptr);
+    utf8.resize(length > 0 ? (size_t)length : 0);
+    return utf8;
+#else
+    return path.native();
+#endif
 }
 
 } // namespace RayoMd::File

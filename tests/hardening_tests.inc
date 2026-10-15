@@ -651,9 +651,103 @@ bool CheckDecodeBudget() {
     return ok;
 }
 
+// Names that are no UTF-8 (AuditEngine F13): a document's image paths (raw and percent-encoded)
+// and links, its source path, a theme's logo and fonts (also through ParseTheme), the files a
+// book's SUMMARY.md lists and a book's links to its files; on Windows also a file name with an
+// unpaired surrogate in a book's folder and a batch folder. std::filesystem's conversions threw
+// for these on Windows, which ends a process built without exceptions (-fno-exceptions, and the
+// GUI's build thread). Every build ends: an image shows its alt text, a theme font that cannot
+// be read is ThemeFontUnavailable, a book that lists a missing file is refused.
+bool CheckInvalidUtf8Names() {
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-names";
+    fs::remove_all(root);
+    fs::create_directories(root / "book");
+    const fs::path assets = fs::path(RAYOMD_TEST_SOURCE_DIR) / "docs" / "assets";
+    std::error_code copyError;
+    fs::copy_file(assets / "branding" / "rayomd.png", root / "pic.png", copyError);
+    const std::string bad = "\xFF\xFE\xC3x\xED\xA0\x80";   // stray bytes, a cut sequence, an encoded surrogate
+    const std::string dir = root.u8string();
+    bool ok = !copyError;
+    const auto check = [&](const char* what, bool passed) {
+        if (!passed) std::cerr << "a name that is no UTF-8: " << what << std::endl;
+        ok = ok && passed;
+    };
+    // The conversions themselves: UTF-8 round trips; elsewhere bytes stay bytes, on Windows a
+    // sequence that is no UTF-8 (or UTF-16) becomes U+FFFD.
+    check("PathFromUtf8 and PathToUtf8",
+        RayoMd::File::PathToUtf8(RayoMd::File::PathFromUtf8("a/\xC3\xA9\xE4\xB8\xAD\xF0\x9F\x98\x80.png")) ==
+            "a/\xC3\xA9\xE4\xB8\xAD\xF0\x9F\x98\x80.png" &&
+#ifdef _WIN32
+        RayoMd::File::PathToUtf8(RayoMd::File::PathFromUtf8("\xFF" "a")) == "\xEF\xBF\xBD" "a" &&
+        RayoMd::File::PathToUtf8(fs::path(std::wstring(L"b\xDC00"))) == "b\xEF\xBF\xBD");
+#else
+        RayoMd::File::PathToUtf8(RayoMd::File::PathFromUtf8("\xFF" "a")) == "\xFF" "a");
+#endif
+    TinyPdf::PdfOptions options;
+    options.sourcePath = dir + "/doc.md";
+    const std::string images = "![a](" + bad + ".png)\n\n![b](pic.png)\n\n![c](%FF%FE.png)\n\n![d](" + dir + "/" + bad +
+        ".png)\n\n[link](" + bad + ".md) [anchor](#" + bad + ")\n";
+    for (const std::string& text : { images, "# \xC3\x9Cnicode \xE2\x9C\x93\n\n" + images }) {
+        std::string pdf;
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf(text, options, pdf);
+        check("image paths", result.Ok() && result.failedImages == 3 && ValidPdf(pdf));
+    }
+    TinyPdf::PdfOptions badSource = options;
+    badSource.sourcePath = dir + "/" + bad + "/doc.md";
+    std::string pdf;
+    TinyPdf::BuildResult result = TinyPdf::BuildPdf("![b](pic.png)\n", badSource, pdf);
+    check("the source path", result.Ok() && result.failedImages == 1);
+
+    TinyPdf::PdfOptions themed = options;
+    themed.theme.logoPath = dir + "/" + bad + ".png";
+    themed.theme.headerLeft = "{logo}";
+    result = TinyPdf::BuildPdf("# Logo\n", themed, pdf);
+    check("a theme's logo", result.Ok() && result.failedImages == 1);
+    themed.theme.fontPath = dir + "/" + bad + ".ttf";
+    result = TinyPdf::BuildPdf("# Font\n", themed, pdf);
+    check("a theme's font", result.error == TinyPdf::BuildError::ThemeFontUnavailable);
+    TinyPdf::PdfTheme parsed;
+    std::string themeError;
+    if (TinyPdf::Internal::ParseTheme("logo = " + bad + ".png\nheader-left = {logo}\n", dir, parsed, themeError)) {
+        TinyPdf::PdfOptions withTheme = options;
+        withTheme.theme = parsed;
+        result = TinyPdf::BuildPdf("# Parsed\n", withTheme, pdf);
+        check("a parsed theme's logo", result.Ok() && result.failedImages == 1);
+    }
+
+    ok = ok && WriteFile(root / "book" / "SUMMARY.md", "# Book\n\n- [One](one.md)\n- [Bad](" + bad + ".md)\n") &&
+        WriteFile(root / "book" / "one.md", "# One\n\n[two](two%FF.md#a) [raw](" + bad + ".md) [three](" + bad + "/x.md)\n");
+    TinyPdf::Book book;
+    std::string bookError;
+    check("a SUMMARY.md listing", !RayoMd::Book::ReadBook({ root / "book" / "SUMMARY.md" }, book, bookError) &&
+        !bookError.empty());
+    TinyPdf::Book linked;
+    linked.title = "Book";
+    linked.directory = (root / "book").u8string();
+    linked.chapters.push_back({ "# One\n\n[two](two%FF.md#a) [raw](" + bad + ".md)\n", (root / "book" / "one.md").u8string(), "", 0, false });
+    linked.chapters.push_back({ "# Two\n\n![i](" + bad + ".png)\n", linked.directory + "/" + bad + ".md", "", 0, false });
+    std::string bookPdf;
+    result = TinyPdf::BuildBookPdf(linked, options, bookPdf);
+    check("a book's links and files", result.Ok() && result.failedImages == 1 && ValidPdf(bookPdf));
+#ifdef _WIN32
+    // An unpaired surrogate in a file name, which NTFS allows and path::u8string threw for.
+    const fs::path folder = root / "surrogate";
+    fs::create_directories(folder);
+    ok = ok && WriteFile(folder / std::wstring(L"a\xD800.md"), "# A\n") && WriteFile(folder / "b.md", "# B\n");
+    TinyPdf::Book listed;
+    check("a book's folder", RayoMd::Book::ReadBook({ folder }, listed, bookError) && listed.chapters.size() == 2 &&
+        listed.chapters[0].markdown == "# A\n");
+    std::vector<RayoMd::Batch::File> files;
+    std::string listError;
+    check("a batch folder", RayoMd::Batch::CollectMarkdown(folder, root / "out", false, files, listError) && files.size() == 2);
+#endif
+    fs::remove_all(root);
+    return ok;
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
-        CheckImageContainment() && CheckCachePermissions() && CheckDecodeBudget();
+        CheckImageContainment() && CheckCachePermissions() && CheckDecodeBudget() && CheckInvalidUtf8Names();
 }
 
 } // namespace hardening_tests

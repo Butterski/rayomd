@@ -71,4 +71,14 @@ struct Stamp {
 };
 Stamp StampOf(const std::filesystem::path& path);
 
+// The path a UTF-8 name names, and a path's name in UTF-8, without exceptions. On Windows,
+// std::filesystem::u8path, path(std::string), path::u8string and path::string convert between
+// UTF-8 and UTF-16 and throw on a sequence that is neither (invalid UTF-8 in a document's image
+// path or link, an unpaired surrogate in a file name): std::terminate where RayoMD is built
+// without exceptions. These make such a sequence U+FFFD instead, as MultiByteToWideChar and
+// WideCharToMultiByte do: the path then names no file but one with U+FFFD in its name. Elsewhere
+// the bytes are the path's, as with u8path.
+std::filesystem::path PathFromUtf8(std::string_view utf8);
+std::string PathToUtf8(const std::filesystem::path& path);
+
 } // namespace RayoMd::File

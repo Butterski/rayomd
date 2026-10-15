@@ -11,11 +11,14 @@
 #include <cstdint>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace RayoMd::Book {
 namespace {
 
 namespace fs = std::filesystem;
+using RayoMd::File::PathFromUtf8;
+using RayoMd::File::PathToUtf8;
 using TinyPdf::Internal::Block;
 using TinyPdf::Internal::BlockType;
 
@@ -136,27 +139,29 @@ std::string BookTomlTitle(const fs::path& directory) {
 // The Markdown files of a directory, not those of its subdirectories nor those whose names begin
 // with '_' or '.', sorted by name byte by byte, README.md or else index.md first.
 bool ListDirectory(const fs::path& directory, std::vector<fs::path>& files, std::string& error) {
-    std::vector<std::string> names;
+    std::vector<std::pair<std::string, fs::path>> names;   // each file's name in UTF-8, and its path
     std::error_code ec;
     for (fs::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec)) {
-        std::string name = it->path().filename().u8string();
+        std::string name = PathToUtf8(it->path().filename());
         if (name.empty() || name[0] == '_' || name[0] == '.') continue;
-        const std::string extension = Lower(it->path().extension().u8string());
+        const std::string extension = Lower(PathToUtf8(it->path().extension()));
         std::error_code typeError;
-        if ((extension == ".md" || extension == ".markdown") && it->is_regular_file(typeError)) names.push_back(std::move(name));
+        if ((extension == ".md" || extension == ".markdown") && it->is_regular_file(typeError)) {
+            names.emplace_back(std::move(name), it->path());
+        }
     }
     if (ec) {
-        error = "could not list the folder " + directory.u8string();
+        error = "could not list the folder " + PathToUtf8(directory);
         return false;
     }
     std::sort(names.begin(), names.end());
     for (const char* first : { "readme.md", "index.md" }) {
-        const auto found = std::find_if(names.begin(), names.end(), [first](const std::string& name) { return Lower(name) == first; });
+        const auto found = std::find_if(names.begin(), names.end(), [first](const auto& name) { return Lower(name.first) == first; });
         if (found == names.end()) continue;
         std::rotate(names.begin(), found, found + 1);
         break;
     }
-    for (const std::string& name : names) files.push_back(directory / fs::u8path(name));
+    for (auto& name : names) files.push_back(std::move(name.second));
     return true;
 }
 
@@ -183,13 +188,13 @@ fs::path CommonDirectory(const std::vector<fs::path>& files) {
 bool ReadSummaryBook(const fs::path& summaryPath, TinyPdf::Book& book, std::string& error) {
     std::string text;
     if (!ReadFile(summaryPath, text)) {
-        error = "could not read " + summaryPath.u8string();
+        error = "could not read " + PathToUtf8(summaryPath);
         return false;
     }
     const Summary summary = ParseSummary(text);
     fs::path directory = summaryPath.parent_path();
     if (directory.empty()) directory = ".";
-    book.directory = directory.u8string();
+    book.directory = PathToUtf8(directory);
     book.title = BookTomlTitle(directory);
     if (book.title.empty()) book.title = summary.title;
     std::vector<std::string> listed;
@@ -199,22 +204,22 @@ bool ReadSummaryBook(const fs::path& summaryPath, TinyPdf::Book& book, std::stri
         chapter.depth = entry.depth;
         chapter.part = entry.part;
         if (!entry.part) {
-            const fs::path path = (directory / fs::u8path(entry.path)).lexically_normal();
-            chapter.path = path.u8string();
+            const fs::path path = (directory / PathFromUtf8(entry.path)).lexically_normal();
+            chapter.path = PathToUtf8(path);
             if (std::find(listed.begin(), listed.end(), chapter.path) != listed.end()) {
-                error = summaryPath.u8string() + " lists " + entry.path + " twice";
+                error = PathToUtf8(summaryPath) + " lists " + entry.path + " twice";
                 return false;
             }
             listed.push_back(chapter.path);
             if (!ReadFile(path, chapter.markdown)) {
-                error = "could not read " + chapter.path + ", which " + summaryPath.u8string() + " lists";
+                error = "could not read " + chapter.path + ", which " + PathToUtf8(summaryPath) + " lists";
                 return false;
             }
         }
         book.chapters.push_back(std::move(chapter));
     }
     if (listed.empty()) {
-        error = summaryPath.u8string() + " lists no file";
+        error = PathToUtf8(summaryPath) + " lists no file";
         return false;
     }
     return true;
@@ -262,25 +267,25 @@ bool ReadBook(const std::vector<fs::path>& inputs, TinyPdf::Book& book, std::str
         if (summary.empty()) {
             if (!ListDirectory(inputs[0], files, error)) return false;
             if (files.empty()) {
-                error = "the folder " + inputs[0].u8string() + " has no Markdown file";
+                error = "the folder " + PathToUtf8(inputs[0]) + " has no Markdown file";
                 return false;
             }
-            book.directory = inputs[0].u8string();
+            book.directory = PathToUtf8(inputs[0]);
         }
-    } else if (inputs.size() == 1 && Lower(inputs[0].filename().u8string()) == "summary.md") {
+    } else if (inputs.size() == 1 && Lower(PathToUtf8(inputs[0].filename())) == "summary.md") {
         summary = inputs[0];
     } else {
         files = inputs;
-        book.directory = CommonDirectory(inputs).u8string();
+        book.directory = PathToUtf8(CommonDirectory(inputs));
     }
     if (!summary.empty()) return ReadSummaryBook(summary, book, error);
     for (const fs::path& file : files) {
         TinyPdf::BookChapter chapter;
         if (!ReadFile(file, chapter.markdown)) {
-            error = "could not read input Markdown file: " + file.u8string();
+            error = "could not read input Markdown file: " + PathToUtf8(file);
             return false;
         }
-        chapter.path = file.u8string();
+        chapter.path = PathToUtf8(file);
         book.chapters.push_back(std::move(chapter));
     }
     return true;
