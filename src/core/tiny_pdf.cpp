@@ -8825,6 +8825,10 @@ static bool PlanSubsetFont(const TtfFont& font, const std::vector<uint16_t>& gly
         const uint32_t end = font.Loca((size_t)glyph + 1);
         if (end > start) glyfBytes += ((size_t)(end - start) + 3) & ~(size_t)3;
     }
+    // A font's loca may let every glyph span most of glyf: copied once per glyph, a 1 MiB font made
+    // a subset of 32 GiB (a std::bad_alloc). Glyphs of a sound font share no bytes, or few; a
+    // subset larger than twice glyf embeds the whole font instead, which has at most 64 MiB.
+    if (glyfBytes > (size_t)oldGlyf.length * 2 + glyphs.size() * 4) return false;
     std::string glyfData;
     std::string locaData;
     std::string hmtxData;

@@ -745,9 +745,66 @@ bool CheckInvalidUtf8Names() {
     return ok;
 }
 
+// A theme font whose loca makes every even glyph span all of glyf (the odd ones empty): a subset
+// copied each such glyph whole, the font's glyf times the glyphs a document shows (a 1 MiB font,
+// 32 GiB). Past twice glyf the whole font is embedded instead: the PDF stays within a few times the
+// font's size and is built in bounded time.
+bool CheckOverlappingGlyphs() {
+    const std::string source = TestFontPath();
+    if (source.empty()) return true;
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-overlapping-glyphs";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    std::string font;
+    uint32_t head = 0, headLength = 0, loca = 0, locaLength = 0, glyf = 0, glyfLength = 0;
+    if (!RayoMd::File::ReadAll(source, 64u << 20, font) || !FindTable(font, "head", head, headLength) ||
+        !FindTable(font, "loca", loca, locaLength) || !FindTable(font, "glyf", glyf, glyfLength) || headLength < 54) {
+        std::cerr << "cannot prepare the overlapping-glyphs test" << std::endl;
+        return false;
+    }
+    const int entry = BigEndianAt(font, head + 50, 2) == 0 ? 2 : 4;
+    const uint32_t end = entry == 2 ? (glyfLength & ~1u) / 2 : glyfLength;
+    for (size_t at = loca, index = 0; at + (size_t)entry <= (size_t)loca + locaLength; at += (size_t)entry, index++) {
+        const uint32_t value = index % 2 == 0 ? 0 : end;
+        for (int i = 0; i < entry; i++) font[at + (size_t)i] = (char)(value >> (8 * (entry - 1 - i)));
+    }
+    const fs::path path = root / "overlapping.ttf";
+    bool ok = WriteFile(path, font);
+    std::string text = "# Glyphs\n\n";
+    for (const auto& [first, last] : { std::pair<uint32_t, uint32_t>{ 0x21, 0x7E }, { 0xC0, 0x24F }, { 0x391, 0x3C9 },
+             { 0x410, 0x44F } }) {
+        for (uint32_t cp = first; cp <= last; cp++) {
+            if (cp >= 0x80) {
+                const bool three = cp >= 0x800;
+                if (three) text += (char)(0xE0 | (cp >> 12));
+                text += (char)((three ? 0x80 | ((cp >> 6) & 0x3F) : 0xC0 | (cp >> 6)));
+                text += (char)(0x80 | (cp & 0x3F));
+            } else if (cp != '*' && cp != '_' && cp != '`' && cp != '\\' && cp != '[' && cp != '<' && cp != '!') {
+                text += (char)cp;
+            }
+            text += ' ';
+        }
+    }
+    TinyPdf::PdfOptions options;
+    options.theme.fontPath = path.u8string();
+    std::string pdf;
+    const auto start = std::chrono::steady_clock::now();
+    const TinyPdf::BuildResult result = TinyPdf::BuildPdf(text, options, pdf);
+    const double ms = MillisecondsSince(start);
+    std::cout << "overlapping glyphs: " << pdf.size() << " bytes of PDF for a font of " << font.size() << " in " << ms
+              << " ms" << std::endl;
+    if (!ok || !result.Ok() || !ValidPdf(pdf) || pdf.size() > font.size() * 3 + (1u << 20)) {
+        std::cerr << "a font of overlapping glyphs made a subset of " << pdf.size() << " bytes" << std::endl;
+        ok = false;
+    }
+    fs::remove_all(root);
+    return ok;
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
-        CheckImageContainment() && CheckCachePermissions() && CheckDecodeBudget() && CheckInvalidUtf8Names();
+        CheckImageContainment() && CheckCachePermissions() && CheckDecodeBudget() && CheckInvalidUtf8Names() &&
+        CheckOverlappingGlyphs();
 }
 
 } // namespace hardening_tests
