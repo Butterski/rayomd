@@ -132,7 +132,7 @@ the completed file atomically.
 Embedding is permanently opt-in for this profile. A reversible PDF may disclose
 comments, front matter, reference definitions, internal notes, unsupported
 syntax, whitespace, and other source content that is not visible on rendered
-pages. The CLI flag and Windows GUI both make this distinction explicit.
+pages. The CLI flag's help and RayoMD GUI make this distinction explicit.
 
 ## Non-goals
 

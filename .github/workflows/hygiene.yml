@@ -31,13 +31,10 @@ jobs:
           test -f docs/assets/branding/rayomd.png
           test -f docs/assets/branding/rayomd.ico
           test -f docs/assets/demo/ui.png
-          test -f docs/assets/demo/show.gif
-          test -f docs/assets/demo/show.mp4
           test -f docs/development/performance.md
           test -f docs/development/native_math.md
           test -f tests/verify_cli.py
           test -f tools/benchmark.py
-          test -f third_party/imgui/LICENSE.txt
           test -f third_party/libdeflate/COPYING
           test -f third_party/tex-gyre/GUST-FONT-LICENSE.txt
       - name: Python helper syntax and entry points
@@ -60,8 +57,5 @@ jobs:
       - name: README local link targets
         run: |
           test -f docs/assets/branding/rayomd.png
-          test -f docs/assets/demo/ui.png
-          test -f docs/assets/demo/show.gif
-          test -f docs/assets/demo/show.mp4
           test -f docs/benchmark_smoke.md
           test -f include/rayomd/tiny_pdf.h

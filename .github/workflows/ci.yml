@@ -57,7 +57,7 @@ jobs:
           python3 -B tests/verify_cli.py --binary build/linux-static/rayomd
 
   windows:
-    name: Windows ImGui app
+    name: Windows CLI
     runs-on: windows-latest
     defaults:
       run:

@@ -485,6 +485,12 @@ def verify(binary: Path, keep: Path | None) -> None:
     try:
         run(binary, "--version")
         run(binary, "--doctor")
+        usage = run(binary, expect=2)
+        if b"Usage:" not in usage.stdout:
+            raise AssertionError("no arguments did not print the usage")
+        unknown = run(binary, "--no-such-mode", expect=2)
+        if b"unknown command" not in unknown.stdout:
+            raise AssertionError("an unknown command was not reported")
         if os.name == "nt":
             # Exercise CommandLineToArgvW behavior outside the common fast path.
             run_raw_windows(binary, "   --doctor")

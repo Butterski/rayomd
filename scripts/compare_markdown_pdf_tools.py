@@ -276,7 +276,7 @@ def main() -> int:
     runner = Path(__file__).with_name("md_to_pdf_runner.cjs").resolve()
     fonts = ["-f", args.pandoc_from, "-V", f"mainfont={args.pandoc_mainfont}", "-V", f"monofont={args.pandoc_monofont}"]
     # Newer RayoMD builds keep re-encoded PNGs in the user cache directory; older ones reject the
-    # flag. A one-line export tells which (without arguments the Windows executable opens its window).
+    # flag. A one-line export tells which (Windows executables up to 4.7.0 open their window without arguments).
     probe = args.root / "image-cache-probe.md"
     probe.write_text("# probe\n", encoding="utf-8")
     knows_flag = subprocess.run([str(args.rayomd.resolve()), "--export", str(probe), str(probe.with_suffix(".pdf")),

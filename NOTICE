@@ -3,7 +3,6 @@ Copyright 2026 RayoMD contributors
 
 This product includes third-party software:
 
-- Dear ImGui v1.92.8, licensed under the MIT License. See third_party/imgui/LICENSE.txt.
 - libdeflate v1.26 (its decompressor), licensed under the MIT License, in the source only:
   the core tests' reference, linked into no executable. See third_party/libdeflate/COPYING:
 

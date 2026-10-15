@@ -12,7 +12,8 @@ RayoMD is a tiny native Markdown-to-PDF converter. The default value is:
 - fast startup and conversion
 - low memory use for normal documents
 - no browser, LaTeX, or Pandoc dependency
-- a polished Windows Dear ImGui app plus a compact cross-platform CLI
+- a compact cross-platform CLI; the desktop app lives in the separate rayomd-gui repository,
+  which embeds the engine through `rayomd::engine`
 
 Treat the native renderer as a fast Markdown subset, not a full Pandoc clone.
 
@@ -166,7 +167,7 @@ Important image/link details:
   re-encoded by its own encoder (`flate.cpp`), on every platform; no zlib or libdeflate.
 - Such a PNG of 32,768 pixels or more is kept between processes in
   `PdfOptions::imageCacheDirectory`, a file per SHA-256 of the PNG (SHA-NI where the
-  CPU has it). The library default is off; the CLI and the Windows app use the user
+  CPU has it). The library default is off; both command lines use the user
   cache directory unless `--no-image-cache`; `--bench` never does. An entry holds the
   RayoMD version and, in `kMagic` of `src/core/image_cache.cpp`, the encoding's
   generation: raise it with any change to the bytes `BuildDecodedPngImage` writes (`kFastMagic`
@@ -384,10 +385,16 @@ Important image/link details:
   export, stdin Markdown export, folder batch, stdin batch, warm serve mode,
   books, and benchmarks.
 
-- `src/win32/main_win32.cpp`
-  Windows Dear ImGui + DirectX 11 app, Windows CLI glue, drag/drop,
-  and native export integration. Its batch modes mirror `main_cli.cpp`; change
-  both. A MinGW cross-build runs under Wine for local checks of the CLI glue.
+- `src/win32/main_windows_cli.cpp`
+  The Windows CLI: wide paths, `CommandLineToArgvW`, a console program. Its modes mirror
+  `main_cli.cpp`; change both. A MinGW cross-build runs under Wine for local checks of the
+  CLI glue.
+
+- `src/win32/delay_load.cpp`, `delay_import_pointers.cpp`, `delay_image_load.cpp` and
+  `delay_image_import_pointers.cpp`
+  System DLLs loaded on first use in GNU and Clang builds: `delay_load.cpp` for
+  `CommandLineToArgvW`; `delay_image_*.cpp` for the engine's own Windows imports (OLE,
+  Winsock, WinHTTP), which are also linked into `rayomd_engine`.
 
 - `src/win32/rayomd.rc`
   Windows manifest and app icon resources. Keep resource changes localized here.
@@ -410,10 +417,6 @@ Important image/link details:
 - `CONTRIBUTING.md`
   Short contributor guide with project priorities, build/verify commands,
   performance expectations, and versioning rules.
-
-- `third_party/imgui/`
-  Vendored Dear ImGui, currently v1.92.8. Do not edit vendored ImGui files
-  unless the task explicitly requires it.
 
 - `third_party/libdeflate/`
   libdeflate v1.26's decompressor, the files it needs and unchanged (MIT): the core
@@ -514,7 +517,7 @@ batching, or memory without calling out the tradeoff.
 GitHub CI entry points:
 
 - `.github/workflows/ci.yml`
-  Builds and smokes Linux native CLI plus Windows MinGW ImGui app.
+  Builds and smokes the Linux native CLI plus the Windows MinGW CLI.
 
 - `.github/workflows/hygiene.yml`
   Checks release files, script syntax, local README targets, and generated
@@ -644,19 +647,6 @@ GitHub CI entry points:
   the order of those additions when restructuring wrapping or measuring code,
   and compare whole PDFs before and after (see `docs/development/performance.md`).
 
-## UI Guidance
-
-The Windows app should feel like a compact utility, not a landing page.
-
-- Keep the main workflow immediate: edit/import Markdown, choose style/margin,
-  export.
-- Preserve keyboard export behavior and drag/drop file loading.
-- Use Dear ImGui idioms and keep custom drawing localized in `main_win32.cpp`.
-- Avoid UI changes that make the binary much larger or require shipping assets
-  beyond the icon/mascot unless the value is clear.
-- The icon source is `docs/assets/branding/rayomd.ico`; `docs/assets/branding/rayomd.png` is the
-  transparent source graphic used in docs/branding.
-
 ## Packaging And Licensing
 
 - Default Windows release should be a single `rayomd.exe` where
@@ -671,7 +661,6 @@ The Windows app should feel like a compact utility, not a landing page.
 - RayoMD's own code is licensed under Apache-2.0. Keep `LICENSE`,
   `NOTICE`, README license wording, and SPDX headers aligned when changing
   licensing metadata.
-- Keep Dear ImGui license attribution intact.
 - Keep generated build trees, benchmark outputs, PDFs, and temporary corpora out
   of source unless the user explicitly asks to track a specific artifact.
 

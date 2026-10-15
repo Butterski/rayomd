@@ -27,10 +27,6 @@ No browser. No LaTeX. No Pandoc. No runtime.
 [Benchmarks](#performance) ·
 [Documentation](https://github.com/Butterski/rayomd/wiki)
 
-<img src="docs/assets/demo/ui.png" alt="RayoMD Windows app screenshot" width="780">
-
-<sub><a href="docs/assets/demo/show.gif">Watch the demo (GIF)</a> · <a href="docs/assets/demo/show.mp4">MP4</a></sub>
-
 </div>
 
 > [!TIP]
@@ -39,9 +35,10 @@ No browser. No LaTeX. No Pandoc. No runtime.
 > fallback font 28 %; one-shot exports of CJK text and of cached images 15 to 28 %. `--fast-images`
 > converts a new PNG with transparency about 10 % sooner, for image streams a few percent larger.
 
-RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code. Windows gets a
-compact Dear ImGui app with command-line modes, Linux a small CLI, and both share one exporter
-you can also embed through the [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
+RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code: a small
+command-line tool for Linux and Windows, and an exporter you can embed through the
+[C++ API](https://github.com/Butterski/rayomd/wiki/C++-API). The desktop app for Linux and
+Windows is developed in a separate repository, RayoMD GUI.
 
 ## Highlights
 
@@ -57,7 +54,7 @@ converted. Batches run on up to 64 threads.
 <td width="33%" valign="top">
 
 ### Small
-A **790 KB** Linux download and a 1.6 MB Windows app. No browser engine, TeX stack or
+A **790 KB** Linux download and a 1.6 MB Windows download. No browser engine, TeX stack or
 runtime to install.
 
 </td>
@@ -107,16 +104,18 @@ tar -xzf rayomd-4.7.0-linux-x64-static.tar.gz
 </details>
 
 <details>
-<summary><b>Windows</b>: the app and the CLI in one <code>rayomd.exe</code></summary>
+<summary><b>Windows</b>: the command-line tool, <code>rayomd.exe</code></summary>
 
 Download `rayomd-4.7.0-windows-x64.zip` from
 [Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
-without arguments opens the app: edit or drop a file, pick a style and margins, and press
-`Ctrl+E` to export. With arguments it is the same CLI as on Linux:
+is the same CLI as on Linux:
 
 ```sh
 rayomd.exe --export input.md output.pdf
 ```
+
+Up to 4.7.0, `rayomd.exe` started without arguments also opens a desktop app; the next major
+release leaves that to RayoMD GUI and prints its usage instead.
 
 </details>
 
@@ -542,7 +541,6 @@ the repository.
 ## License
 
 RayoMD is released under the Apache License 2.0; see [`LICENSE`](LICENSE). [`NOTICE`](NOTICE)
-lists the third-party code and the runtime libraries linked into the release binaries. Dear
-ImGui keeps its own license in [`third_party/imgui/LICENSE.txt`](third_party/imgui/LICENSE.txt).
+lists the third-party code and the runtime libraries linked into the release binaries.
 
 <p align="right"><a href="#readme-top">back to top ↑</a></p>

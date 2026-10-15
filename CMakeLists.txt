@@ -270,49 +270,22 @@ rayomd_warnings(rayomd_engine)
 if(RAYOMD_BUILD_CLI)
     if(WIN32)
         enable_language(RC)
-        set(RAYOMD_IMGUI_SOURCES
-            third_party/imgui/imgui.cpp
-            third_party/imgui/imgui_draw.cpp
-            third_party/imgui/imgui_tables.cpp
-            third_party/imgui/imgui_widgets.cpp
-            third_party/imgui/misc/cpp/imgui_stdlib.cpp
-            third_party/imgui/backends/imgui_impl_win32.cpp
-            third_party/imgui/backends/imgui_impl_dx11.cpp)
-        add_executable(rayomd WIN32 ${RAYOMD_CORE_SOURCES} src/win32/main_win32.cpp src/win32/rayomd.rc
-            ${RAYOMD_IMGUI_SOURCES})
+        add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/win32/main_windows_cli.cpp src/win32/rayomd.rc)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-            # Vendored ImGui stays as upstream wrote it, and quiet.
-            set_property(SOURCE ${RAYOMD_IMGUI_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -w)
             target_sources(rayomd PRIVATE
                 src/win32/delay_load.cpp
                 src/win32/delay_import_pointers.cpp
                 src/win32/delay_image_load.cpp
                 src/win32/delay_image_import_pointers.cpp)
-            target_link_options(rayomd PRIVATE
-                -Wl,--wrap=GetOpenFileNameW
-                -Wl,--wrap=GetSaveFileNameW
-                -Wl,--wrap=D3D11CreateDeviceAndSwapChain
-                -Wl,--wrap=D3DCompile
-                -Wl,--wrap=DwmEnableBlurBehindWindow
-                -Wl,--wrap=DwmGetColorizationColor
-                -Wl,--wrap=DwmIsCompositionEnabled
-                -Wl,--wrap=DwmSetWindowAttribute
-                -Wl,--wrap=DragAcceptFiles
-                -Wl,--wrap=DragFinish
-                -Wl,--wrap=DragQueryFileW
-                -Wl,--wrap=SHGetFolderPathW
-                -Wl,--wrap=ShellExecuteW
-                -Wl,--wrap=CommandLineToArgvW)
+            target_link_options(rayomd PRIVATE -Wl,--wrap=CommandLineToArgvW)
         endif()
         target_compile_definitions(rayomd PRIVATE UNICODE _UNICODE)
-        target_include_directories(rayomd PRIVATE include . third_party third_party/imgui)
+        target_include_directories(rayomd PRIVATE include)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-            target_link_libraries(rayomd PRIVATE
-                dxgi windowscodecs Threads::Threads)
+            target_link_libraries(rayomd PRIVATE windowscodecs Threads::Threads)
         else()
             target_link_libraries(rayomd PRIVATE
-                d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi
-                winhttp windowscodecs ws2_32 Threads::Threads)
+                shell32 ole32 winhttp windowscodecs ws2_32 Threads::Threads)
         endif()
         rayomd_common_definitions(rayomd)
         rayomd_release_flags(rayomd)

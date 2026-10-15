@@ -33,9 +33,6 @@ Testing/
 *.user
 *.sln.docstates
 
-# ImGui generated
-imgui.ini
-
 # Temp files
 *.tmp
 *.temp
