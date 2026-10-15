@@ -1,0 +1,16 @@
+# Every key ParseTheme knows.
+font = tiny.ttf
+font-bold = tiny.otf
+font-italic = tiny.ttf
+font-bold-italic = tiny.otf
+logo = rgba.png
+heading-color = #0B3D91
+link-color = #c00
+accent-color = "#123456"
+header-left = {title}
+header-center = "{logo}"
+header-right = {author} · {date}
+footer-left = {subject}
+footer-center = {page} / {pages}
+footer-right = Confidential — ünïcödé 中文
+cover = yes

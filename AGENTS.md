@@ -469,12 +469,26 @@ Important image/link details:
   `tests/hardening_tests.inc` those of hostile and abandoned builds (cancellation, files that
   are no regular files, fonts changed after loading, image containment, cache permissions).
 
+- `tests/fuzz/`
+  libFuzzer targets of the engine's untrusted-input entry points (`fuzz_targets.h`): Markdown
+  through `BuildPdf` (the first two bytes choose the options), `PdfSource::Inspect`, `ParseTheme`
+  and a build with its theme, TrueType and OpenType fonts loaded and subset as a theme's font,
+  bare CFF, image decoding, and SVG through both hosts. `fuzz_internal.cpp` compiles
+  `tiny_pdf.cpp` inside itself to reach its internal names (and reads fonts into memory instead of
+  mapping them, so ASan sees overreads); each target runs on a 2 MiB stack. `-DRAYOMD_FUZZ=ON` with
+  clang builds `rayomd-fuzz-<target>` (ASan, UBSan); `tests/fuzz/run.sh BUILD SECONDS` runs them on
+  the corpus `seeds.py collect` makes (-timeout=10, -rss_limit_mb=2048). Every test build on Linux
+  builds `rayomd-fuzz-replay`, the ctest entry that runs `tests/fuzz/regressions/<target>/` and
+  `tests/fuzz/seeds/<target>/` through the same targets without libFuzzer; a `.rep` regression
+  describes a large input in a few lines (`replay_main.cpp`). Add each input a fuzzer finds there,
+  minimized, with the fix. The seeds are synthetic (`seeds.py generate`: no third-party font data).
+
 - tools/benchmark.py
   Maintained entry point for run, A/B (warm engine and fresh process),
   competitor, and reversible-profile performance workflows. Focused
   implementations remain under scripts/.
 - `.github/workflows/`
-  GitHub Actions for Linux/Windows CI, repository hygiene, and CodeQL. Keep
+  GitHub Actions for Linux/Windows CI, repository hygiene, fuzzing, and CodeQL. Keep
   README badges aligned with workflow filenames when adding or renaming checks.
 
 - docs/assets/branding/ and docs/assets/demo/
@@ -555,6 +569,10 @@ GitHub CI entry points:
 
 - `.github/workflows/codeql.yml`
   Runs C++ CodeQL analysis on the Linux native build path.
+
+- `.github/workflows/fuzz.yml`
+  Builds the libFuzzer targets with clang on Arch, replays the regressions and seeds under ASan
+  and UBSan, and runs each target 60 s on the seed corpus; any crash, timeout or OOM fails it.
 
 - `.github/workflows/release.yml`
   Packages default Linux, curl-enabled Linux, and Windows artifacts for matching version

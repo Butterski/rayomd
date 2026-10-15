@@ -13,3 +13,7 @@
 *.pdf binary
 *.png binary
 
+
+# Fuzz seeds and regressions are inputs, byte for byte.
+tests/fuzz/seeds/** -text
+tests/fuzz/regressions/** -text

@@ -1,0 +1,95 @@
+%PDF-2.0
+%âãÏÓ
+1 0 obj
+<< /Type /Pages /Kids [7 0 R ] /Count 1 >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding >>
+endobj
+6 0 obj
+<<  /Length 868 >>
+stream
+q 0.02 0.02 0.02 rg BT /F2 26 Tf 1 0 0 1 54 762 Tm (Reversible) Tj ET Q
+q 0.08 0.08 0.08 rg BT /F1 11.5 Tf 1 0 0 1 54 733.4 Tm (A source with) Tj ET Q
+q 0.08 0.08 0.08 rg BT /F4 11.5 Tf 1 0 0 1 123.02 733.4 Tm ( emphasis) Tj ET Q
+q 0.08 0.08 0.08 rg BT /F1 11.5 Tf 1 0 0 1 175.43 733.4 Tm (, ünïcödé and a table:) Tj ET Q
+q 0.91 0.93 0.95 rg 54 698.7 487 22.67 re f Q
+q 0.72 0.72 0.72 RG 0.45 w 54 698.7 243.5 22.67 re S Q
+q 0.08 0.08 0.08 rg BT /F2 9.6 Tf 1 0 0 1 59 706.78 Tm (a) Tj ET Q
+q 0.72 0.72 0.72 RG 0.45 w 297.5 698.7 243.5 22.67 re S Q
+q 0.08 0.08 0.08 rg BT /F2 9.6 Tf 1 0 0 1 302.5 706.78 Tm (b) Tj ET Q
+q 0.72 0.72 0.72 RG 0.45 w 54 676.03 243.5 22.67 re S Q
+q 0.08 0.08 0.08 rg BT /F1 9.6 Tf 1 0 0 1 59 684.1 Tm (1) Tj ET Q
+q 0.72 0.72 0.72 RG 0.45 w 297.5 676.03 243.5 22.67 re S Q
+q 0.08 0.08 0.08 rg BT /F1 9.6 Tf 1 0 0 1 302.5 684.1 Tm (2) Tj ET Q
+
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 1 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 2 0 R /F2 3 0 R /F3 4 0 R /F4 5 0 R >> >> /Contents 6 0 R >>
+endobj
+8 0 obj
+<< /Type /Outlines /First 9 0 R /Last 9 0 R /Count 1 >>
+endobj
+9 0 obj
+<< /Title (Reversible) /Parent 8 0 R /Dest [7 0 R /XYZ null 792 null] >>
+endobj
+10 0 obj
+<< /Type /EmbeddedFile /Subtype /text#2Fmarkdown /Params << /Size 96 >> /Length 96 >>
+stream
+# Reversible
+
+A source with *emphasis*, Ã¼nÃ¯cÃ¶dÃ© and a table:
+
+| a | b |
+|---|---|
+| 1 | 2 |
+
+endstream
+endobj
+11 0 obj
+<< /Type /Filespec /F (source.md) /UF (source.md) /EF << /F 10 0 R /UF 10 0 R >> /AFRelationship /Source >>
+endobj
+12 0 obj
+<< /Type /Metadata /Subtype /XML /Length 470 >>
+stream
+<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:rayomd="https://rayomd.dev/ns/source/1.0/" rayomd:profile="rayomd-source/1" rayomd:producer="4.7.0" rayomd:encoding="UTF-8" rayomd:length="96" rayomd:sha256="cb87ec2f97a27a700211e93b9fac41cb059ab3f10f3bd8299cc6fd37d6c4488e" rayomd:attachment="source.md"/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>
+endstream
+endobj
+13 0 obj
+<< /Type /Catalog /Pages 1 0 R /Outlines 8 0 R /Metadata 12 0 R /Names << /EmbeddedFiles << /Names [(source.md) 11 0 R] >> >> /AF [11 0 R] >>
+endobj
+14 0 obj
+<< /Producer (RayoMD Native Standard PDF) /Creator (RayoMD) /Title (Reversible) >>
+endobj
+xref
+0 15
+0000000000 65535 f 
+0000000015 00000 n 
+0000000073 00000 n 
+0000000170 00000 n 
+0000000272 00000 n 
+0000000367 00000 n 
+0000000472 00000 n 
+0000001392 00000 n 
+0000001548 00000 n 
+0000001619 00000 n 
+0000001707 00000 n 
+0000001923 00000 n 
+0000002047 00000 n 
+0000002599 00000 n 
+0000002757 00000 n 
+trailer
+<< /Size 15 /Root 13 0 R /Info 14 0 R >>
+startxref
+2856
+%%EOF

@@ -1,0 +1,6 @@
+# Pipe-table padding (AuditEngine F2, owner EngineParse): every row is padded to the header's
+# 19,999 columns, 20,000 rows: 4 * 10^8 cells from 60 KB of text.
+1*\x00\x00
+20000*|
+1*\n|---|---|\n
+20000*x\n

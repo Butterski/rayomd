@@ -1,0 +1,6 @@
+# Quadratic status symbols (AuditEngine F6, owner EngineParse): NormalizeSymbols replaces each
+# of 900,000 check marks with std::string::replace, moving the rest of the paragraph each time.
+# The CJK character keeps the document off the WinAnsi path, whose transcoding is linear.
+1*\x00\x00\xe4\xb8\xad\n\n
+900000*\xe2\x9c\x85
+1*\n

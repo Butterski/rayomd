@@ -1,0 +1,4 @@
+logo = basic.svg
+header-center = {logo}
+footer-center = Page {page} of {pages}
+cover = true

@@ -1,0 +1,42 @@
+name: Fuzz
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: libFuzzer targets (60 s each)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed base-devel clang llvm cmake python ttf-dejavu
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build/fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++ -DRAYOMD_FUZZ=ON -DRAYOMD_BUILD_CLI=OFF
+      - name: Build
+        run: >
+          cmake --build build/fuzz -j"$(nproc)" --target rayomd-fuzz-replay rayomd-fuzz-buildpdf
+          rayomd-fuzz-pdfsource rayomd-fuzz-theme rayomd-fuzz-font rayomd-fuzz-cff rayomd-fuzz-image rayomd-fuzz-svg
+      - name: Regressions and seeds under ASan and UBSan
+        run: build/fuzz/tests/fuzz/rayomd-fuzz-replay tests/fuzz/regressions tests/fuzz/seeds
+      - name: Fuzz
+        run: tests/fuzz/run.sh build/fuzz 60
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: build/fuzz/fuzz-artifacts/
+          if-no-files-found: ignore
