@@ -113,13 +113,13 @@ bool CheckCancel() {
     }
 
     std::string blocks, table = "| a | b | c |\n|---|---|---|\n", code = "```\n", bookText;
-    for (int i = 0; i < 30000; i++) blocks += "Paragraph " + std::to_string(i) + " of many blocks, with **bold** text.\n\n";
-    for (int i = 0; i < 12000; i++) table += "| row " + std::to_string(i) + " | *cell* | `x` |\n";
-    for (int i = 0; i < 150000; i++) code += "int line" + std::to_string(i) + " = " + std::to_string(i) + ";\n";
+    for (int i = 0; i < 60000; i++) blocks += "Paragraph " + std::to_string(i) + " of many blocks, with **bold** text.\n\n";
+    for (int i = 0; i < 40000; i++) table += "| row " + std::to_string(i) + " | *cell* | `x` |\n";
+    for (int i = 0; i < 300000; i++) code += "int line" + std::to_string(i) + " = " + std::to_string(i) + ";\n";
     code += "```\n";
     for (int i = 0; i < 400; i++) bookText += "Paragraph " + std::to_string(i) + " of a file.\n\n";
     TinyPdf::Book longBook;
-    for (int file = 0; file < 200; file++) longBook.chapters.push_back({ bookText, (root / "f.md").u8string(), "", 0, false });
+    for (int file = 0; file < 400; file++) longBook.chapters.push_back({ bookText, (root / "f.md").u8string(), "", 0, false });
     struct Case {
         const char* name;
         std::string markdown;   // "{}" stands for the image's number
@@ -145,9 +145,10 @@ bool CheckCancel() {
             }
             return TinyPdf::BuildPdf(markdown, buildOptions, out);
         };
-        // The whole build first, then one cancelled halfway, past the parse, which does not stop;
-        // then the cancelled document again, whose image must not be taken for a failed one. A
-        // busy machine can stall the build's thread for longer than the bound: up to three tries.
+        // The whole build first, then one cancelled a third of the way, past the parse, which does
+        // not stop; then the cancelled document again, whose image must not be taken for a failed
+        // one. A try is inconclusive when the build ended before the flag (Windows sleeps whole
+        // timer ticks of 15.6 ms) or a busy machine stalled its thread past the bound: up to three.
         bool passed = false;
         for (int attempt = 0; attempt < 3 && !passed; attempt++) {
             std::string full;
@@ -158,7 +159,7 @@ bool CheckCancel() {
             TinyPdf::BuildResult cancelled;
             std::string cancelledPdf;
             std::thread worker([&]() { cancelled = build(options, cancelledPdf, 2); });
-            std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(fullMs / 2.0));
+            std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(fullMs / 3.0));
             const auto set = std::chrono::steady_clock::now();
             cancel = true;
             worker.join();
@@ -167,11 +168,12 @@ bool CheckCancel() {
             const TinyPdf::BuildResult after = build(plain, again, 2);
             std::cout << "cancel " << item.name << ": returned " << latency << " ms after the flag, the whole build "
                       << fullMs << " ms" << std::endl;
-            if (cancelled.error != TinyPdf::BuildError::Cancelled || !cancelledPdf.empty() || !whole.Ok() ||
-                whole.failedImages != 0 || !ValidPdf(full) || !after.Ok() || after.failedImages != 0) {
+            if (!whole.Ok() || whole.failedImages != 0 || !ValidPdf(full) || !after.Ok() || after.failedImages != 0 ||
+                (cancelled.error != TinyPdf::BuildError::Cancelled && !cancelled.Ok()) ||
+                (cancelled.error == TinyPdf::BuildError::Cancelled && !cancelledPdf.empty())) {
                 break;
             }
-            passed = latency <= std::max(25.0, fullMs / 5.0);
+            passed = cancelled.error == TinyPdf::BuildError::Cancelled && latency <= std::max(25.0, fullMs / 5.0);
         }
         if (!passed) {
             std::cerr << "cancelling the " << item.name << " build failed" << std::endl;
