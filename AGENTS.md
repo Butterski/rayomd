@@ -187,6 +187,12 @@ Important image/link details:
   closed: SVG input is untrusted.
 - Links are emitted as PDF annotations; keep visible text and annotation rects
   aligned when changing wrapping or text layout.
+- Every link target goes through `Html::SafeUrl` before it can become a `/URI`: Markdown inline
+  links and resolved references (`ParseInlineRuns`), linked image blocks (`ParseStandaloneImage`,
+  `ParseImageAt`) and HTML `<a href>`. A refused one (`javascript:`, `vbscript:`, `data:`,
+  `file:`, a drive path, a `\\host` share) keeps its text without an annotation. Bare URLs and
+  `<…>` autolinks are `http(s)` or `mailto:` by construction. A new way to make a link must call
+  it too.
 - Headings make the PDF outline, and `#anchor` links go to them by GitHub's
   anchor rules (`HeadingTargets`) with explicit destinations; a link to a missing
   anchor is dropped. Renderers note a heading where its first line lands

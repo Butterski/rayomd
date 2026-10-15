@@ -374,6 +374,10 @@ static bool ParseTableSeparator(std::string_view line, std::vector<int>& aligns)
     return true;
 }
 
+// The most columns a pipe table may have; a longer header line is text. Every row gets the
+// header's cells, so a header of 100,000 cells made each one-word line after it 100,000 cells.
+constexpr size_t kMaxTableColumns = 1000;
+
 // True when lines[i] is a table header followed by its separator line. `aligns`, when
 // given, receives the column alignments of a table that starts here.
 static bool IsTableStart(const std::vector<std::string_view>& lines, size_t i, std::vector<int>* aligns = nullptr) {
@@ -383,29 +387,12 @@ static bool IsTableStart(const std::vector<std::string_view>& lines, size_t i, s
         lines[i + 1].find('-') == std::string_view::npos) {
         return false;
     }
-    if (CountTableCells(lines[i]) < 2) return false;
+    const size_t cells = CountTableCells(lines[i]);
+    if (cells < 2 || cells > kMaxTableColumns) return false;
     std::vector<int> parsed;
     if (!ParseTableSeparator(lines[i + 1], parsed)) return false;
     if (aligns) *aligns = std::move(parsed);
     return true;
-}
-
-static void ReplaceAll(std::string& s, const std::string& from, const std::string& to) {
-    if (from.empty()) return;
-    size_t pos = 0;
-    while ((pos = s.find(from, pos)) != std::string::npos) {
-        s.replace(pos, from.size(), to);
-        pos += to.size();
-    }
-}
-
-std::string NormalizeSymbols(std::string s) {
-    if (s.find('\xE2') == std::string::npos) return s;
-    ReplaceAll(s, std::string("\xE2\x9C\x85"), "[OK]");
-    ReplaceAll(s, std::string("\xE2\x9A\xA0\xEF\xB8\x8F"), "[!]");
-    ReplaceAll(s, std::string("\xE2\x9A\xA0"), "[!]");
-    ReplaceAll(s, std::string("\xE2\x9D\x8C"), "[X]");
-    return s;
 }
 
 struct MarkdownInlineLink {
@@ -583,7 +570,8 @@ static bool ParseStandaloneImage(std::string_view line, ImageSyntax* image) {
     if (image) {
         image->alt = StripInlineMarkdown(link.label);
         image->source.src = std::move(src);
-        image->source.link = std::move(target);
+        // A target SafeUrl refuses leaves the image unlinked.
+        image->source.link = Html::SafeUrl(target) ? std::move(target) : std::string();
     }
     return true;
 }
@@ -610,7 +598,7 @@ RAYOMD_NOINLINE size_t ParseImageAt(std::string_view s, size_t at, std::string& 
     if (!ExtractMarkdownDestination(link.target, src)) return 0;
     alt = StripInlineMarkdown(link.label);
     source.src = std::move(src);
-    source.link = std::move(target);
+    source.link = Html::SafeUrl(target) ? std::move(target) : std::string();
     return end;
 }
 
@@ -788,7 +776,7 @@ static bool ParseReferenceDefinition(const std::vector<std::string_view>& lines,
         while (cursor < rest.size() && !IsSpace(rest[cursor])) cursor++;
         destination = rest.substr(0, cursor);
     }
-    if (destination.empty()) return false;
+    if (destination.empty() || destination.size() > kMaxReferenceDestinationBytes) return false;
     definition.destination = UnescapeMarkdownDestination(destination);
     definition.title.clear();
     std::string_view trailing = TrimView(rest.substr(cursor));
@@ -1425,8 +1413,17 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
 
             // As in GFM, the rows go on up to a blank line or the start of another block, and
             // every row has the cells of the header: missing ones are empty, extra ones dropped.
+            // The empty cells come from the document's budget (ParseBudget); a row that would
+            // pass it ends the table, and the lines from it on are text, as in cmark-gfm.
+            ParseBudget* const budget = ParseBudget::Current();
+            size_t ownCells = ParseBudget::kPaddedCells;
+            size_t& cellsLeft = budget != nullptr ? budget->paddedCells : ownCells;
             while (i < lines.size() && infos[i].kind == LineKind::Plain && !isSuppressed(i)) {
                 std::vector<std::string> row = SplitTableCells(lines[i]);
+                if (row.size() < columns) {
+                    if (columns - row.size() > cellsLeft) break;
+                    cellsLeft -= columns - row.size();
+                }
                 row.resize(columns);
                 addRow(lines[i], std::move(row));
                 i++;
@@ -1653,6 +1650,7 @@ std::vector<Block> ParseMarkdownLevel(const std::string& markdown, int depth, Fo
 }
 
 std::vector<Block> ParseMarkdown(const std::string& markdown, Footnotes* footnotes) {
+    const ParseBudget budget(markdown.size());
     return footnotes == nullptr ? ParseMarkdownImpl(markdown, 0, nullptr) : ParseWithFootnotes(markdown, *footnotes);
 }
 

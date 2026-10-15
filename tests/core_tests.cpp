@@ -43,6 +43,9 @@
 #include <vector>
 
 #include "libdeflate.h"
+#if defined(__linux__)
+#include <sys/resource.h>
+#endif
 
 #ifndef RAYOMD_TEST_SOURCE_DIR
 #define RAYOMD_TEST_SOURCE_DIR "."
@@ -727,6 +730,18 @@ bool CheckImagePolicyCacheIsolation() {
 #include "math_parser_tests.inc"
 #include "math_layout_tests.inc"
 #include "inline_lookahead_tests.inc"
+
+// The peak resident size of this process in bytes, 0 where it cannot be read: off Linux and under
+// AddressSanitizer, whose shadow memory and quarantine make it say little about the code.
+size_t PeakRssBytes() {
+#if defined(__linux__) && !defined(__SANITIZE_ADDRESS__)
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) return static_cast<size_t>(usage.ru_maxrss) * 1024;
+#endif
+    return 0;
+}
+
+#include "parse_limits_tests.inc"
 #include "html_tests.inc"
 
 // Heights of the filled rectangles drawn with the given fill colour ("r g b").
@@ -3505,6 +3520,7 @@ int main() {
     if (!CheckComposedAdvance()) return 104;
     if (!CheckCffSubset()) return 105;
     if (!html_tests::CheckHtmlEngine()) return 106;
+    if (!CheckParseLimits()) return 107;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

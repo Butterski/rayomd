@@ -336,6 +336,17 @@ bool HtmlBlockEnds(std::string_view line, int condition) {
 bool SafeUrl(std::string_view url, bool image) {
     size_t index = 0;
     while (index < url.size() && static_cast<unsigned char>(url[index]) <= 0x20) index++;
+    // Most targets ("https:", "mailto:", "#top", "page.md") are answered from two bytes: a first
+    // byte that starts none of the refused forms below, then one that is no drive letter's ':'
+    // and none of the bytes the scheme reading skips.
+    if (index + 1 < url.size()) {
+        const char first = Lower(url[index]);
+        const char second = url[index + 1];
+        if (first != 'j' && first != 'v' && first != 'd' && first != 'f' && first != '\\' && first != '/' &&
+            second != ':' && second != '\t' && second != '\n' && second != '\r') {
+            return true;
+        }
+    }
     char scheme[11];
     size_t length = 0;
     for (; index < url.size() && length < sizeof(scheme); index++) {
@@ -345,6 +356,19 @@ bool SafeUrl(std::string_view url, bool image) {
     }
     const std::string_view start(scheme, length);
     if (start.compare(0, 11, "javascript:") == 0 || start.compare(0, 9, "vbscript:") == 0) return false;
+    if (!image) {
+        // A link opens no local file: not file:, not a drive path ("C:\", "c:/"), and not a path
+        // of two slashes with a backslash among them, which Windows takes for a network share
+        // ("\\host\share"). An image's source has the local image policy (relative paths only).
+        if (start.compare(0, 5, "file:") == 0) return false;
+        if (length >= 3 && start[0] >= 'a' && start[0] <= 'z' && start[1] == ':' && (start[2] == '\\' || start[2] == '/')) {
+            return false;
+        }
+        if (length >= 2 && (start[0] == '\\' || start[0] == '/') && (start[1] == '\\' || start[1] == '/') &&
+            (start[0] == '\\' || start[1] == '\\')) {
+            return false;
+        }
+    }
     if (start.compare(0, 5, "data:") != 0) return true;
     return image && start.compare(0, 11, "data:image/") == 0;
 }
