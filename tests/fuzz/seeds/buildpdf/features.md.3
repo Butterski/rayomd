@@ -1,0 +1,73 @@
+%"---
+title: Fuzz features
+author: RayoMD
+lang: de
+---
+
+[TOC]
+
+# Heading *one*
+
+## Heading `two` {#custom}
+
+Paragraph with **bold**, *italic*, ~~strike~~, `code`, <u>under</u>, <mark>mark</mark>, H<sub>2</sub>O, x<sup>2</sup>,
+a [link](https://example.com "t"), <https://auto.example>, www.example.com, mail@example.com, &copy; &rarr; &#x1F600;.
+A footnote[^1] and a [reference][ref] and [shortcut].
+
+[^1]: The note, with **bold**.
+[ref]: https://example.com/ref
+[shortcut]: #heading-one
+
+> [!NOTE]
+> An alert with a list:
+> - a
+>   - b
+
+1. one
+2. two
+   - [ ] task
+   - [x] done
+
+| Left | Center | Right |
+|:-----|:------:|------:|
+| a | `b` | $x^2$ |
+| ✅ done | ❌ no | ⚠️ |
+
+```python
+def f(x):  # comment
+    return "s" + str(x)
+```
+
+```js
+const a = `t${1}`; // c
+```
+
+```
+plain
+```
+
+Inline math $\frac{a}{b} + \sqrt{x}$ and display:
+
+$$
+\sum_{i=1}^{n} i = \frac{n(n+1)}{2} \quad \begin{pmatrix} a & b \\ c & d \end{pmatrix}
+$$
+
+<details><summary>Sum</summary>
+
+Hidden *text*.
+
+</details>
+
+<div align="right">Right aligned</div>
+
+<!-- comment -->
+
+---
+
+Line<br>break and a hard  
+break.
+
+<table><tr><th>H</th></tr><tr><td>cell</td></tr></table>
+
+<a id="anchor"></a>
+[to anchor](#anchor)

@@ -32,6 +32,8 @@ jobs:
         run: python3 -B tests/verify_cli.py --binary build/linux/rayomd
       - name: Core tests
         run: ctest --test-dir build/linux --output-on-failure -R rayomd-core
+      - name: Fuzz regressions
+        run: ctest --test-dir build/linux --output-on-failure -R rayomd-fuzz-replay
       - name: Engine library
         run: |
           cmake --build build/linux --target rayomd_engine

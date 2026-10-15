@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Every feature RayoMD's converter draws, once. -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="120" viewBox="0 0 200 120">
+  <style>.accent { fill: #0b3d91; stroke-width: 2 } #t { font-weight: bold } rect.box { opacity: 0.8 }</style>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0" gradientTransform="rotate(10)">
+      <stop offset="0" stop-color="red"/><stop offset="0.5" stop-color="#0f0" stop-opacity="0.5"/><stop offset="1" stop-color="rgb(0,0,255)"/>
+    </linearGradient>
+    <clipPath id="c"><circle cx="50" cy="50" r="40"/></clipPath>
+    <g id="mark"><path d="M0 0 L10 0 L5 8 Z"/></g>
+  </defs>
+  <rect class="box" x="5" y="5" width="90" height="50" rx="6" fill="url(#g)" stroke="black" stroke-dasharray="4 2"/>
+  <g transform="translate(100 10) scale(0.8) skewX(10)" clip-path="url(#c)">
+    <circle cx="40" cy="40" r="30" class="accent" fill-opacity="0.5"/>
+    <ellipse cx="60" cy="30" rx="20" ry="10" fill="none" stroke="#333" stroke-linejoin="round" stroke-linecap="square"/>
+  </g>
+  <path d="M10 80 h20 v10 H10 z m40 0 c10 -10 20 10 30 0 s10 10 20 0 q5 -10 10 0 t10 0 a10 5 30 1 0 15 5 l5 5" fill="none" stroke="purple" fill-rule="evenodd"/>
+  <polyline points="120,80 130,90 140,80 150,90" fill="none" stroke="orange" stroke-width="3" stroke-miterlimit="2"/>
+  <polygon points="160,80 180,80 170,100"/>
+  <line x1="0" y1="118" x2="200" y2="118" stroke="gray"/>
+  <use xlink:href="#mark" x="180" y="10"/>
+  <text id="t" x="10" y="70" font-size="12" font-family="sans-serif" text-anchor="start">SVG text <tspan dy="2" fill="red">span</tspan> é中</text>
+  <text x="190" y="110" text-anchor="end" transform="rotate(-5 190 110)">end</text>
+</svg>

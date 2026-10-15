@@ -31,6 +31,9 @@ endif()
 if(RAYOMD_STATIC AND RAYOMD_USE_CURL)
     message(FATAL_ERROR "RAYOMD_STATIC cannot link libcurl and its TLS stack statically.")
 endif()
+# libFuzzer targets of the engine's untrusted-input entry points (tests/fuzz/), clang only. The
+# normal build never builds them; a test build runs their regression inputs without libFuzzer.
+option(RAYOMD_FUZZ "Build the libFuzzer targets of tests/fuzz (clang, ASan and UBSan)" OFF)
 
 function(rayomd_release_flags target)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -336,5 +339,8 @@ if(RAYOMD_TOP_LEVEL)
                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_cli.py"
                     --binary "$<TARGET_FILE:rayomd>")
         endif()
+    endif()
+    if(RAYOMD_FUZZ OR (BUILD_TESTING AND NOT WIN32))
+        add_subdirectory(tests/fuzz)
     endif()
 endif()

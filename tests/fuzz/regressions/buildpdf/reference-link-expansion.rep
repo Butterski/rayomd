@@ -1,0 +1,8 @@
+# Quadratic reference links (AuditEngine F1, owner EngineParse): each use of [a] is rewritten as an
+# inline link carrying a full copy of its destination, 32,768 uses of a 64 KiB one: 2 GiB.
+# Options 0x00 0x00, then the document.
+1*\x00\x00[a]:\x20
+65536*x
+1*\n\n
+32768*[a].
+1*\n
