@@ -5,8 +5,8 @@
 // <fcntl.h>, <sys/stat.h> and <unistd.h>; Bounded of parse_limits_tests.inc.
 // Hostile and abandoned builds: cancellation (PdfOptions::cancel), files that are no regular
 // files, fonts changed after they were read, deep composite glyphs, image containment, the
-// decode budget, the image cache's permissions, a theme's long header and footer text and a
-// book's files listed under several names or past its byte budget.
+// decode budget, the image cache's permissions, long link targets, a theme's long header and
+// footer text and a book's files listed under several names or past its byte budget.
 // Included inside the anonymous namespace of tests/core_tests.cpp.
 
 namespace hardening_tests {
@@ -608,6 +608,326 @@ bool CheckThemeFields() {
     return true;
 }
 
+// An 8-bit RGBA PNG of `width` x `height` transparent black pixels but the first, whose red is
+// `mark`: a "bomb" of a few dozen KB that decodes to width * height * 4 bytes.
+std::string MakeBombPng(uint32_t width, uint32_t height, uint8_t mark) {
+    std::string raw((size_t)(width * 4 + 1) * height, '\0');
+    raw[1] = (char)mark;
+    std::string zlib(RayoMd::Flate::ZlibBound(raw.size()), '\0');
+    RayoMd::Flate::Scratch scratch;
+    zlib.resize(RayoMd::Flate::ZlibCompress(raw, reinterpret_cast<uint8_t*>(&zlib[0]), scratch));
+    std::string png("\x89PNG\r\n\x1a\n", 8);
+    std::string header;
+    AppendBigEndian(header, width);
+    AppendBigEndian(header, height);
+    header += std::string("\x08\x06\x00\x00\x00", 5);
+    AppendChunk(png, "IHDR", header);
+    AppendChunk(png, "IDAT", zlib);
+    AppendChunk(png, "IEND", std::string());
+    return png;
+}
+
+std::string Base64(const std::string& bytes) {
+    static const char kDigits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    for (size_t at = 0; at < bytes.size(); at += 3) {
+        const size_t left = bytes.size() - at;
+        const uint32_t v = (uint32_t)(uint8_t)bytes[at] << 16 | (left > 1 ? (uint32_t)(uint8_t)bytes[at + 1] << 8 : 0u) |
+            (left > 2 ? (uint32_t)(uint8_t)bytes[at + 2] : 0u);
+        out += kDigits[v >> 18];
+        out += kDigits[(v >> 12) & 63];
+        out += left > 1 ? kDigits[(v >> 6) & 63] : '=';
+        out += left > 2 ? kDigits[v & 63] : '=';
+    }
+    return out;
+}
+
+// An SVG of a red square and the PNG `png` as a data: image.
+std::string SvgWithImage(const std::string& png) {
+    return "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"5\" height=\"5\" fill=\"red\"/>"
+        "<image x=\"5\" y=\"5\" width=\"10\" height=\"10\" href=\"data:image/png;base64," + Base64(png) + "\"/></svg>";
+}
+
+// The pixels one build may decode (AuditEngine F12): 2^30, which 64 PNGs of 4096 x 4096 fill. A
+// document of 66 SVG files with the same such data: image and 30 copies of such a PNG decodes the
+// image once (the process keeps it by its SHA-256, charging each use what its decode took), and
+// shows neither the last two SVGs' image nor any copy, each a failed image, with no time spent
+// decoding them; built again, it is the same PDF. An SVG's data: image is decoded once a process:
+// a second build of its document decodes nothing and writes the same bytes.
+bool CheckDecodeBudget() {
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-decode-budget";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    const std::string bomb = MakeBombPng(4096, 4096, 1);
+    const std::string svg = SvgWithImage(bomb);
+    std::string svgs, copies;
+    bool ok = true;
+    for (int i = 0; i < 66; i++) {
+        ok = ok && WriteFile(root / ("s" + std::to_string(i) + ".svg"), svg);
+        svgs += "![s](s" + std::to_string(i) + ".svg)\n\n";
+    }
+    for (int i = 0; i < 30; i++) {
+        ok = ok && WriteFile(root / ("c" + std::to_string(i) + ".png"), bomb);
+        copies += "![c](c" + std::to_string(i) + ".png)\n\n";
+    }
+    const std::string small = MakeRgbaPng(64, 48, [](uint32_t x, uint32_t y, int c) {
+        return c == 3 ? (uint8_t)(x * 4) : (uint8_t)(x * 3 + y * 5 + (uint32_t)c * 40);
+    });
+    ok = ok && WriteFile(root / "small.svg", SvgWithImage(small));
+    if (!ok) {
+        std::cerr << "cannot write the decode budget test's files" << std::endl;
+        return false;
+    }
+    TinyPdf::PdfOptions options;
+    options.sourcePath = (root / "doc.md").u8string();
+
+    const uint64_t before = TinyPdf::Internal::SvgImageDecodes();
+    std::string first, again, withCopies;
+    auto start = std::chrono::steady_clock::now();
+    const TinyPdf::BuildResult spent = TinyPdf::BuildPdf(svgs, options, first);
+    const double firstMs = MillisecondsSince(start);
+    const uint64_t decodes = TinyPdf::Internal::SvgImageDecodes() - before;
+    const TinyPdf::BuildResult spentAgain = TinyPdf::BuildPdf(svgs, options, again);
+    start = std::chrono::steady_clock::now();
+    const TinyPdf::BuildResult copied = TinyPdf::BuildPdf(svgs + copies, options, withCopies);
+    const double copiesMs = MillisecondsSince(start);
+    std::cout << "decode budget: 66 SVGs in " << firstMs << " ms, with 30 PNGs past the budget " << copiesMs << " ms"
+              << std::endl;
+    if (!spent.Ok() || spent.failedImages != 2 || decodes != 1 || !ValidPdf(first)) {
+        std::cerr << "the decode budget: " << spent.failedImages << " failed images, " << decodes << " decodes" << std::endl;
+        ok = false;
+    }
+    if (!spentAgain.Ok() || spentAgain.failedImages != 2 || again != first ||
+        TinyPdf::Internal::SvgImageDecodes() - before != 1) {
+        std::cerr << "a document past the decode budget changed when built again" << std::endl;
+        ok = false;
+    }
+    // Decoded, the 30 copies would take 30 times the one decode of the first build.
+    if (!copied.Ok() || copied.failedImages != 32 || copiesMs > 2.0 * firstMs + 50.0) {
+        std::cerr << "PNGs past the decode budget: " << copied.failedImages << " failed images in " << copiesMs << " ms"
+                  << std::endl;
+        ok = false;
+    }
+
+    const uint64_t smallBefore = TinyPdf::Internal::SvgImageDecodes();
+    std::string once, twice;
+    const TinyPdf::BuildResult built = TinyPdf::BuildPdf("![s](small.svg)\n", options, once);
+    const uint64_t firstDecodes = TinyPdf::Internal::SvgImageDecodes() - smallBefore;
+    const TinyPdf::BuildResult rebuilt = TinyPdf::BuildPdf("![s](small.svg)\n", options, twice);
+    if (!built.Ok() || !rebuilt.Ok() || built.failedImages != 0 || firstDecodes != 1 ||
+        TinyPdf::Internal::SvgImageDecodes() - smallBefore != 1 || once != twice ||
+        once.find("/Subtype /Image") == std::string::npos) {
+        std::cerr << "an SVG's data: image was decoded again, or its PDF changed" << std::endl;
+        ok = false;
+    }
+    fs::remove_all(root);
+    return ok;
+}
+
+// Names that are no UTF-8 (AuditEngine F13): a document's image paths (raw and percent-encoded)
+// and links, its source path, a theme's logo and fonts (also through ParseTheme), the files a
+// book's SUMMARY.md lists and a book's links to its files; on Windows also a file name with an
+// unpaired surrogate in a book's folder and a batch folder. std::filesystem's conversions threw
+// for these on Windows, which ends a process built without exceptions (-fno-exceptions, and the
+// GUI's build thread). Every build ends: an image shows its alt text, a theme font that cannot
+// be read is ThemeFontUnavailable, a book that lists a missing file is refused.
+bool CheckInvalidUtf8Names() {
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-names";
+    fs::remove_all(root);
+    fs::create_directories(root / "book");
+    const fs::path assets = fs::path(RAYOMD_TEST_SOURCE_DIR) / "docs" / "assets";
+    std::error_code copyError;
+    fs::copy_file(assets / "branding" / "rayomd.png", root / "pic.png", copyError);
+    const std::string bad = "\xFF\xFE\xC3x\xED\xA0\x80";   // stray bytes, a cut sequence, an encoded surrogate
+    const std::string dir = root.u8string();
+    bool ok = !copyError;
+    const auto check = [&](const char* what, bool passed) {
+        if (!passed) std::cerr << "a name that is no UTF-8: " << what << std::endl;
+        ok = ok && passed;
+    };
+    // The conversions themselves: UTF-8 round trips; elsewhere bytes stay bytes, on Windows a
+    // sequence that is no UTF-8 (or UTF-16) becomes U+FFFD.
+    check("PathFromUtf8 and PathToUtf8",
+        RayoMd::File::PathToUtf8(RayoMd::File::PathFromUtf8("a/\xC3\xA9\xE4\xB8\xAD\xF0\x9F\x98\x80.png")) ==
+            "a/\xC3\xA9\xE4\xB8\xAD\xF0\x9F\x98\x80.png" &&
+#ifdef _WIN32
+        RayoMd::File::PathToUtf8(RayoMd::File::PathFromUtf8("\xFF" "a")) == "\xEF\xBF\xBD" "a" &&
+        RayoMd::File::PathToUtf8(fs::path(std::wstring(L"b\xDC00"))) == "b\xEF\xBF\xBD");
+#else
+        RayoMd::File::PathToUtf8(RayoMd::File::PathFromUtf8("\xFF" "a")) == "\xFF" "a");
+#endif
+    TinyPdf::PdfOptions options;
+    options.sourcePath = dir + "/doc.md";
+    const std::string images = "![a](" + bad + ".png)\n\n![b](pic.png)\n\n![c](%FF%FE.png)\n\n![d](" + dir + "/" + bad +
+        ".png)\n\n[link](" + bad + ".md) [anchor](#" + bad + ")\n";
+    for (const std::string& text : { images, "# \xC3\x9Cnicode \xE2\x9C\x93\n\n" + images }) {
+        std::string pdf;
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf(text, options, pdf);
+        check("image paths", result.Ok() && result.failedImages == 3 && ValidPdf(pdf));
+    }
+    TinyPdf::PdfOptions badSource = options;
+    badSource.sourcePath = dir + "/" + bad + "/doc.md";
+    std::string pdf;
+    TinyPdf::BuildResult result = TinyPdf::BuildPdf("![b](pic.png)\n", badSource, pdf);
+    check("the source path", result.Ok() && result.failedImages == 1);
+
+    TinyPdf::PdfOptions themed = options;
+    themed.theme.logoPath = dir + "/" + bad + ".png";
+    themed.theme.headerLeft = "{logo}";
+    result = TinyPdf::BuildPdf("# Logo\n", themed, pdf);
+    check("a theme's logo", result.Ok() && result.failedImages == 1);
+    themed.theme.fontPath = dir + "/" + bad + ".ttf";
+    result = TinyPdf::BuildPdf("# Font\n", themed, pdf);
+    check("a theme's font", result.error == TinyPdf::BuildError::ThemeFontUnavailable);
+    TinyPdf::PdfTheme parsed;
+    std::string themeError;
+    if (TinyPdf::Internal::ParseTheme("logo = " + bad + ".png\nheader-left = {logo}\n", dir, parsed, themeError)) {
+        TinyPdf::PdfOptions withTheme = options;
+        withTheme.theme = parsed;
+        result = TinyPdf::BuildPdf("# Parsed\n", withTheme, pdf);
+        check("a parsed theme's logo", result.Ok() && result.failedImages == 1);
+    }
+
+    ok = ok && WriteFile(root / "book" / "SUMMARY.md", "# Book\n\n- [One](one.md)\n- [Bad](" + bad + ".md)\n") &&
+        WriteFile(root / "book" / "one.md", "# One\n\n[two](two%FF.md#a) [raw](" + bad + ".md) [three](" + bad + "/x.md)\n");
+    TinyPdf::Book book;
+    std::string bookError;
+    check("a SUMMARY.md listing", !RayoMd::Book::ReadBook({ root / "book" / "SUMMARY.md" }, book, bookError) &&
+        !bookError.empty());
+    TinyPdf::Book linked;
+    linked.title = "Book";
+    linked.directory = (root / "book").u8string();
+    linked.chapters.push_back({ "# One\n\n[two](two%FF.md#a) [raw](" + bad + ".md)\n", (root / "book" / "one.md").u8string(), "", 0, false });
+    linked.chapters.push_back({ "# Two\n\n![i](" + bad + ".png)\n", linked.directory + "/" + bad + ".md", "", 0, false });
+    std::string bookPdf;
+    result = TinyPdf::BuildBookPdf(linked, options, bookPdf);
+    check("a book's links and files", result.Ok() && result.failedImages == 1 && ValidPdf(bookPdf));
+#ifdef _WIN32
+    // An unpaired surrogate in a file name, which NTFS allows and path::u8string threw for.
+    const fs::path folder = root / "surrogate";
+    fs::create_directories(folder);
+    ok = ok && WriteFile(folder / std::wstring(L"a\xD800.md"), "# A\n") && WriteFile(folder / "b.md", "# B\n");
+    TinyPdf::Book listed;
+    check("a book's folder", RayoMd::Book::ReadBook({ folder }, listed, bookError) && listed.chapters.size() == 2 &&
+        listed.chapters[0].markdown == "# A\n");
+    std::vector<RayoMd::Batch::File> files;
+    std::string listError;
+    check("a batch folder", RayoMd::Batch::CollectMarkdown(folder, root / "out", false, files, listError) && files.size() == 2);
+#endif
+    fs::remove_all(root);
+    return ok;
+}
+
+// A theme font whose loca makes every even glyph span all of glyf (the odd ones empty): a subset
+// copied each such glyph whole, the font's glyf times the glyphs a document shows (a 1 MiB font,
+// 32 GiB). Past twice glyf the whole font is embedded instead: the PDF stays within a few times the
+// font's size and is built in bounded time.
+bool CheckOverlappingGlyphs() {
+    const std::string source = TestFontPath();
+    if (source.empty()) return true;
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-overlapping-glyphs";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    std::string font;
+    uint32_t head = 0, headLength = 0, loca = 0, locaLength = 0, glyf = 0, glyfLength = 0;
+    if (!RayoMd::File::ReadAll(source, 64u << 20, font) || !FindTable(font, "head", head, headLength) ||
+        !FindTable(font, "loca", loca, locaLength) || !FindTable(font, "glyf", glyf, glyfLength) || headLength < 54) {
+        std::cerr << "cannot prepare the overlapping-glyphs test" << std::endl;
+        return false;
+    }
+    const int entry = BigEndianAt(font, head + 50, 2) == 0 ? 2 : 4;
+    const uint32_t end = entry == 2 ? (glyfLength & ~1u) / 2 : glyfLength;
+    for (size_t at = loca, index = 0; at + (size_t)entry <= (size_t)loca + locaLength; at += (size_t)entry, index++) {
+        const uint32_t value = index % 2 == 0 ? 0 : end;
+        for (int i = 0; i < entry; i++) font[at + (size_t)i] = (char)(value >> (8 * (entry - 1 - i)));
+    }
+    const fs::path path = root / "overlapping.ttf";
+    bool ok = WriteFile(path, font);
+    std::string text = "# Glyphs\n\n";
+    for (const auto& [first, last] : { std::pair<uint32_t, uint32_t>{ 0x21, 0x7E }, { 0xC0, 0x24F }, { 0x391, 0x3C9 },
+             { 0x410, 0x44F } }) {
+        for (uint32_t cp = first; cp <= last; cp++) {
+            if (cp >= 0x80) {
+                const bool three = cp >= 0x800;
+                if (three) text += (char)(0xE0 | (cp >> 12));
+                text += (char)((three ? 0x80 | ((cp >> 6) & 0x3F) : 0xC0 | (cp >> 6)));
+                text += (char)(0x80 | (cp & 0x3F));
+            } else if (cp != '*' && cp != '_' && cp != '`' && cp != '\\' && cp != '[' && cp != '<' && cp != '!') {
+                text += (char)cp;
+            }
+            text += ' ';
+        }
+    }
+    TinyPdf::PdfOptions options;
+    options.theme.fontPath = path.u8string();
+    std::string pdf;
+    const auto start = std::chrono::steady_clock::now();
+    const TinyPdf::BuildResult result = TinyPdf::BuildPdf(text, options, pdf);
+    const double ms = MillisecondsSince(start);
+    std::cout << "overlapping glyphs: " << pdf.size() << " bytes of PDF for a font of " << font.size() << " in " << ms
+              << " ms" << std::endl;
+    if (!ok || !result.Ok() || !ValidPdf(pdf) || pdf.size() > font.size() * 3 + (1u << 20)) {
+        std::cerr << "a font of overlapping glyphs made a subset of " << pdf.size() << " bytes" << std::endl;
+        ok = false;
+    }
+    fs::remove_all(root);
+    return ok;
+}
+
+// A CFF font whose glyph inlines a 30 KB subroutine twice: a CID-keyed subset of 65,000 such
+// glyphs held 65,000 x 60 KB, 3.9 GB, three times over. It now stops at 64 MiB of charstrings and
+// makes no font, in bounded time; a subset of 100 of them (6 MB) is still made.
+bool CheckCffSubsetBound() {
+    using namespace TinyPdf::Internal::Cff;
+    const auto int5 = [](uint32_t value) {
+        std::string out(1, '\x1D');
+        AppendBigEndian(out, value);
+        return out;
+    };
+    const auto index = [](const std::string& item) {   // an INDEX of one item, four-byte offsets
+        std::string out("\x00\x01\x04", 3);
+        AppendBigEndian(out, 1);
+        AppendBigEndian(out, (uint32_t)item.size() + 1);
+        return out + item;
+    };
+    std::string subr;
+    for (int i = 0; i < 10000; i++) subr += "\x8B\x8B\x05";   // 0 0 rlineto
+    subr += '\x0B';                                          // return
+    const std::string glyph("\x20\x0A\x20\x0A\x0E", 5);      // callsubr 0, callsubr 0, endchar
+    // As CheckCffSubset's fonts: name INDEX, top DICT (CharStrings, Private), no strings or global
+    // subroutines, the glyph, a private DICT whose Subrs follow it.
+    const std::string head = std::string("\x01\x00\x04\x01", 4) + index("T");
+    const size_t topIndexBytes = 11 + 17;
+    const size_t charStringsAt = head.size() + topIndexBytes + 4;
+    const std::string charStrings = index(glyph);
+    const size_t privateAt = charStringsAt + charStrings.size();
+    const std::string top = int5((uint32_t)charStringsAt) + "\x11" + int5(6) + int5((uint32_t)privateAt) + "\x12";
+    const std::string font = head + index(top) + std::string(4, '\0') + charStrings + int5(6) + "\x13" + index(subr);
+    CffFont parsed;
+    std::string flat;
+    if (!ParseCff(reinterpret_cast<const uint8_t*>(font.data()), font.size(), 1, parsed) ||
+        !Desubroutinize(parsed, 0, flat) || flat.size() != 60001) {
+        std::cerr << "the CFF subset bound's font does not read" << std::endl;
+        return false;
+    }
+    const auto glyphs = [](size_t count) {
+        std::vector<CidGlyph> list;
+        for (size_t i = 0; i < count; i++) list.push_back({ (uint16_t)(i + 1), 0 });
+        return list;
+    };
+    std::string small, large;
+    const bool made = WriteCidKeyedSubset(parsed, "T", glyphs(100), small);
+    const auto start = std::chrono::steady_clock::now();
+    const bool refused = !WriteCidKeyedSubset(parsed, "T", glyphs(65000), large);
+    const double ms = MillisecondsSince(start);
+    std::cout << "CFF subset bound: refused after " << ms << " ms" << std::endl;
+    if (!made || small.size() < 100 * 60001 || !refused || !large.empty()) {
+        std::cerr << "a CFF subset of long charstrings was not bounded" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // A book reads each file once and at most 128 MiB in all: a SUMMARY.md that lists one file under
 // other names (a hard link, a link to its folder, "x/../") is refused as listing it twice, where
 // it was read once a name (8 names of a 65 MB file took 6.7 GB); files of more than 128 MiB in
@@ -652,9 +972,105 @@ bool CheckBookFiles() {
     return ok;
 }
 
+// A long link target over long link text: one copy of the target for every piece of the text
+// (span, word, line) and in every annotation (one a line) made a 100 KB label with a 100 KB URL
+// a 118 MB PDF and 580 MB of memory, 14.6 GB with styles alternating in the label. The target is
+// now held once, and from 1 KiB on written once, as a URI action every annotation of the link
+// names; a shorter one stays inside each annotation. Both renderers (the second document of each
+// pair has a character outside WinAnsi), plain and styled labels, PDF/A and PDF/UA.
+bool CheckLongLinkTarget() {
+    const auto target = [](size_t bytes, char fill) { return "https://example.com/" + std::string(bytes - 20, fill); };
+    // The number of /A references to object `id`, and the id of the first /A reference.
+    const auto actionRefs = [](const std::string& pdf, std::string& first) {
+        const size_t at = pdf.find(" /A ");
+        if (at == std::string::npos || pdf.compare(at + 4, 2, "<<") == 0) return size_t(0);
+        first = pdf.substr(at, pdf.find(" R", at) + 2 - at);
+        return CountOccurrences(pdf, first);
+    };
+    std::string words;
+    for (int i = 0; i < 20000; i++) words += "word ";
+    std::string styled;
+    for (int i = 0; i < 25000; i++) styled += "*a*b";
+    const std::string url = target(100000, 'u');
+    bool ok = true;
+    for (const char* prefix : { "", "\xC5\xBC " }) {
+        for (const bool math : { false, true }) {
+            const std::string label = math ? styled : words;
+            const std::string head = std::string(prefix) + (math ? "$x$ " : "");
+            const std::string markdown = head + "[" + label + "](" + url + ")\n";
+            for (int mode = 0; mode < 3; mode++) {
+                TinyPdf::PdfOptions options;
+                options.pdfa = mode == 1;
+                options.pdfua = mode == 2;
+                std::string pdf;
+                TinyPdf::BuildResult result;
+                const auto start = std::chrono::steady_clock::now();
+                const bool bounded = parse_limits_tests::Bounded("long link target", 10.0, 64, [&]() {
+                    result = TinyPdf::BuildPdf(markdown, options, pdf);
+                    return result.Ok();
+                });
+                const double ms = MillisecondsSince(start);
+                std::string reference;
+                TinyPdf::BuildPdf(head + "[" + label + "](https://example.com/)\n", options, reference);
+                std::string action;
+                const size_t annotations = CountOccurrences(pdf, "/Subtype /Link");
+                const size_t refs = actionRefs(pdf, action);
+                if (mode == 0) {
+                    std::cout << "long link target" << (*prefix ? " (Unicode)" : "") << (math ? ", styled label" : "")
+                              << ": " << pdf.size() << " bytes of PDF (" << reference.size() << " with a short URL) for "
+                              << markdown.size() << " of Markdown, " << annotations << " annotations, " << ms << " ms"
+                              << std::endl;
+                }
+                if (!bounded || !ValidPdf(pdf) || annotations < 100 || refs != annotations ||
+                    CountOccurrences(pdf, url) != 1 || CountOccurrences(pdf, "/S /URI") != 1 ||
+                    pdf.size() > reference.size() + url.size() + annotations * 64 + 65536) {
+                    std::cerr << "a long link target over " << annotations << " lines (mode " << mode << ", prefix '"
+                              << prefix << "', math " << math << ") made " << pdf.size() << " bytes, " << refs
+                              << " references to one action" << std::endl;
+                    ok = false;
+                }
+            }
+        }
+    }
+    // From kSharedActionUrlBytes (1024) on, one action; below, a target in each annotation, as before.
+    for (const size_t bytes : { size_t(1023), size_t(1024) }) {
+        const std::string link = target(bytes, 'v');
+        const std::string markdown = "[" + words.substr(0, 4000) + "](" + link + ")\n";
+        std::string pdf;
+        std::string action;
+        const bool built = TinyPdf::BuildPdf(markdown, TinyPdf::PdfOptions(), pdf).Ok();
+        const size_t annotations = CountOccurrences(pdf, "/Subtype /Link");
+        const bool shared = bytes >= 1024;
+        if (!built || annotations < 5 || CountOccurrences(pdf, link) != (shared ? 1 : annotations) ||
+            CountOccurrences(pdf, "/S /URI") != (shared ? 1 : annotations) ||
+            actionRefs(pdf, action) != (shared ? annotations : 0)) {
+            std::cerr << "a link target of " << bytes << " bytes is not written as before" << std::endl;
+            ok = false;
+        }
+    }
+    // Paragraphs and table cells with long targets of one length: each its own target, though the
+    // parse of the next may reuse the memory of the one before.
+    std::string several;
+    for (const char fill : { 'p', 'q', 'r' }) several += "[" + words.substr(0, 2000) + "](" + target(4096, fill) + ")\n\n";
+    several += "| a | b |\n|---|---|\n";
+    for (const char fill : { 's', 't' }) several += "| [*x* y](" + target(4096, fill) + ") | [z](" + target(4096, (char)(fill + 2)) + ") |\n";
+    for (const char* prefix : { "", "\xC5\xBC\n\n" }) {
+        std::string pdf;
+        bool good = TinyPdf::BuildPdf(prefix + several, TinyPdf::PdfOptions(), pdf).Ok();
+        for (const char fill : { 'p', 'q', 'r', 's', 't', 'u', 'v' }) good = good && CountOccurrences(pdf, target(4096, fill)) == 1;
+        if (!good || CountOccurrences(pdf, "/S /URI") != 7) {
+            std::cerr << "long link targets of several paragraphs and cells are mixed up" << std::endl;
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
-        CheckImageContainment() && CheckCachePermissions() && CheckThemeFields() && CheckBookFiles();
+        CheckImageContainment() && CheckCachePermissions() && CheckThemeFields() && CheckBookFiles() &&
+        CheckDecodeBudget() && CheckInvalidUtf8Names() && CheckOverlappingGlyphs() && CheckCffSubsetBound() &&
+        CheckLongLinkTarget();
 }
 
 } // namespace hardening_tests

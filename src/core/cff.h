@@ -91,7 +91,8 @@ struct CidGlyph {
 // A CID-keyed CFF font of .notdef and `glyphs`, ascending by CID, none of them CID 0: the
 // Adobe-Identity ordering, each glyph's CID in the charset, the font DICTs and private DICTs of
 // the glyphs it holds (without their subroutines), and FontBBox and FontMatrix as the font has
-// them. A glyph that cannot be desubroutinized is written empty.
+// them. A glyph that cannot be desubroutinized is written empty. False, with no font, when the
+// glyphs' charstrings would pass 64 MiB (kMaxSubsetCharStringBytes in cff.cpp).
 bool WriteCidKeyedSubset(const CffFont& font, const char* fontName, const std::vector<CidGlyph>& glyphs,
     std::string& out);
 

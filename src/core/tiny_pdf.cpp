@@ -22,6 +22,7 @@
 #include "math_layout.h"
 #include "pdfa.h"
 #include "png_filter.h"
+#include "shared_url.h"
 #include "svg.h"
 #include "tagged.h"
 #include "theme.h"
@@ -2057,6 +2058,37 @@ constexpr size_t kMaxDecodedImageBytes = 96u * 1024u * 1024u;
 // From this many pixels a re-encoded PNG's rows are compressed by helper threads as it is decoded.
 constexpr size_t kImageThreadPixels = size_t(1) << 18;
 
+// The pixels the images of one build may decode in all (DecodeBudget): 2^30, 42 images of the
+// largest size one decode takes (kMaxDecodedImageBytes, 25 Mpx), or 200 transparent full-screen
+// screenshots of a 5-Mpx display. Past it an image is not decoded and shows its alt text; without
+// it a 16 MiB SVG of 110 data: PNGs of 100 KB, each 25 Mpx of one colour, took 7.5 s and 2.8
+// Gpx of inflating and re-encoding, again for every build of a preview (2026-10-15).
+constexpr uint64_t kDecodeBudgetPixels = uint64_t(1) << 30;
+
+// What the images of one build (an ImageRegistry) may still decode: a PNG that is re-encoded
+// (BuildDecodedPngImage, also when the persistent cache has its streams) or an image WIC decodes is
+// charged its pixels before its pixels are read, and an image taken from the process's caches the
+// pixels its decode was charged (PdfImage::decodedPixels), so a document shows the same images
+// whichever of them a cache holds.
+class DecodeBudget {
+public:
+    // Takes `pixels`, or nothing and false when fewer are left; `refused` then says so until the
+    // next decode starts (DecodeImageBytes).
+    bool Take(uint64_t pixels) {
+        if (pixels > left) {
+            refused = true;
+            return false;
+        }
+        left -= pixels;
+        return true;
+    }
+
+    bool refused = false;
+
+private:
+    uint64_t left = kDecodeBudgetPixels;
+};
+
 // The CPUs this process may run on: its affinity mask, which taskset or a container narrows,
 // where std::thread::hardware_concurrency counts the machine's.
 RAYOMD_COLD static unsigned UsableCpus() {
@@ -2118,25 +2150,30 @@ struct PdfImage {
     int width = 0;
     int height = 0;
     int bitsPerComponent = 8;
+    // The pixels decoding this image took from the build's DecodeBudget: 0 for one whose bytes go
+    // into the PDF as they are (a JPEG, a PNG without transparency) or an SVG form.
+    uint32_t decodedPixels = 0;
     // An SVG drawn as a form XObject (svg.h) instead of pixels; its size above in pixels at 96 dpi.
     std::shared_ptr<const Internal::SvgForm> svg;
 };
 
 using SharedPdfImage = std::shared_ptr<const PdfImage>;
 
+using Internal::SharedUrl;
+
 struct LinkRect {
     double x1 = 0.0;
     double y1 = 0.0;
     double x2 = 0.0;
     double y2 = 0.0;
-    std::string url;
+    SharedUrl url;   // the link's target, shared by all its rectangles
 };
 
 // Adds the rectangle of link text that starts at x on `baseline` and is `width` wide. A piece
 // of the same link that goes on where the last one ended (link text in several styles)
 // extends it, so a link is one annotation per line.
 static void AddLinkRect(std::vector<LinkRect>& links, double x, double baseline, double width, double size,
-    std::string_view url) {
+    const SharedUrl& url) {
     const double y1 = baseline - 1.0;
     const double y2 = baseline + size * 1.05;
     if (!links.empty()) {
@@ -2146,8 +2183,38 @@ static void AddLinkRect(std::vector<LinkRect>& links, double x, double baseline,
             return;
         }
     }
-    links.push_back({ x, y1, x + width, y2, std::string(url) });
+    links.push_back({ x, y1, x + width, y2, url });
 }
+
+// The parse a paragraph's runs (StyledRuns, AsciiRuns) come from: a number no other parse of the
+// process has, so that a view of a link target in it and the parse name one target (RunLinkUrls).
+static uint64_t NextRunsParse() {
+    static std::atomic<uint64_t> parses{ 0 };
+    return parses.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+// The targets of the links the runs of a paragraph draw, each copied once into a SharedUrl that
+// all its rectangles share: a run's target is a view into its paragraph's parse, and a link over
+// many lines draws one rectangle a line. Copied for each, a long target over long link text took
+// gigabytes for a few megabytes of Markdown.
+class RunLinkUrls {
+public:
+    const SharedUrl& Get(std::string_view url, uint64_t parse) {
+        if (url.data() != data || url.size() != last.size() || parse != lastParse) Copy(url, parse);
+        return last;
+    }
+
+private:
+    RAYOMD_NOINLINE void Copy(std::string_view url, uint64_t parse) {
+        last = SharedUrl(url);
+        data = url.data();
+        lastParse = parse;
+    }
+
+    SharedUrl last;
+    const char* data = nullptr;
+    uint64_t lastParse = 0;
+};
 
 static bool IsHttpUrl(std::string_view src) {
     return StartsWith(src, "http://") || StartsWith(src, "https://");
@@ -2155,13 +2222,11 @@ static bool IsHttpUrl(std::string_view src) {
 
 static char* WriteEscapedLiteral(char* out, std::string_view text);
 
-static std::filesystem::path PathFromUtf8(std::string_view s) {
-    return std::filesystem::u8path(s.begin(), s.end());
-}
-
-static std::string PathToUtf8(const std::filesystem::path& path) {
-    return path.u8string();
-}
+// Paths of UTF-8 names and back without exceptions (file_io.h): std::filesystem::u8path and
+// path::u8string threw on Windows for invalid UTF-8 in a document's image path or link and for an
+// unpaired surrogate in a file name, which ended the process.
+using RayoMd::File::PathFromUtf8;
+using RayoMd::File::PathToUtf8;
 
 #ifdef _WIN32
 struct WinLocalImageFile {
@@ -2417,17 +2482,23 @@ static bool TryCanonicalForPolicy(
     return true;
 }
 
+// Whether two components of paths are the same name: on Windows their UTF-16 as it is, with ASCII
+// letters folded unless `exact`. Never converted to UTF-8, which threw on an unpaired surrogate and
+// would make two different such names one.
 static bool PathPartEqualForPolicy(
     const std::filesystem::path& a, const std::filesystem::path& b, [[maybe_unused]] bool exact) {
-    std::string left = a.u8string();
-    std::string right = b.u8string();
 #ifdef _WIN32
-    if (!exact) {
-        std::transform(left.begin(), left.end(), left.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-        std::transform(right.begin(), right.end(), right.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    const std::wstring& left = a.native();
+    const std::wstring& right = b.native();
+    if (exact || left.size() != right.size()) return left == right;
+    const auto fold = [](wchar_t c) { return c >= L'A' && c <= L'Z' ? (wchar_t)(c - L'A' + L'a') : c; };
+    for (size_t at = 0; at < left.size(); at++) {
+        if (fold(left[at]) != fold(right[at])) return false;
     }
+    return true;
+#else
+    return a.native() == b.native();
 #endif
-    return left == right;
 }
 
 struct DirectRootCacheEntry {
@@ -3374,7 +3445,7 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image, bool fast)
 }
 
 static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {},
-    bool fast = false);
+    bool fast = false, DecodeBudget* budget = nullptr);
 
 #ifdef _WIN32
 template<typename T>
@@ -3517,7 +3588,7 @@ static HRESULT CreateMicrosoftDecoder(IWICImagingFactory* factory, const GUID& c
 
 // A PNG or JPEG file RayoMD's own readers do not take (CMYK or 12-bit JPEG, for one), decoded by
 // Windows' built-in decoder for its format; any other bytes are refused.
-static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage& image) {
+static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage& image, DecodeBudget* budget) {
     if (bytes.empty() || bytes.size() > kMaxImageBytes) return false;
     const GUID* container = WicContainerOf(bytes);
     if (!container) return false;
@@ -3561,7 +3632,7 @@ static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage
     if (SUCCEEDED(hr) && width > 0 && height > 0) {
         size_t stride = (size_t)width * 4;
         size_t total = stride * (size_t)height;
-        if (total > kMaxDecodedImageBytes) {
+        if (total > kMaxDecodedImageBytes || (budget != nullptr && !budget->Take((uint64_t)width * height))) {
             hr = E_FAIL;
         } else {
             rgba.assign(total, 0);
@@ -3597,6 +3668,7 @@ static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage
             image.stream = std::move(rgb);
             if (hasAlpha) image.maskStream = std::move(alpha);
         }
+        image.decodedPixels = (uint32_t)pixels;
         ok = true;
     }
 
@@ -3609,22 +3681,25 @@ static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage
     return ok;
 }
 #else
-static bool BuildDecodedImageWithWic(const std::vector<uint8_t>&, PdfImage&) {
+static bool BuildDecodedImageWithWic(const std::vector<uint8_t>&, PdfImage&, DecodeBudget*) {
     return false;
 }
 #endif
 
 // With `cacheDirectory`, a PNG that is re-encoded is first looked for there, and kept there after
-// (image_cache.h). `fast` re-encodes it in DeflateImageSegment's fast mode (--fast-images).
+// (image_cache.h). `fast` re-encodes it in DeflateImageSegment's fast mode (--fast-images). A PNG
+// to re-encode is charged to `budget`, if any, before either.
 static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory,
-    bool fast) {
+    bool fast, DecodeBudget* budget) {
     PngInfo png;
     if (!ParsePngChunks(bytes, png)) return false;
     if (BuildFastPngImage(png, bytes, image)) return true;
     size_t rowBytes = 0;
     size_t bpp = 0;
-    const bool cached = !cacheDirectory.empty() && DecodedPngRows(png, rowBytes, bpp) &&
-        (size_t)png.width * png.height >= Internal::kImageCacheMinPixels;
+    if (!DecodedPngRows(png, rowBytes, bpp)) return false;   // as BuildDecodedPngImage would
+    const uint32_t pixels = (uint32_t)((size_t)png.width * png.height);   // within kMaxDecodedImageBytes / 4
+    if (budget != nullptr && !budget->Take(pixels)) return false;
+    const bool cached = !cacheDirectory.empty() && pixels >= Internal::kImageCacheMinPixels;
     const uint32_t components = PngHasRgbColor(png) ? 3 : 1;
     std::string digest;
     if (cached) {
@@ -3633,12 +3708,14 @@ static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, co
         if (Internal::LoadCachedImage(cacheDirectory, digest, png.width, png.height, components, kMaxImageBytes,
             kept.stream, kept.maskStream, fast)) {
             DescribeReencodedPng(png, kept);
+            kept.decodedPixels = pixels;
             image = std::move(kept);
             return true;
         }
     }
     JoinIdat(bytes, png.idatBytes, png.idat);
     if (BuildDecodedPngImage(png, image, fast)) {
+        image.decodedPixels = pixels;
         if (cached) {
             Internal::StoreCachedImage(cacheDirectory, digest, png.width, png.height, components, kMaxImageBytes,
                 image.stream, image.maskStream, fast);
@@ -3648,15 +3725,25 @@ static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, co
     return false;
 }
 
+// `budget`, if any, is charged what the decode takes; its `refused` says afterwards whether the
+// image failed for want of it.
 static bool DecodeImageBytes(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {},
-    bool fast = false) {
+    bool fast = false, DecodeBudget* budget = nullptr) {
+    if (budget != nullptr) budget->refused = false;
     PdfImage parsed;
-    if (ParseJpegImage(bytes, parsed) || ParsePngImage(bytes, parsed, cacheDirectory, fast) ||
-        (!BuildCancelled() && BuildDecodedImageWithWic(bytes, parsed))) {
+    if (ParseJpegImage(bytes, parsed) || ParsePngImage(bytes, parsed, cacheDirectory, fast, budget) ||
+        (!BuildCancelled() && (budget == nullptr || !budget->refused) && BuildDecodedImageWithWic(bytes, parsed, budget))) {
         image = std::move(parsed);
         return image.width > 0 && image.height > 0 && !image.stream.empty();
     }
     return false;
+}
+
+// How many data: images of SVGs the process has decoded (ImageRegistry::AddDecoded).
+static std::atomic<uint64_t> g_svgImageDecodes{ 0 };
+
+uint64_t Internal::SvgImageDecodes() {
+    return g_svgImageDecodes.load(std::memory_order_relaxed);
 }
 
 class ImageRegistry {
@@ -3676,14 +3763,37 @@ public:
         svgBoldCids = boldCids;
     }
 
-    // A raster image of an SVG (a data: URI) for this document only: its index, with its size in
-    // pixels; -1 when it cannot be decoded.
+    // A raster image of an SVG (a data: URI): its index among this build's images, with its size in
+    // pixels; -1 when it cannot be decoded, or, one more failed image, when the build's decode
+    // budget is spent. Decoded once a process: kept by the SHA-256 of its bytes in the process's
+    // cache of decoded images (and, by the same key, as a failure), since a preview builds the same
+    // SVG again on every edit. The digest is the whole key: this decode takes no option, neither
+    // --fast-images nor the persistent cache.
     RAYOMD_COLD int AddDecoded(std::string_view bytes, int& width, int& height) {
-        PdfImage image;
-        if (bytes.size() > kMaxImageBytes || !DecodeImageBytes(std::vector<uint8_t>(bytes.begin(), bytes.end()), image)) return -1;
-        width = image.width;
-        height = image.height;
-        images.push_back(std::make_shared<PdfImage>(std::move(image)));
+        if (bytes.size() > kMaxImageBytes) return -1;
+        const std::string key = "svg-image:" + RayoMd::PdfSource::Sha256Hex(bytes);
+        const RayoMd::File::Stamp none;
+        SharedPdfImage shared = LoadDecodedImageFromCache(key, none);
+        if (shared) {
+            if (!budget.Take(shared->decodedPixels)) {
+                failed++;
+                return -1;
+            }
+        } else {
+            if (IsKnownFailure(key, none)) return -1;
+            PdfImage image;
+            const bool decoded = DecodeImageBytes(std::vector<uint8_t>(bytes.begin(), bytes.end()), image, {}, false, &budget);
+            if (!budget.refused) g_svgImageDecodes.fetch_add(1, std::memory_order_relaxed);
+            if (!decoded) {
+                if (budget.refused) failed++;
+                else if (!BuildCancelled()) StoreFailure(key, none);
+                return -1;
+            }
+            shared = StoreDecodedImageInCache(key, none, std::move(image));
+        }
+        width = shared->width;
+        height = shared->height;
+        images.push_back(std::move(shared));
         return (int)images.size() - 1;
     }
 
@@ -3724,11 +3834,16 @@ public:
         const RayoMd::File::Stamp stamp = RayoMd::File::StampOf(normalized);
         std::string keyStorage;
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
+        if (sharedImage && !budget.Take(sharedImage->decodedPixels)) {
+            failed++;
+            return false;
+        }
         if (!sharedImage) {
             std::vector<uint8_t> bytes;
+            budget.refused = false;
             if (IsKnownFailure(key, stamp) || !ReadLocalImageFile(PathToUtf8(normalized), bytes) ||
                 bytes.size() > kMaxImageBytes || !Decode(key, stamp, bytes, sharedImage)) {
-                if (!BuildCancelled()) StoreFailure(key, stamp);
+                if (!BuildCancelled() && !budget.refused) StoreFailure(key, stamp);
                 failed++;
                 return false;
             }
@@ -3789,9 +3904,11 @@ private:
         if (!isUrl) stamp = RayoMd::File::StampOf(PathFromUtf8(localPathUtf8));
         std::string keyStorage;
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
+        if (sharedImage && !budget.Take(sharedImage->decodedPixels)) return false;
         if (!sharedImage && IsKnownFailure(key, stamp)) return false;
         if (!sharedImage) {
             std::vector<uint8_t> bytes;
+            budget.refused = false;
             bool loaded = false;
             if (isUrl) {
                 loaded = FetchUrlBytes(src, options, urlBudget, bytes);
@@ -3806,7 +3923,8 @@ private:
                     bytes.size() <= kMaxImageBytes;
             }
             if (!loaded || !Decode(key, stamp, bytes, sharedImage)) {
-                if (!BuildCancelled()) StoreFailure(key, stamp);   // a cancelled read or decode tells nothing
+                // A cancelled read or decode tells nothing, nor one the budget refused.
+                if (!BuildCancelled() && !budget.refused) StoreFailure(key, stamp);
                 return false;
             }
         }
@@ -3839,7 +3957,7 @@ private:
             shared = std::make_shared<PdfImage>(std::move(image));
             return true;
         }
-        if (!DecodeImageBytes(bytes, image, options.imageCacheDirectory, options.fastImages)) return false;
+        if (!DecodeImageBytes(bytes, image, options.imageCacheDirectory, options.fastImages, &budget)) return false;
         std::string keyStorage;
         shared = StoreDecodedImageInCache(CacheKey(key, keyStorage), stamp, std::move(image));
         return true;
@@ -3867,6 +3985,7 @@ private:
     UsedCidSet* svgBoldCids = nullptr;
     bool svgAttempted = false;          // ConvertSvgImage ran: an SVG's text may be in the document's font
     UrlFetchBudget urlBudget;           // the time this build's URL images have left
+    DecodeBudget budget;                // the pixels this build's images may still decode
     // Decoded images and failed sources for later documents of the process, each with the stamp of
     // its file when it was read (none for a URL): a lookup with another stamp misses, and storing
     // replaces the entry, so a file changed on disk is read again.
@@ -4864,7 +4983,7 @@ public:
     // in a document with footnotes "^N" to note N and "^rN" to its first reference, and in one
     // with a table of contents "\x01N" to the heading of its entry N.
     RAYOMD_COLD bool Reserve(PdfObjects& pdf, const LinkRect& link, std::vector<InternalLink>& out) {
-        return ReserveFragment(pdf, link, std::string_view(link.url).substr(1), 0, out);
+        return ReserveFragment(pdf, link, link.url.View().substr(1), 0, out);
     }
 
     // A link of a book's file (Target): links to the place `written` names, a fragment as in
@@ -4898,7 +5017,7 @@ public:
 
     // Whether `link` goes outside the document or into it ("#fragment", Reserve).
     LinkTarget Target(PdfObjects& pdf, const LinkRect& link, size_t, std::vector<InternalLink>& out) {
-        if (link.url[0] != '#') return LinkTarget::External;
+        if (link.url.View()[0] != '#') return LinkTarget::External;
         return Reserve(pdf, link, out) ? LinkTarget::Reserved : LinkTarget::Dropped;
     }
 
@@ -4995,6 +5114,36 @@ RAYOMD_COLD static std::string TaggedAnnotationEntries(Internal::StructTree& tag
     return tags.AnnotationEntries(id);
 }
 
+// From this many bytes a link's target is written once, as a URI action object that every
+// annotation of the link (one a line) names: written into each, a long target over long link text
+// made a PDF of gigabytes from a few megabytes of Markdown. Shorter ones stay inside their
+// annotations, as before; a real document's longest are a few hundred bytes.
+constexpr size_t kSharedActionUrlBytes = 1024;
+
+// The URI action of the last long target written (AppendSharedUriAction), by its SharedUrl's text.
+struct SharedUriActions {
+    const char* url = nullptr;
+    int id = 0;
+};
+
+// Appends " /A n 0 R" to `annot`: n the object of the URI action of `url`, one of
+// kSharedActionUrlBytes or more, made when the link is not the one before (the rectangles of a link
+// come one after the other and share its SharedUrl).
+RAYOMD_COLD static void AppendSharedUriAction(std::string& annot, PdfObjects& pdf, const SharedUrl& url, bool winAnsi,
+    SharedUriActions& last) {
+    if (url.View().data() != last.url) {
+        std::string action;
+        AppendLit(action, "<< /S /URI /URI (");
+        AppendUriLiteral(action, url, winAnsi);
+        AppendLit(action, ") >>");
+        last.id = pdf.Add(std::move(action));
+        last.url = url.View().data();
+    }
+    AppendLit(annot, " /A ");
+    AppendInt(annot, last.id);
+    AppendLit(annot, " 0 R");
+}
+
 // The link annotations of every page. Those of links into the document are left to `targets`
 // (HeadingTargets, a book's BookTargets), which drops a link to a place the document does not
 // have instead of leading nowhere. `Tagged` (PDF/UA): each annotation belongs to the Link its
@@ -5006,6 +5155,7 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
     std::vector<InternalLink>& internalLinks, bool print, Internal::StructTree* tags = nullptr) {
     std::vector<std::vector<int>> idsByPage;
     idsByPage.reserve(linksByPage.size());
+    SharedUriActions actions;
     for (size_t page = 0; page < linksByPage.size(); page++) {
         const std::vector<LinkRect>& pageLinks = linksByPage[page];
         std::vector<int> ids;
@@ -5026,19 +5176,27 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
                 continue;
             }
             std::string annot;
-            annot.reserve(link.url.size() + 192);
+            const bool sharedAction = link.url.size() >= kSharedActionUrlBytes;
+            annot.reserve((sharedAction ? 0 : link.url.size()) + 192);
             AppendLinkAnnotationStart(annot, link, print);
-            AppendLit(annot, " /A << /S /URI /URI (");
-            AppendUriLiteral(annot, link.url, winAnsiTargets);
+            if (sharedAction) {
+                AppendSharedUriAction(annot, pdf, link.url, winAnsiTargets, actions);
+            } else {
+                AppendLit(annot, " /A << /S /URI /URI (");
+                AppendUriLiteral(annot, link.url, winAnsiTargets);
+            }
+            // The action's dictionary closes with the annotation's, in one append, as it did
+            // before shared actions; a shared one is a reference.
             if constexpr (Tagged) {
                 const int id = pdf.Reserve();
-                AppendLit(annot, ") >>");
+                if (!sharedAction) AppendLit(annot, ") >>");
                 annot += TaggedAnnotationEntries(*tags, element, id);
                 AppendLit(annot, " >>");
                 pdf.Set(id, std::move(annot));
                 ids.push_back(id);
             } else {
-                AppendLit(annot, ") >> >>");
+                if (sharedAction) AppendLit(annot, " >>");
+                else AppendLit(annot, ") >> >>");
                 ids.push_back(pdf.Add(std::move(annot)));
             }
         }
@@ -5870,7 +6028,7 @@ private:
 
     // "#\x01N", entry N of the table of contents.
     LinkTarget ReserveContents(PdfObjects& pdf, const LinkRect& link, std::vector<InternalLink>& out) const {
-        const size_t entry = (size_t)std::strtoull(link.url.c_str() + 2, nullptr, 10);
+        const size_t entry = (size_t)std::strtoull(link.url.View().data() + 2, nullptr, 10);   // a NUL-ended string
         if (contents == nullptr || entry >= contents->size() || (*contents)[entry] >= marks.size()) return LinkTarget::Dropped;
         const HeadingMark& heading = marks[(*contents)[entry]];
         out.push_back({ pdf.Reserve(), &link, heading.page, heading.top + 4.0 });
@@ -6113,6 +6271,7 @@ private:
     std::string& content;
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
+    RunLinkUrls runLinkUrls;        // the target of the last link a run drew (AddRunLink)
     std::vector<HeadingMark> headings;
     std::vector<HeadingMark> ids;   // where the HTML ids (Block::Anchor) are, for "#id" links
     // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
@@ -6272,7 +6431,7 @@ private:
 
     struct StyledSpan {
         std::wstring text;
-        std::string url;
+        SharedUrl url;
         bool bold = false;
         bool italic = false;
         bool strike = false;
@@ -6290,7 +6449,7 @@ private:
     };
 
     void PushSpan(std::vector<StyledSpan>& spans, std::string_view text, bool bold, bool italic, bool strike,
-        std::string&& url, bool code, uint8_t decor = 0) {
+        SharedUrl&& url, bool code, uint8_t decor = 0) {
         if (text.empty()) return;
         std::wstring wide = Utf8ToWide(text);
         if (!spans.empty() && spans.back().bold == bold && spans.back().italic == italic &&
@@ -6376,7 +6535,7 @@ private:
             tags->Begin(Internal::StructType::Link);
         }
         PaintText(x, raised, size * kNoteSizeFactor, std::wstring(number.begin(), number.end()), linkColor);
-        AddLink(x, raised, width, size * kNoteSizeFactor, "#^" + number);
+        AddLink(x, raised, width, size * kNoteSizeFactor, SharedUrl("#^" + number));
         if (tags != nullptr) tags->End(reference);
         noteMarks.MarkReference(note, pageStarts.size() - 1, baseline + size);
         return width;
@@ -6391,7 +6550,7 @@ private:
                 PushMathSpan(spans, span, size, width, false);
                 continue;
             }
-            PushSpan(spans, span.text, span.bold, span.italic, span.strike, std::string(span.url.View()), span.code, span.decor);
+            PushSpan(spans, span.text, span.bold, span.italic, span.strike, std::move(span.url), span.code, span.decor);
         }
         return spans;
     }
@@ -6446,7 +6605,7 @@ private:
     // Appends one word to the line being filled, with a leading space when `spaced`. It is
     // merged into the previous span when the style is the same.
     void AppendStyledWord(std::vector<StyledSpan>& line, std::wstring_view word, bool spaced, bool bold, bool italic,
-        bool strike, const std::string& url, bool code, uint8_t decor = 0) {
+        bool strike, const SharedUrl& url, bool code, uint8_t decor = 0) {
         if (!line.empty()) {
             StyledSpan& last = line.back();
             if (last.bold == bold && last.italic == italic && last.strike == strike && last.url == url &&
@@ -6483,12 +6642,12 @@ private:
             const StyledWord& word = words[index];
             widths[index] = word.math >= 0 ? math.Width(word.math) : TextWidth(SpanFont(word.span->bold, word.span->italic), word.text, size);
         }
-        const std::string noUrl;
+        const SharedUrl noUrl;
         // Appends text to the line, after a space when `spaced`: merged into the previous span
         // when the style is the same (never into a formula), as AppendStyledWord does for plain
         // text. Unstyled text (a space before a formula or a struck word) has no link or style.
         auto appendText = [&](std::wstring_view text, bool spaced, const StyledWord& word, bool styled) {
-            const std::string& url = styled ? word.span->url : noUrl;
+            const SharedUrl& url = styled ? word.span->url : noUrl;
             const bool bold = styled && word.span->bold;
             const bool italic = styled && word.span->italic;
             const bool strike = styled && word.span->strike;
@@ -6682,6 +6841,7 @@ private:
     // builds no string and no vector per line.
     struct StyledRuns {
         Internal::InlineRuns parsed;        // the paragraph as parsed; holds the link targets
+        uint64_t parse = 0;                 // NextRunsParse of `parsed`, for RunLinkUrls
         std::wstring wide;                  // the parsed text, or the whole plain paragraph, as wide text
         std::vector<uint32_t> wideEnds;     // where each parsed run ends in `wide`
         std::wstring text;
@@ -6761,7 +6921,7 @@ private:
             if (run.decor & Internal::kDecorMark) PaintDecor(x, baseline, spanWidth, size, runText, true, color);
             PaintText(x, baseline, size, runText, color, run.bold || bold, run.italic, run.strike);
             if (run.decor & Internal::kDecorUnderline) PaintDecor(x, baseline, spanWidth, size, runText, false, color);
-            AddLink(x, baseline, spanWidth, size, run.url);
+            AddRunLink(x, baseline, spanWidth, size, run.url, runs);
             x += spanWidth;
         }
     }
@@ -6925,6 +7085,7 @@ private:
         }
 
         Internal::ParseInlineRuns(text, out.parsed, recognizeMath);
+        out.parse = NextRunsParse();
         const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
         size_t bytes = 0;
         for (const Internal::InlineRun& span : parsed) bytes += span.end - span.begin;
@@ -7089,7 +7250,7 @@ private:
         line.reserve(16);
         double lineWidth = 0.0;
         double spaceWidth = TextWidth(font, L" ", size);
-        const std::string noUrl;
+        const SharedUrl noUrl;
         auto newLine = [&]() {
             lines.push_back(std::move(line));
             line.clear();
@@ -7313,7 +7474,7 @@ private:
         out.Lit(" re S Q\n");
     }
 
-    void AddLink(double x, double baseline, double width, double size, std::string_view url) {
+    void AddLink(double x, double baseline, double width, double size, const SharedUrl& url) {
         if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
         if (tags != nullptr) {
             TagLinkRect(x, baseline, width, size, url);
@@ -7322,8 +7483,17 @@ private:
         AddLinkRect(pageLinks.back(), x, baseline, width, size, url);
     }
 
+    // AddLink for a run of `runs`, whose target is a view into their parse: one copy of it for all
+    // the link's rectangles (RunLinkUrls).
+    template <typename Runs>
+    RAYOMD_HOT_INLINE void AddRunLink(double x, double baseline, double width, double size, std::string_view url,
+        const Runs& runs) {
+        if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
+        AddLink(x, baseline, width, size, runLinkUrls.Get(url, runs.parse));
+    }
+
     // PDF/UA: the same, noting the Link of a new rectangle; one that extends the last is its.
-    RAYOMD_COLD void TagLinkRect(double x, double baseline, double width, double size, std::string_view url) {
+    RAYOMD_COLD void TagLinkRect(double x, double baseline, double width, double size, const SharedUrl& url) {
         const size_t before = pageLinks.back().size();
         AddLinkRect(pageLinks.back(), x, baseline, width, size, url);
         if (pageLinks.back().size() != before) tags->LinkRect();
@@ -7499,7 +7669,7 @@ private:
             if (run.decor & Internal::kDecorMark) PaintDecor(x, baseline, spanWidth, size, runText, true, color);
             PaintFaceText(choice, x, baseline, size, runText, color, run.strike);
             if (run.decor & Internal::kDecorUnderline) PaintDecor(x, baseline, spanWidth, size, runText, false, color);
-            AddLink(x, baseline, spanWidth, size, run.url);
+            AddRunLink(x, baseline, spanWidth, size, run.url, runs);
             x += spanWidth;
         }
     }
@@ -7634,10 +7804,11 @@ private:
         const double lh = bodySize * 1.35;
         const int tagged = TagBegin(Internal::StructType::P);
         TagLinkRun(image.link);
+        const SharedUrl link(image.link);
         for (const std::wstring& line : WrapText(font, Utf8ToWide(fallback), pageW - margin * 2.0, bodySize)) {
             Ensure(lh);
             PaintText(margin, y - bodySize, bodySize, line, linkColor);
-            AddLink(margin, y - bodySize, TextWidth(font, line, bodySize), bodySize, image.link);
+            AddLink(margin, y - bodySize, TextWidth(font, line, bodySize), bodySize, link);
             y -= lh;
         }
         y -= 5.0;
@@ -7681,7 +7852,7 @@ private:
         const int tagged = tags != nullptr ? TagFigure(block.text, link, x, y - h, x + w, y) : -1;
         DrawImage(index, x, y, w, h);
         if (!link.empty() && !pageLinks.empty()) {
-            pageLinks.back().push_back({ x, y - h, x + w, y, link });
+            pageLinks.back().push_back({ x, y - h, x + w, y, SharedUrl(link) });
             if (tags != nullptr) tags->LinkRect();
         }
         if (tags != nullptr) {
@@ -7745,7 +7916,7 @@ private:
                 const int tagged = tags != nullptr ? TagFigure(*image.alt, link, x, top - image.h, x + image.w, top) : -1;
                 DrawImage(image.index, x, top, image.w, image.h);
                 if (!link.empty() && !pageLinks.empty()) {
-                    pageLinks.back().push_back({ x, top - image.h, x + image.w, top, link });
+                    pageLinks.back().push_back({ x, top - image.h, x + image.w, top, SharedUrl(link) });
                     if (tags != nullptr) tags->LinkRect();
                 }
                 if (tags != nullptr) {
@@ -8372,7 +8543,7 @@ private:
             if (top && index > 0) y -= em * 0.5;
             const double x = margin + (entry.level - 1) * 1.5 * em;
             char url[24] = "#\x01";
-            const std::string_view link(url, (size_t)(std::to_chars(url + 2, url + sizeof(url), index).ptr - url));
+            const SharedUrl link(std::string_view(url, (size_t)(std::to_chars(url + 2, url + sizeof(url), index).ptr - url)));
             ContentsLine& last = contentsLines[index];
             last = { index, pageStarts.size() - 1, y - bodySize, x };
             const int item = TagBegin(Internal::StructType::TOCI);
@@ -8744,6 +8915,10 @@ static bool PlanSubsetFont(const TtfFont& font, const std::vector<uint16_t>& gly
         const uint32_t end = font.Loca((size_t)glyph + 1);
         if (end > start) glyfBytes += ((size_t)(end - start) + 3) & ~(size_t)3;
     }
+    // A font's loca may let every glyph span most of glyf: copied once per glyph, a 1 MiB font made
+    // a subset of 32 GiB (a std::bad_alloc). Glyphs of a sound font share no bytes, or few; a
+    // subset larger than twice glyf embeds the whole font instead, which has at most 64 MiB.
+    if (glyfBytes > (size_t)oldGlyf.length * 2 + glyphs.size() * 4) return false;
     std::string glyfData;
     std::string locaData;
     std::string hmtxData;
@@ -9553,6 +9728,7 @@ private:
     std::string& content;
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
+    RunLinkUrls runLinkUrls;        // the target of the last link a run drew (AddRunLink)
     std::vector<HeadingMark> headings;
     std::vector<HeadingMark> ids;   // where the HTML ids (Block::Anchor) are, for "#id" links
     // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
@@ -9834,24 +10010,33 @@ private:
 
     struct AsciiSpan {
         std::string text;
-        std::string url;
+        SharedUrl url;
         uint8_t style = 0;  // kStyle* bits
         int math = -1;   // index into `math` when the span is a formula; text is empty then
     };
 
     struct AsciiWord {
         std::string text;
-        std::string url;
+        SharedUrl url;
         uint8_t style = 0;
         int math = -1;
     };
 
-    void AddLink(double x, double baseline, double width, double size, std::string_view url) {
+    void AddLink(double x, double baseline, double width, double size, const SharedUrl& url) {
         if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
         AddLinkRect(pageLinks.back(), x, baseline, width, size, url);
     }
 
-    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string&& text, std::string&& url, uint8_t styleBits) {
+    // AddLink for a run of `runs`, whose target is a view into their parse: one copy of it for all
+    // the link's rectangles (RunLinkUrls).
+    template <typename Runs>
+    RAYOMD_HOT_INLINE void AddRunLink(double x, double baseline, double width, double size, std::string_view url,
+        const Runs& runs) {
+        if (url.empty() || width <= 0.0 || pageLinks.empty()) return;
+        AddLinkRect(pageLinks.back(), x, baseline, width, size, runLinkUrls.Get(url, runs.parse));
+    }
+
+    void PushAsciiSpan(std::vector<AsciiSpan>& spans, std::string&& text, SharedUrl&& url, uint8_t styleBits) {
         if (text.empty()) return;
         if (!spans.empty() && spans.back().url == url && spans.back().style == styleBits && spans.back().math < 0) {
             spans.back().text += text;
@@ -9912,7 +10097,7 @@ private:
         const double width = math.Width(index);
         const std::string number = std::to_string(note);
         Text(x, raised, size * kNoteSizeFactor, number, "F1", linkColor);
-        AddLink(x, raised, width, size * kNoteSizeFactor, "#^" + number);
+        AddLink(x, raised, width, size * kNoteSizeFactor, SharedUrl("#^" + number));
         noteMarks.MarkReference(note, pageStarts.size() - 1, baseline + size);
         return width;
     }
@@ -9934,7 +10119,7 @@ private:
                 PushAsciiMathSpan(spans, span, size, width, false);
                 continue;
             }
-            PushAsciiSpan(spans, std::move(span.text), std::string(span.url.View()), SpanStyle(span));
+            PushAsciiSpan(spans, std::move(span.text), std::move(span.url), SpanStyle(span));
         }
         return spans;
     }
@@ -9984,7 +10169,7 @@ private:
 
     // Appends one word to the line being filled, with a leading space when `spaced`. It is
     // merged into the previous span when link, code and emphasis are the same.
-    void AppendAsciiWord(std::vector<AsciiSpan>& line, std::string_view word, bool spaced, const std::string& url,
+    void AppendAsciiWord(std::vector<AsciiSpan>& line, std::string_view word, bool spaced, const SharedUrl& url,
         uint8_t styleBits) {
         if (!line.empty()) {
             AsciiSpan& last = line.back();
@@ -10031,7 +10216,7 @@ private:
         }
         // Appends text to the line: merged into the previous span when the style is the
         // same (never into a formula), as AppendAsciiWord does for plain text.
-        auto appendText = [&](std::string text, const std::string& url, uint8_t styleBits) {
+        auto appendText = [&](std::string text, const SharedUrl& url, uint8_t styleBits) {
             if (!line.empty()) {
                 AsciiSpan& last = line.back();
                 if (last.math < 0 && last.style == styleBits && last.url == url) {
@@ -10079,7 +10264,7 @@ private:
             }
             if (word.math >= 0) {
                 if (needsSpace) {
-                    appendText(" ", std::string(), 0);
+                    appendText(" ", SharedUrl(), 0);
                     lineWidth += spaceWidth;
                 }
                 MathAppend(line).math = word.math;
@@ -10202,6 +10387,7 @@ private:
     // builds no string and no vector per line.
     struct AsciiRuns {
         Internal::InlineRuns parsed;        // the paragraph as parsed; holds the link targets
+        uint64_t parse = 0;                 // NextRunsParse of `parsed`, for RunLinkUrls
         std::vector<AsciiSegment> segments;
         std::string text;
         std::vector<AsciiRun> runs;
@@ -10242,7 +10428,7 @@ private:
             Text(x, baseline, size, runs.Text(run), StyleFontName(run.style), color, runs.plain);
             if (run.style & kStyleStrike) StrikeThrough(x, baseline, spanWidth, size, runs.Text(run), run.style, color);
             if (run.style & kStyleUnderline) PaintDecor(x, baseline, spanWidth, size, runs.Text(run), run.style, false, color);
-            AddLink(x, baseline, spanWidth, size, run.url);
+            AddRunLink(x, baseline, spanWidth, size, run.url, runs);
             x += spanWidth;
         }
     }
@@ -10356,6 +10542,7 @@ private:
         bool recognizeMath = true) {
         if (text.size() >= 0x40000000u) return false;
         Internal::ParseInlineRuns(text, out.parsed, recognizeMath);
+        out.parse = NextRunsParse();
         out.segments.clear();
         out.runs.clear();
         out.lineEnds.clear();
@@ -10619,10 +10806,11 @@ private:
         const double lh = bodySize * 1.35;
         AsciiLines lines;
         WrapAsciiTextCold(fallback, pageW - margin * 2.0, bodySize, StandardTextFont::Regular, lines);
+        const SharedUrl link(image.link);
         for (size_t i = 0; i < lines.Count(); i++) {
             Ensure(lh);
             Text(margin, y - bodySize, bodySize, lines.Text(i), "F1", linkColor);
-            AddLink(margin, y - bodySize, lines.Width(i), bodySize, image.link);
+            AddLink(margin, y - bodySize, lines.Width(i), bodySize, link);
             y -= lh;
         }
         y -= 5.0;
@@ -10667,7 +10855,7 @@ private:
         double x = ImageLeft(block.align, margin, maxW, w);
         DrawImage(index, x, y, w, h);
         const std::string& link = block.image->link;
-        if (!link.empty() && !pageLinks.empty()) pageLinks.back().push_back({ x, y - h, x + w, y, link });
+        if (!link.empty() && !pageLinks.empty()) pageLinks.back().push_back({ x, y - h, x + w, y, SharedUrl(link) });
         y -= h + 10.0;
     }
 
@@ -10724,7 +10912,7 @@ private:
                 const double top = y - (tall - image.h);    // the images of a line stand on one bottom
                 DrawImage(image.index, x, top, image.w, image.h);
                 const std::string& link = image.source->link;
-                if (!link.empty() && !pageLinks.empty()) pageLinks.back().push_back({ x, top - image.h, x + image.w, top, link });
+                if (!link.empty() && !pageLinks.empty()) pageLinks.back().push_back({ x, top - image.h, x + image.w, top, SharedUrl(link) });
                 x += image.w + 6.0;
             }
             y -= tall + (last < placed.size() ? 6.0 : 10.0);
@@ -11337,7 +11525,7 @@ private:
             if (top && index > 0) y -= em * 0.5;
             const double x = margin + (entry.level - 1) * 1.5 * em;
             char url[24] = "#\x01";
-            const std::string_view link(url, (size_t)(std::to_chars(url + 2, url + sizeof(url), index).ptr - url));
+            const SharedUrl link(std::string_view(url, (size_t)(std::to_chars(url + 2, url + sizeof(url), index).ptr - url)));
             ContentsLine& last = contentsLines[index];
             last = { index, pageStarts.size() - 1, y - bodySize, x };
             WrapAsciiTextCold(entry.text, pageW - margin - x - 2.55 * em, bodySize,

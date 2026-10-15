@@ -7,6 +7,7 @@
 // rasterizing: paths, shapes, transforms, clipping, linear gradients, text and embedded raster
 // images map to PDF operators. Built at -Os: an SVG is converted once per document.
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -54,5 +55,10 @@ bool LooksLikeSvg(std::string_view bytes);
 // safety limit, painting nothing, or depending on content it does not draw (scripts, HTML, style
 // rules whose selectors it does not match); the caller then shows the image's alt text.
 bool ConvertSvg(std::string_view svg, SvgHost& host, SvgForm& form);
+
+// How many data: images of SVGs (SvgHost::AddImage) the documents' builds have decoded in this
+// process: each once, kept by its SHA-256 for later builds (tiny_pdf.cpp's ImageRegistry). Read by
+// the tests.
+uint64_t SvgImageDecodes();
 
 } // namespace TinyPdf::Internal
