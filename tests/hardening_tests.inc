@@ -450,8 +450,60 @@ bool CheckDeepCompositeGlyph() {
     return ok;
 }
 
+// An image the policy found inside the document's folder is read only while it is still there:
+// RayoMd::File::ReadCanonical refuses a canonical path one of whose directories became a link to
+// elsewhere since it was worked out (the check-then-open race of AuditEngine F11); a document
+// whose image directory is swapped back and forth while it is built never shows the outside file.
+bool CheckImageContainment() {
+#ifndef __linux__
+    return true;
+#else
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-containment";
+    fs::remove_all(root);
+    const fs::path doc = root / "doc";
+    fs::create_directories(doc / "pics");
+    fs::create_directories(root / "outside");
+    const fs::path assets = fs::path(RAYOMD_TEST_SOURCE_DIR) / "docs" / "assets";
+    fs::copy_file(assets / "branding" / "rayomd.png", doc / "pics" / "pic.png");
+    fs::copy_file(assets / "demo" / "ui.png", root / "outside" / "pic.png");
+    fs::create_directory_symlink(root / "outside", doc / "swap");
+    const fs::path canonical = fs::canonical(doc / "pics" / "pic.png");
+    std::vector<uint8_t> bytes;
+    bool ok = RayoMd::File::ReadCanonical(canonical, 64u << 20, bytes) && !bytes.empty();
+    // Swapped: the same canonical path now leads through a link.
+    ok = ok && ::renameat2(AT_FDCWD, (doc / "pics").c_str(), AT_FDCWD, (doc / "swap").c_str(), RENAME_EXCHANGE) == 0;
+    ok = ok && !RayoMd::File::ReadCanonical(canonical, 64u << 20, bytes);
+    ok = ok && ::renameat2(AT_FDCWD, (doc / "pics").c_str(), AT_FDCWD, (doc / "swap").c_str(), RENAME_EXCHANGE) == 0;
+    if (!ok) std::cerr << "a canonical path through a swapped-in link was read" << std::endl;
+    // The race itself: builds while another thread keeps swapping the folder for the link.
+    TinyPdf::PdfOptions options;
+    options.sourcePath = (doc / "doc.md").u8string();
+    std::string inside;
+    ok = ok && TinyPdf::BuildPdf("![p](pics/pic.png)\n", options, inside).Ok() && inside.find("/Subtype /Image") != std::string::npos;
+    std::atomic<bool> stop{ false };
+    std::thread swapper([&]() {
+        while (!stop) ::renameat2(AT_FDCWD, (doc / "pics").c_str(), AT_FDCWD, (doc / "swap").c_str(), RENAME_EXCHANGE);
+    });
+    size_t leaked = 0;
+    for (int build = 0; build < 300; build++) {
+        std::string pdf;
+        TinyPdf::BuildPdf("![p](pics/pic.png)\n", options, pdf);
+        leaked += pdf.find("/Subtype /Image") != std::string::npos && pdf != inside;
+    }
+    stop = true;
+    swapper.join();
+    if (leaked != 0) {
+        std::cerr << "the outside image was read " << leaked << " times" << std::endl;
+        ok = false;
+    }
+    fs::remove_all(root);
+    return ok;
+#endif
+}
+
 bool CheckHardening() {
-    return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph();
+    return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
+        CheckImageContainment();
 }
 
 } // namespace hardening_tests

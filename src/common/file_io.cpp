@@ -111,15 +111,18 @@ bool SeekTo(std::FILE* file, long long offset) {
 #endif
 }
 
+// `size` bytes of the open file `file` (OpenRegular) into `content`, at most `maximum`; closes it.
 template <class Bytes>
-static bool ReadAllInto(const std::filesystem::path& path, size_t maximum, Bytes& content) {
-    uint64_t size = 0;
+static bool ReadOpened(
 #ifdef _WIN32
-    const intptr_t handle = OpenRegular(path, size);
-    if (handle == (intptr_t)INVALID_HANDLE_VALUE) return false;
-    HANDLE file = (HANDLE)handle;
+    HANDLE file,
+#else
+    int fd,
+#endif
+    uint64_t size, size_t maximum, Bytes& content) {
     bool read = size <= maximum;
     if (read) content.resize((size_t)size);
+#ifdef _WIN32
     for (size_t offset = 0; read && offset < (size_t)size;) {
         DWORD got = 0;
         const DWORD chunk = (DWORD)std::min<uint64_t>(size - offset, 1u << 20);
@@ -127,12 +130,7 @@ static bool ReadAllInto(const std::filesystem::path& path, size_t maximum, Bytes
         offset += got;
     }
     CloseHandle(file);
-    return read;
 #else
-    const int fd = OpenRegular(path, size);
-    if (fd < 0) return false;
-    bool read = size <= maximum;
-    if (read) content.resize((size_t)size);
     // A file that shrinks while it is read fails; one that grows keeps the size fstat said.
     for (size_t offset = 0; read && offset < (size_t)size;) {
         const ssize_t got = ::read(fd, &content[offset], (size_t)size - offset);
@@ -141,7 +139,42 @@ static bool ReadAllInto(const std::filesystem::path& path, size_t maximum, Bytes
         if (read) offset += (size_t)got;
     }
     ::close(fd);
+#endif
     return read;
+}
+
+template <class Bytes>
+static bool ReadAllInto(const std::filesystem::path& path, size_t maximum, Bytes& content) {
+    uint64_t size = 0;
+#ifdef _WIN32
+    const intptr_t handle = OpenRegular(path, size);
+    if (handle == (intptr_t)INVALID_HANDLE_VALUE) return false;
+    return ReadOpened((HANDLE)handle, size, maximum, content);
+#else
+    const int fd = OpenRegular(path, size);
+    if (fd < 0) return false;
+    return ReadOpened(fd, size, maximum, content);
+#endif
+}
+
+bool ReadCanonical(const std::filesystem::path& canonical, size_t maximum, std::vector<uint8_t>& content) {
+#ifdef __linux__
+    uint64_t size = 0;
+    const int fd = OpenRegular(canonical, size);
+    if (fd < 0) return false;
+    char link[32];
+    std::snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+    const std::string& expected = canonical.native();
+    // One byte more than expected: a longer target is another file too.
+    std::string target(expected.size() + 1, '\0');
+    const ssize_t length = ::readlink(link, &target[0], target.size());
+    if (length < 0 || (size_t)length != expected.size() || target.compare(0, expected.size(), expected) != 0) {
+        ::close(fd);
+        return false;
+    }
+    return ReadOpened(fd, size, maximum, content);
+#else
+    return ReadAllInto(canonical, maximum, content);
 #endif
 }
 

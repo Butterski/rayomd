@@ -42,6 +42,13 @@ bool SeekTo(std::FILE* file, long long offset);
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content);
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint8_t>& content);
 
+// As ReadAll, for a `canonical` path (absolute, no symbolic link, no "." or ".."), and only while
+// it still names the file opened: on Linux the path the open descriptor names (/proc/self/fd/N)
+// must be `canonical`, else a directory of it was swapped for a link since the path was worked
+// out, and the file is refused. A check of a path and a later open of it by name cannot tell.
+// Elsewhere as ReadAll.
+bool ReadCanonical(const std::filesystem::path& canonical, size_t maximum, std::vector<uint8_t>& content);
+
 // Creates or replaces `path` with `content`. On POSIX systems an existing file is overwritten in
 // place and then cut to size (no O_TRUNC; see file_io.cpp).
 bool WriteAll(const std::filesystem::path& path, std::string_view content);

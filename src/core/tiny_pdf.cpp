@@ -2573,11 +2573,17 @@ private:
     std::wstring safeRootNt;
 };
 
-static bool ReadLocalImageFile(const std::string& pathUtf8, std::vector<uint8_t>& bytes) {
+// The image file at `pathUtf8`, a canonical path. `contained`: the policy found it inside its root
+// (LocalImagePolicy::Resolve), which holds only while no directory on the way has been swapped for
+// a link since; RayoMd::File::ReadCanonical refuses a file the opened descriptor finds elsewhere
+// (on Windows TryOpenDirect checks the handle's final path).
+static bool ReadLocalImageFile(const std::string& pathUtf8, std::vector<uint8_t>& bytes, bool contained = false) {
 #ifdef _WIN32
+    (void)contained;
     return ReadWholeFile(Utf8ToWide(pathUtf8), bytes);
 #else
-    return ReadWholeFile(pathUtf8, bytes);
+    if (!contained) return ReadWholeFile(pathUtf8, bytes);
+    return RayoMd::File::ReadCanonical(std::filesystem::path(pathUtf8), 64u * 1024u * 1024u, bytes) && !bytes.empty();
 #endif
 }
 
@@ -3694,7 +3700,8 @@ private:
             }
 #endif
             else {
-                loaded = ReadLocalImageFile(localPathUtf8, bytes) && bytes.size() <= kMaxImageBytes;
+                loaded = ReadLocalImageFile(localPathUtf8, bytes, !options.allowUnsafeLocalImages) &&
+                    bytes.size() <= kMaxImageBytes;
             }
             if (!loaded || !Decode(key, stamp, bytes, sharedImage)) {
                 if (!BuildCancelled()) StoreFailure(key, stamp);   // a cancelled read or decode tells nothing
