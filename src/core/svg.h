@@ -29,6 +29,9 @@ public:
     // A raster image, the PNG or JPEG bytes of a data: URI, which the form draws as /Im<index + 1>:
     // its index, with its size in pixels; -1 when it cannot be decoded.
     virtual int AddImage(std::string_view bytes, int& width, int& height) = 0;
+    // Whether the build the form is for was abandoned (PdfOptions::cancel): the conversion then
+    // fails, read every 1,024 elements drawn.
+    virtual bool Cancelled() const { return false; }
 };
 
 // An SVG as a PDF form: its content stream over [0 0 width height] in points, the origin at the

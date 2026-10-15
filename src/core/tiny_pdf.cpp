@@ -204,6 +204,37 @@ int GetLastError() {
     return g_lastError;
 }
 
+// PdfOptions::cancel of the build running on this thread, while BuildPdf or BuildBookPdf runs
+// (CancelScope): the loops that can run long read it where they have no options at hand.
+static thread_local const std::atomic<bool>* g_cancel = nullptr;
+
+// Whether the caller abandoned the build running on this thread: a load and a test while nothing
+// can cancel it. Relaxed: no data travels with the flag, and the build only stops sooner or later.
+// Out of line: inlined at its two dozen call sites, it moved GCC's inlining of hot calls
+// (NeedsInlineParse, DrawStrokeRect; +0.54 % instructions on README.md, +0.41 % on notes.md).
+RAYOMD_NOINLINE static bool BuildCancelled() {
+    const std::atomic<bool>* const cancel = g_cancel;
+    return cancel != nullptr && cancel->load(std::memory_order_relaxed);
+}
+
+// A build that stops because it was cancelled: false, with the error set.
+RAYOMD_COLD static bool CancelBuild() {
+    g_lastError = static_cast<int>(BuildError::Cancelled);
+    return false;
+}
+
+// Sets g_cancel for a build (BuildPdf, BuildBookPdf) and puts back the one before it.
+class CancelScope {
+public:
+    explicit CancelScope(const std::atomic<bool>* cancel) : saved(g_cancel) { g_cancel = cancel; }
+    ~CancelScope() { g_cancel = saved; }
+    CancelScope(const CancelScope&) = delete;
+    CancelScope& operator=(const CancelScope&) = delete;
+
+private:
+    const std::atomic<bool>* saved;
+};
+
 using Internal::ResolveMarginPoints;
 using Internal::ResolvePageSize;
 using Internal::Block;
@@ -1957,10 +1988,12 @@ RAYOMD_COLD static void CompressPageContents(std::string& pdfBytes, std::vector<
     FlateWork& work = ThreadFlateWork();
     flate.assign(starts.size(), false);
     size_t write = starts[0];
+    bool cancelled = false;   // the pages after a cancel are kept as they are: the PDF is dropped
     for (size_t page = 0; page < starts.size(); page++) {
         const size_t start = starts[page];
         const size_t end = page + 1 < starts.size() ? starts[page + 1] : pdfBytes.size();
-        const size_t packed = Deflate(std::string_view(pdfBytes.data() + start, end - start), work);
+        cancelled = cancelled || BuildCancelled();
+        const size_t packed = cancelled ? 0 : Deflate(std::string_view(pdfBytes.data() + start, end - start), work);
         starts[page] = write;
         if (packed != 0) {
             memcpy(&pdfBytes[write], work.out.data(), packed);
@@ -2663,7 +2696,7 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
     WinHttpSetTimeouts(session, 5000, 5000, 8000, 15000);
 
     bool ok = false;
-    for (int redirect = 0; redirect < 6 && !ok; redirect++) {
+    for (int redirect = 0; redirect < 6 && !ok && !BuildCancelled(); redirect++) {
         URL_COMPONENTSW parts = {};
         parts.dwStructSize = sizeof(parts);
         parts.dwSchemeLength = (DWORD)-1;
@@ -2707,7 +2740,7 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
             bytes.clear();
             for (;;) {
                 DWORD available = 0;
-                if (!WinHttpQueryDataAvailable(request, &available)) break;
+                if (BuildCancelled() || !WinHttpQueryDataAvailable(request, &available)) break;
                 if (available == 0) {
                     ok = !bytes.empty();
                     break;
@@ -2751,13 +2784,19 @@ struct CurlImageBuffer {
 static size_t CurlWriteImageBytes(char* ptr, size_t size, size_t nmemb, void* userdata) {
     size_t count = size * nmemb;
     CurlImageBuffer* buffer = static_cast<CurlImageBuffer*>(userdata);
-    if (!buffer || !buffer->bytes) return 0;
+    if (!buffer || !buffer->bytes || BuildCancelled()) return 0;
     if (buffer->bytes->size() + count > kMaxImageBytes) {
         buffer->tooLarge = true;
         return 0;
     }
     buffer->bytes->insert(buffer->bytes->end(), ptr, ptr + count);
     return count;
+}
+
+// Called by curl while it waits and transfers, on the build's thread: non-zero ends the transfer of
+// a cancelled build (PdfOptions::cancel).
+static int CurlProgressCancel(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    return BuildCancelled() ? 1 : 0;
 }
 
 static curl_socket_t CurlOpenSocketChecked(void*, curlsocktype purpose, struct curl_sockaddr* address) {
@@ -2794,6 +2833,8 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "RayoMD/1.0");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteImageBytes);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, CurlProgressCancel);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 
     CURLcode result = curl_easy_perform(curl);
     long status = 0;
@@ -3195,6 +3236,7 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image, bool fast)
 
     unsigned opaque = 255;
     for (size_t y = 0; y < height;) {
+        if (BuildCancelled()) return false;   // the encoder abandons both planes
         // Only two Paeth rows gain from going together: after a Paeth row the next one is taken
         // too, and given back when it is not one (it may be the next Paeth row's partner).
         size_t count = 1;
@@ -3493,14 +3535,14 @@ static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, co
         }
         return true;
     }
-    return BuildDecodedImageWithWic(bytes, image);
+    return !BuildCancelled() && BuildDecodedImageWithWic(bytes, image);
 }
 
 static bool DecodeImageBytes(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {},
     bool fast = false) {
     PdfImage parsed;
     if (ParseJpegImage(bytes, parsed) || ParsePngImage(bytes, parsed, cacheDirectory, fast) ||
-        BuildDecodedImageWithWic(bytes, parsed)) {
+        (!BuildCancelled() && BuildDecodedImageWithWic(bytes, parsed))) {
         image = std::move(parsed);
         return image.width > 0 && image.height > 0 && !image.stream.empty();
     }
@@ -3568,7 +3610,7 @@ public:
             std::vector<uint8_t> bytes;
             if (IsKnownFailure(key, stamp) || !ReadLocalImageFile(PathToUtf8(normalized), bytes) ||
                 bytes.size() > kMaxImageBytes || !Decode(key, stamp, bytes, sharedImage)) {
-                StoreFailure(key, stamp);
+                if (!BuildCancelled()) StoreFailure(key, stamp);
                 failed++;
                 return false;
             }
@@ -3645,7 +3687,7 @@ private:
                 loaded = ReadLocalImageFile(localPathUtf8, bytes) && bytes.size() <= kMaxImageBytes;
             }
             if (!loaded || !Decode(key, stamp, bytes, sharedImage)) {
-                StoreFailure(key, stamp);
+                if (!BuildCancelled()) StoreFailure(key, stamp);   // a cancelled read or decode tells nothing
                 return false;
             }
         }
@@ -3818,6 +3860,7 @@ public:
     }
 
     bool HasBoldFace() const override { return true; }
+    bool Cancelled() const override { return BuildCancelled(); }
     int AddImage(std::string_view bytes, int& width, int& height) override { return images.AddDecoded(bytes, width, height); }
 
 private:
@@ -3845,6 +3888,7 @@ public:
     }
 
     bool HasBoldFace() const override { return bold != nullptr; }
+    bool Cancelled() const override { return BuildCancelled(); }
     int AddImage(std::string_view bytes, int& width, int& height) override { return images.AddDecoded(bytes, width, height); }
 
 private:
@@ -5287,6 +5331,7 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
     double headerHeight = 0.0;  // the header row's height; 0 when it was cut into slices
     size_t resumeRow = 0;       // the row to draw after a repeated header row, or 0
     for (size_t r = 0; r < rows.size(); r++) {
+        if (BuildCancelled()) break;
         renderer.math.Clear();
         double contentHeight = lh;
         for (size_t c = 0; c < columns; c++) {
@@ -5514,7 +5559,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
     bool pageBreakPending = false;
     renderer.TagEnterBlocks();
     for (const Block& block : blocks) {
-        if (renderer.StopRender()) break;
+        if (renderer.StopRender() || BuildCancelled()) break;
         if (block.type == BlockType::PageBreak) { pageBreakPending = true; continue; }
         if (pageBreakPending) { renderer.RenderPageBreak(); pageBreakPending = false; }
         renderer.TagBlock(block);
@@ -5622,6 +5667,7 @@ RAYOMD_COLD static void RenderBook(RendererType& renderer, ImageRegistry& images
     }
     std::vector<HeadingMark>& marks = renderer.headings;
     for (size_t index = 0; index < chapters.size(); index++) {
+        if (BuildCancelled()) break;
         const BookChapter& chapter = chapters[index];
         renderer.RenderPageBreak();
         parse.firstPages.push_back(renderer.pageStarts.size() - 1);
@@ -7855,6 +7901,7 @@ private:
 
     void RenderQuoteChildren(const std::vector<Block>& children) {
         for (const Block& child : children) {
+            if (BuildCancelled()) break;
             switch (child.type) {
             case BlockType::Paragraph: RenderQuote(child.text); break;
             case BlockType::Heading: RenderQuoteHeading(child); break;
@@ -8029,7 +8076,7 @@ private:
                 pieceWidth += charWidth;
             }
             draw(piece, lineEnd);
-            if (last) break;
+            if (last || BuildCancelled()) break;
             start = end + 1;
         }
         y -= 8.0;
@@ -8124,7 +8171,7 @@ private:
                 }
                 draw(piece, lineEnd);
             }
-            if (last) break;
+            if (last || BuildCancelled()) break;
             start = end + 1;
         }
         y -= 8.0;
@@ -8353,6 +8400,7 @@ private:
         double headerHeight = 0.0;  // the header row's height; 0 when it was cut into slices
         size_t resumeRow = 0;       // the row to draw after a repeated header row, or 0
         for (size_t r = 0; r < rows.size(); r++) {
+            if (BuildCancelled()) break;
             size_t maxLines = 1;
             wrapBold = multiFace && r == 0;     // a theme's bold face draws the header row
             for (size_t c = 0; c < columns; c++) {
@@ -10859,6 +10907,7 @@ private:
 
     void RenderQuoteChildren(const std::vector<Block>& children) {
         for (const Block& child : children) {
+            if (BuildCancelled()) break;
             switch (child.type) {
             case BlockType::Paragraph: RenderQuote(child.text); break;
             case BlockType::Heading: RenderQuoteHeading(child); break;
@@ -11024,7 +11073,7 @@ private:
                 DrawTextLine(x, size, line.substr(piece, count), "F3", "0.12 0.12 0.12", true);
                 piece += count;
             } while (piece < line.size());
-            if (last) break;
+            if (last || BuildCancelled()) break;
             start = end + 1;
         }
         y -= 8.0;
@@ -11090,7 +11139,7 @@ private:
                 y -= lh;
                 piece += count;
             } while (piece < line.size());
-            if (last) break;
+            if (last || BuildCancelled()) break;
             start = end + 1;
         }
         y -= 8.0;
@@ -11287,6 +11336,7 @@ private:
         double headerHeight = 0.0;  // the header row's height; 0 when it was cut into slices
         size_t resumeRow = 0;       // the row to draw after a repeated header row, or 0
         for (size_t r = 0; r < rows.size(); r++) {
+            if (BuildCancelled()) break;
             size_t maxLines = 1;
             for (size_t c = 0; c < columns; c++) {
                 const std::string& cell = c < rows[r].size() ? rows[r][c] : emptyCell;
@@ -11638,7 +11688,8 @@ RAYOMD_COLD static std::vector<std::string> ContentsOverlays(RendererType& rende
 // A book's files parsed (Internal::ParseBookFiles), and the entries of its table of contents.
 RAYOMD_COLD static std::vector<Internal::ContentsEntry> ParseBook(const BookSource& source, const PdfOptions& options,
     BookParse& parse) {
-    Internal::ParseBookFiles(source.book->chapters, source.texts, source.titles, options.toc, options.tocDepth, parse.files);
+    Internal::ParseBookFiles(source.book->chapters, source.texts, source.titles, options.toc, options.tocDepth, options.cancel,
+        parse.files);
     parse.contentsFirst = options.toc;
     parse.noteMarks.resize(source.book->chapters.size());
     return std::move(parse.files.contents);
@@ -11699,6 +11750,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
             contents = ParseBook(*book, options, *bookParse);
         }
     }
+    if (BuildCancelled()) return CancelBuild();
     PdfObjects pdf;
     int pagesId = pdf.Reserve();
     // WinAnsiEncoding: without it the fonts' built-in StandardEncoding shows the straight
@@ -11720,6 +11772,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         else if (footnotes.notes.empty()) renderer.Render(blocks);
         else RenderWithFootnotes(renderer, blocks, footnotes);
     }
+    if (BuildCancelled()) return CancelBuild();
     // The headings without their footnote references, for anchors, bookmarks and titles.
     std::vector<HeadingMark> titledHeadings;
     std::vector<std::string> headingTitles;
@@ -12253,6 +12306,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
             contents = ParseBook(*book, options, *bookParse);
         }
     }
+    if (BuildCancelled()) return CancelBuild();
 
     PdfObjects pdf;
 
@@ -12291,6 +12345,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         else if (footnotes.notes.empty()) renderer.Render(blocks);
         else RenderWithFootnotes(renderer, blocks, footnotes);
     }
+    if (BuildCancelled()) return CancelBuild();
     // Laid out to find a fallback font to draw the document in: it was found.
     if (renderer.Guess() != nullptr) {
         check->guess = renderer.Guess();
@@ -12609,9 +12664,14 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
         }
     }
     g_lastError = 0;
+    const CancelScope cancelScope(options.cancel);
     uint32_t missingCharacters = 0;
     BuildResult stats;
-    bool built = BuildDocument(markdown, options, pdfBytes, stats, missingCharacters, nullptr);
+    bool built = !BuildCancelled() && BuildDocument(markdown, options, pdfBytes, stats, missingCharacters, nullptr);
+    if (BuildCancelled()) {
+        pdfBytes.clear();
+        built = CancelBuild();
+    }
     if (built && options.embedSource && pdfBytes.size() > RayoMd::PdfSource::kMaxPdfBytes) {
         pdfBytes.clear();
         g_lastError = static_cast<int>(BuildError::ReversiblePdfTooLarge);
@@ -12627,6 +12687,7 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
 BuildResult BuildBookPdf(const Book& book, const PdfOptions& options, std::string& pdfBytes) {
     const auto profileBefore = RayoMd::Profiling::Capture();
     g_lastError = 0;
+    const CancelScope cancelScope(options.cancel);
     PdfOptions bookOptions = options;
     bookOptions.embedSource = false;
     bookOptions.sourcePath = book.directory.empty() ? std::string() : book.directory + '/';
@@ -12646,7 +12707,11 @@ BuildResult BuildBookPdf(const Book& book, const PdfOptions& options, std::strin
     }
     uint32_t missingCharacters = 0;
     BuildResult stats;
-    const bool built = BuildDocument(all, bookOptions, pdfBytes, stats, missingCharacters, &source);
+    bool built = !BuildCancelled() && BuildDocument(all, bookOptions, pdfBytes, stats, missingCharacters, &source);
+    if (BuildCancelled()) {
+        pdfBytes.clear();
+        built = CancelBuild();
+    }
     RayoMd::Profiling::EmitDelta("book", profileBefore, RayoMd::Profiling::Capture());
     if (!built) return BuildResult{ static_cast<BuildError>(g_lastError) };
     BuildResult result = stats;

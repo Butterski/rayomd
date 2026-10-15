@@ -728,6 +728,7 @@ bool CheckImagePolicyCacheIsolation() {
 #include "math_layout_tests.inc"
 #include "inline_lookahead_tests.inc"
 #include "html_tests.inc"
+#include "hardening_tests.inc"
 
 // Heights of the filled rectangles drawn with the given fill colour ("r g b").
 std::vector<double> FillRectHeights(const std::string& pdf, std::string_view color) {
@@ -3505,6 +3506,7 @@ int main() {
     if (!CheckComposedAdvance()) return 104;
     if (!CheckCffSubset()) return 105;
     if (!html_tests::CheckHtmlEngine()) return 106;
+    if (!hardening_tests::CheckHardening()) return 107;
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",
