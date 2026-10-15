@@ -45,7 +45,10 @@ struct PdfPageSize {
     static PdfPageSize Legal() { return { 612.0, 1008.0 }; }
 };
 
-// A company look over the style. Empty or unset fields leave the style as it is.
+// A company look over the style. Empty or unset fields leave the style as it is. Its font and logo
+// paths are local files: on Windows a UNC (\\server\share), device (\\.\, \\?\) or mapped network
+// drive path is never opened, so a theme cannot make a build connect to a share; such a font
+// fails the build (ThemeFontUnavailable), such a logo is a failed image.
 struct PdfTheme {
     static constexpr int32_t kStyleColor = -1;
 

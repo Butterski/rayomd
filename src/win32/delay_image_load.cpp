@@ -123,6 +123,12 @@ extern "C" BOOL WINAPI __wrap_WinHttpQueryHeaders(
     return procedure ? procedure(request, infoLevel, name, buffer, bufferLength, index) : FALSE;
 }
 
+extern "C" BOOL WINAPI __wrap_WinHttpQueryOption(
+    HINTERNET internet, DWORD option, LPVOID buffer, LPDWORD bufferLength) {
+    RAYOMD_DELAY_PROC(L"winhttp.dll", WinHttpQueryOption);
+    return procedure ? procedure(internet, option, buffer, bufferLength) : FALSE;
+}
+
 extern "C" BOOL WINAPI __wrap_WinHttpReadData(
     HINTERNET request, LPVOID buffer, DWORD bytesToRead, LPDWORD bytesRead) {
     RAYOMD_DELAY_PROC(L"winhttp.dll", WinHttpReadData);

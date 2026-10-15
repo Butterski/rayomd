@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "rayomd/tiny_pdf.h"
+#include "../src/core/access_policy.h"
 #include "../src/common/batch_report.h"
 #include "../src/common/exact_math.h"
 #include "../src/common/file_io.h"
@@ -53,6 +54,14 @@
 #include "libdeflate.h"
 #if defined(__linux__)
 #include <sys/resource.h>
+#endif
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 #ifndef RAYOMD_TEST_SOURCE_DIR
@@ -730,6 +739,209 @@ bool CheckImagePolicyCacheIsolation() {
     if (!ExpectImagePolicyResult(absoluteMarkdown, safe, false, "safe absolute image")) return false;
     return true;
 }
+
+// ---- What builds may reach (access_policy.h) ---------------------------------------
+
+// URL images: addresses of this machine and of private networks are refused, IPv6 forms that
+// carry an IPv4 address by that address; public ones pass.
+bool CheckUrlAddressFilter() {
+    const auto v4 = [](uint32_t a, uint32_t b, uint32_t c, uint32_t d) { return a << 24 | b << 16 | c << 8 | d; };
+    const std::pair<uint32_t, bool> ipv4[] = {
+        { v4(0, 0, 0, 0), true }, { v4(10, 1, 2, 3), true }, { v4(127, 0, 0, 1), true },
+        { v4(169, 254, 169, 254), true }, { v4(172, 16, 0, 1), true }, { v4(172, 31, 255, 255), true },
+        { v4(172, 32, 0, 1), false }, { v4(192, 168, 1, 1), true },
+        { v4(100, 64, 0, 1), true }, { v4(100, 100, 1, 5), true }, { v4(100, 127, 255, 255), true },
+        { v4(100, 63, 255, 255), false }, { v4(100, 128, 0, 1), false },
+        { v4(198, 18, 0, 1), true }, { v4(198, 19, 255, 255), true }, { v4(198, 17, 255, 255), false },
+        { v4(198, 20, 0, 0), false }, { v4(192, 0, 0, 8), true }, { v4(192, 0, 1, 1), false },
+        { v4(224, 0, 0, 1), true }, { v4(240, 0, 0, 1), true }, { v4(255, 255, 255, 255), true },
+        { v4(8, 8, 8, 8), false }, { v4(1, 1, 1, 1), false }, { v4(93, 184, 216, 34), false },
+    };
+    for (const auto& [address, unsafe] : ipv4) {
+        if (TinyPdf::Internal::IsUnsafeIpv4Address(address) != unsafe) {
+            std::cerr << "IPv4 address " << (address >> 24) << '.' << (address >> 16 & 255) << '.' << (address >> 8 & 255)
+                      << '.' << (address & 255) << (unsafe ? " allowed" : " refused") << std::endl;
+            return false;
+        }
+    }
+    using Groups = std::array<uint32_t, 8>;
+    const std::pair<Groups, bool> ipv6[] = {
+        { { 0, 0, 0, 0, 0, 0, 0, 0 }, true },                          // ::
+        { { 0, 0, 0, 0, 0, 0, 0, 1 }, true },                          // ::1
+        { { 0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001 }, true },           // ::ffff:127.0.0.1
+        { { 0, 0, 0, 0, 0, 0xffff, 0x0808, 0x0808 }, false },          // ::ffff:8.8.8.8
+        { { 0, 0, 0, 0, 0, 0, 0x0a00, 0x0001 }, true },                // ::10.0.0.1
+        { { 0, 0, 0, 0, 0, 0, 0x0808, 0x0808 }, false },               // ::8.8.8.8
+        { { 0, 0, 0, 0, 0xffff, 0, 0x0a00, 0x0001 }, true },           // ::ffff:0:10.0.0.1
+        { { 0x64, 0xff9b, 0, 0, 0, 0, 0xc0a8, 0x0001 }, true },        // 64:ff9b::192.168.0.1
+        { { 0x64, 0xff9b, 0, 0, 0, 0, 0x6440, 0x0001 }, true },        // 64:ff9b::100.64.0.1
+        { { 0x64, 0xff9b, 0, 0, 0, 0, 0x0808, 0x0808 }, false },       // 64:ff9b::8.8.8.8
+        { { 0x64, 0xff9b, 1, 0, 0, 0, 0, 1 }, true },                  // 64:ff9b:1::1
+        { { 0x2002, 0x7f00, 0x0001, 0, 0, 0, 0, 0 }, true },           // 2002:7f00:1::
+        { { 0x2002, 0xa9fe, 0xa9fe, 0, 0, 0, 0, 1 }, true },           // 2002:169.254.169.254::1
+        { { 0x2002, 0x0808, 0x0808, 0, 0, 0, 0, 1 }, false },          // 2002:8.8.8.8::1
+        { { 0xfc00, 0, 0, 0, 0, 0, 0, 1 }, true }, { { 0xfd12, 0x3456, 0, 0, 0, 0, 0, 1 }, true },
+        { { 0xfe80, 0, 0, 0, 0, 0, 0, 1 }, true }, { { 0xfec0, 0, 0, 0, 0, 0, 0, 1 }, true },
+        { { 0xff02, 0, 0, 0, 0, 0, 0, 1 }, true },
+        { { 0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888 }, false }, { { 0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111 }, false },
+    };
+    for (const auto& [groups, unsafe] : ipv6) {
+        unsigned char bytes[16];
+        for (size_t i = 0; i < groups.size(); i++) {
+            bytes[2 * i] = (unsigned char)(groups[i] >> 8);
+            bytes[2 * i + 1] = (unsigned char)groups[i];
+        }
+        if (TinyPdf::Internal::IsUnsafeIpv6Address(bytes) != unsafe) {
+            std::cerr << "IPv6 address " << std::hex << groups[0] << ':' << groups[1] << ':' << groups[2] << "... "
+                      << std::dec << (unsafe ? "allowed" : "refused") << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
+// Theme fonts and logos are local files: on Windows a UNC, device or drive-relative path is
+// refused by the parser and by the build, before anything opens it (no SMB or WebDAV
+// connection, no NTLM). The classification itself is checked on every platform.
+bool CheckThemePathPolicy() {
+    const std::pair<const char*, bool> paths[] = {
+        { "\\\\server\\share\\font.ttf", true }, { "//server/share/font.ttf", true }, { "\\/server/share/f.ttf", true },
+        { "\\\\attacker.example@SSL\\s\\f.ttf", true }, { "\\\\?\\C:\\font.ttf", true },
+        { "\\\\?\\UNC\\server\\share\\f.ttf", true }, { "\\\\.\\pipe\\x", true }, { "\\??\\UNC\\server\\s\\f.ttf", true },
+        { "C:font.ttf", true }, { "C:", true }, { "C:\\fonts\\NUL.ttf", true }, { "fonts/con", true },
+        { "themes/COM1.png", true }, { "lpt9 .txt", true }, { "conin$", true },
+        { "C:\\Windows\\Fonts\\arial.ttf", false }, { "c:/fonts/a.ttf", false }, { "fonts/acme.ttf", false },
+        { "\\fonts\\a.ttf", false }, { "/usr/share/fonts/a.ttf", false }, { "console.ttf", false },
+        { "COM10.ttf", false }, { "", false }, { "themes/../fonts/a.ttf", false },
+    };
+    for (const auto& [path, refused] : paths) {
+        if (TinyPdf::Internal::IsNetworkOrDevicePath(path) != refused) {
+            std::cerr << "theme path " << path << (refused ? " allowed" : " refused") << std::endl;
+            return false;
+        }
+    }
+#ifdef _WIN32
+    // A fresh theme for each parse: ParseTheme sets fields as it reads them, and a failed one keeps them.
+    for (const char* text : { "font = \\\\attacker.example\\s\\f.ttf\n", "logo = //attacker.example@SSL/s/l.png\n",
+             "font = a.ttf\nfont-bold = C:b.ttf\n", "font = a.ttf\nlogo = img\\NUL.png\n" }) {
+        TinyPdf::PdfTheme theme;
+        std::string error;
+        if (TinyPdf::Internal::ParseTheme(text, "C:\\themes", theme, error) || error.find("local drive") == std::string::npos) {
+            std::cerr << "a theme's network or device path was accepted: " << text << std::endl;
+            return false;
+        }
+    }
+    // A theme file in a share: its relative paths are in the share too.
+    TinyPdf::PdfTheme shared;
+    TinyPdf::PdfTheme local;
+    std::string error;
+    if (TinyPdf::Internal::ParseTheme("font = a.ttf\n", "\\\\server\\themes", shared, error) ||
+        !TinyPdf::Internal::ParseTheme("font = fonts\\a.ttf\nlogo = /img/l.png\n", "C:\\themes", local, error)) {
+        std::cerr << "theme paths in a share or on a local drive mismatch: " << error << std::endl;
+        return false;
+    }
+    // A theme an API caller filled in: the build refuses what the parser would, without opening it
+    // (this administrative share of the machine itself would open).
+    const std::string share = "\\\\127.0.0.1\\c$\\Windows\\Fonts\\arial.ttf";
+    TinyPdf::PdfOptions options;
+    options.theme.fontPath = share;
+    std::string pdf;
+    if (TinyPdf::Internal::IsLocalThemeFile(share) ||
+        TinyPdf::BuildPdf("# Theme\n", options, pdf).error != TinyPdf::BuildError::ThemeFontUnavailable) {
+        std::cerr << "a theme font on a share was opened" << std::endl;
+        return false;
+    }
+    TinyPdf::PdfOptions logo;
+    logo.theme.headerLeft = "{logo}";
+    logo.theme.logoPath = "\\\\127.0.0.1\\c$\\Windows\\Web\\Screen\\img100.jpg";
+    const TinyPdf::BuildResult logoResult = TinyPdf::BuildPdf("# Theme\n", logo, pdf);
+    if (!logoResult.Ok() || logoResult.failedImages != 1) {
+        std::cerr << "a theme logo on a share was read" << std::endl;
+        return false;
+    }
+    if (const char* windows = std::getenv("WINDIR")) {
+        const std::string arial = std::string(windows) + "\\Fonts\\arial.ttf";
+        if (std::ifstream(arial, std::ios::binary) && !TinyPdf::Internal::IsLocalThemeFile(arial)) {
+            std::cerr << "a font on the system drive is no local theme file" << std::endl;
+            return false;
+        }
+    }
+#endif
+    return true;
+}
+
+// Images are PNG, JPEG and SVG: other formats show their alt text on every platform, and on
+// Windows never reach the system's codecs (WIC decodes only PNG and JPEG files RayoMD's own
+// readers do not take, with Microsoft's decoder for that format).
+bool CheckImageFormats() {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-image-formats";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    // A 1x1 24-bit BMP, which WIC decoded before.
+    const unsigned char bmp[] = { 'B', 'M', 58, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0,
+        1, 0, 24, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0x13, 0x0b, 0, 0, 0x13, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0x00, 0x00, 0xff, 0x00 };
+    const unsigned char gif[] = { 'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0, 0x80, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x2c,
+        0, 0, 0, 0, 1, 0, 1, 0, 0, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b };
+    bool ok = RayoMd::File::WriteAll(root / "pixel.bmp", std::string_view((const char*)bmp, sizeof(bmp))) &&
+        RayoMd::File::WriteAll(root / "pixel.gif", std::string_view((const char*)gif, sizeof(gif)));
+    fs::copy_file(fs::path(RAYOMD_TEST_SOURCE_DIR) / "docs" / "assets" / "branding" / "rayomd.png", root / "pixel.png");
+    TinyPdf::PdfOptions options;
+    options.sourcePath = (root / "doc.md").u8string();
+    for (const auto& [markdown, failures] : { std::pair<const char*, uint32_t>{ "![b](pixel.bmp)\n", 1 },
+             { "![g](pixel.gif)\n", 1 }, { "![p](pixel.png)\n", 0 } }) {
+        std::string pdf;
+        const TinyPdf::BuildResult result = ok ? TinyPdf::BuildPdf(markdown, options, pdf) : TinyPdf::BuildResult();
+        if (!result.Ok() || result.failedImages != failures ||
+            (pdf.find("/Subtype /Image") != std::string::npos) != (failures == 0)) {
+            std::cerr << "image format policy mismatch for " << markdown;
+            ok = false;
+            break;
+        }
+    }
+    fs::remove_all(root);
+    return ok;
+}
+
+#ifdef _WIN32
+// The direct local-image path of Windows follows no link: an image that is a symbolic link, or
+// lies in a linked folder, is refused before its target is opened, even inside the document's
+// folder (a link could as well lead to \\attacker\share). Skipped where links cannot be made.
+bool CheckDirectImageLinks() {
+    namespace fs = std::filesystem;
+    // The working directory, not the temporary one: a short (8.3) name in the root's path takes
+    // the other, canonical-path route.
+    const fs::path root = fs::current_path() / "rayomd-test-image-links";
+    fs::remove_all(root);
+    fs::create_directories(root / "sub");
+    const fs::path mascot = fs::path(RAYOMD_TEST_SOURCE_DIR) / "docs" / "assets" / "branding" / "rayomd.png";
+    fs::copy_file(mascot, root / "real.png");
+    fs::copy_file(mascot, root / "sub" / "real.png");
+    const DWORD unprivileged = 0x2;   // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (Developer Mode)
+    const bool linked = CreateSymbolicLinkW((root / "link.png").c_str(), L"real.png", unprivileged) &&
+        CreateSymbolicLinkW((root / "linkdir").c_str(), L"sub", SYMBOLIC_LINK_FLAG_DIRECTORY | unprivileged);
+    bool ok = true;
+    if (!linked) {
+        std::cerr << "skipped the image link check: symbolic links cannot be made here" << std::endl;
+    } else {
+        TinyPdf::PdfOptions options;
+        options.sourcePath = (root / "doc.md").u8string();
+        for (const auto& [markdown, failures] : { std::pair<const char*, uint32_t>{ "![r](real.png)\n", 0 },
+                 { "![s](sub/real.png)\n", 0 }, { "![l](link.png)\n", 1 }, { "![d](linkdir/real.png)\n", 1 } }) {
+            std::string pdf;
+            const TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdf);
+            if (!result.Ok() || result.failedImages != failures) {
+                std::cerr << "image link policy mismatch for " << markdown;
+                ok = false;
+                break;
+            }
+        }
+    }
+    fs::remove_all(root);
+    return ok;
+}
+#endif
 
 // ---- Native math -------------------------------------------------------------------
 
@@ -3531,6 +3743,12 @@ int main() {
     if (!html_tests::CheckHtmlEngine()) return 106;
     if (!CheckParseLimits()) return 107;
     if (!hardening_tests::CheckHardening()) return 108;
+    if (!CheckUrlAddressFilter()) return 120;
+    if (!CheckThemePathPolicy()) return 121;
+    if (!CheckImageFormats()) return 122;
+#ifdef _WIN32
+    if (!CheckDirectImageLinks()) return 123;
+#endif
     const std::vector<std::string> documents = {
         "# ASCII\n\nFast **native** export with a paragraph and a rule.\n\n---\n",
         u8"# Unicode\n\nZa\u017C\u00F3\u0142\u0107 g\u0119\u015Bl\u0105 ja\u017A\u0144. \u65E5\u672C\u8A9E \u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC.\n",

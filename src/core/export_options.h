@@ -26,7 +26,8 @@ bool ParseColor(std::string_view value, int32_t& rgb);
 // header-left, header-center, header-right, footer-left, footer-center, footer-right, cover
 // (yes or no). Relative font and logo paths are taken in `directory`, the theme file's folder
 // (UTF-8; empty for the current one). False, with `error` naming the line, for an unknown key or
-// a value that does not parse.
+// a value that does not parse; on Windows also, naming the key, for a font or logo path that is
+// no local file (IsNetworkOrDevicePath: UNC, device and drive-relative paths).
 bool ParseTheme(std::string_view text, std::string_view directory, PdfTheme& theme, std::string& error);
 
 const char* PdfStyleName(PdfStyle style);

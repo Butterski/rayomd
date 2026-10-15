@@ -161,8 +161,24 @@ Important image/link details:
 - Local image paths are resolved relative to `TinyPdf::BuildOptions::sourcePath`
   when the caller provides an input file path.
 - URL images are controlled by `BuildOptions::enableUrlImages`.
-- Windows image support uses WinHTTP/WIC through the Win32 build.
+- Windows image support uses WinHTTP/WIC through the Win32 build. WIC sees only PNG and JPEG
+  files (by their magic bytes) that RayoMD's own readers reject, once, through Microsoft's own
+  decoder for that format (`CreateDecoder` with `GUID_VendorMicrosoft`, checked, metadata on
+  demand); never `CreateDecoderFromStream`, which lets every installed codec parse the bytes.
 - Linux URL images use libcurl when `RAYOMD_USE_CURL` is defined.
+- URL images reach only public addresses (`IsUnsafeIpv4Address`/`IsUnsafeIpv6Address` in
+  `access_policy.cpp`, the core tests' `CheckUrlAddressFilter`), checked on the address actually
+  connected to as well (curl's open-socket callback, WinHTTP's `WINHTTP_OPTION_CONNECTION_INFO`)
+  against DNS rebinding. A fetch stops at the first error or status other than 2xx/3xx, sends
+  no cookies or credentials, and has a deadline: 20 s per URL, redirects included, and 60 s for
+  all of a build's (`UrlFetchBudget`).
+- Theme fonts and logos are local files. On Windows `ParseTheme` and the build refuse UNC,
+  device and drive-relative paths and mapped network drives (`IsNetworkOrDevicePath`,
+  `IsLocalThemeFile`) before anything opens them: a share would mean an SMB or WebDAV connection
+  with the user's credentials on every build.
+- The Windows direct local-image path (`TryOpenDirect`) checks containment by name before it
+  opens anything and follows no symbolic link, junction or mount point (name-surrogate reparse
+  points), in the file or a folder below the document's.
 - PNGs with transparency are inflated by RayoMD's own inflater (`inflate.cpp`) and
   re-encoded by its own encoder (`flate.cpp`), on every platform; no zlib or libdeflate.
 - Such a PNG of 32,768 pixels or more is kept between processes in
@@ -316,6 +332,11 @@ Important image/link details:
   Shared typed style/margin conversion, CLI option parsing primitives (also theme
   files, `ParseTheme`), and non-public text helpers. `export_options.cpp` is built at
   `-Os`: it runs once per run.
+
+- `src/core/access_policy.h` and `src/core/access_policy.cpp`
+  What builds may reach: the address classes URL images may not connect to, and Windows theme
+  paths that are no local file. Pure where it can be, so the core tests check it on every
+  platform. Built at `-Os`.
 
 - `src/core/png_filter.cpp`
   PNG row filters: undoing them when a PNG is decoded, choosing and applying them when
