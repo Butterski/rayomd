@@ -186,6 +186,35 @@ bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint
     return ReadAllInto(path, maximum, content);
 }
 
+bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content, FileIdentity& identity) {
+    identity = FileIdentity();
+#ifdef _WIN32
+    const intptr_t handle = OpenRegular(path, identity.size);
+    if (handle == (intptr_t)INVALID_HANDLE_VALUE) return false;
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle((HANDLE)handle, &info)) {
+        CloseHandle((HANDLE)handle);
+        return false;
+    }
+    identity.volume = info.dwVolumeSerialNumber;
+    identity.index = (uint64_t)info.nFileIndexHigh << 32 | info.nFileIndexLow;
+    identity.opened = true;
+    return ReadOpened((HANDLE)handle, identity.size, maximum, content);
+#else
+    const int fd = OpenRegular(path, identity.size);
+    if (fd < 0) return false;
+    struct stat info {};
+    if (::fstat(fd, &info) != 0) {
+        ::close(fd);
+        return false;
+    }
+    identity.volume = (uint64_t)info.st_dev;
+    identity.index = (uint64_t)info.st_ino;
+    identity.opened = true;
+    return ReadOpened(fd, identity.size, maximum, content);
+#endif
+}
+
 bool WriteAll(const std::filesystem::path& path, std::string_view content, [[maybe_unused]] bool ownerOnly) {
 #ifdef _WIN32
     std::FILE* file = Open(path, "wb");

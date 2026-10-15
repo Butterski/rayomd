@@ -5,7 +5,8 @@
 // <fcntl.h>, <sys/stat.h> and <unistd.h>; Bounded of parse_limits_tests.inc.
 // Hostile and abandoned builds: cancellation (PdfOptions::cancel), files that are no regular
 // files, fonts changed after they were read, deep composite glyphs, image containment, the
-// decode budget, the image cache's permissions and a theme's long header and footer text.
+// decode budget, the image cache's permissions, a theme's long header and footer text and a
+// book's files listed under several names or past its byte budget.
 // Included inside the anonymous namespace of tests/core_tests.cpp.
 
 namespace hardening_tests {
@@ -607,9 +608,53 @@ bool CheckThemeFields() {
     return true;
 }
 
+// A book reads each file once and at most 128 MiB in all: a SUMMARY.md that lists one file under
+// other names (a hard link, a link to its folder, "x/../") is refused as listing it twice, where
+// it was read once a name (8 names of a 65 MB file took 6.7 GB); files of more than 128 MiB in
+// all end the book with an error before they are read.
+bool CheckBookFiles() {
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-book-files";
+    fs::remove_all(root);
+    fs::create_directories(root / "sub");
+    bool ok = WriteFile(root / "a.md", "# A\n\ntext\n") && WriteFile(root / "big.md", std::string(size_t(48) << 20, 'x'));
+    std::error_code linked;
+    fs::create_hard_link(root / "a.md", root / "b.md", linked);
+    ok = ok && !linked;
+    const auto readBook = [](const std::vector<fs::path>& inputs, std::string& error) {
+        TinyPdf::Book book;
+        error.clear();
+        return RayoMd::Book::ReadBook(inputs, book, error) ? book.chapters.size() : size_t(0);
+    };
+    std::string error;
+    // Another name of a.md, each in a SUMMARY.md of its own.
+    std::vector<std::string> names = { "b.md", "sub/../a.md" };
+#ifndef _WIN32
+    fs::create_directory_symlink(".", root / "s", linked);
+    ok = ok && !linked;
+    names.push_back("s/a.md");
+    names.push_back("s/s/b.md");
+#endif
+    for (const std::string& name : names) {
+        ok = ok && WriteFile(root / "SUMMARY.md", "# S\n\n- [A](a.md)\n- [Again](" + name + ")\n");
+        if (readBook({ root / "SUMMARY.md" }, error) != 0 || error.find("lists " + name + " twice") == std::string::npos) {
+            std::cerr << "a book listing a.md as " << name << " too: " << (error.empty() ? "read" : error) << std::endl;
+            ok = false;
+        }
+    }
+    ok = ok && WriteFile(root / "SUMMARY.md", "# S\n\n- [A](a.md)\n- [Big](big.md)\n") &&
+        readBook({ root / "SUMMARY.md" }, error) == 2 && readBook({ root / "big.md", root / "big.md" }, error) == 2;
+    if (!ok) std::cerr << "a book of distinct files within 128 MiB is not read: " << error << std::endl;
+    ok = ok && parse_limits_tests::Bounded("a book of three 48 MiB files", 10.0, 160, [&]() {
+        return readBook({ root / "big.md", root / "a.md", root / "big.md", root / "big.md" }, error) == 0 &&
+            error.find("more than 128 MiB") != std::string::npos;
+    });
+    fs::remove_all(root);
+    return ok;
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
-        CheckImageContainment() && CheckCachePermissions() && CheckThemeFields();
+        CheckImageContainment() && CheckCachePermissions() && CheckThemeFields() && CheckBookFiles();
 }
 
 } // namespace hardening_tests
