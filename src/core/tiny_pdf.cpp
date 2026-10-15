@@ -2052,6 +2052,37 @@ constexpr size_t kMaxDecodedImageBytes = 96u * 1024u * 1024u;
 // From this many pixels a re-encoded PNG's rows are compressed by helper threads as it is decoded.
 constexpr size_t kImageThreadPixels = size_t(1) << 18;
 
+// The pixels the images of one build may decode in all (DecodeBudget): 2^30, 42 images of the
+// largest size one decode takes (kMaxDecodedImageBytes, 25 Mpx), or 200 transparent full-screen
+// screenshots of a 5-Mpx display. Past it an image is not decoded and shows its alt text; without
+// it a 16 MiB SVG of 110 data: PNGs of 100 KB, each 25 Mpx of one colour, took 7.5 s and 2.8
+// Gpx of inflating and re-encoding, again for every build of a preview (2026-10-15).
+constexpr uint64_t kDecodeBudgetPixels = uint64_t(1) << 30;
+
+// What the images of one build (an ImageRegistry) may still decode: a PNG that is re-encoded
+// (BuildDecodedPngImage, also when the persistent cache has its streams) or an image WIC decodes is
+// charged its pixels before its pixels are read, and an image taken from the process's caches the
+// pixels its decode was charged (PdfImage::decodedPixels), so a document shows the same images
+// whichever of them a cache holds.
+class DecodeBudget {
+public:
+    // Takes `pixels`, or nothing and false when fewer are left; `refused` then says so until the
+    // next decode starts (DecodeImageBytes).
+    bool Take(uint64_t pixels) {
+        if (pixels > left) {
+            refused = true;
+            return false;
+        }
+        left -= pixels;
+        return true;
+    }
+
+    bool refused = false;
+
+private:
+    uint64_t left = kDecodeBudgetPixels;
+};
+
 // The CPUs this process may run on: its affinity mask, which taskset or a container narrows,
 // where std::thread::hardware_concurrency counts the machine's.
 RAYOMD_COLD static unsigned UsableCpus() {
@@ -2113,6 +2144,9 @@ struct PdfImage {
     int width = 0;
     int height = 0;
     int bitsPerComponent = 8;
+    // The pixels decoding this image took from the build's DecodeBudget: 0 for one whose bytes go
+    // into the PDF as they are (a JPEG, a PNG without transparency) or an SVG form.
+    uint32_t decodedPixels = 0;
     // An SVG drawn as a form XObject (svg.h) instead of pixels; its size above in pixels at 96 dpi.
     std::shared_ptr<const Internal::SvgForm> svg;
 };
@@ -3369,7 +3403,7 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image, bool fast)
 }
 
 static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {},
-    bool fast = false);
+    bool fast = false, DecodeBudget* budget = nullptr);
 
 #ifdef _WIN32
 template<typename T>
@@ -3512,7 +3546,7 @@ static HRESULT CreateMicrosoftDecoder(IWICImagingFactory* factory, const GUID& c
 
 // A PNG or JPEG file RayoMD's own readers do not take (CMYK or 12-bit JPEG, for one), decoded by
 // Windows' built-in decoder for its format; any other bytes are refused.
-static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage& image) {
+static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage& image, DecodeBudget* budget) {
     if (bytes.empty() || bytes.size() > kMaxImageBytes) return false;
     const GUID* container = WicContainerOf(bytes);
     if (!container) return false;
@@ -3556,7 +3590,7 @@ static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage
     if (SUCCEEDED(hr) && width > 0 && height > 0) {
         size_t stride = (size_t)width * 4;
         size_t total = stride * (size_t)height;
-        if (total > kMaxDecodedImageBytes) {
+        if (total > kMaxDecodedImageBytes || (budget != nullptr && !budget->Take((uint64_t)width * height))) {
             hr = E_FAIL;
         } else {
             rgba.assign(total, 0);
@@ -3592,6 +3626,7 @@ static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage
             image.stream = std::move(rgb);
             if (hasAlpha) image.maskStream = std::move(alpha);
         }
+        image.decodedPixels = (uint32_t)pixels;
         ok = true;
     }
 
@@ -3604,22 +3639,25 @@ static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage
     return ok;
 }
 #else
-static bool BuildDecodedImageWithWic(const std::vector<uint8_t>&, PdfImage&) {
+static bool BuildDecodedImageWithWic(const std::vector<uint8_t>&, PdfImage&, DecodeBudget*) {
     return false;
 }
 #endif
 
 // With `cacheDirectory`, a PNG that is re-encoded is first looked for there, and kept there after
-// (image_cache.h). `fast` re-encodes it in DeflateImageSegment's fast mode (--fast-images).
+// (image_cache.h). `fast` re-encodes it in DeflateImageSegment's fast mode (--fast-images). A PNG
+// to re-encode is charged to `budget`, if any, before either.
 static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory,
-    bool fast) {
+    bool fast, DecodeBudget* budget) {
     PngInfo png;
     if (!ParsePngChunks(bytes, png)) return false;
     if (BuildFastPngImage(png, bytes, image)) return true;
     size_t rowBytes = 0;
     size_t bpp = 0;
-    const bool cached = !cacheDirectory.empty() && DecodedPngRows(png, rowBytes, bpp) &&
-        (size_t)png.width * png.height >= Internal::kImageCacheMinPixels;
+    if (!DecodedPngRows(png, rowBytes, bpp)) return false;   // as BuildDecodedPngImage would
+    const uint32_t pixels = (uint32_t)((size_t)png.width * png.height);   // within kMaxDecodedImageBytes / 4
+    if (budget != nullptr && !budget->Take(pixels)) return false;
+    const bool cached = !cacheDirectory.empty() && pixels >= Internal::kImageCacheMinPixels;
     const uint32_t components = PngHasRgbColor(png) ? 3 : 1;
     std::string digest;
     if (cached) {
@@ -3628,12 +3666,14 @@ static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, co
         if (Internal::LoadCachedImage(cacheDirectory, digest, png.width, png.height, components, kMaxImageBytes,
             kept.stream, kept.maskStream, fast)) {
             DescribeReencodedPng(png, kept);
+            kept.decodedPixels = pixels;
             image = std::move(kept);
             return true;
         }
     }
     JoinIdat(bytes, png.idatBytes, png.idat);
     if (BuildDecodedPngImage(png, image, fast)) {
+        image.decodedPixels = pixels;
         if (cached) {
             Internal::StoreCachedImage(cacheDirectory, digest, png.width, png.height, components, kMaxImageBytes,
                 image.stream, image.maskStream, fast);
@@ -3643,15 +3683,25 @@ static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, co
     return false;
 }
 
+// `budget`, if any, is charged what the decode takes; its `refused` says afterwards whether the
+// image failed for want of it.
 static bool DecodeImageBytes(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {},
-    bool fast = false) {
+    bool fast = false, DecodeBudget* budget = nullptr) {
+    if (budget != nullptr) budget->refused = false;
     PdfImage parsed;
-    if (ParseJpegImage(bytes, parsed) || ParsePngImage(bytes, parsed, cacheDirectory, fast) ||
-        (!BuildCancelled() && BuildDecodedImageWithWic(bytes, parsed))) {
+    if (ParseJpegImage(bytes, parsed) || ParsePngImage(bytes, parsed, cacheDirectory, fast, budget) ||
+        (!BuildCancelled() && (budget == nullptr || !budget->refused) && BuildDecodedImageWithWic(bytes, parsed, budget))) {
         image = std::move(parsed);
         return image.width > 0 && image.height > 0 && !image.stream.empty();
     }
     return false;
+}
+
+// How many data: images of SVGs the process has decoded (ImageRegistry::AddDecoded).
+static std::atomic<uint64_t> g_svgImageDecodes{ 0 };
+
+uint64_t Internal::SvgImageDecodes() {
+    return g_svgImageDecodes.load(std::memory_order_relaxed);
 }
 
 class ImageRegistry {
@@ -3671,14 +3721,37 @@ public:
         svgBoldCids = boldCids;
     }
 
-    // A raster image of an SVG (a data: URI) for this document only: its index, with its size in
-    // pixels; -1 when it cannot be decoded.
+    // A raster image of an SVG (a data: URI): its index among this build's images, with its size in
+    // pixels; -1 when it cannot be decoded, or, one more failed image, when the build's decode
+    // budget is spent. Decoded once a process: kept by the SHA-256 of its bytes in the process's
+    // cache of decoded images (and, by the same key, as a failure), since a preview builds the same
+    // SVG again on every edit. The digest is the whole key: this decode takes no option, neither
+    // --fast-images nor the persistent cache.
     RAYOMD_COLD int AddDecoded(std::string_view bytes, int& width, int& height) {
-        PdfImage image;
-        if (bytes.size() > kMaxImageBytes || !DecodeImageBytes(std::vector<uint8_t>(bytes.begin(), bytes.end()), image)) return -1;
-        width = image.width;
-        height = image.height;
-        images.push_back(std::make_shared<PdfImage>(std::move(image)));
+        if (bytes.size() > kMaxImageBytes) return -1;
+        const std::string key = "svg-image:" + RayoMd::PdfSource::Sha256Hex(bytes);
+        const RayoMd::File::Stamp none;
+        SharedPdfImage shared = LoadDecodedImageFromCache(key, none);
+        if (shared) {
+            if (!budget.Take(shared->decodedPixels)) {
+                failed++;
+                return -1;
+            }
+        } else {
+            if (IsKnownFailure(key, none)) return -1;
+            PdfImage image;
+            const bool decoded = DecodeImageBytes(std::vector<uint8_t>(bytes.begin(), bytes.end()), image, {}, false, &budget);
+            if (!budget.refused) g_svgImageDecodes.fetch_add(1, std::memory_order_relaxed);
+            if (!decoded) {
+                if (budget.refused) failed++;
+                else if (!BuildCancelled()) StoreFailure(key, none);
+                return -1;
+            }
+            shared = StoreDecodedImageInCache(key, none, std::move(image));
+        }
+        width = shared->width;
+        height = shared->height;
+        images.push_back(std::move(shared));
         return (int)images.size() - 1;
     }
 
@@ -3719,11 +3792,16 @@ public:
         const RayoMd::File::Stamp stamp = RayoMd::File::StampOf(normalized);
         std::string keyStorage;
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
+        if (sharedImage && !budget.Take(sharedImage->decodedPixels)) {
+            failed++;
+            return false;
+        }
         if (!sharedImage) {
             std::vector<uint8_t> bytes;
+            budget.refused = false;
             if (IsKnownFailure(key, stamp) || !ReadLocalImageFile(PathToUtf8(normalized), bytes) ||
                 bytes.size() > kMaxImageBytes || !Decode(key, stamp, bytes, sharedImage)) {
-                if (!BuildCancelled()) StoreFailure(key, stamp);
+                if (!BuildCancelled() && !budget.refused) StoreFailure(key, stamp);
                 failed++;
                 return false;
             }
@@ -3784,9 +3862,11 @@ private:
         if (!isUrl) stamp = RayoMd::File::StampOf(PathFromUtf8(localPathUtf8));
         std::string keyStorage;
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
+        if (sharedImage && !budget.Take(sharedImage->decodedPixels)) return false;
         if (!sharedImage && IsKnownFailure(key, stamp)) return false;
         if (!sharedImage) {
             std::vector<uint8_t> bytes;
+            budget.refused = false;
             bool loaded = false;
             if (isUrl) {
                 loaded = FetchUrlBytes(src, options, urlBudget, bytes);
@@ -3801,7 +3881,8 @@ private:
                     bytes.size() <= kMaxImageBytes;
             }
             if (!loaded || !Decode(key, stamp, bytes, sharedImage)) {
-                if (!BuildCancelled()) StoreFailure(key, stamp);   // a cancelled read or decode tells nothing
+                // A cancelled read or decode tells nothing, nor one the budget refused.
+                if (!BuildCancelled() && !budget.refused) StoreFailure(key, stamp);
                 return false;
             }
         }
@@ -3834,7 +3915,7 @@ private:
             shared = std::make_shared<PdfImage>(std::move(image));
             return true;
         }
-        if (!DecodeImageBytes(bytes, image, options.imageCacheDirectory, options.fastImages)) return false;
+        if (!DecodeImageBytes(bytes, image, options.imageCacheDirectory, options.fastImages, &budget)) return false;
         std::string keyStorage;
         shared = StoreDecodedImageInCache(CacheKey(key, keyStorage), stamp, std::move(image));
         return true;
@@ -3862,6 +3943,7 @@ private:
     UsedCidSet* svgBoldCids = nullptr;
     bool svgAttempted = false;          // ConvertSvgImage ran: an SVG's text may be in the document's font
     UrlFetchBudget urlBudget;           // the time this build's URL images have left
+    DecodeBudget budget;                // the pixels this build's images may still decode
     // Decoded images and failed sources for later documents of the process, each with the stamp of
     // its file when it was read (none for a URL): a lookup with another stamp misses, and storing
     // replaces the entry, so a file changed on disk is read again.

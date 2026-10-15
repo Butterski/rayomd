@@ -22,6 +22,7 @@
 #include "../src/core/png_filter.h"
 #include "../src/core/cff.h"
 #include "../src/core/html.h"
+#include "../src/core/svg.h"
 
 #include <algorithm>
 #include <array>

@@ -197,10 +197,19 @@ Important image/link details:
   whole conversion.
 - An SVG image (a file or URL) is converted by `src/core/svg.cpp`, without a
   dependency, into a form XObject for each document, as its text uses the
-  document's fonts; such forms never enter the cross-document image cache. One
+  document's fonts; such forms never enter the cross-document image cache. Their `data:`
+  images do: decoded once a process and kept by the SHA-256 of their bytes
+  (`ImageRegistry::AddDecoded`), as a preview builds the same SVG on every edit. One
   that needs what the converter does not draw (HTML, scripts, style sheets it
   cannot match) or hits a limit shows its alt text. Keep every limit failing
   closed: SVG input is untrusted.
+- The images of one build decode at most `kDecodeBudgetPixels` (2^30) pixels in all
+  (`DecodeBudget`, one per `ImageRegistry`, so per pass of a build): a re-encoded PNG, a WIC
+  decode and an SVG's `data:` image are charged before their pixels are read, and an image
+  taken from a cache (the process's or the persistent one) what its decode took
+  (`PdfImage::decodedPixels`), so a PDF never depends on what the caches hold. Past it an
+  image is not decoded: it shows its alt text and counts in `failedImages`. A new way to
+  decode pixels must charge it.
 - Links are emitted as PDF annotations; keep visible text and annotation rects
   aligned when changing wrapping or text layout.
 - Every link target goes through `Html::SafeUrl` before it can become a `/URI`: Markdown inline
@@ -467,7 +476,8 @@ Important image/link details:
   look-ahead tables, `tests/parse_limits_tests.inc` the parser's limits on hostile input
   (`CheckParseLimits`) and the golden digests of what they must leave alone, and
   `tests/hardening_tests.inc` those of hostile and abandoned builds (cancellation, files that
-  are no regular files, fonts changed after loading, image containment, cache permissions).
+  are no regular files, fonts changed after loading, image containment, cache permissions, the
+  decode budget and the SVG `data:` image cache).
 
 - `tests/fuzz/`
   libFuzzer targets of the engine's untrusted-input entry points (`fuzz_targets.h`): Markdown

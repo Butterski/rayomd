@@ -535,9 +535,125 @@ bool CheckCachePermissions() {
 #endif
 }
 
+// An 8-bit RGBA PNG of `width` x `height` transparent black pixels but the first, whose red is
+// `mark`: a "bomb" of a few dozen KB that decodes to width * height * 4 bytes.
+std::string MakeBombPng(uint32_t width, uint32_t height, uint8_t mark) {
+    std::string raw((size_t)(width * 4 + 1) * height, '\0');
+    raw[1] = (char)mark;
+    std::string zlib(RayoMd::Flate::ZlibBound(raw.size()), '\0');
+    RayoMd::Flate::Scratch scratch;
+    zlib.resize(RayoMd::Flate::ZlibCompress(raw, reinterpret_cast<uint8_t*>(&zlib[0]), scratch));
+    std::string png("\x89PNG\r\n\x1a\n", 8);
+    std::string header;
+    AppendBigEndian(header, width);
+    AppendBigEndian(header, height);
+    header += std::string("\x08\x06\x00\x00\x00", 5);
+    AppendChunk(png, "IHDR", header);
+    AppendChunk(png, "IDAT", zlib);
+    AppendChunk(png, "IEND", std::string());
+    return png;
+}
+
+std::string Base64(const std::string& bytes) {
+    static const char kDigits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    for (size_t at = 0; at < bytes.size(); at += 3) {
+        const size_t left = bytes.size() - at;
+        const uint32_t v = (uint32_t)(uint8_t)bytes[at] << 16 | (left > 1 ? (uint32_t)(uint8_t)bytes[at + 1] << 8 : 0u) |
+            (left > 2 ? (uint32_t)(uint8_t)bytes[at + 2] : 0u);
+        out += kDigits[v >> 18];
+        out += kDigits[(v >> 12) & 63];
+        out += left > 1 ? kDigits[(v >> 6) & 63] : '=';
+        out += left > 2 ? kDigits[v & 63] : '=';
+    }
+    return out;
+}
+
+// An SVG of a red square and the PNG `png` as a data: image.
+std::string SvgWithImage(const std::string& png) {
+    return "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"5\" height=\"5\" fill=\"red\"/>"
+        "<image x=\"5\" y=\"5\" width=\"10\" height=\"10\" href=\"data:image/png;base64," + Base64(png) + "\"/></svg>";
+}
+
+// The pixels one build may decode (AuditEngine F12): 2^30, which 64 PNGs of 4096 x 4096 fill. A
+// document of 66 SVG files with the same such data: image and 30 copies of such a PNG decodes the
+// image once (the process keeps it by its SHA-256, charging each use what its decode took), and
+// shows neither the last two SVGs' image nor any copy, each a failed image, with no time spent
+// decoding them; built again, it is the same PDF. An SVG's data: image is decoded once a process:
+// a second build of its document decodes nothing and writes the same bytes.
+bool CheckDecodeBudget() {
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-decode-budget";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    const std::string bomb = MakeBombPng(4096, 4096, 1);
+    const std::string svg = SvgWithImage(bomb);
+    std::string svgs, copies;
+    bool ok = true;
+    for (int i = 0; i < 66; i++) {
+        ok = ok && WriteFile(root / ("s" + std::to_string(i) + ".svg"), svg);
+        svgs += "![s](s" + std::to_string(i) + ".svg)\n\n";
+    }
+    for (int i = 0; i < 30; i++) {
+        ok = ok && WriteFile(root / ("c" + std::to_string(i) + ".png"), bomb);
+        copies += "![c](c" + std::to_string(i) + ".png)\n\n";
+    }
+    const std::string small = MakeRgbaPng(64, 48, [](uint32_t x, uint32_t y, int c) {
+        return c == 3 ? (uint8_t)(x * 4) : (uint8_t)(x * 3 + y * 5 + (uint32_t)c * 40);
+    });
+    ok = ok && WriteFile(root / "small.svg", SvgWithImage(small));
+    if (!ok) {
+        std::cerr << "cannot write the decode budget test's files" << std::endl;
+        return false;
+    }
+    TinyPdf::PdfOptions options;
+    options.sourcePath = (root / "doc.md").u8string();
+
+    const uint64_t before = TinyPdf::Internal::SvgImageDecodes();
+    std::string first, again, withCopies;
+    auto start = std::chrono::steady_clock::now();
+    const TinyPdf::BuildResult spent = TinyPdf::BuildPdf(svgs, options, first);
+    const double firstMs = MillisecondsSince(start);
+    const uint64_t decodes = TinyPdf::Internal::SvgImageDecodes() - before;
+    const TinyPdf::BuildResult spentAgain = TinyPdf::BuildPdf(svgs, options, again);
+    start = std::chrono::steady_clock::now();
+    const TinyPdf::BuildResult copied = TinyPdf::BuildPdf(svgs + copies, options, withCopies);
+    const double copiesMs = MillisecondsSince(start);
+    std::cout << "decode budget: 66 SVGs in " << firstMs << " ms, with 30 PNGs past the budget " << copiesMs << " ms"
+              << std::endl;
+    if (!spent.Ok() || spent.failedImages != 2 || decodes != 1 || !ValidPdf(first)) {
+        std::cerr << "the decode budget: " << spent.failedImages << " failed images, " << decodes << " decodes" << std::endl;
+        ok = false;
+    }
+    if (!spentAgain.Ok() || spentAgain.failedImages != 2 || again != first ||
+        TinyPdf::Internal::SvgImageDecodes() - before != 1) {
+        std::cerr << "a document past the decode budget changed when built again" << std::endl;
+        ok = false;
+    }
+    // Decoded, the 30 copies would take 30 times the one decode of the first build.
+    if (!copied.Ok() || copied.failedImages != 32 || copiesMs > 2.0 * firstMs + 50.0) {
+        std::cerr << "PNGs past the decode budget: " << copied.failedImages << " failed images in " << copiesMs << " ms"
+                  << std::endl;
+        ok = false;
+    }
+
+    const uint64_t smallBefore = TinyPdf::Internal::SvgImageDecodes();
+    std::string once, twice;
+    const TinyPdf::BuildResult built = TinyPdf::BuildPdf("![s](small.svg)\n", options, once);
+    const uint64_t firstDecodes = TinyPdf::Internal::SvgImageDecodes() - smallBefore;
+    const TinyPdf::BuildResult rebuilt = TinyPdf::BuildPdf("![s](small.svg)\n", options, twice);
+    if (!built.Ok() || !rebuilt.Ok() || built.failedImages != 0 || firstDecodes != 1 ||
+        TinyPdf::Internal::SvgImageDecodes() - smallBefore != 1 || once != twice ||
+        once.find("/Subtype /Image") == std::string::npos) {
+        std::cerr << "an SVG's data: image was decoded again, or its PDF changed" << std::endl;
+        ok = false;
+    }
+    fs::remove_all(root);
+    return ok;
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
-        CheckImageContainment() && CheckCachePermissions();
+        CheckImageContainment() && CheckCachePermissions() && CheckDecodeBudget();
 }
 
 } // namespace hardening_tests
