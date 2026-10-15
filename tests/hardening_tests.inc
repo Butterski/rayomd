@@ -146,27 +146,34 @@ bool CheckCancel() {
             return TinyPdf::BuildPdf(markdown, buildOptions, out);
         };
         // The whole build first, then one cancelled halfway, past the parse, which does not stop;
-        // then the cancelled document again, whose image must not be taken for a failed one.
-        std::string full;
-        const auto start = std::chrono::steady_clock::now();
-        const TinyPdf::BuildResult whole = build(plain, full, 1);
-        const double fullMs = MillisecondsSince(start);
-        cancel = false;
-        TinyPdf::BuildResult cancelled;
-        std::string cancelledPdf;
-        std::thread worker([&]() { cancelled = build(options, cancelledPdf, 2); });
-        std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(fullMs / 2.0));
-        const auto set = std::chrono::steady_clock::now();
-        cancel = true;
-        worker.join();
-        const double latency = MillisecondsSince(set);
-        std::string again;
-        const TinyPdf::BuildResult after = build(plain, again, 2);
-        std::cout << "cancel " << item.name << ": returned " << latency << " ms after the flag, the whole build "
-                  << fullMs << " ms" << std::endl;
-        if (cancelled.error != TinyPdf::BuildError::Cancelled || !cancelledPdf.empty() || !whole.Ok() ||
-            whole.failedImages != 0 || !ValidPdf(full) || !after.Ok() || after.failedImages != 0 ||
-            latency > std::max(25.0, fullMs / 5.0)) {
+        // then the cancelled document again, whose image must not be taken for a failed one. A
+        // busy machine can stall the build's thread for longer than the bound: up to three tries.
+        bool passed = false;
+        for (int attempt = 0; attempt < 3 && !passed; attempt++) {
+            std::string full;
+            const auto start = std::chrono::steady_clock::now();
+            const TinyPdf::BuildResult whole = build(plain, full, 1);
+            const double fullMs = MillisecondsSince(start);
+            cancel = false;
+            TinyPdf::BuildResult cancelled;
+            std::string cancelledPdf;
+            std::thread worker([&]() { cancelled = build(options, cancelledPdf, 2); });
+            std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(fullMs / 2.0));
+            const auto set = std::chrono::steady_clock::now();
+            cancel = true;
+            worker.join();
+            const double latency = MillisecondsSince(set);
+            std::string again;
+            const TinyPdf::BuildResult after = build(plain, again, 2);
+            std::cout << "cancel " << item.name << ": returned " << latency << " ms after the flag, the whole build "
+                      << fullMs << " ms" << std::endl;
+            if (cancelled.error != TinyPdf::BuildError::Cancelled || !cancelledPdf.empty() || !whole.Ok() ||
+                whole.failedImages != 0 || !ValidPdf(full) || !after.Ok() || after.failedImages != 0) {
+                break;
+            }
+            passed = latency <= std::max(25.0, fullMs / 5.0);
+        }
+        if (!passed) {
             std::cerr << "cancelling the " << item.name << " build failed" << std::endl;
             ok = false;
         }
