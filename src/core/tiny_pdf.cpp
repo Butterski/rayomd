@@ -288,17 +288,17 @@ static bool ReadFromHandle(HANDLE file, uint8_t* out, size_t size) {
     return true;
 }
 
-// The size of the file `path` opened for reading, or INVALID_HANDLE_VALUE when it cannot be read
-// or is empty or past 64 MB.
+// The regular file `path` opened for reading (RayoMd::File::OpenRegular: no pipe or device) with
+// its size, or INVALID_HANDLE_VALUE when it cannot be read or is empty or past 64 MB.
 static HANDLE OpenWholeFile(const std::wstring& path, size_t& size) {
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    uint64_t length = 0;
+    HANDLE file = (HANDLE)RayoMd::File::OpenRegular(std::filesystem::path(path), length);
     if (file == INVALID_HANDLE_VALUE) return file;
-    LARGE_INTEGER length = {};
-    if (!GetFileSizeEx(file, &length) || length.QuadPart <= 0 || length.QuadPart > 64LL * 1024LL * 1024LL) {
+    if (length == 0 || length > 64u * 1024u * 1024u) {
         CloseHandle(file);
         return INVALID_HANDLE_VALUE;
     }
-    size = (size_t)length.QuadPart;
+    size = (size_t)length;
     return file;
 }
 
@@ -353,15 +353,15 @@ public:
 #else
     bool Load(const std::string& path) {
         clear();
-        int file = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        // A regular file only, opened without waiting on a FIFO (RayoMd::File::OpenRegular).
+        uint64_t length = 0;
+        int file = RayoMd::File::OpenRegular(std::filesystem::path(path), length);
         if (file < 0) return false;
-        struct stat info {};
-        if (fstat(file, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0 ||
-            info.st_size > 64LL * 1024LL * 1024LL) {
+        if (length == 0 || length > 64u * 1024u * 1024u) {
             close(file);
             return false;
         }
-        size_t size = (size_t)info.st_size;
+        size_t size = (size_t)length;
         void* mapped = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, file, 0);
         if (mapped != MAP_FAILED) {
             close(file);

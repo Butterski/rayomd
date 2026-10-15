@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Needs <atomic>, <chrono>, <filesystem>, <iostream>, <string>, <thread>, <vector>,
-// rayomd/tiny_pdf.h and src/core/flate.h.
+// Needs <atomic>, <chrono>, <filesystem>, <functional>, <iostream>, <string>, <thread>, <vector>,
+// rayomd/tiny_pdf.h, src/common/file_io.h and src/core/flate.h; on POSIX <fcntl.h>, <sys/stat.h>
+// and <unistd.h>.
 // Hostile and abandoned builds: cancellation (PdfOptions::cancel), files that are no regular
 // files, fonts changed after they were read, deep composite glyphs, image containment, the
 // decode budget and the image cache's permissions. Included inside the anonymous namespace of
@@ -174,8 +175,91 @@ bool CheckCancel() {
     return ok;
 }
 
+// A FIFO, which blocks whoever opens it for reading until a writer comes, as a document's image, a
+// theme's font and logo, and through RayoMd::File::ReadAll and Open: each read fails at once, as
+// for any file that is not a regular file (a directory, a device), instead of waiting.
+bool CheckSpecialFiles() {
+#ifdef _WIN32
+    return true;
+#else
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-special";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    const fs::path fifo = root / "pipe.png";
+    const fs::path fontFifo = root / "pipe.ttf";
+    if (::mkfifo(fifo.c_str(), 0600) != 0 || ::mkfifo(fontFifo.c_str(), 0600) != 0) {
+        std::cerr << "mkfifo failed" << std::endl;
+        return false;
+    }
+    bool ok = true;
+    // Runs `step` on a thread; one still running after 5 s waits on the FIFO, which a writer
+    // opened here then releases.
+    const auto quickly = [&](const char* what, const std::function<bool()>& step) {
+        std::atomic<bool> done{ false };
+        bool passed = false;
+        std::thread worker([&]() { passed = step(); done = true; });
+        const auto start = std::chrono::steady_clock::now();
+        while (!done && MillisecondsSince(start) < 5000.0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!done) {
+            for (const fs::path& path : { fifo, fontFifo }) {
+                const int writer = ::open(path.c_str(), O_WRONLY | O_NONBLOCK);
+                if (writer >= 0) ::close(writer);
+            }
+            std::cerr << what << " waited on a FIFO" << std::endl;
+        }
+        worker.join();
+        if (!passed) std::cerr << what << " did not fail as a file that is no regular file" << std::endl;
+        ok = ok && done && passed;
+    };
+    TinyPdf::PdfOptions options;
+    options.sourcePath = (root / "doc.md").u8string();
+    quickly("an image", [&]() {
+        std::string pdf;
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf("![pipe](pipe.png)\n", options, pdf);
+        return result.Ok() && result.failedImages == 1;
+    });
+    quickly("a theme's logo", [&]() {
+        TinyPdf::PdfOptions themed = options;
+        themed.theme.logoPath = fifo.u8string();
+        themed.theme.headerLeft = "{logo}";
+        std::string pdf;
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf("# Logo\n", themed, pdf);
+        return result.Ok() && result.failedImages == 1;
+    });
+    quickly("a theme's font", [&]() {
+        TinyPdf::PdfOptions themed = options;
+        themed.theme.fontPath = fontFifo.u8string();
+        std::string pdf;
+        return TinyPdf::BuildPdf("# Font\n", themed, pdf).error == TinyPdf::BuildError::ThemeFontUnavailable;
+    });
+    quickly("ReadAll and Open", [&]() {
+        std::string text;
+        std::FILE* file = RayoMd::File::Open(fifo, "rb");
+        if (file) std::fclose(file);
+        return !RayoMd::File::ReadAll(fifo, 1024, text) && file == nullptr && !RayoMd::File::ReadAll(root, 1024, text) &&
+            !RayoMd::File::ReadAll("/dev/zero", 1024, text);
+    });
+    // Close-on-exec, so no descriptor leaks into a child process.
+    std::FILE* written = RayoMd::File::Open(root / "out.txt", "wb");
+    std::FILE* read = written ? (std::fclose(written), RayoMd::File::Open(root / "out.txt", "rb")) : nullptr;
+    if (!read || (::fcntl(::fileno(read), F_GETFD) & FD_CLOEXEC) == 0) {
+        std::cerr << "RayoMD::File::Open left a descriptor inheritable" << std::endl;
+        ok = false;
+    }
+    if (read) std::fclose(read);
+    written = RayoMd::File::Open(root / "out.txt", "wb");
+    if (!written || (::fcntl(::fileno(written), F_GETFD) & FD_CLOEXEC) == 0) {
+        std::cerr << "RayoMD::File::Open left a descriptor inheritable" << std::endl;
+        ok = false;
+    }
+    if (written) std::fclose(written);
+    fs::remove_all(root);
+    return ok;
+#endif
+}
+
 bool CheckHardening() {
-    return CheckCancel();
+    return CheckCancel() && CheckSpecialFiles();
 }
 
 } // namespace hardening_tests
