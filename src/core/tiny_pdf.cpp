@@ -12020,6 +12020,11 @@ RAYOMD_COLD static std::shared_ptr<const TtfFont> ThemeFont(const std::string& p
     };
     static std::mutex mutex;
     static std::map<std::string, Entry> fonts;
+#ifdef _WIN32
+    // Theme fonts are local files, as ResolveThemeFile's logo is: checked before the stamp, whose
+    // stat would already reach a share.
+    if (!Internal::IsLocalThemeFile(pathUtf8)) return nullptr;
+#endif
     const RayoMd::File::Stamp stamp = RayoMd::File::StampOf(PathFromUtf8(pathUtf8));
     std::lock_guard<std::mutex> lock(mutex);
     auto found = fonts.find(pathUtf8);
@@ -12027,8 +12032,7 @@ RAYOMD_COLD static std::shared_ptr<const TtfFont> ThemeFont(const std::string& p
     // TtfFont's own operator new (calloc): its width cache must start zeroed, so no make_shared.
     std::shared_ptr<TtfFont> font(new TtfFont());
 #ifdef _WIN32
-    // Theme fonts are local files, as ResolveThemeFile's logo is.
-    if (!Internal::IsLocalThemeFile(pathUtf8) || !font->TryLoad(Utf8ToWide(pathUtf8))) font.reset();
+    if (!font->TryLoad(Utf8ToWide(pathUtf8))) font.reset();
 #else
     if (!font->TryLoad(pathUtf8)) font.reset();
 #endif
