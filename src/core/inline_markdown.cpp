@@ -24,24 +24,6 @@ std::string_view TrimView(std::string_view value) {
     return value;
 }
 
-void ReplaceAll(std::string& value, const char* from, const char* to) {
-    size_t position = 0;
-    size_t fromLength = std::char_traits<char>::length(from);
-    while ((position = value.find(from, position)) != std::string::npos) {
-        value.replace(position, fromLength, to);
-        position += std::char_traits<char>::length(to);
-    }
-}
-
-std::string NormalizeSymbols(std::string value) {
-    if (value.find('\xE2') == std::string::npos) return value;
-    ReplaceAll(value, "\xE2\x9C\x85", "[OK]");
-    ReplaceAll(value, "\xE2\x9A\xA0\xEF\xB8\x8F", "[!]");
-    ReplaceAll(value, "\xE2\x9A\xA0", "[!]");
-    ReplaceAll(value, "\xE2\x9D\x8C", "[X]");
-    return value;
-}
-
 // Whether the inline parser on this thread writes character references as WinAnsi codes.
 thread_local bool tWinAnsiReferences = false;
 
@@ -50,6 +32,9 @@ thread_local bool tWinAnsiReferences = false;
 // can grow or shrink when it is normalized, but not to less than a third of its bytes.
 thread_local const std::unordered_map<std::string, int>* tFootnoteLabels = nullptr;
 thread_local size_t tFootnoteLabelBytes = 0;
+
+// The budget of the document ParseMarkdown is parsing on this thread, or null.
+thread_local ParseBudget* tParseBudget = nullptr;
 
 // The longest name is "thetasym": names in place, without a pointer to relocate each.
 struct NamedReference {
@@ -311,8 +296,10 @@ size_t FindDestinationEnd(std::string_view source, size_t openParen) {
 
 // Appends the destination of a link target to `urls`, unescaped and with its character
 // references decoded: the text between angle brackets, or else the text up to the first
-// space. Appends nothing when there is none.
-void AppendDestination(std::string_view target, std::string& urls) {
+// space. Appends nothing when there is none, or when Html::SafeUrl refuses it (javascript:,
+// file:, ...): the link's text then links nowhere.
+RAYOMD_NOINLINE void AppendDestination(std::string_view target, std::string& urls) {
+    const size_t begin = urls.size();
     target = TrimView(target);
     if (target.empty()) return;
     std::string_view value;
@@ -338,6 +325,7 @@ void AppendDestination(std::string_view target, std::string& urls) {
             urls.push_back(value[i]);
         }
     }
+    if (!Html::SafeUrl(std::string_view(urls).substr(begin))) urls.resize(begin);
 }
 
 // What the HTML tags of a paragraph have opened so far: counters of the open elements by effect,
@@ -1462,6 +1450,19 @@ FootnoteLabels::~FootnoteLabels() {
     tFootnoteLabelBytes = previousBytes;
 }
 
+ParseBudget::ParseBudget(size_t sourceBytes)
+    : referenceBytes(2 * sourceBytes + kReferenceSlackBytes), previous(tParseBudget) {
+    tParseBudget = this;
+}
+
+ParseBudget::~ParseBudget() {
+    tParseBudget = previous;
+}
+
+ParseBudget* ParseBudget::Current() {
+    return tParseBudget;
+}
+
 std::string NormalizeReferenceLabel(std::string_view label) {
     label = TrimView(label);
     std::string normalized;
@@ -1483,6 +1484,16 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
     if (definitions.empty() || input.find('[') == std::string_view::npos) return std::string(input);
     std::string output;
     output.reserve(input.size());
+    // The destination bytes this text may still copy in: its document's budget, or outside a
+    // parse one of its own. A reference past it stays text.
+    ParseBudget* const budget = ParseBudget::Current();
+    size_t ownBytes = 2 * input.size() + ParseBudget::kReferenceSlackBytes;
+    size_t& bytesLeft = budget != nullptr ? budget->referenceBytes : ownBytes;
+    const auto affordable = [&](const ReferenceDefinition& definition) {
+        if (definition.destination.size() > bytesLeft) return false;
+        bytesLeft -= definition.destination.size();
+        return true;
+    };
     // First ']' at or after `from`: one search serves every '[' in front of the same bracket.
     size_t bracketFrom = std::string_view::npos;
     size_t bracketAt = std::string_view::npos;
@@ -1541,7 +1552,7 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
             const auto found = label.empty() || input.find('[', labelStart + 1) < close
                 ? definitions.end()
                 : definitions.find(NormalizeReferenceLabel(label));
-            if (found == definitions.end()) {
+            if (found == definitions.end() || !affordable(found->second)) {
                 output.push_back(input[i++]);
                 continue;
             }
@@ -1558,7 +1569,7 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
         std::string_view referenceLabel = input.substr(cursor + 1, referenceClose - cursor - 1);
         if (referenceLabel.empty()) referenceLabel = visible;
         auto found = definitions.find(NormalizeReferenceLabel(referenceLabel));
-        if (found == definitions.end()) {
+        if (found == definitions.end() || !affordable(found->second)) {
             size_t unresolvedEnd = referenceClose + 1;
             output.append(input.substr(i, unresolvedEnd - i));
             i = unresolvedEnd;
@@ -1578,6 +1589,40 @@ static RAYOMD_NOINLINE void AppendLinkText(std::string_view label, RunWriter& wr
     InlineRuns runs;
     ParseInlineRuns(label, runs, false);
     writer.LinkText(runs, urlBegin, bold, italic, strike);
+}
+
+std::string NormalizeSymbols(std::string text) {
+    size_t at = text.find('\xE2');
+    if (at == std::string::npos) return text;
+    // One pass into a new string: replacing in place moved the rest of the text for every symbol,
+    // quadratic in a paragraph of them. Each symbol starts with the only 0xE2 it holds and
+    // becomes ASCII, so one pass finds what replacing symbol by symbol found.
+    std::string out;
+    size_t copied = 0;
+    for (; at != std::string::npos; at = text.find('\xE2', at)) {
+        const std::string_view rest(text.data() + at, text.size() - at);
+        std::string_view replacement;
+        size_t length = 3;
+        if (rest.compare(0, 3, "\xE2\x9C\x85") == 0) {
+            replacement = "[OK]";
+        } else if (rest.compare(0, 3, "\xE2\x9A\xA0") == 0) {
+            replacement = "[!]";
+            if (rest.compare(3, 3, "\xEF\xB8\x8F") == 0) length = 6;
+        } else if (rest.compare(0, 3, "\xE2\x9D\x8C") == 0) {
+            replacement = "[X]";
+        } else {
+            at++;
+            continue;
+        }
+        if (copied == 0) out.reserve(text.size() + text.size() / 3);
+        out.append(text, copied, at - copied);
+        out.append(replacement);
+        at += length;
+        copied = at;
+    }
+    if (copied == 0) return text;
+    out.append(text, copied, std::string::npos);
+    return out;
 }
 
 void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath, size_t lookaheadBudget) {

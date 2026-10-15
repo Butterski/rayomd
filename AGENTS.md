@@ -187,6 +187,12 @@ Important image/link details:
   closed: SVG input is untrusted.
 - Links are emitted as PDF annotations; keep visible text and annotation rects
   aligned when changing wrapping or text layout.
+- Every link target goes through `Html::SafeUrl` before it can become a `/URI`: Markdown inline
+  links and resolved references (`ParseInlineRuns`), linked image blocks (`ParseStandaloneImage`,
+  `ParseImageAt`) and HTML `<a href>`. A refused one (`javascript:`, `vbscript:`, `data:`,
+  `file:`, a drive path, a `\\host` share) keeps its text without an annotation. Bare URLs and
+  `<…>` autolinks are `http(s)` or `mailto:` by construction. A new way to make a link must call
+  it too.
 - Headings make the PDF outline, and `#anchor` links go to them by GitHub's
   anchor rules (`HeadingTargets`) with explicit destinations; a link to a missing
   anchor is dropped. Renderers note a heading where its first line lands
@@ -437,7 +443,8 @@ Important image/link details:
   `tests/math_markdown_tests.inc`, `tests/math_parser_tests.inc`,
   `tests/math_layout_tests.inc`, and `tests/no_math_golden.inc`, which it includes;
   `tests/inline_lookahead_tests.inc` holds the checks of the inline parser's
-  look-ahead tables.
+  look-ahead tables, `tests/parse_limits_tests.inc` the parser's limits on hostile input
+  (`CheckParseLimits`) and the golden digests of what they must leave alone.
 
 - tools/benchmark.py
   Maintained entry point for run, A/B (warm engine and fresh process),
@@ -593,6 +600,14 @@ GitHub CI entry points:
   thousands of unterminated openers becomes quadratic again. Matchers outside it
   (bare URLs, shortcut references) must fail in constant time or never rescan
   text: `CheckInlineLookahead` holds a megabyte of `http://(` and 120,000 `[`.
+- What the parser adds to a document beyond its text is bounded for the whole document by
+  `ParseBudget` (`inline_markdown.h`), which `ParseMarkdown` keeps for its thread and every
+  nested level and footnote shares, so nesting cannot multiply it: the destination bytes resolved
+  references copy in (twice the document and 1 MiB; a definition's destination has at most
+  `kMaxReferenceDestinationBytes`) and the empty cells that complete short table rows (2^19, as
+  in cmark-gfm; a table header has at most `kMaxTableColumns` cells). Past a budget the input
+  stays text. A new expansion that copies or pads must draw on it. Rewrites of text go into a new
+  buffer in one pass (`NormalizeSymbols`), never `std::string::replace` in a loop.
 - Prefer measured changes over plausible micro-optimizations.
 - `src/core/tiny_pdf.cpp` sits at GCC's `-O3` inline-unit-growth limit, so any edit
   can move which hot calls get inlined. Profile the hot paths after a change; mark

@@ -87,8 +87,42 @@ struct ReferenceDefinition {
 
 using ReferenceDefinitions = std::unordered_map<std::string, ReferenceDefinition>;
 
+// The longest destination a link reference definition may have; a line with a longer one is no
+// definition but text. Every use of a reference copies its destination.
+constexpr size_t kMaxReferenceDestinationBytes = 8192;
+
+// What the parse of one document may add to its text, shared by all its levels and footnotes so
+// that nesting cannot multiply it: the destination bytes resolved reference links copy in, at most
+// twice the document's size and a mebibyte (a reference past that stays text), and the empty
+// cells that complete pipe-table rows shorter than their header, at most 2^19 as in cmark-gfm (a
+// row past that ends its table). ParseMarkdown keeps one for its thread while it runs; text parsed
+// outside one gets those budgets for itself.
+class ParseBudget {
+public:
+    static constexpr size_t kReferenceSlackBytes = size_t(1) << 20;
+    static constexpr size_t kPaddedCells = size_t(1) << 19;
+
+    explicit ParseBudget(size_t sourceBytes);
+    ~ParseBudget();
+    ParseBudget(const ParseBudget&) = delete;
+    ParseBudget& operator=(const ParseBudget&) = delete;
+    // The budget of the document being parsed on this thread, or null.
+    static ParseBudget* Current();
+
+    size_t referenceBytes;      // destination bytes reference links may still copy in
+    size_t paddedCells = kPaddedCells;  // empty cells short table rows may still get
+
+private:
+    ParseBudget* previous;
+};
+
 std::string NormalizeReferenceLabel(std::string_view label);
+// "[text][label]", "[label][]" and "[label]" (also as images) with a defined label as the inline
+// links "[text](<destination>)", within the ParseBudget.
 std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinitions& definitions);
+// The status symbols U+2705, U+26A0 (with or without the variation selector U+FE0F) and U+274C
+// as "[OK]", "[!]" and "[X]", which the standard fonts can show; in one pass.
+std::string NormalizeSymbols(std::string text);
 // recognizeMath == false keeps every '$' and "\(" literal. It exists for text that has
 // already been through the inline parser once and is only being re-read as plain text.
 //

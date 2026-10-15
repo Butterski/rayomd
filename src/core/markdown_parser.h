@@ -99,7 +99,6 @@ struct Footnotes {
 };
 
 std::vector<std::string> SplitLines(const std::string& text);
-std::string NormalizeSymbols(std::string text);
 std::string StripInlineMarkdown(std::string_view input, bool recognizeMath = true);
 // Like StripInlineMarkdown, but keeps formulas as kMathTextOpen + TeX + kMathTextClose.
 // When the input has no formula the result is byte-identical to StripInlineMarkdown
