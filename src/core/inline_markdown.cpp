@@ -33,6 +33,9 @@ thread_local bool tWinAnsiReferences = false;
 thread_local const std::unordered_map<std::string, int>* tFootnoteLabels = nullptr;
 thread_local size_t tFootnoteLabelBytes = 0;
 
+// The budget of the document ParseMarkdown is parsing on this thread, or null.
+thread_local ParseBudget* tParseBudget = nullptr;
+
 // The longest name is "thetasym": names in place, without a pointer to relocate each.
 struct NamedReference {
     char name[9];
@@ -1444,6 +1447,19 @@ FootnoteLabels::~FootnoteLabels() {
     tFootnoteLabelBytes = previousBytes;
 }
 
+ParseBudget::ParseBudget(size_t sourceBytes)
+    : referenceBytes(2 * sourceBytes + kReferenceSlackBytes), previous(tParseBudget) {
+    tParseBudget = this;
+}
+
+ParseBudget::~ParseBudget() {
+    tParseBudget = previous;
+}
+
+ParseBudget* ParseBudget::Current() {
+    return tParseBudget;
+}
+
 std::string NormalizeReferenceLabel(std::string_view label) {
     label = TrimView(label);
     std::string normalized;
@@ -1465,6 +1481,16 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
     if (definitions.empty() || input.find('[') == std::string_view::npos) return std::string(input);
     std::string output;
     output.reserve(input.size());
+    // The destination bytes this text may still copy in: its document's budget, or outside a
+    // parse one of its own. A reference past it stays text.
+    ParseBudget* const budget = ParseBudget::Current();
+    size_t ownBytes = 2 * input.size() + ParseBudget::kReferenceSlackBytes;
+    size_t& bytesLeft = budget != nullptr ? budget->referenceBytes : ownBytes;
+    const auto affordable = [&](const ReferenceDefinition& definition) {
+        if (definition.destination.size() > bytesLeft) return false;
+        bytesLeft -= definition.destination.size();
+        return true;
+    };
     // First ']' at or after `from`: one search serves every '[' in front of the same bracket.
     size_t bracketFrom = std::string_view::npos;
     size_t bracketAt = std::string_view::npos;
@@ -1523,7 +1549,7 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
             const auto found = label.empty() || input.find('[', labelStart + 1) < close
                 ? definitions.end()
                 : definitions.find(NormalizeReferenceLabel(label));
-            if (found == definitions.end()) {
+            if (found == definitions.end() || !affordable(found->second)) {
                 output.push_back(input[i++]);
                 continue;
             }
@@ -1540,7 +1566,7 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
         std::string_view referenceLabel = input.substr(cursor + 1, referenceClose - cursor - 1);
         if (referenceLabel.empty()) referenceLabel = visible;
         auto found = definitions.find(NormalizeReferenceLabel(referenceLabel));
-        if (found == definitions.end()) {
+        if (found == definitions.end() || !affordable(found->second)) {
             size_t unresolvedEnd = referenceClose + 1;
             output.append(input.substr(i, unresolvedEnd - i));
             i = unresolvedEnd;

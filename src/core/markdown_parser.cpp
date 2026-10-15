@@ -770,7 +770,7 @@ static bool ParseReferenceDefinition(const std::vector<std::string_view>& lines,
         while (cursor < rest.size() && !IsSpace(rest[cursor])) cursor++;
         destination = rest.substr(0, cursor);
     }
-    if (destination.empty()) return false;
+    if (destination.empty() || destination.size() > kMaxReferenceDestinationBytes) return false;
     definition.destination = UnescapeMarkdownDestination(destination);
     definition.title.clear();
     std::string_view trailing = TrimView(rest.substr(cursor));
@@ -1635,6 +1635,7 @@ std::vector<Block> ParseMarkdownLevel(const std::string& markdown, int depth, Fo
 }
 
 std::vector<Block> ParseMarkdown(const std::string& markdown, Footnotes* footnotes) {
+    const ParseBudget budget(markdown.size());
     return footnotes == nullptr ? ParseMarkdownImpl(markdown, 0, nullptr) : ParseWithFootnotes(markdown, *footnotes);
 }
 
