@@ -212,6 +212,12 @@ Important image/link details:
   decode pixels must charge it.
 - Links are emitted as PDF annotations; keep visible text and annotation rects
   aligned when changing wrapping or text layout.
+- A link's target is one `SharedUrl` (`shared_url.h`) for all its spans, words, lines and
+  rectangles; the fast paths' runs hold views into their parse, which `RunLinkUrls` copies once a
+  link (by view and `NextRunsParse` id). Never copy a target per piece: a 100 KB URL over 100 KB of
+  link text took 580 MB (14.6 GB with styled text). Targets of `kSharedActionUrlBytes` (1 KiB) or
+  more are written once, as a URI action object every annotation of the link names; shorter ones
+  stay inside each annotation, so ordinary documents keep their bytes.
 - Every link target goes through `Html::SafeUrl` before it can become a `/URI`: Markdown inline
   links and resolved references (`ParseInlineRuns`), linked image blocks (`ParseStandaloneImage`,
   `ParseImageAt`) and HTML `<a href>`. A refused one (`javascript:`, `vbscript:`, `data:`,

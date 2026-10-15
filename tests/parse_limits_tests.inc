@@ -250,7 +250,7 @@ bool CheckLinkSchemes() {
         std::string visible;
         for (const InlineSpan& span : TinyPdf::Internal::ParseInlineSpans(text)) {
             if (!span.url.empty()) {
-                std::cerr << "unsafe Markdown link made: " << text << " -> " << span.url << std::endl;
+                std::cerr << "unsafe Markdown link made: " << text << " -> " << span.url.View() << std::endl;
                 return false;
             }
             visible += span.text;

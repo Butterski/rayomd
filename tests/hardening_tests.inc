@@ -5,8 +5,8 @@
 // and <unistd.h>.
 // Hostile and abandoned builds: cancellation (PdfOptions::cancel), files that are no regular
 // files, fonts changed after they were read, deep composite glyphs, image containment, the
-// decode budget and the image cache's permissions. Included inside the anonymous namespace of
-// tests/core_tests.cpp.
+// decode budget, the image cache's permissions and long link targets. Included inside the
+// anonymous namespace of tests/core_tests.cpp.
 
 namespace hardening_tests {
 
@@ -855,10 +855,104 @@ bool CheckCffSubsetBound() {
     return true;
 }
 
+// A long link target over long link text: one copy of the target for every piece of the text
+// (span, word, line) and in every annotation (one a line) made a 100 KB label with a 100 KB URL
+// a 118 MB PDF and 580 MB of memory, 14.6 GB with styles alternating in the label. The target is
+// now held once, and from 1 KiB on written once, as a URI action every annotation of the link
+// names; a shorter one stays inside each annotation. Both renderers (the second document of each
+// pair has a character outside WinAnsi), plain and styled labels, PDF/A and PDF/UA.
+bool CheckLongLinkTarget() {
+    const auto target = [](size_t bytes, char fill) { return "https://example.com/" + std::string(bytes - 20, fill); };
+    // The number of /A references to object `id`, and the id of the first /A reference.
+    const auto actionRefs = [](const std::string& pdf, std::string& first) {
+        const size_t at = pdf.find(" /A ");
+        if (at == std::string::npos || pdf.compare(at + 4, 2, "<<") == 0) return size_t(0);
+        first = pdf.substr(at, pdf.find(" R", at) + 2 - at);
+        return CountOccurrences(pdf, first);
+    };
+    std::string words;
+    for (int i = 0; i < 20000; i++) words += "word ";
+    std::string styled;
+    for (int i = 0; i < 25000; i++) styled += "*a*b";
+    const std::string url = target(100000, 'u');
+    bool ok = true;
+    for (const char* prefix : { "", "\xC5\xBC " }) {
+        for (const bool math : { false, true }) {
+            const std::string label = math ? styled : words;
+            const std::string head = std::string(prefix) + (math ? "$x$ " : "");
+            const std::string markdown = head + "[" + label + "](" + url + ")\n";
+            for (int mode = 0; mode < 3; mode++) {
+                TinyPdf::PdfOptions options;
+                options.pdfa = mode == 1;
+                options.pdfua = mode == 2;
+                std::string pdf;
+                TinyPdf::BuildResult result;
+                const auto start = std::chrono::steady_clock::now();
+                const bool bounded = parse_limits_tests::Bounded("long link target", 10.0, 64, [&]() {
+                    result = TinyPdf::BuildPdf(markdown, options, pdf);
+                    return result.Ok();
+                });
+                const double ms = MillisecondsSince(start);
+                std::string reference;
+                TinyPdf::BuildPdf(head + "[" + label + "](https://example.com/)\n", options, reference);
+                std::string action;
+                const size_t annotations = CountOccurrences(pdf, "/Subtype /Link");
+                const size_t refs = actionRefs(pdf, action);
+                if (mode == 0) {
+                    std::cout << "long link target" << (*prefix ? " (Unicode)" : "") << (math ? ", styled label" : "")
+                              << ": " << pdf.size() << " bytes of PDF (" << reference.size() << " with a short URL) for "
+                              << markdown.size() << " of Markdown, " << annotations << " annotations, " << ms << " ms"
+                              << std::endl;
+                }
+                if (!bounded || !ValidPdf(pdf) || annotations < 100 || refs != annotations ||
+                    CountOccurrences(pdf, url) != 1 || CountOccurrences(pdf, "/S /URI") != 1 ||
+                    pdf.size() > reference.size() + url.size() + annotations * 64 + 65536) {
+                    std::cerr << "a long link target over " << annotations << " lines (mode " << mode << ", prefix '"
+                              << prefix << "', math " << math << ") made " << pdf.size() << " bytes, " << refs
+                              << " references to one action" << std::endl;
+                    ok = false;
+                }
+            }
+        }
+    }
+    // From kSharedActionUrlBytes (1024) on, one action; below, a target in each annotation, as before.
+    for (const size_t bytes : { size_t(1023), size_t(1024) }) {
+        const std::string link = target(bytes, 'v');
+        const std::string markdown = "[" + words.substr(0, 4000) + "](" + link + ")\n";
+        std::string pdf;
+        std::string action;
+        const bool built = TinyPdf::BuildPdf(markdown, TinyPdf::PdfOptions(), pdf).Ok();
+        const size_t annotations = CountOccurrences(pdf, "/Subtype /Link");
+        const bool shared = bytes >= 1024;
+        if (!built || annotations < 5 || CountOccurrences(pdf, link) != (shared ? 1 : annotations) ||
+            CountOccurrences(pdf, "/S /URI") != (shared ? 1 : annotations) ||
+            actionRefs(pdf, action) != (shared ? annotations : 0)) {
+            std::cerr << "a link target of " << bytes << " bytes is not written as before" << std::endl;
+            ok = false;
+        }
+    }
+    // Paragraphs and table cells with long targets of one length: each its own target, though the
+    // parse of the next may reuse the memory of the one before.
+    std::string several;
+    for (const char fill : { 'p', 'q', 'r' }) several += "[" + words.substr(0, 2000) + "](" + target(4096, fill) + ")\n\n";
+    several += "| a | b |\n|---|---|\n";
+    for (const char fill : { 's', 't' }) several += "| [*x* y](" + target(4096, fill) + ") | [z](" + target(4096, (char)(fill + 2)) + ") |\n";
+    for (const char* prefix : { "", "\xC5\xBC\n\n" }) {
+        std::string pdf;
+        bool good = TinyPdf::BuildPdf(prefix + several, TinyPdf::PdfOptions(), pdf).Ok();
+        for (const char fill : { 'p', 'q', 'r', 's', 't', 'u', 'v' }) good = good && CountOccurrences(pdf, target(4096, fill)) == 1;
+        if (!good || CountOccurrences(pdf, "/S /URI") != 7) {
+            std::cerr << "long link targets of several paragraphs and cells are mixed up" << std::endl;
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
         CheckImageContainment() && CheckCachePermissions() && CheckDecodeBudget() && CheckInvalidUtf8Names() &&
-        CheckOverlappingGlyphs() && CheckCffSubsetBound();
+        CheckOverlappingGlyphs() && CheckCffSubsetBound() && CheckLongLinkTarget();
 }
 
 } // namespace hardening_tests

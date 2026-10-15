@@ -80,7 +80,7 @@ std::string Plain(const std::string& text) {
 void AddLinks(const std::string& text, int depth, bool firstOnly, Summary& summary) {
     const std::vector<TinyPdf::Internal::InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(text, false);
     for (size_t at = 0; at < spans.size();) {
-        const std::string& url = spans[at].url;
+        const std::string_view url = spans[at].url;
         if (url.empty()) {
             at++;
             continue;
