@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "rayomd/tiny_pdf.h"
+#include "access_policy.h"
 #include "flate.h"
 #include "export_options.h"
 #include "rayomd_pdf_source.h"
@@ -48,6 +49,8 @@
 #include <atomic>
 #include <array>
 #include <charconv>
+#include <chrono>
+#include <climits>
 #include <cmath>
 #include <cctype>
 #include <cstdint>
@@ -2224,11 +2227,49 @@ static bool TryApprovedNtRootForPolicy(
     return true;
 }
 
+// Whether a directory between `root` and the file `path` names, which lies in it by name, is a
+// symbolic link, junction or mount point (name surrogates): they may lead off the root, to a
+// share even, and are checked here by their entries, never followed. Other reparse points, such
+// as cloud-file placeholders, are plain folders to this test. A missing directory counts as one.
+static bool DirectPathHasLink(const std::filesystem::path& root, const std::filesystem::path& path) {
+    auto part = path.begin();
+    for (auto rootPart = root.begin(); rootPart != root.end() && part != path.end(); ++rootPart) ++part;
+    std::filesystem::path current = root;
+    for (; part != path.end() && std::next(part) != path.end(); ++part) {
+        current /= *part;
+        WIN32_FIND_DATAW entry{};
+        HANDLE find = FindFirstFileExW(current.c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch, nullptr, 0);
+        if (find == INVALID_HANDLE_VALUE) return true;
+        FindClose(find);
+        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 && IsReparseTagNameSurrogate(entry.dwReserved0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Opens `path`, in the approved root by name, without following a link: a file that is a
+// symbolic link (or another name surrogate) is rejected, so nothing outside the root, a share
+// least of all, is opened before the final-path check.
 static DirectLocalImageResult TryOpenDirectLocalImage(
     const std::filesystem::path& path, const std::wstring& approvedRoot,
     std::string& key, WinLocalImageFile& file) {
     HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        FILE_ATTRIBUTE_TAG_INFO tag{};
+        if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag, sizeof(tag))) {
+            CloseHandle(handle);
+            return DirectLocalImageResult::Rejected;
+        }
+        if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            CloseHandle(handle);
+            if (IsReparseTagNameSurrogate(tag.ReparseTag)) return DirectLocalImageResult::Rejected;
+            // A placeholder of a cloud file and the like: its data comes through a normal open.
+            handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        }
+    }
     if (handle == INVALID_HANDLE_VALUE) {
         DWORD error = ::GetLastError();
         return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
@@ -2448,6 +2489,11 @@ public:
         if (!safeRootDirect || safeRootNt.empty()) return DirectLocalImageResult::NotApplicable;
 
         std::filesystem::path path = (root / PathFromUtf8(src)).lexically_normal();
+        // In the root by name before anything is opened ("..", wildcards), and through no link.
+        if (path == root || !IsPathContainedInRoot(path, root, false) ||
+            path.native().find_first_of(L"*?") != std::wstring::npos || DirectPathHasLink(root, path)) {
+            return DirectLocalImageResult::Rejected;
+        }
         return TryOpenDirectLocalImage(path, safeRootNt, key, file);
     }
 #endif
@@ -2539,52 +2585,24 @@ static bool ReadLocalImageFile(const std::string& pathUtf8, std::vector<uint8_t>
 }
 
 #if defined(_WIN32) || defined(RAYOMD_USE_CURL)
-static bool IsUnsafeIpv4Address(uint32_t hostOrder) {
-    return (hostOrder >> 24) == 0 ||
-        (hostOrder >> 24) == 10 ||
-        (hostOrder >> 24) == 127 ||
-        (hostOrder >> 16) == 0xA9FEu ||
-        (hostOrder >> 20) == 0xAC1u ||
-        (hostOrder >> 16) == 0xC0A8u ||
-        (hostOrder >> 22) == 0x0192u ||
-        (hostOrder >> 28) == 0xEu ||
-        (hostOrder >> 28) == 0xFu ||
-        hostOrder == 0xFFFFFFFFu;
-}
-
-static bool IsUnsafeIpv6Address(const unsigned char* b) {
-    bool allZero = true;
-    for (int i = 0; i < 16; i++) allZero = allZero && b[i] == 0;
-    if (allZero) return true;
-
-    bool loopback = true;
-    for (int i = 0; i < 15; i++) loopback = loopback && b[i] == 0;
-    if (loopback && b[15] == 1) return true;
-
-    bool mappedV4 = true;
-    for (int i = 0; i < 10; i++) mappedV4 = mappedV4 && b[i] == 0;
-    if (mappedV4 && b[10] == 0xff && b[11] == 0xff) {
-        uint32_t mapped = ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16) |
-            ((uint32_t)b[14] << 8) | (uint32_t)b[15];
-        return IsUnsafeIpv4Address(mapped);
-    }
-
-    return (b[0] & 0xfe) == 0xfc ||
-        (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) ||
-        b[0] == 0xff;
-}
-
 static bool IsUnsafeSocketAddress(const sockaddr* address) {
     if (!address) return true;
     if (address->sa_family == AF_INET) {
         const sockaddr_in* ipv4 = reinterpret_cast<const sockaddr_in*>(address);
-        return IsUnsafeIpv4Address(ntohl(ipv4->sin_addr.s_addr));
+        return Internal::IsUnsafeIpv4Address(ntohl(ipv4->sin_addr.s_addr));
     }
     if (address->sa_family == AF_INET6) {
         const sockaddr_in6* ipv6 = reinterpret_cast<const sockaddr_in6*>(address);
-        return IsUnsafeIpv6Address(reinterpret_cast<const unsigned char*>(&ipv6->sin6_addr));
+        return Internal::IsUnsafeIpv6Address(reinterpret_cast<const unsigned char*>(&ipv6->sin6_addr));
     }
     return true;
+}
+
+// The milliseconds left until `deadline`, 0 once it has passed.
+static int RemainingMs(std::chrono::steady_clock::time_point deadline) {
+    const long long left =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+    return left <= 0 ? 0 : (int)std::min<long long>(left, INT_MAX);
 }
 #endif
 
@@ -2653,17 +2671,30 @@ static std::wstring ResolveRedirectUrl(const std::wstring& currentUrl, const std
     return base + path + location;
 }
 
-static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& bytes) {
+// Whether the server the request reached, after WinHttpReceiveResponse, is one URL images may
+// reach: WinHttpConnect resolved the host again, after IsFetchHostAllowed (DNS rebinding).
+static bool IsConnectedPeerAllowed(HINTERNET request) {
+    WINHTTP_CONNECTION_INFO info{};
+    info.cbSize = sizeof(info);
+    DWORD size = sizeof(info);
+    return WinHttpQueryOption(request, WINHTTP_OPTION_CONNECTION_INFO, &info, &size) &&
+        !IsUnsafeSocketAddress(reinterpret_cast<const sockaddr*>(&info.RemoteAddress));
+}
+
+// One request a hop, up to 5 redirects, each checked again; no cookies, never the user's
+// credentials; the first error or status other than 2xx and 3xx ends the fetch, and so does
+// `deadline`, which bounds every wait.
+static bool FetchUrlBytesPlatform(const std::string& url, std::chrono::steady_clock::time_point deadline,
+    std::vector<uint8_t>& bytes) {
     std::wstring currentUrl = Utf8ToWide(url);
     if (currentUrl.empty()) return false;
 
     HINTERNET session = WinHttpOpen(L"RayoMD/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return false;
-    WinHttpSetTimeouts(session, 5000, 5000, 8000, 15000);
 
     bool ok = false;
-    for (int redirect = 0; redirect < 6 && !ok; redirect++) {
+    for (int redirect = 0; redirect < 6; redirect++) {
         URL_COMPONENTSW parts = {};
         parts.dwStructSize = sizeof(parts);
         parts.dwSchemeLength = (DWORD)-1;
@@ -2678,6 +2709,8 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
         if (parts.dwExtraInfoLength > 0) path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
         if (path.empty()) path = L"/";
         if (!IsFetchHostAllowed(host)) break;
+        const int left = RemainingMs(deadline);
+        if (left == 0) break;
 
         HINTERNET connect = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
         if (!connect) break;
@@ -2690,11 +2723,18 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
             break;
         }
 
+        WinHttpSetTimeouts(request, std::min(left, 5000), std::min(left, 5000), std::min(left, 8000),
+            std::min(left, 15000));
         DWORD disableRedirects = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
         WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &disableRedirects, sizeof(disableRedirects));
+        DWORD disableCookies = WINHTTP_DISABLE_COOKIES;
+        WinHttpSetOption(request, WINHTTP_OPTION_DISABLE_FEATURE, &disableCookies, sizeof(disableCookies));
+        DWORD autologon = WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH;
+        WinHttpSetOption(request, WINHTTP_OPTION_AUTOLOGON_POLICY, &autologon, sizeof(autologon));
 
         bool gotResponse = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(request, nullptr);
+            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(request, nullptr) &&
+            IsConnectedPeerAllowed(request);
 
         DWORD status = 0;
         DWORD statusSize = sizeof(status);
@@ -2703,9 +2743,10 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
                 WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX);
         }
 
+        bool follow = false;
         if (status >= 200 && status < 300) {
             bytes.clear();
-            for (;;) {
+            while (RemainingMs(deadline) > 0) {
                 DWORD available = 0;
                 if (!WinHttpQueryDataAvailable(request, &available)) break;
                 if (available == 0) {
@@ -2728,15 +2769,14 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
                 WINHTTP_HEADER_NAME_BY_INDEX, &location[0], &locationSize, WINHTTP_NO_HEADER_INDEX)) {
                 location.resize(wcslen(location.c_str()));
                 std::wstring next = ResolveRedirectUrl(currentUrl, location);
-                if (!next.empty() && next != currentUrl) currentUrl = std::move(next);
-                else redirect = 6;
-            } else {
-                redirect = 6;
+                follow = !next.empty() && next != currentUrl;
+                if (follow) currentUrl = std::move(next);
             }
         }
 
         WinHttpCloseHandle(request);
         WinHttpCloseHandle(connect);
+        if (!follow) break;
     }
 
     WinHttpCloseHandle(session);
@@ -2768,7 +2808,10 @@ static curl_socket_t CurlOpenSocketChecked(void*, curlsocktype purpose, struct c
     return socket(address->family, address->socktype, address->protocol);
 }
 
-static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& bytes) {
+static bool FetchUrlBytesPlatform(const std::string& url, std::chrono::steady_clock::time_point deadline,
+    std::vector<uint8_t>& bytes) {
+    const int left = RemainingMs(deadline);
+    if (left == 0) return false;
     static bool curlReady = []() { return curl_global_init(CURL_GLOBAL_DEFAULT) == 0; }();
     if (!curlReady) return false;
 
@@ -2789,8 +2832,8 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
     curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, CurlOpenSocketChecked);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 15000L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)std::min(left, 5000));
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)left);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "RayoMD/1.0");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteImageBytes);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
@@ -2802,14 +2845,32 @@ static bool FetchUrlBytesPlatform(const std::string& url, std::vector<uint8_t>& 
     return result == CURLE_OK && !buffer.tooLarge && status >= 200 && status < 300 && !bytes.empty();
 }
 #else
-static bool FetchUrlBytesPlatform(const std::string&, std::vector<uint8_t>&) {
+static bool FetchUrlBytesPlatform(const std::string&, std::chrono::steady_clock::time_point, std::vector<uint8_t>&) {
     return false;
 }
 #endif
 
-static bool FetchUrlBytes(const std::string& src, const PdfOptions& options, std::vector<uint8_t>& bytes) {
+// The time a build's URL images may take: each at most kUrlFetchTime, redirects included, and
+// all of them together kBuildUrlFetchTime from the first; after that, later URL images of the
+// build show their alt text without a request.
+constexpr std::chrono::milliseconds kUrlFetchTime{20000};
+constexpr std::chrono::milliseconds kBuildUrlFetchTime{60000};
+
+struct UrlFetchBudget {
+    std::chrono::steady_clock::time_point end{};
+    bool started = false;
+};
+
+RAYOMD_COLD static bool FetchUrlBytes(const std::string& src, const PdfOptions& options, UrlFetchBudget& budget,
+    std::vector<uint8_t>& bytes) {
     if (!options.enableUrlImages || !IsHttpUrl(src)) return false;
-    return FetchUrlBytesPlatform(src, bytes);
+    const auto now = std::chrono::steady_clock::now();
+    if (!budget.started) {
+        budget.started = true;
+        budget.end = now + kBuildUrlFetchTime;
+    }
+    if (now >= budget.end) return false;
+    return FetchUrlBytesPlatform(src, std::min(budget.end, now + kUrlFetchTime), bytes);
 }
 
 static void AppendHexByte(std::string& out, uint8_t value) {
@@ -3367,8 +3428,36 @@ static bool TryCompressWicDecodedImage(IWICImagingFactory* factory, UINT width, 
     return true;
 }
 
+// The container of a PNG or JPEG file by its first bytes; null for anything else, which WIC
+// never sees: its other codecs (RAW, HEIF, WebP, third-party ones) are no input RayoMD accepts.
+static const GUID* WicContainerOf(const std::vector<uint8_t>& bytes) {
+    static const uint8_t png[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    if (bytes.size() >= sizeof(png) && memcmp(bytes.data(), png, sizeof(png)) == 0) return &GUID_ContainerFormatPng;
+    if (bytes.size() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff) return &GUID_ContainerFormatJpeg;
+    return nullptr;
+}
+
+// Microsoft's own decoder for `container`, reading `stream` with metadata parsed only on request
+// (never, here).
+static HRESULT CreateMicrosoftDecoder(IWICImagingFactory* factory, const GUID& container, IWICStream* stream,
+    IWICBitmapDecoder*& decoder) {
+    HRESULT hr = factory->CreateDecoder(container, &GUID_VendorMicrosoft, &decoder);
+    IWICBitmapDecoderInfo* info = nullptr;
+    if (SUCCEEDED(hr)) hr = decoder->GetDecoderInfo(&info);
+    GUID vendor{};
+    if (SUCCEEDED(hr)) hr = info->GetVendorGUID(&vendor);
+    if (SUCCEEDED(hr) && !IsEqualGUID(vendor, GUID_VendorMicrosoft)) hr = E_FAIL;
+    ReleaseCom(info);
+    if (SUCCEEDED(hr)) hr = decoder->Initialize(stream, WICDecodeMetadataCacheOnDemand);
+    return hr;
+}
+
+// A PNG or JPEG file RayoMD's own readers do not take (CMYK or 12-bit JPEG, for one), decoded by
+// Windows' built-in decoder for its format; any other bytes are refused.
 static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage& image) {
     if (bytes.empty() || bytes.size() > kMaxImageBytes) return false;
+    const GUID* container = WicContainerOf(bytes);
+    if (!container) return false;
 
     HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     bool uninitialize = SUCCEEDED(co);
@@ -3389,7 +3478,7 @@ static bool BuildDecodedImageWithWic(const std::vector<uint8_t>& bytes, PdfImage
         hr = stream->InitializeFromMemory((BYTE*)bytes.data(), (DWORD)bytes.size());
     }
     if (SUCCEEDED(hr)) {
-        hr = factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder);
+        hr = CreateMicrosoftDecoder(factory, *container, stream, decoder);
     }
     if (SUCCEEDED(hr)) {
         hr = decoder->GetFrame(0, &frame);
@@ -3493,7 +3582,7 @@ static bool ParsePngImage(const std::vector<uint8_t>& bytes, PdfImage& image, co
         }
         return true;
     }
-    return BuildDecodedImageWithWic(bytes, image);
+    return false;
 }
 
 static bool DecodeImageBytes(const std::vector<uint8_t>& bytes, PdfImage& image, const std::string& cacheDirectory = {},
@@ -3551,6 +3640,14 @@ public:
     // be read or decoded.
     RAYOMD_COLD bool ResolveThemeFile(const std::string& pathUtf8, int& index) {
         std::filesystem::path normalized;
+#ifdef _WIN32
+        // Theme assets are local files: a UNC, device or network-drive path is refused before
+        // anything opens it, so a theme cannot make the build connect to a share.
+        if (!Internal::IsLocalThemeFile(pathUtf8)) {
+            failed++;
+            return false;
+        }
+#endif
         if (!TryCanonicalForPolicy(PathFromUtf8(pathUtf8), normalized)) {
             failed++;
             return false;
@@ -3634,7 +3731,7 @@ private:
             std::vector<uint8_t> bytes;
             bool loaded = false;
             if (isUrl) {
-                loaded = FetchUrlBytes(src, options, bytes);
+                loaded = FetchUrlBytes(src, options, urlBudget, bytes);
             }
 #ifdef _WIN32
             else if (directLocal) {
@@ -3705,6 +3802,7 @@ private:
     const TtfFont* svgBoldFont = nullptr;   // a theme's bold face (SetFont), /F2 of the forms, or none
     UsedCidSet* svgBoldCids = nullptr;
     bool svgAttempted = false;          // ConvertSvgImage ran: an SVG's text may be in the document's font
+    UrlFetchBudget urlBudget;           // the time this build's URL images have left
     // Decoded images and failed sources for later documents of the process, each with the stamp of
     // its file when it was read (none for a URL): a lookup with another stamp misses, and storing
     // replaces the entry, so a file changed on disk is read again.
@@ -11854,7 +11952,8 @@ RAYOMD_COLD static const TtfFont* ThemeFont(const std::string& pathUtf8) {
     if (found != fonts.end()) return found->second.get();
     auto font = std::make_unique<TtfFont>();
 #ifdef _WIN32
-    if (!font->TryLoad(Utf8ToWide(pathUtf8))) font.reset();
+    // Theme fonts are local files, as ResolveThemeFile's logo is.
+    if (!Internal::IsLocalThemeFile(pathUtf8) || !font->TryLoad(Utf8ToWide(pathUtf8))) font.reset();
 #else
     if (!font->TryLoad(pathUtf8)) font.reset();
 #endif

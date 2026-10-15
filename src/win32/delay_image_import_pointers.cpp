@@ -27,6 +27,7 @@ extern "C" HINTERNET WINAPI __wrap_WinHttpOpenRequest(
 extern "C" BOOL WINAPI __wrap_WinHttpQueryDataAvailable(HINTERNET, LPDWORD);
 extern "C" BOOL WINAPI __wrap_WinHttpQueryHeaders(
     HINTERNET, DWORD, LPCWSTR, LPVOID, LPDWORD, LPDWORD);
+extern "C" BOOL WINAPI __wrap_WinHttpQueryOption(HINTERNET, DWORD, LPVOID, LPDWORD);
 extern "C" BOOL WINAPI __wrap_WinHttpReadData(HINTERNET, LPVOID, DWORD, LPDWORD);
 extern "C" BOOL WINAPI __wrap_WinHttpReceiveResponse(HINTERNET, LPVOID);
 extern "C" BOOL WINAPI __wrap_WinHttpSendRequest(
@@ -51,6 +52,7 @@ decltype(&WinHttpOpen) __imp_WinHttpOpen = __wrap_WinHttpOpen;
 decltype(&WinHttpOpenRequest) __imp_WinHttpOpenRequest = __wrap_WinHttpOpenRequest;
 decltype(&WinHttpQueryDataAvailable) __imp_WinHttpQueryDataAvailable = __wrap_WinHttpQueryDataAvailable;
 decltype(&WinHttpQueryHeaders) __imp_WinHttpQueryHeaders = __wrap_WinHttpQueryHeaders;
+decltype(&WinHttpQueryOption) __imp_WinHttpQueryOption = __wrap_WinHttpQueryOption;
 decltype(&WinHttpReadData) __imp_WinHttpReadData = __wrap_WinHttpReadData;
 decltype(&WinHttpReceiveResponse) __imp_WinHttpReceiveResponse = __wrap_WinHttpReceiveResponse;
 decltype(&WinHttpSendRequest) __imp_WinHttpSendRequest = __wrap_WinHttpSendRequest;

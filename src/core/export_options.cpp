@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "export_options.h"
+#include "access_policy.h"
 
 #include <algorithm>
 #include <cctype>
@@ -244,6 +245,19 @@ bool ParseTheme(std::string_view text, std::string_view directory, PdfTheme& the
         error = "font-bold, font-italic and font-bold-italic need font";
         return false;
     }
+#ifdef _WIN32
+    // Theme assets are local files: never a share (an SMB or WebDAV connection on every build,
+    // with the user's credentials), a device, or a path on whichever drive is current.
+    for (const auto& [name, value] : { std::pair<const char*, const std::string*>{ "font", &theme.fontPath },
+             { "font-bold", &theme.fontBoldPath }, { "font-italic", &theme.fontItalicPath },
+             { "font-bold-italic", &theme.fontBoldItalicPath }, { "logo", &theme.logoPath } }) {
+        if (IsNetworkOrDevicePath(*value)) {
+            error = std::string(name) + " must be a file on a local drive, not a network, device or drive-relative path: " +
+                *value;
+            return false;
+        }
+    }
+#endif
     return true;
 }
 

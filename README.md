@@ -390,7 +390,9 @@ rayomd --export handbook.md handbook.pdf --toc --toc-depth=2
 italic and bold italic faces (each optional; headings, bold text and table headers in the bold
 one), heading, link and accent colours, a header and footer with placeholders (`{title}`,
 `{author}`, `{subject}`, `{date}`, `{page}`, `{pages}`, `{logo}`) and a logo, and a cover page.
-Paths are relative to the theme file; see [Themes](https://github.com/Butterski/rayomd/wiki/Themes).
+Paths are relative to the theme file, and theme fonts and logos are local files: on Windows,
+network (UNC, WebDAV, mapped network drive) and device paths are refused. See
+[Themes](https://github.com/Butterski/rayomd/wiki/Themes).
 
 <details>
 <summary>Example theme file</summary>
