@@ -61,6 +61,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <thread>
 #include <string>
@@ -401,17 +402,25 @@ private:
     std::unique_ptr<uint8_t[]> owned_;
 };
 
+// Zeroed memory for the classes that free with std::free: calloc's, as operator new would give
+// it (the new-handler is called while calloc fails; without one the process ends, as it would
+// on the bad_alloc nothing catches). Never memory of ::operator new, which std::free must not see.
+RAYOMD_COLD static void* AllocateZeroed(size_t size) {
+    for (;;) {
+        if (void* zeroed = std::calloc(1, size)) return zeroed;
+        const std::new_handler handler = std::get_new_handler();
+        if (!handler) std::abort();
+        handler();
+    }
+}
+
 struct TtfFont {
     // A font lives on the heap, allocated zeroed by calloc (fresh pages come zeroed from the
     // system, untouched until used), or in static storage, which starts zeroed: the 128 KB width
     // cache is not cleared again. A value-initialized TtfFont() zeroed all of it, for each of
     // the up to 11 fallback candidates a document without glyphs probes.
     TtfFont() {}
-    static void* operator new(size_t size) {
-        if (void* zeroed = std::calloc(1, size)) return zeroed;
-        void* memory = ::operator new(size);
-        return std::memset(memory, 0, size);
-    }
+    static void* operator new(size_t size) { return AllocateZeroed(size); }
     static void operator delete(void* memory) noexcept { std::free(memory); }
 
     struct Table {
@@ -1383,11 +1392,7 @@ public:
     // Lives on the heap only (KeptCidSet), allocated zeroed by calloc: the bit arrays are not
     // cleared again, and their pages stay untouched where no CID falls.
     UsedCidSet() {}
-    static void* operator new(size_t size) {
-        if (void* zeroed = std::calloc(1, size)) return zeroed;
-        void* memory = ::operator new(size);
-        return std::memset(memory, 0, size);
-    }
+    static void* operator new(size_t size) { return AllocateZeroed(size); }
     static void operator delete(void* memory) noexcept { std::free(memory); }
 
     void Add(uint16_t cid) {
