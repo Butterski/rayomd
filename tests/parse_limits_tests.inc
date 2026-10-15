@@ -222,17 +222,45 @@ bool CheckTables() {
     }
     // The limit is the document's, also for tables in quotes, each parsed on its own.
     const std::string quoted = Repeat("> " + Repeat("| a ", 1000) + "|\n> |---|\n> x\n\n", 600);
-    return Bounded("600 quoted tables of 1,000 columns", 20.0, 512, [&]() {
-        const std::vector<Block> parsed = ParseMarkdown(quoted);
-        size_t full = 0;
-        for (const Block& quote : parsed) {
-            if (quote.type != BlockType::Quote || quote.children.empty() || quote.children[0].type != BlockType::Table) {
-                return false;
+    if (!Bounded("600 quoted tables of 1,000 columns", 20.0, 512, [&]() {
+            const std::vector<Block> parsed = ParseMarkdown(quoted);
+            size_t full = 0;
+            for (const Block& quote : parsed) {
+                if (quote.type != BlockType::Quote || quote.children.empty() || quote.children[0].type != BlockType::Table) {
+                    return false;
+                }
+                full += quote.children[0].rows.size() == 2;
             }
-            full += quote.children[0].rows.size() == 2;
-        }
-        std::string pdf;
-        return parsed.size() == 600 && full == (size_t(1) << 19) / 999 && Build(quoted, pdf);
+            std::string pdf;
+            return parsed.size() == 600 && full == (size_t(1) << 19) / 999 && Build(quoted, pdf);
+        })) {
+        return false;
+    }
+
+    // A data row is split up to its header's cells only, the rest dropped as before, also past
+    // an escaped pipe; a separator line is checked without a string per cell. A line of 32 MiB
+    // pipes under two columns was 2^25 empty cells, 1 GiB (a 128 MiB line 4 GiB); a separator of
+    // 2^23 cells with a backslash 2^23 strings.
+    const std::vector<Block> excess = ParseMarkdown("| a | b |\n|---|---|\n| 1 | 2 | 3 \\| 4 | 5 |\n| x \\| y | z | w |\n");
+    if (excess.size() != 1 || excess[0].type != BlockType::Table || excess[0].rows.size() != 3 ||
+        excess[0].rows[1] != std::vector<std::string>{ "1", "2" } || excess[0].rows[2] != std::vector<std::string>{ "x | y", "z" }) {
+        std::cerr << "the cells past a table's header are not dropped" << std::endl;
+        return false;
+    }
+    const std::string pipes = "| a | b |\n|---|---|\n" + std::string(size_t(1) << 25, '|') + "\n";
+    const std::string escapedPipes = "| a | b |\n|---|---|\n" + Repeat("a|", size_t(1) << 24) + "\\\n";
+    const std::string separator = "| a | b |\n" + Repeat("|---", size_t(1) << 23) + "|\\\n";
+    return Bounded("a row of 2^25 pipes under two columns", 10.0, 128, [&]() {
+        const std::vector<Block> parsed = ParseMarkdown(pipes);
+        return parsed.size() == 1 && parsed[0].type == BlockType::Table && parsed[0].rows.size() == 2 &&
+            parsed[0].rows[1] == std::vector<std::string>{ "", "" };
+    }) && Bounded("a row of 2^24 cells and a backslash under two columns", 10.0, 128, [&]() {
+        const std::vector<Block> parsed = ParseMarkdown(escapedPipes);
+        return parsed.size() == 1 && parsed[0].type == BlockType::Table && parsed[0].rows.size() == 2 &&
+            parsed[0].rows[1] == std::vector<std::string>{ "a", "a" };
+    }) && Bounded("a separator of 2^23 cells and a backslash", 10.0, 160, [&]() {
+        const std::vector<Block> parsed = ParseMarkdown(separator);
+        return parsed.size() == 1 && parsed[0].type == BlockType::Paragraph;
     });
 }
 
