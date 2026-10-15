@@ -261,7 +261,9 @@ A sentence with a footnote.[^1]
 
 Also reference links (full, collapsed and shortcut), `<…>` autolinks, rules, page breaks
 (`\pagebreak`, `\newpage`, `<!-- pagebreak -->`), `<br>`, character references such as
-`&copy;`, and hidden HTML comments. Unicode text uses an embedded subset of a system font (or
+`&copy;`, and hidden HTML comments. A link to a `javascript:`, `vbscript:`, `data:` or `file:`
+URL, a drive path (`C:\…`) or a network share (`\\host\share`) keeps its text but is not made
+clickable, in Markdown as in HTML. Unicode text uses an embedded subset of a system font (or
 the one `RAYOMD_FONT` names, TrueType or OpenType: `.ttf`, `.otf`, `.ttc`) with fallback fonts
 for other scripts, Noto Sans CJK first for Chinese, Japanese and Korean; Latin text stays on the
 PDF standard fonts, which keeps those files small.
@@ -270,8 +272,8 @@ PDF standard fonts, which keeps those files small.
 
 Inline HTML as GitHub shows it: `<b>`, `<i>`, `<s>`, `<code>`, `<kbd>`, `<u>`, `<mark>`, `<sup>`
 and `<sub>`, `<a href>`, `<q>`, `<br>`, and `<img>` as its alt text. Other tags are removed and
-their text kept; `<script>`, `<style>` and the like are left out with their content, and links to
-`javascript:` URLs are not made.
+their text kept; `<script>`, `<style>` and the like are left out with their content, and links
+follow the same URL rules as Markdown links.
 
 HTML blocks become what they stand for: `align="center"` or `"right"` and `<center>` place the
 text, headings and images inside (also Markdown between an opening and a closing `<div>`),

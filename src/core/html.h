@@ -96,7 +96,9 @@ bool HtmlBlockEnds(std::string_view line, int condition);
 
 // Whether a link or image may point at `url`: not, compared case-insensitively after leading
 // white space and control characters and ignoring tabs and line breaks as browsers do, to a
-// javascript:, vbscript: or data: URL, except data:image/ for an image's source.
+// javascript:, vbscript: or data: URL, except data:image/ for an image's source, nor a link to a
+// file: URL, a drive path ("C:\") or a network path ("\\host\share", also with one of the
+// backslashes a slash). HTML and Markdown links and linked images all take this policy.
 bool SafeUrl(std::string_view url, bool image = false);
 
 // The HTML elements open at one level of a document (the document, a list item, a quote) while

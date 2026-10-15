@@ -163,19 +163,22 @@ bool CheckTagLimits() {
 
 bool CheckSafeUrls() {
     for (std::string_view unsafe : { "javascript:alert(1)", " JavaScript:x", "java\tscript:x", "\x01javascript:x",
-             "VBScript:x", "data:text/html,x", "data:image/png;base64,x" }) {
+             "VBScript:x", "data:text/html,x", "data:image/png;base64,x", "file:///etc/passwd", "FILE://host/x",
+             "\\\\host\\share", "\\/host", "/\\host", " \\\\host", "C:\\Windows\\x.exe", "c:/x" }) {
         if (SafeUrl(unsafe)) {
             std::cerr << "unsafe URL allowed: " << unsafe << std::endl;
             return false;
         }
     }
-    for (std::string_view safe : { "https://example.com", "#top", "mailto:a@b.c", "javascriptish", "docs/a.md", "" }) {
+    for (std::string_view safe : { "https://example.com", "#top", "mailto:a@b.c", "javascriptish", "docs/a.md", "",
+             "//example.com/x", "/docs/a.md", "filename.md", "c:x", "ab:/x" }) {
         if (!SafeUrl(safe)) {
             std::cerr << "safe URL refused: " << safe << std::endl;
             return false;
         }
     }
-    if (!SafeUrl("data:image/png;base64,x", true) || SafeUrl("data:text/plain,x", true) || SafeUrl("javascript:x", true)) {
+    if (!SafeUrl("data:image/png;base64,x", true) || SafeUrl("data:text/plain,x", true) || SafeUrl("javascript:x", true) ||
+        !SafeUrl("file.png", true)) {
         std::cerr << "image URL safety mismatch" << std::endl;
         return false;
     }

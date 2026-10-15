@@ -570,7 +570,8 @@ static bool ParseStandaloneImage(std::string_view line, ImageSyntax* image) {
     if (image) {
         image->alt = StripInlineMarkdown(link.label);
         image->source.src = std::move(src);
-        image->source.link = std::move(target);
+        // A target SafeUrl refuses leaves the image unlinked.
+        image->source.link = Html::SafeUrl(target) ? std::move(target) : std::string();
     }
     return true;
 }
@@ -597,7 +598,7 @@ RAYOMD_NOINLINE size_t ParseImageAt(std::string_view s, size_t at, std::string& 
     if (!ExtractMarkdownDestination(link.target, src)) return 0;
     alt = StripInlineMarkdown(link.label);
     source.src = std::move(src);
-    source.link = std::move(target);
+    source.link = Html::SafeUrl(target) ? std::move(target) : std::string();
     return end;
 }
 

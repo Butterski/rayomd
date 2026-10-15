@@ -233,9 +233,70 @@ bool CheckTables() {
     });
 }
 
+// Markdown links take the URL policy of HTML links (Html::SafeUrl): a target that runs script,
+// carries data or opens a local file or network share keeps its text and gets no annotation.
+bool CheckLinkSchemes() {
+    using TinyPdf::Internal::InlineSpan;
+    const char* const unsafe[] = {
+        "[x](javascript:alert(1))", "[x](JaVaScRiPt:alert(1))", "[x](<java\tscript:a>)", "[x](&#106;avascript:a)",
+        "[x](vbscript:msgbox)", "[x](data:text/html,a)", "[x](file:///etc/passwd)", "[x](\\\\\\\\host\\\\share)",
+        "[x](<\\\\\\\\host\\\\share>)", "[x](C:\\\\Windows\\\\calc.exe)", "[x](<file://host/a b>)", "[![x](a.png)](javascript:a)",
+        "[*x*](javascript:a)",
+    };
+    for (const char* text : unsafe) {
+        std::string visible;
+        for (const InlineSpan& span : TinyPdf::Internal::ParseInlineSpans(text)) {
+            if (!span.url.empty()) {
+                std::cerr << "unsafe Markdown link made: " << text << " -> " << span.url << std::endl;
+                return false;
+            }
+            visible += span.text;
+        }
+        if (visible.find('x') == std::string::npos) {
+            std::cerr << "unsafe Markdown link lost its text: " << text << std::endl;
+            return false;
+        }
+    }
+    const std::pair<const char*, const char*> safe[] = {
+        { "[x](https://example.com/a)", "https://example.com/a" }, { "[x](mailto:a@b.c)", "mailto:a@b.c" },
+        { "[x](docs/a.md#b)", "docs/a.md#b" }, { "[x](#top)", "#top" }, { "[x](//example.com)", "//example.com" },
+        { "<https://example.com>", "https://example.com" }, { "see https://example.com/x", "https://example.com/x" },
+        { "a@example.com", "mailto:a@example.com" },
+    };
+    for (const auto& [text, url] : safe) {
+        bool found = false;
+        for (const InlineSpan& span : TinyPdf::Internal::ParseInlineSpans(text)) found = found || span.url == url;
+        if (!found) {
+            std::cerr << "safe Markdown link not made: " << text << std::endl;
+            return false;
+        }
+    }
+
+    // In a document: references, a linked image block, a list, a table and HTML; the PDF has the
+    // text and only the one safe link.
+    const std::string document =
+        "[a][js] [b][file] [c] and [safe](https://example.com/ok)\n\n"
+        "[![logo](docs/assets/branding/rayomd.png)](javascript:alert(1))\n\n"
+        "- [d](vbscript:x)\n\n| e | f |\n|---|---|\n| [g](\\\\\\\\host\\\\x) | <a href=\"file:///x\">h</a> |\n\n"
+        "[js]: javascript:alert(1)\n[file]: <file:///etc/passwd>\n[c]: data:text/html,x\n";
+    const std::vector<TinyPdf::Internal::Block> blocks = TinyPdf::Internal::ParseMarkdown(document);
+    if (blocks.size() < 2 || blocks[1].type != TinyPdf::Internal::BlockType::Image || !blocks[1].image ||
+        !blocks[1].image->link.empty()) {
+        std::cerr << "a linked image keeps an unsafe link" << std::endl;
+        return false;
+    }
+    std::string pdf;
+    if (!Build(document, pdf) || CountOccurrences(pdf, "/Subtype /Link") != 1 ||
+        pdf.find("/URI (https://example.com/ok)") == std::string::npos) {
+        std::cerr << "unsafe links in the PDF: " << CountOccurrences(pdf, "/Subtype /Link") << std::endl;
+        return false;
+    }
+    return true;
+}
+
 } // namespace parse_limits_tests
 
 bool CheckParseLimits() {
     return parse_limits_tests::CheckStatusSymbols() && parse_limits_tests::CheckReferenceLinks() &&
-        parse_limits_tests::CheckTables();
+        parse_limits_tests::CheckTables() && parse_limits_tests::CheckLinkSchemes();
 }

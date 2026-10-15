@@ -296,8 +296,10 @@ size_t FindDestinationEnd(std::string_view source, size_t openParen) {
 
 // Appends the destination of a link target to `urls`, unescaped and with its character
 // references decoded: the text between angle brackets, or else the text up to the first
-// space. Appends nothing when there is none.
-void AppendDestination(std::string_view target, std::string& urls) {
+// space. Appends nothing when there is none, or when Html::SafeUrl refuses it (javascript:,
+// file:, ...): the link's text then links nowhere.
+RAYOMD_NOINLINE void AppendDestination(std::string_view target, std::string& urls) {
+    const size_t begin = urls.size();
     target = TrimView(target);
     if (target.empty()) return;
     std::string_view value;
@@ -323,6 +325,7 @@ void AppendDestination(std::string_view target, std::string& urls) {
             urls.push_back(value[i]);
         }
     }
+    if (!Html::SafeUrl(std::string_view(urls).substr(begin))) urls.resize(begin);
 }
 
 // What the HTML tags of a paragraph have opened so far: counters of the open elements by effect,
