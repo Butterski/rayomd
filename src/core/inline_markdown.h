@@ -89,6 +89,9 @@ using ReferenceDefinitions = std::unordered_map<std::string, ReferenceDefinition
 
 std::string NormalizeReferenceLabel(std::string_view label);
 std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinitions& definitions);
+// The status symbols U+2705, U+26A0 (with or without the variation selector U+FE0F) and U+274C
+// as "[OK]", "[!]" and "[X]", which the standard fonts can show; in one pass.
+std::string NormalizeSymbols(std::string text);
 // recognizeMath == false keeps every '$' and "\(" literal. It exists for text that has
 // already been through the inline parser once and is only being re-read as plain text.
 //

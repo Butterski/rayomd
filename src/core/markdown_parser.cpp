@@ -390,24 +390,6 @@ static bool IsTableStart(const std::vector<std::string_view>& lines, size_t i, s
     return true;
 }
 
-static void ReplaceAll(std::string& s, const std::string& from, const std::string& to) {
-    if (from.empty()) return;
-    size_t pos = 0;
-    while ((pos = s.find(from, pos)) != std::string::npos) {
-        s.replace(pos, from.size(), to);
-        pos += to.size();
-    }
-}
-
-std::string NormalizeSymbols(std::string s) {
-    if (s.find('\xE2') == std::string::npos) return s;
-    ReplaceAll(s, std::string("\xE2\x9C\x85"), "[OK]");
-    ReplaceAll(s, std::string("\xE2\x9A\xA0\xEF\xB8\x8F"), "[!]");
-    ReplaceAll(s, std::string("\xE2\x9A\xA0"), "[!]");
-    ReplaceAll(s, std::string("\xE2\x9D\x8C"), "[X]");
-    return s;
-}
-
 struct MarkdownInlineLink {
     std::string_view label;
     std::string_view target;
