@@ -35,6 +35,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -42,6 +43,13 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include "libdeflate.h"
 

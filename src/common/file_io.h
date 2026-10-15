@@ -16,8 +16,20 @@
 
 namespace RayoMd::File {
 
-// fopen of `path` with fopen's mode ("rb", "wb"); null when it cannot be opened.
+// fopen of `path` with fopen's mode ("rb", "wb"), close-on-exec; null when it cannot be opened. A
+// read mode opens only a regular file (OpenRegular).
 std::FILE* Open(const std::filesystem::path& path, const char* mode);
+
+// The regular file at `path` opened for reading, close-on-exec, its size in `size`; a FIFO, a
+// device, a socket or a directory is refused before anything can wait on it: on POSIX the open is
+// non-blocking (O_NONBLOCK, O_NOCTTY) and fstat must say S_ISREG before the descriptor is made
+// blocking again; on Windows GetFileType must say FILE_TYPE_DISK. A file descriptor, -1 when it
+// cannot (POSIX), or a HANDLE, INVALID_HANDLE_VALUE when it cannot (Windows, as intptr_t).
+#ifdef _WIN32
+intptr_t OpenRegular(const std::filesystem::path& path, uint64_t& size);
+#else
+int OpenRegular(const std::filesystem::path& path, uint64_t& size);
+#endif
 
 // The size of an open file, -1 when it has none (a pipe). Leaves the position at the end.
 long long SizeOf(std::FILE* file);
@@ -25,7 +37,8 @@ long long SizeOf(std::FILE* file);
 // Moves an open file to byte `offset`.
 bool SeekTo(std::FILE* file, long long offset);
 
-// The whole file, at most `maximum` bytes; false when it cannot be read or is larger.
+// The whole regular file (OpenRegular), at most `maximum` bytes; false when it cannot be read, is
+// larger, or is no regular file.
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content);
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint8_t>& content);
 

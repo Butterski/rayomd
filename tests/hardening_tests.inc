@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Needs <atomic>, <chrono>, <filesystem>, <iostream>, <string>, <thread>, <vector>,
-// rayomd/tiny_pdf.h and src/core/flate.h.
+// Needs <atomic>, <chrono>, <filesystem>, <functional>, <iostream>, <string>, <thread>, <vector>,
+// rayomd/tiny_pdf.h, src/common/file_io.h and src/core/flate.h; on POSIX <fcntl.h>, <sys/stat.h>
+// and <unistd.h>.
 // Hostile and abandoned builds: cancellation (PdfOptions::cancel), files that are no regular
 // files, fonts changed after they were read, deep composite glyphs, image containment, the
 // decode budget and the image cache's permissions. Included inside the anonymous namespace of
@@ -112,13 +113,13 @@ bool CheckCancel() {
     }
 
     std::string blocks, table = "| a | b | c |\n|---|---|---|\n", code = "```\n", bookText;
-    for (int i = 0; i < 30000; i++) blocks += "Paragraph " + std::to_string(i) + " of many blocks, with **bold** text.\n\n";
-    for (int i = 0; i < 12000; i++) table += "| row " + std::to_string(i) + " | *cell* | `x` |\n";
-    for (int i = 0; i < 150000; i++) code += "int line" + std::to_string(i) + " = " + std::to_string(i) + ";\n";
+    for (int i = 0; i < 60000; i++) blocks += "Paragraph " + std::to_string(i) + " of many blocks, with **bold** text.\n\n";
+    for (int i = 0; i < 40000; i++) table += "| row " + std::to_string(i) + " | *cell* | `x` |\n";
+    for (int i = 0; i < 300000; i++) code += "int line" + std::to_string(i) + " = " + std::to_string(i) + ";\n";
     code += "```\n";
     for (int i = 0; i < 400; i++) bookText += "Paragraph " + std::to_string(i) + " of a file.\n\n";
     TinyPdf::Book longBook;
-    for (int file = 0; file < 200; file++) longBook.chapters.push_back({ bookText, (root / "f.md").u8string(), "", 0, false });
+    for (int file = 0; file < 400; file++) longBook.chapters.push_back({ bookText, (root / "f.md").u8string(), "", 0, false });
     struct Case {
         const char* name;
         std::string markdown;   // "{}" stands for the image's number
@@ -144,28 +145,37 @@ bool CheckCancel() {
             }
             return TinyPdf::BuildPdf(markdown, buildOptions, out);
         };
-        // The whole build first, then one cancelled halfway, past the parse, which does not stop;
-        // then the cancelled document again, whose image must not be taken for a failed one.
-        std::string full;
-        const auto start = std::chrono::steady_clock::now();
-        const TinyPdf::BuildResult whole = build(plain, full, 1);
-        const double fullMs = MillisecondsSince(start);
-        cancel = false;
-        TinyPdf::BuildResult cancelled;
-        std::string cancelledPdf;
-        std::thread worker([&]() { cancelled = build(options, cancelledPdf, 2); });
-        std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(fullMs / 2.0));
-        const auto set = std::chrono::steady_clock::now();
-        cancel = true;
-        worker.join();
-        const double latency = MillisecondsSince(set);
-        std::string again;
-        const TinyPdf::BuildResult after = build(plain, again, 2);
-        std::cout << "cancel " << item.name << ": returned " << latency << " ms after the flag, the whole build "
-                  << fullMs << " ms" << std::endl;
-        if (cancelled.error != TinyPdf::BuildError::Cancelled || !cancelledPdf.empty() || !whole.Ok() ||
-            whole.failedImages != 0 || !ValidPdf(full) || !after.Ok() || after.failedImages != 0 ||
-            latency > std::max(25.0, fullMs / 5.0)) {
+        // The whole build first, then one cancelled a third of the way, past the parse, which does
+        // not stop; then the cancelled document again, whose image must not be taken for a failed
+        // one. A try is inconclusive when the build ended before the flag (Windows sleeps whole
+        // timer ticks of 15.6 ms) or a busy machine stalled its thread past the bound: up to three.
+        bool passed = false;
+        for (int attempt = 0; attempt < 3 && !passed; attempt++) {
+            std::string full;
+            const auto start = std::chrono::steady_clock::now();
+            const TinyPdf::BuildResult whole = build(plain, full, 1);
+            const double fullMs = MillisecondsSince(start);
+            cancel = false;
+            TinyPdf::BuildResult cancelled;
+            std::string cancelledPdf;
+            std::thread worker([&]() { cancelled = build(options, cancelledPdf, 2); });
+            std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(fullMs / 3.0));
+            const auto set = std::chrono::steady_clock::now();
+            cancel = true;
+            worker.join();
+            const double latency = MillisecondsSince(set);
+            std::string again;
+            const TinyPdf::BuildResult after = build(plain, again, 2);
+            std::cout << "cancel " << item.name << ": returned " << latency << " ms after the flag, the whole build "
+                      << fullMs << " ms" << std::endl;
+            if (!whole.Ok() || whole.failedImages != 0 || !ValidPdf(full) || !after.Ok() || after.failedImages != 0 ||
+                (cancelled.error != TinyPdf::BuildError::Cancelled && !cancelled.Ok()) ||
+                (cancelled.error == TinyPdf::BuildError::Cancelled && !cancelledPdf.empty())) {
+                break;
+            }
+            passed = cancelled.error == TinyPdf::BuildError::Cancelled && latency <= std::max(25.0, fullMs / 5.0);
+        }
+        if (!passed) {
             std::cerr << "cancelling the " << item.name << " build failed" << std::endl;
             ok = false;
         }
@@ -174,8 +184,274 @@ bool CheckCancel() {
     return ok;
 }
 
+// A FIFO, which blocks whoever opens it for reading until a writer comes, as a document's image, a
+// theme's font and logo, and through RayoMd::File::ReadAll and Open: each read fails at once, as
+// for any file that is not a regular file (a directory, a device), instead of waiting.
+bool CheckSpecialFiles() {
+#ifdef _WIN32
+    return true;
+#else
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-special";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    const fs::path fifo = root / "pipe.png";
+    const fs::path fontFifo = root / "pipe.ttf";
+    if (::mkfifo(fifo.c_str(), 0600) != 0 || ::mkfifo(fontFifo.c_str(), 0600) != 0) {
+        std::cerr << "mkfifo failed" << std::endl;
+        return false;
+    }
+    bool ok = true;
+    // Runs `step` on a thread; one still running after 5 s waits on the FIFO, which a writer
+    // opened here then releases.
+    const auto quickly = [&](const char* what, const std::function<bool()>& step) {
+        std::atomic<bool> done{ false };
+        bool passed = false;
+        std::thread worker([&]() { passed = step(); done = true; });
+        const auto start = std::chrono::steady_clock::now();
+        while (!done && MillisecondsSince(start) < 5000.0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!done) {
+            for (const fs::path& path : { fifo, fontFifo }) {
+                const int writer = ::open(path.c_str(), O_WRONLY | O_NONBLOCK);
+                if (writer >= 0) ::close(writer);
+            }
+            std::cerr << what << " waited on a FIFO" << std::endl;
+        }
+        worker.join();
+        if (!passed) std::cerr << what << " did not fail as a file that is no regular file" << std::endl;
+        ok = ok && done && passed;
+    };
+    TinyPdf::PdfOptions options;
+    options.sourcePath = (root / "doc.md").u8string();
+    quickly("an image", [&]() {
+        std::string pdf;
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf("![pipe](pipe.png)\n", options, pdf);
+        return result.Ok() && result.failedImages == 1;
+    });
+    quickly("a theme's logo", [&]() {
+        TinyPdf::PdfOptions themed = options;
+        themed.theme.logoPath = fifo.u8string();
+        themed.theme.headerLeft = "{logo}";
+        std::string pdf;
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf("# Logo\n", themed, pdf);
+        return result.Ok() && result.failedImages == 1;
+    });
+    quickly("a theme's font", [&]() {
+        TinyPdf::PdfOptions themed = options;
+        themed.theme.fontPath = fontFifo.u8string();
+        std::string pdf;
+        return TinyPdf::BuildPdf("# Font\n", themed, pdf).error == TinyPdf::BuildError::ThemeFontUnavailable;
+    });
+    quickly("ReadAll and Open", [&]() {
+        std::string text;
+        std::FILE* file = RayoMd::File::Open(fifo, "rb");
+        if (file) std::fclose(file);
+        return !RayoMd::File::ReadAll(fifo, 1024, text) && file == nullptr && !RayoMd::File::ReadAll(root, 1024, text) &&
+            !RayoMd::File::ReadAll("/dev/zero", 1024, text);
+    });
+    // Close-on-exec, so no descriptor leaks into a child process.
+    std::FILE* written = RayoMd::File::Open(root / "out.txt", "wb");
+    std::FILE* read = written ? (std::fclose(written), RayoMd::File::Open(root / "out.txt", "rb")) : nullptr;
+    if (!read || (::fcntl(::fileno(read), F_GETFD) & FD_CLOEXEC) == 0) {
+        std::cerr << "RayoMD::File::Open left a descriptor inheritable" << std::endl;
+        ok = false;
+    }
+    if (read) std::fclose(read);
+    written = RayoMd::File::Open(root / "out.txt", "wb");
+    if (!written || (::fcntl(::fileno(written), F_GETFD) & FD_CLOEXEC) == 0) {
+        std::cerr << "RayoMD::File::Open left a descriptor inheritable" << std::endl;
+        ok = false;
+    }
+    if (written) std::fclose(written);
+    fs::remove_all(root);
+    return ok;
+#endif
+}
+
+uint32_t BigEndianAt(const std::string& bytes, size_t at, int size) {
+    uint32_t value = 0;
+    for (int i = 0; i < size; i++) value = value << 8 | (uint8_t)bytes[at + (size_t)i];
+    return value;
+}
+
+// The offset and length of table `tag` in a single sfnt font, false without it.
+bool FindTable(const std::string& font, const char* tag, uint32_t& offset, uint32_t& length) {
+    const uint32_t tables = BigEndianAt(font, 4, 2);
+    for (uint32_t i = 0; i < tables && 12 + (i + 1) * 16 <= font.size(); i++) {
+        if (font.compare(12 + i * 16, 4, tag) == 0) {
+            offset = BigEndianAt(font, 12 + i * 16 + 8, 4);
+            length = BigEndianAt(font, 12 + i * 16 + 12, 4);
+            return (size_t)offset + length <= font.size();
+        }
+    }
+    return false;
+}
+
+// The system's TrueType font for tests, empty when it has none.
+std::string TestFontPath() {
+#ifdef _WIN32
+    const char* windows = std::getenv("WINDIR");
+    const std::string path = windows ? std::string(windows) + "\\Fonts\\arial.ttf" : std::string();
+#else
+    const std::string path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+#endif
+    std::error_code error;
+    return !path.empty() && fs::is_regular_file(path, error) ? path : std::string();
+}
+
+// A theme font is mapped, not copied, so a file changed in place while a build uses it changes
+// what the build reads: loca entries that now point past glyf (and past the file) must not be
+// followed when the font is subset; the next build loads the changed file again (and fails, its
+// loca being out of range), and the one after, the file put back, loads it again too.
+bool CheckFontChangedInPlace() {
+    const std::string source = TestFontPath();
+    if (source.empty()) return true;
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-changed-font";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    const fs::path path = root / "theme.ttf";
+    std::string original;
+    uint32_t head = 0, headLength = 0, loca = 0, locaLength = 0;
+    if (!RayoMd::File::ReadAll(source, 64u << 20, original) || !FindTable(original, "head", head, headLength) ||
+        !FindTable(original, "loca", loca, locaLength) || headLength < 54 || !WriteFile(path, original)) {
+        std::cerr << "cannot prepare the changed-font test" << std::endl;
+        return false;
+    }
+    std::string corrupt = original;
+    const int entry = BigEndianAt(original, head + 50, 2) == 0 ? 2 : 4;
+    for (size_t at = loca, index = 0; at + (size_t)entry <= (size_t)loca + locaLength; at += (size_t)entry, index++) {
+        const uint32_t value = index % 2 == 0 ? 0 : (entry == 2 ? 0xFFFFu : 0x7FFFFFF0u);
+        for (int i = 0; i < entry; i++) corrupt[at + (size_t)i] = (char)(value >> (8 * (entry - 1 - i)));
+    }
+    std::string document;
+    for (int i = 0; i < 20000; i++) document += u8"Zażółć gęślą jaźń, paragraph " + std::to_string(i) + ".\n\n";
+    TinyPdf::PdfOptions options;
+    options.theme.fontPath = path.u8string();
+    std::string pdf;
+    const auto start = std::chrono::steady_clock::now();
+    bool ok = TinyPdf::BuildPdf(document, options, pdf).Ok() && ValidPdf(pdf);
+    const double fullMs = MillisecondsSince(start);
+    // Built again with the font loaded above; the file is rewritten in place while it lays out.
+    std::string changedPdf;
+    std::thread worker([&]() { TinyPdf::BuildPdf(document, options, changedPdf); });
+    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(fullMs / 3.0));
+    ok = RayoMd::File::WriteAll(path, corrupt) && ok;
+    worker.join();
+    std::string after;
+    ok = ok && TinyPdf::BuildPdf("# Text\n", options, after).error == TinyPdf::BuildError::ThemeFontUnavailable;
+    ok = ok && RayoMd::File::WriteAll(path, original) && TinyPdf::BuildPdf("# Text\n", options, after).Ok() && ValidPdf(after);
+    if (!ok) std::cerr << "a theme font changed in place was not read again as it now is" << std::endl;
+    fs::remove_all(root);
+    return ok;
+}
+
+void AppendBig16(std::string& out, uint32_t value) {
+    out.push_back((char)(value >> 8));
+    out.push_back((char)value);
+}
+
+// A TrueType font of 65,535 glyphs in which 'A' (glyph 1) is a composite of glyph 2, which is one
+// of glyph 3, and so on to the last, an empty glyph that is also the space.
+std::string MakeCompositeChainFont() {
+    const uint32_t glyphs = 65535;
+    std::string glyf, loca, hmtx, cmap, head(54, '\0'), hhea(36, '\0'), maxp;
+    for (uint32_t glyph = 0; glyph < glyphs; glyph++) {
+        AppendBigEndian(loca, (uint32_t)glyf.size());
+        if (glyph == 0 || glyph + 1 == glyphs) continue;      // .notdef and the last: empty
+        AppendBig16(glyf, 0xFFFF);                           // numberOfContours -1: composite
+        for (int i = 0; i < 4; i++) AppendBig16(glyf, 0);    // bounding box
+        AppendBig16(glyf, 0x0002);                           // ARGS_ARE_XY_VALUES, bytes, no more
+        AppendBig16(glyf, glyph + 1);
+        AppendBig16(glyf, 0);                                // two byte arguments
+    }
+    AppendBigEndian(loca, (uint32_t)glyf.size());
+    AppendBig16(hmtx, 500);
+    AppendBig16(hmtx, 0);
+    AppendBig16(cmap, 0);                                    // version
+    AppendBig16(cmap, 1);                                    // one subtable: Windows, UCS-4
+    AppendBig16(cmap, 3);
+    AppendBig16(cmap, 10);
+    AppendBigEndian(cmap, 12);
+    AppendBig16(cmap, 12);                                   // format 12
+    AppendBig16(cmap, 0);
+    AppendBigEndian(cmap, 16 + 2 * 12);
+    AppendBigEndian(cmap, 0);
+    AppendBigEndian(cmap, 2);
+    for (const uint32_t group : { 0x20u, 0x41u }) {
+        AppendBigEndian(cmap, group);
+        AppendBigEndian(cmap, group);
+        AppendBigEndian(cmap, group == 0x20u ? glyphs - 1 : 1);
+    }
+    head[0] = 0; head[1] = 1;                                // version 1.0
+    head[18] = (char)(1000 >> 8); head[19] = (char)(1000 & 0xFF);   // unitsPerEm
+    head[51] = 1;                                            // indexToLocFormat: long
+    hhea[0] = 0; hhea[1] = 1;
+    hhea[35] = 1;                                            // numberOfHMetrics
+    AppendBigEndian(maxp, 0x00005000);
+    AppendBig16(maxp, glyphs);
+    const std::pair<const char*, const std::string*> tables[] = {
+        { "cmap", &cmap }, { "glyf", &glyf }, { "head", &head }, { "hhea", &hhea }, { "hmtx", &hmtx },
+        { "loca", &loca }, { "maxp", &maxp } };
+    std::string font;
+    AppendBigEndian(font, 0x00010000);
+    AppendBig16(font, 7);
+    for (int i = 0; i < 3; i++) AppendBig16(font, 0);
+    uint32_t offset = 12 + 7 * 16;
+    for (const auto& [tag, data] : tables) {
+        font.append(tag, 4);
+        AppendBigEndian(font, 0);
+        AppendBigEndian(font, offset);
+        AppendBigEndian(font, (uint32_t)data->size());
+        offset += (uint32_t)(data->size() + 3) & ~3u;
+    }
+    for (const auto& table : tables) {
+        font += *table.second;
+        font.resize((font.size() + 3) & ~(size_t)3, '\0');
+    }
+    return font;
+}
+
+// A composite glyph nested 65,534 deep: subsetting the font for "A" stops at the depth limit
+// instead of recursing down the chain (a stack overflow before), and the PDF is made.
+bool CheckDeepCompositeGlyph() {
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-composite";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    const fs::path path = root / "chain.ttf";
+    bool ok = WriteFile(path, MakeCompositeChainFont());
+    TinyPdf::PdfOptions options;
+    options.theme.fontPath = path.u8string();
+    std::string pdf;
+    // On a thread with a 1 MiB stack, as Windows gives its threads (the main one has 8 MiB here).
+    const std::function<void()> build = [&]() {
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf("# A\n\nA A A\n", options, pdf);
+        ok = ok && result.Ok() && ValidPdf(pdf);
+    };
+#ifdef _WIN32
+    std::thread worker(build);
+    worker.join();
+#else
+    pthread_attr_t attributes;
+    pthread_t thread;
+    pthread_attr_init(&attributes);
+    pthread_attr_setstacksize(&attributes, 1u << 20);
+    const auto run = [](void* function) -> void* {
+        (*static_cast<const std::function<void()>*>(function))();
+        return nullptr;
+    };
+    if (pthread_create(&thread, &attributes, run, const_cast<std::function<void()>*>(&build)) != 0) {
+        ok = false;
+    } else {
+        pthread_join(thread, nullptr);
+    }
+    pthread_attr_destroy(&attributes);
+#endif
+    if (!ok) std::cerr << "a font of deeply nested composite glyphs failed the export" << std::endl;
+    fs::remove_all(root);
+    return ok;
+}
+
 bool CheckHardening() {
-    return CheckCancel();
+    return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph();
 }
 
 } // namespace hardening_tests

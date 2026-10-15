@@ -23,9 +23,9 @@ bool Report::Open(const std::string& path) {
         ownsFile = false;
     } else {
 #ifdef _WIN32
-        file = _wfopen(fs::u8path(path).c_str(), L"wb");
+        file = RayoMd::File::Open(fs::u8path(path), "wb");
 #else
-        file = std::fopen(path.c_str(), "wb");
+        file = RayoMd::File::Open(fs::path(path), "wb");
 #endif
         ownsFile = file != nullptr;
     }

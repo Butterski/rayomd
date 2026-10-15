@@ -77,32 +77,6 @@ bool ReadLine(std::string& line) {
 
 bool ReadUtf8FilePortable(const fs::path& path, std::string& content) {
     RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Io);
-#ifndef _WIN32
-    int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd >= 0) {
-        struct stat st = {};
-        if (::fstat(fd, &st) == 0 && st.st_size >= 0 && st.st_size <= kMaxMarkdownInputBytes) {
-            if (st.st_size == 0) {
-                content.clear();
-                ::close(fd);
-                return true;
-            }
-            content.resize((size_t)st.st_size);
-            size_t offset = 0;
-            while (offset < content.size()) {
-                const ssize_t got = ::read(fd, &content[offset], content.size() - offset);
-                if (got < 0 && errno == EINTR) continue;
-                if (got <= 0) break;
-                offset += (size_t)got;
-            }
-            ::close(fd);
-            if (offset == content.size()) return true;
-            return RayoMd::File::ReadAll(path, (size_t)kMaxMarkdownInputBytes, content);
-        }
-        ::close(fd);
-    }
-#endif
-
     return RayoMd::File::ReadAll(path, (size_t)kMaxMarkdownInputBytes, content);
 }
 
@@ -146,7 +120,7 @@ bool WriteNewFileAtomicPortable(const fs::path& path, const std::string& content
             ("." + path.filename().string() + ".rayomd-" +
              std::to_string(counter.fetch_add(1, std::memory_order_relaxed)) + ".tmp");
 #ifndef _WIN32
-        int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+        int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
         if (fd < 0) {
             if (errno == EEXIST) continue;
             return false;

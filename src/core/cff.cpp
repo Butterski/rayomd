@@ -402,10 +402,11 @@ uint8_t CffFont::FdFor(uint16_t glyph) const {
     if (!cidKeyed) return 0;
     if (fdSelectFormat == 0) return glyph < glyphCount ? data[fdSelect + glyph] : 0;
     // Format 3: ranges of (first glyph, FD) with ascending first glyphs; the last range whose
-    // first glyph is not after `glyph`.
+    // first glyph is not after `glyph`. As many ranges as ParseCff checked, not as the data says
+    // now: a font file changed in place since may say more.
     const uint8_t* const ranges = data + fdSelect + 2;
     size_t low = 0;
-    size_t high = ReadU16(data + fdSelect);
+    size_t high = fdRanges;
     while (high - low > 1) {
         const size_t middle = (low + high) / 2;
         if (ReadU16(ranges + middle * 3) <= glyph) low = middle;
@@ -519,6 +520,7 @@ bool ParseCff(const uint8_t* data, size_t size, uint16_t glyphCount, CffFont& fo
     if (font.fdSelectFormat != 3 || size - at < 2) return false;
     const size_t ranges = ReadU16(data + at);
     if (ranges == 0 || ranges * 3 + 4 > size - at) return false;
+    font.fdRanges = (uint16_t)ranges;
     uint32_t previous = 0;
     for (size_t range = 0; range < ranges; range++) {
         const uint8_t* const entry = data + at + 2 + range * 3;
