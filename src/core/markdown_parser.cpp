@@ -374,6 +374,10 @@ static bool ParseTableSeparator(std::string_view line, std::vector<int>& aligns)
     return true;
 }
 
+// The most columns a pipe table may have; a longer header line is text. Every row gets the
+// header's cells, so a header of 100,000 cells made each one-word line after it 100,000 cells.
+constexpr size_t kMaxTableColumns = 1000;
+
 // True when lines[i] is a table header followed by its separator line. `aligns`, when
 // given, receives the column alignments of a table that starts here.
 static bool IsTableStart(const std::vector<std::string_view>& lines, size_t i, std::vector<int>* aligns = nullptr) {
@@ -383,7 +387,8 @@ static bool IsTableStart(const std::vector<std::string_view>& lines, size_t i, s
         lines[i + 1].find('-') == std::string_view::npos) {
         return false;
     }
-    if (CountTableCells(lines[i]) < 2) return false;
+    const size_t cells = CountTableCells(lines[i]);
+    if (cells < 2 || cells > kMaxTableColumns) return false;
     std::vector<int> parsed;
     if (!ParseTableSeparator(lines[i + 1], parsed)) return false;
     if (aligns) *aligns = std::move(parsed);
@@ -1407,8 +1412,17 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
 
             // As in GFM, the rows go on up to a blank line or the start of another block, and
             // every row has the cells of the header: missing ones are empty, extra ones dropped.
+            // The empty cells come from the document's budget (ParseBudget); a row that would
+            // pass it ends the table, and the lines from it on are text, as in cmark-gfm.
+            ParseBudget* const budget = ParseBudget::Current();
+            size_t ownCells = ParseBudget::kPaddedCells;
+            size_t& cellsLeft = budget != nullptr ? budget->paddedCells : ownCells;
             while (i < lines.size() && infos[i].kind == LineKind::Plain && !isSuppressed(i)) {
                 std::vector<std::string> row = SplitTableCells(lines[i]);
+                if (row.size() < columns) {
+                    if (columns - row.size() > cellsLeft) break;
+                    cellsLeft -= columns - row.size();
+                }
                 row.resize(columns);
                 addRow(lines[i], std::move(row));
                 i++;

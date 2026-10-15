@@ -93,11 +93,14 @@ constexpr size_t kMaxReferenceDestinationBytes = 8192;
 
 // What the parse of one document may add to its text, shared by all its levels and footnotes so
 // that nesting cannot multiply it: the destination bytes resolved reference links copy in, at most
-// twice the document's size and a mebibyte; a reference past that stays text. ParseMarkdown keeps
-// one for its thread while it runs; text resolved outside one gets that budget for its own size.
+// twice the document's size and a mebibyte (a reference past that stays text), and the empty
+// cells that complete pipe-table rows shorter than their header, at most 2^19 as in cmark-gfm (a
+// row past that ends its table). ParseMarkdown keeps one for its thread while it runs; text parsed
+// outside one gets those budgets for itself.
 class ParseBudget {
 public:
     static constexpr size_t kReferenceSlackBytes = size_t(1) << 20;
+    static constexpr size_t kPaddedCells = size_t(1) << 19;
 
     explicit ParseBudget(size_t sourceBytes);
     ~ParseBudget();
@@ -107,6 +110,7 @@ public:
     static ParseBudget* Current();
 
     size_t referenceBytes;      // destination bytes reference links may still copy in
+    size_t paddedCells = kPaddedCells;  // empty cells short table rows may still get
 
 private:
     ParseBudget* previous;

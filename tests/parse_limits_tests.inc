@@ -162,8 +162,80 @@ bool CheckReferenceLinks() {
     });
 }
 
+bool CheckTables() {
+    using math_markdown_tests::Repeat;
+    using TinyPdf::Internal::Block;
+    using TinyPdf::Internal::BlockType;
+    using TinyPdf::Internal::ParseMarkdown;
+    // Rows shorter and longer than their header, a separator shorter than it: the same bytes.
+    const std::string ragged =
+        "# Ragged tables\n\n"
+        "| a | b | c |\n|---|:-:|--:|\n| 1 |\n| 1 | 2 | 3 | 4 |\n| \\| x | `y|z` |\nno pipes here\n\n"
+        "| h1 | h2 | h3 |\n|---|---|\n| short |\n|  |\n\n"
+        "> | q | r |\n> |---|---|\n> | only |\n\n"
+        "- item\n\n  | s | t | u | v |\n  |---|---|---|---|\n  | 1 |\n";
+    if (!SameBytes("ragged tables", ragged, 5447, "2a42e434fe1acd7f088c00ad41c7d005f69c6becf9d1a16950582bc28843f7d7")) {
+        return false;
+    }
+
+    // A header of 1,000 cells makes a table, one of 1,001 does not.
+    const auto header = [](size_t cells) { return Repeat("| a ", cells) + "|\n|---|\nx\n"; };
+    std::vector<Block> blocks = ParseMarkdown(header(1000));
+    if (blocks.size() != 1 || blocks[0].type != BlockType::Table || blocks[0].rows.size() != 2 ||
+        blocks[0].rows[1].size() != 1000) {
+        std::cerr << "a table of 1,000 columns is no table" << std::endl;
+        return false;
+    }
+    blocks = ParseMarkdown(header(1001));
+    if (blocks.empty() || blocks[0].type != BlockType::Paragraph) {
+        std::cerr << "a table of 1,001 columns is a table" << std::endl;
+        return false;
+    }
+
+    // Every line after a header got the header's cells: 100,000 cells and 10,000 one-word lines
+    // (120 KB) made 10^9 cells, 32 GB of empty strings.
+    const std::string wide = std::string(100001, '|') + "\n|---|\n" + Repeat("x\n", 10000);
+    if (!Bounded("a header of 100,000 cells over 10,000 lines", 20.0, 192, [&]() {
+            const std::vector<Block> parsed = ParseMarkdown(wide);
+            std::string pdf;
+            return !parsed.empty() && parsed[0].type == BlockType::Paragraph && Build(wide, pdf);
+        })) {
+        return false;
+    }
+
+    // Within the column limit, the document's empty cells are limited to 2^19 (cmark-gfm's
+    // limit): 1,000 columns over 20,000 one-word lines were 2 * 10^7 cells. The row that would
+    // pass the limit ends the table; it and the lines after it are a paragraph.
+    const std::string tall = Repeat("| a ", 1000) + "|\n|---|\n" + Repeat("x\n", 20000);
+    if (!Bounded("1,000 columns over 20,000 one-word lines", 20.0, 512, [&]() {
+            const std::vector<Block> parsed = ParseMarkdown(tall);
+            const size_t rows = (size_t(1) << 19) / 999;
+            std::string pdf;
+            return parsed.size() == 2 && parsed[0].type == BlockType::Table && parsed[0].rows.size() == 1 + rows &&
+                parsed[1].type == BlockType::Paragraph && parsed[1].text.size() == 2 * (20000 - rows) - 1 &&
+                Build(tall, pdf);
+        })) {
+        return false;
+    }
+    // The limit is the document's, also for tables in quotes, each parsed on its own.
+    const std::string quoted = Repeat("> " + Repeat("| a ", 1000) + "|\n> |---|\n> x\n\n", 600);
+    return Bounded("600 quoted tables of 1,000 columns", 20.0, 512, [&]() {
+        const std::vector<Block> parsed = ParseMarkdown(quoted);
+        size_t full = 0;
+        for (const Block& quote : parsed) {
+            if (quote.type != BlockType::Quote || quote.children.empty() || quote.children[0].type != BlockType::Table) {
+                return false;
+            }
+            full += quote.children[0].rows.size() == 2;
+        }
+        std::string pdf;
+        return parsed.size() == 600 && full == (size_t(1) << 19) / 999 && Build(quoted, pdf);
+    });
+}
+
 } // namespace parse_limits_tests
 
 bool CheckParseLimits() {
-    return parse_limits_tests::CheckStatusSymbols() && parse_limits_tests::CheckReferenceLinks();
+    return parse_limits_tests::CheckStatusSymbols() && parse_limits_tests::CheckReferenceLinks() &&
+        parse_limits_tests::CheckTables();
 }
