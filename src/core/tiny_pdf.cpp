@@ -423,6 +423,8 @@ struct TtfFont {
     uint32_t hmtxOffset = 0;
     uint32_t locaOffset = 0;
     uint32_t glyfOffset = 0;      // of glyf, once loca is checked
+    uint32_t glyfLength = 0;      // of glyf, once loca is checked: no Loca value is larger
+    uint64_t loadId = 0;          // which load of the process this is (TryLoad), never 0 once loaded
     uint32_t locaEntries = 0;     // glyphCount + 1 once loca is checked, else 0
     uint16_t metricGlyphs = 0;    // glyphCount once hmtx is checked, else 0: the glyphs with an advance
     uint16_t advanceCount = 0;    // the advances hmtx lists; later glyphs take the last one
@@ -455,12 +457,15 @@ struct TtfFont {
         return (uint16_t)(metric[0] << 8 | metric[1]);
     }
 
-    // The offset of `index`'s glyph in glyf, for an index below locaEntries.
+    // The offset of `index`'s glyph in glyf, for an index below locaEntries. At most glyf's length,
+    // which ParseLoca checked every entry against: a mapped file changed in place since then may
+    // hold others, and reads of a glyph from start to end must stay in glyf.
     uint32_t Loca(size_t index) const {
         const uint8_t* const entries = bytes.data() + locaOffset;
-        if (indexToLocFormat == 0) return (uint32_t)(entries[index * 2] << 8 | entries[index * 2 + 1]) * 2u;
-        return (uint32_t)entries[index * 4] << 24 | (uint32_t)entries[index * 4 + 1] << 16 |
-            (uint32_t)entries[index * 4 + 2] << 8 | entries[index * 4 + 3];
+        const uint32_t offset = indexToLocFormat == 0 ? (uint32_t)(entries[index * 2] << 8 | entries[index * 2 + 1]) * 2u
+            : (uint32_t)entries[index * 4] << 24 | (uint32_t)entries[index * 4 + 1] << 16 |
+                (uint32_t)entries[index * 4 + 2] << 8 | entries[index * 4 + 3];
+        return std::min(offset, glyfLength);
     }
 
     // Whether `glyph` is a composite glyph: one whose glyf entry has a negative contour count.
@@ -556,6 +561,10 @@ struct TtfFont {
             for (auto& width : widthCache) width.store(0, std::memory_order_relaxed);
         }
         loaded = bytes.Load(path) && Parse();
+        // Unique to this load in the process: the font objects' caches (MakeCidKey) know a font by
+        // it, never by its address, which a theme font loaded again may take over.
+        static std::atomic<uint64_t> loads{ 0 };
+        if (loaded) loadId = ++loads;
         return loaded;
     }
 
@@ -837,6 +846,7 @@ struct TtfFont {
         if (furthest > tables["glyf"].length) return false;
         locaOffset = table.offset;
         glyfOffset = tables["glyf"].offset;
+        glyfLength = tables["glyf"].length;
         locaEntries = (uint32_t)glyphCount + 1;
         return true;
     }
@@ -1605,7 +1615,7 @@ static uint32_t ChecksumBytes(const char* data, size_t size) {
 
 // The key of the font objects of a document: the font, then the CIDs it shows, high byte first.
 static std::string MakeCidKey(const TtfFont& font, const CidList& used) {
-    const TtfFont* const identity = &font;
+    const uint64_t identity = font.loadId;
     std::string key(sizeof(identity) + used.size() * 2, '\0');
     memcpy(&key[0], &identity, sizeof(identity));
     char* out = &key[sizeof(identity)];
@@ -11897,21 +11907,31 @@ static const TtfFont* GetCachedFont() {
     return cached.font.loaded ? &cached.font : nullptr;
 }
 
-// A theme's font, loaded once per path and kept, as the default font is: builds on other threads
-// may be using it. Null when it cannot be read or is no TrueType font.
-RAYOMD_COLD static const TtfFont* ThemeFont(const std::string& pathUtf8) {
+// A theme's font, loaded once per path and kept while the file keeps its stamp (RayoMd::File::
+// StampOf): a font file replaced or rewritten is loaded again, and one that could not be loaded
+// is tried again once it changes. Shared: a build on another thread may still use the one before.
+// Null when it cannot be read or is no TrueType or OpenType font.
+RAYOMD_COLD static std::shared_ptr<const TtfFont> ThemeFont(const std::string& pathUtf8) {
+    struct Entry {
+        RayoMd::File::Stamp stamp;
+        std::shared_ptr<const TtfFont> font;
+    };
     static std::mutex mutex;
-    static std::map<std::string, std::unique_ptr<TtfFont>> fonts;
+    static std::map<std::string, Entry> fonts;
+    const RayoMd::File::Stamp stamp = RayoMd::File::StampOf(PathFromUtf8(pathUtf8));
     std::lock_guard<std::mutex> lock(mutex);
     auto found = fonts.find(pathUtf8);
-    if (found != fonts.end()) return found->second.get();
-    auto font = std::make_unique<TtfFont>();
+    if (found != fonts.end() && found->second.stamp == stamp) return found->second.font;
+    // TtfFont's own operator new (calloc): its width cache must start zeroed, so no make_shared.
+    std::shared_ptr<TtfFont> font(new TtfFont());
 #ifdef _WIN32
     if (!font->TryLoad(Utf8ToWide(pathUtf8))) font.reset();
 #else
     if (!font->TryLoad(pathUtf8)) font.reset();
 #endif
-    return fonts.emplace(pathUtf8, std::move(font)).first->second.get();
+    Entry& entry = fonts[pathUtf8];
+    entry = { stamp, std::move(font) };
+    return entry.font;
 }
 
 // Whether the theme's own header and footer text has characters the standard fonts cannot show:
@@ -12559,15 +12579,19 @@ static bool BuildInTrueType(const PdfOptions& options, uint32_t& missingCharacte
     size_t missing = 0;
     bool built = false;
     if (!options.theme.fontPath.empty()) {
-        const TtfFont* font = ThemeFont(options.theme.fontPath);
+        // Held for the whole build: the cache may load a changed file again meanwhile.
+        const std::shared_ptr<const TtfFont> held[4] = { ThemeFont(options.theme.fontPath),
+            options.theme.fontBoldPath.empty() ? nullptr : ThemeFont(options.theme.fontBoldPath),
+            options.theme.fontItalicPath.empty() ? nullptr : ThemeFont(options.theme.fontItalicPath),
+            options.theme.fontBoldItalicPath.empty() ? nullptr : ThemeFont(options.theme.fontBoldItalicPath) };
+        const TtfFont* font = held[0].get();
         ThemeFaces faces;
-        bool facesLoaded = true;
-        for (const auto& [path, face] : { std::pair<const std::string*, const TtfFont**>{ &options.theme.fontBoldPath, &faces.bold },
-                 { &options.theme.fontItalicPath, &faces.italic }, { &options.theme.fontBoldItalicPath, &faces.boldItalic } }) {
-            if (path->empty()) continue;
-            *face = ThemeFont(*path);
-            facesLoaded = facesLoaded && *face != nullptr;
-        }
+        faces.bold = held[1].get();
+        faces.italic = held[2].get();
+        faces.boldItalic = held[3].get();
+        const bool facesLoaded = (options.theme.fontBoldPath.empty() || faces.bold != nullptr) &&
+            (options.theme.fontItalicPath.empty() || faces.italic != nullptr) &&
+            (options.theme.fontBoldItalicPath.empty() || faces.boldItalic != nullptr);
         if (!font || !facesLoaded) {
             g_lastError = static_cast<int>(BuildError::ThemeFontUnavailable);
             return false;

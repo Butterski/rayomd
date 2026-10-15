@@ -265,8 +265,85 @@ bool CheckSpecialFiles() {
 #endif
 }
 
+uint32_t BigEndianAt(const std::string& bytes, size_t at, int size) {
+    uint32_t value = 0;
+    for (int i = 0; i < size; i++) value = value << 8 | (uint8_t)bytes[at + (size_t)i];
+    return value;
+}
+
+// The offset and length of table `tag` in a single sfnt font, false without it.
+bool FindTable(const std::string& font, const char* tag, uint32_t& offset, uint32_t& length) {
+    const uint32_t tables = BigEndianAt(font, 4, 2);
+    for (uint32_t i = 0; i < tables && 12 + (i + 1) * 16 <= font.size(); i++) {
+        if (font.compare(12 + i * 16, 4, tag) == 0) {
+            offset = BigEndianAt(font, 12 + i * 16 + 8, 4);
+            length = BigEndianAt(font, 12 + i * 16 + 12, 4);
+            return (size_t)offset + length <= font.size();
+        }
+    }
+    return false;
+}
+
+// The system's TrueType font for tests, empty when it has none.
+std::string TestFontPath() {
+#ifdef _WIN32
+    const char* windows = std::getenv("WINDIR");
+    const std::string path = windows ? std::string(windows) + "\\Fonts\\arial.ttf" : std::string();
+#else
+    const std::string path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+#endif
+    std::error_code error;
+    return !path.empty() && fs::is_regular_file(path, error) ? path : std::string();
+}
+
+// A theme font is mapped, not copied, so a file changed in place while a build uses it changes
+// what the build reads: loca entries that now point past glyf (and past the file) must not be
+// followed when the font is subset; the next build loads the changed file again (and fails, its
+// loca being out of range), and the one after, the file put back, loads it again too.
+bool CheckFontChangedInPlace() {
+    const std::string source = TestFontPath();
+    if (source.empty()) return true;
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-changed-font";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    const fs::path path = root / "theme.ttf";
+    std::string original;
+    uint32_t head = 0, headLength = 0, loca = 0, locaLength = 0;
+    if (!RayoMd::File::ReadAll(source, 64u << 20, original) || !FindTable(original, "head", head, headLength) ||
+        !FindTable(original, "loca", loca, locaLength) || headLength < 54 || !WriteFile(path, original)) {
+        std::cerr << "cannot prepare the changed-font test" << std::endl;
+        return false;
+    }
+    std::string corrupt = original;
+    const int entry = BigEndianAt(original, head + 50, 2) == 0 ? 2 : 4;
+    for (size_t at = loca, index = 0; at + (size_t)entry <= (size_t)loca + locaLength; at += (size_t)entry, index++) {
+        const uint32_t value = index % 2 == 0 ? 0 : (entry == 2 ? 0xFFFFu : 0x7FFFFFF0u);
+        for (int i = 0; i < entry; i++) corrupt[at + (size_t)i] = (char)(value >> (8 * (entry - 1 - i)));
+    }
+    std::string document;
+    for (int i = 0; i < 20000; i++) document += u8"Zażółć gęślą jaźń, paragraph " + std::to_string(i) + ".\n\n";
+    TinyPdf::PdfOptions options;
+    options.theme.fontPath = path.u8string();
+    std::string pdf;
+    const auto start = std::chrono::steady_clock::now();
+    bool ok = TinyPdf::BuildPdf(document, options, pdf).Ok() && ValidPdf(pdf);
+    const double fullMs = MillisecondsSince(start);
+    // Built again with the font loaded above; the file is rewritten in place while it lays out.
+    std::string changedPdf;
+    std::thread worker([&]() { TinyPdf::BuildPdf(document, options, changedPdf); });
+    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(fullMs / 3.0));
+    ok = RayoMd::File::WriteAll(path, corrupt) && ok;
+    worker.join();
+    std::string after;
+    ok = ok && TinyPdf::BuildPdf("# Text\n", options, after).error == TinyPdf::BuildError::ThemeFontUnavailable;
+    ok = ok && RayoMd::File::WriteAll(path, original) && TinyPdf::BuildPdf("# Text\n", options, after).Ok() && ValidPdf(after);
+    if (!ok) std::cerr << "a theme font changed in place was not read again as it now is" << std::endl;
+    fs::remove_all(root);
+    return ok;
+}
+
 bool CheckHardening() {
-    return CheckCancel() && CheckSpecialFiles();
+    return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace();
 }
 
 } // namespace hardening_tests
