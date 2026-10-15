@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -97,6 +98,8 @@ enum class BuildError : uint8_t {
     // PdfOptions::pdfa or pdfua, but no TrueType or OpenType font to embed: neither RAYOMD_FONT
     // nor a system font.
     PdfaFontUnavailable = 8,
+    // PdfOptions::cancel was set: the build was abandoned, and no PDF made.
+    Cancelled = 9,
 };
 
 struct BuildResult {
@@ -150,6 +153,11 @@ struct PdfOptions {
     // The heading levels the table lists, from its top one: 1 to 6.
     int tocDepth = 3;
     PdfTheme theme;
+    // Set to true by another thread to abandon a build no longer wanted: BuildPdf (and
+    // BuildBookPdf) then return soon after with BuildError::Cancelled and no PDF. Checked between
+    // blocks and in loops that can run long (image fetch and decode, big tables, code, a book's
+    // files), so a build returns within a few milliseconds. nullptr: never cancelled.
+    const std::atomic<bool>* cancel = nullptr;
 };
 
 // Legacy error reporting is retained for the bool-returning compatibility
