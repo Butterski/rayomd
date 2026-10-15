@@ -339,6 +339,10 @@ bool CheckFontChangedInPlace() {
     worker.join();
     std::string after;
     ok = ok && TinyPdf::BuildPdf("# Text\n", options, after).error == TinyPdf::BuildError::ThemeFontUnavailable;
+    // The file put back keeps its size, so only its write time tells it from the corrupt one: write
+    // it a few clock ticks later (Windows stamps writes with the coarse system time, a tick of up to
+    // 15.6 ms; the two writes fell into one tick on a CI runner, and the build kept the failure).
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
     ok = ok && RayoMd::File::WriteAll(path, original) && TinyPdf::BuildPdf("# Text\n", options, after).Ok() && ValidPdf(after);
     if (!ok) std::cerr << "a theme font changed in place was not read again as it now is" << std::endl;
     fs::remove_all(root);
