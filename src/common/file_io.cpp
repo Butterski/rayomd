@@ -228,7 +228,8 @@ bool WriteAll(const std::filesystem::path& path, std::string_view content, [[may
     // fopen("wb")'s O_TRUNC: truncating an ext4 file to zero frees its blocks, and its close then
     // starts writeback (auto_da_alloc), about 0.1 ms per export onto an existing PDF. The cost: no
     // such flush, so a crash can leave old and new bytes mixed, as any in-place overwrite can.
-    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, ownerOnly ? 0600 : 0666);
+    const int fd = ownerOnly ? ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600)
+                             : ::open(path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0666);
     if (fd < 0) return false;
     struct stat st;
     bool written = ::fstat(fd, &st) == 0;

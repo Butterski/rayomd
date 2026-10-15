@@ -531,8 +531,21 @@ bool CheckCachePermissions() {
         ok = ok && ::stat(entry.path().c_str(), &info) == 0 && (info.st_mode & 0777) == 0600;
     }
     if (!ok || entries == 0) std::cerr << "the image cache is readable by others" << std::endl;
+    // A cache entry's temporary file is written with ownerOnly: a link or a file planted at its
+    // name fails the write and is left as it was, where the write went through the link before.
+    bool planted = WriteFile(root / "victim", "victim");
+    fs::create_symlink(root / "victim", root / "link.tmp", error);
+    planted = planted && !error && WriteFile(root / "other.tmp", "other");
+    std::string text;
+    planted = planted && !RayoMd::File::WriteAll(root / "link.tmp", "new", true) &&
+        !RayoMd::File::WriteAll(root / "other.tmp", "new", true) &&
+        RayoMd::File::ReadAll(root / "victim", 64, text) && text == "victim" &&
+        RayoMd::File::ReadAll(root / "other.tmp", 64, text) && text == "other" &&
+        RayoMd::File::WriteAll(root / "fresh.tmp", "new", true) && ::stat((root / "fresh.tmp").c_str(), &info) == 0 &&
+        (info.st_mode & 0777) == 0600;
+    if (!planted) std::cerr << "a private write went through a planted link or file" << std::endl;
     fs::remove_all(root);
-    return ok && entries != 0;
+    return ok && entries != 0 && planted;
 #endif
 }
 
