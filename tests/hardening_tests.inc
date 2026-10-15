@@ -344,8 +344,114 @@ bool CheckFontChangedInPlace() {
     return ok;
 }
 
+void AppendBig16(std::string& out, uint32_t value) {
+    out.push_back((char)(value >> 8));
+    out.push_back((char)value);
+}
+
+// A TrueType font of 65,535 glyphs in which 'A' (glyph 1) is a composite of glyph 2, which is one
+// of glyph 3, and so on to the last, an empty glyph that is also the space.
+std::string MakeCompositeChainFont() {
+    const uint32_t glyphs = 65535;
+    std::string glyf, loca, hmtx, cmap, head(54, '\0'), hhea(36, '\0'), maxp;
+    for (uint32_t glyph = 0; glyph < glyphs; glyph++) {
+        AppendBigEndian(loca, (uint32_t)glyf.size());
+        if (glyph == 0 || glyph + 1 == glyphs) continue;      // .notdef and the last: empty
+        AppendBig16(glyf, 0xFFFF);                           // numberOfContours -1: composite
+        for (int i = 0; i < 4; i++) AppendBig16(glyf, 0);    // bounding box
+        AppendBig16(glyf, 0x0002);                           // ARGS_ARE_XY_VALUES, bytes, no more
+        AppendBig16(glyf, glyph + 1);
+        AppendBig16(glyf, 0);                                // two byte arguments
+    }
+    AppendBigEndian(loca, (uint32_t)glyf.size());
+    AppendBig16(hmtx, 500);
+    AppendBig16(hmtx, 0);
+    AppendBig16(cmap, 0);                                    // version
+    AppendBig16(cmap, 1);                                    // one subtable: Windows, UCS-4
+    AppendBig16(cmap, 3);
+    AppendBig16(cmap, 10);
+    AppendBigEndian(cmap, 12);
+    AppendBig16(cmap, 12);                                   // format 12
+    AppendBig16(cmap, 0);
+    AppendBigEndian(cmap, 16 + 2 * 12);
+    AppendBigEndian(cmap, 0);
+    AppendBigEndian(cmap, 2);
+    for (const uint32_t group : { 0x20u, 0x41u }) {
+        AppendBigEndian(cmap, group);
+        AppendBigEndian(cmap, group);
+        AppendBigEndian(cmap, group == 0x20u ? glyphs - 1 : 1);
+    }
+    head[0] = 0; head[1] = 1;                                // version 1.0
+    head[18] = (char)(1000 >> 8); head[19] = (char)(1000 & 0xFF);   // unitsPerEm
+    head[51] = 1;                                            // indexToLocFormat: long
+    hhea[0] = 0; hhea[1] = 1;
+    hhea[35] = 1;                                            // numberOfHMetrics
+    AppendBigEndian(maxp, 0x00005000);
+    AppendBig16(maxp, glyphs);
+    const std::pair<const char*, const std::string*> tables[] = {
+        { "cmap", &cmap }, { "glyf", &glyf }, { "head", &head }, { "hhea", &hhea }, { "hmtx", &hmtx },
+        { "loca", &loca }, { "maxp", &maxp } };
+    std::string font;
+    AppendBigEndian(font, 0x00010000);
+    AppendBig16(font, 7);
+    for (int i = 0; i < 3; i++) AppendBig16(font, 0);
+    uint32_t offset = 12 + 7 * 16;
+    for (const auto& [tag, data] : tables) {
+        font.append(tag, 4);
+        AppendBigEndian(font, 0);
+        AppendBigEndian(font, offset);
+        AppendBigEndian(font, (uint32_t)data->size());
+        offset += (uint32_t)(data->size() + 3) & ~3u;
+    }
+    for (const auto& table : tables) {
+        font += *table.second;
+        font.resize((font.size() + 3) & ~(size_t)3, '\0');
+    }
+    return font;
+}
+
+// A composite glyph nested 65,534 deep: subsetting the font for "A" stops at the depth limit
+// instead of recursing down the chain (a stack overflow before), and the PDF is made.
+bool CheckDeepCompositeGlyph() {
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-composite";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    const fs::path path = root / "chain.ttf";
+    bool ok = WriteFile(path, MakeCompositeChainFont());
+    TinyPdf::PdfOptions options;
+    options.theme.fontPath = path.u8string();
+    std::string pdf;
+    // On a thread with a 1 MiB stack, as Windows gives its threads (the main one has 8 MiB here).
+    const std::function<void()> build = [&]() {
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf("# A\n\nA A A\n", options, pdf);
+        ok = ok && result.Ok() && ValidPdf(pdf);
+    };
+#ifdef _WIN32
+    std::thread worker(build);
+    worker.join();
+#else
+    pthread_attr_t attributes;
+    pthread_t thread;
+    pthread_attr_init(&attributes);
+    pthread_attr_setstacksize(&attributes, 1u << 20);
+    const auto run = [](void* function) -> void* {
+        (*static_cast<const std::function<void()>*>(function))();
+        return nullptr;
+    };
+    if (pthread_create(&thread, &attributes, run, const_cast<std::function<void()>*>(&build)) != 0) {
+        ok = false;
+    } else {
+        pthread_join(thread, nullptr);
+    }
+    pthread_attr_destroy(&attributes);
+#endif
+    if (!ok) std::cerr << "a font of deeply nested composite glyphs failed the export" << std::endl;
+    fs::remove_all(root);
+    return ok;
+}
+
 bool CheckHardening() {
-    return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace();
+    return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph();
 }
 
 } // namespace hardening_tests

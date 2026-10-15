@@ -8525,11 +8525,15 @@ private:
     }
 };
 
+// Composite glyphs nested deeper than this fail (FreeType's limit): a font may chain each of its
+// 65,535 glyphs to the next, which recursion would follow until the stack ran out.
+constexpr int kMaxCompositeDepth = 16;
+
 // Marks `glyph` and the components of a composite one in `include`, and lists each glyph it
-// marks in `marked`.
+// marks in `marked`; `depth` composites hold it.
 static bool AddGlyphClosure(const TtfFont& font, uint16_t glyph, std::vector<uint8_t>& include,
-    std::vector<uint16_t>& marked) {
-    if (glyph >= include.size()) return false;
+    std::vector<uint16_t>& marked, int depth = 0) {
+    if (glyph >= include.size() || depth > kMaxCompositeDepth) return false;
     if (include[glyph]) return true;
     include[glyph] = 1;
     marked.push_back(glyph);
@@ -8556,7 +8560,7 @@ static bool AddGlyphClosure(const TtfFont& font, uint16_t glyph, std::vector<uin
         uint16_t flags = ReadU16(font.bytes, off);
         uint16_t componentGlyph = ReadU16(font.bytes, off + 2);
         off += 4;
-        if (!AddGlyphClosure(font, componentGlyph, include, marked)) return false;
+        if (!AddGlyphClosure(font, componentGlyph, include, marked, depth + 1)) return false;
         off += (flags & 0x0001) ? 4 : 2;
         if (flags & 0x0008) off += 2;
         else if (flags & 0x0040) off += 4;

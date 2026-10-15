@@ -45,6 +45,7 @@
 
 #ifndef _WIN32
 #include <fcntl.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
