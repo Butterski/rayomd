@@ -1018,7 +1018,7 @@ struct Layouter {
 
         // Scratch: the cells, then one slot per column (w = width, font = alignment, ic = rules
         // before it), then one per row (h, d, w = baseline, skew = tag width, first/end = tag).
-        const size_t base = scratch.size(), colBase = base + rows * cols, rowBase = colBase + cols;
+        const size_t base = scratch.size(), colBase = base + size_t(rows) * cols, rowBase = colBase + cols;
         scratch.resize(rowBase + rows);
         unsigned rulesAfter = 0;
         {
@@ -1044,7 +1044,7 @@ struct Layouter {
                 unsigned c = 0;
                 for (unsigned cell = Node(row).child[0]; cell != 0 && c < cols; cell = Node(cell).next, ++c) {
                     const Box box = Field(Node(cell).child[0], cellStyle);
-                    scratch[base + r * cols + c] = box;
+                    scratch[base + size_t(r) * cols + c] = box;
                     scratch[colBase + c].w = std::max(scratch[colBase + c].w, box.w);
                     h = std::max(h, box.h);
                     d = std::max(d, box.d);
@@ -1095,7 +1095,7 @@ struct Layouter {
                 metrics.w = baseline;
                 for (unsigned c = 0; c < cols; ++c) {
                     const Box& column = scratch[colBase + c];
-                    const Box& cell = scratch[base + r * cols + c];
+                    const Box& cell = scratch[base + size_t(r) * cols + c];
                     const double slack = column.w - cell.w;
                     const double offset = column.font == kColumnLeft ? 0.0 : column.font == kColumnRight ? slack : slack / 2.0;
                     Shift(cell, column.ic + offset, baseline);
