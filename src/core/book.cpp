@@ -294,12 +294,13 @@ BookFiles::BookFiles() = default;
 BookFiles::~BookFiles() = default;
 
 void ParseBookFiles(const std::vector<BookChapter>& chapters, const std::vector<std::string>& texts,
-    const std::vector<std::string>& titles, bool toc, int tocDepth, BookFiles& files) {
+    const std::vector<std::string>& titles, bool toc, int tocDepth, const std::atomic<bool>* cancel, BookFiles& files) {
     const size_t count = chapters.size();
     files.blocks.resize(count);
     files.footnotes.resize(count);
     bool marker = false;
     for (size_t index = 0; index < count; index++) {
+        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return;
         if (chapters[index].part) continue;
         std::vector<Block>& blocks = files.blocks[index];
         blocks = ParseMarkdown(texts[index], &files.footnotes[index]);

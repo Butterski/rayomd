@@ -16,8 +16,20 @@
 
 namespace RayoMd::File {
 
-// fopen of `path` with fopen's mode ("rb", "wb"); null when it cannot be opened.
+// fopen of `path` with fopen's mode ("rb", "wb"), close-on-exec; null when it cannot be opened. A
+// read mode opens only a regular file (OpenRegular).
 std::FILE* Open(const std::filesystem::path& path, const char* mode);
+
+// The regular file at `path` opened for reading, close-on-exec, its size in `size`; a FIFO, a
+// device, a socket or a directory is refused before anything can wait on it: on POSIX the open is
+// non-blocking (O_NONBLOCK, O_NOCTTY) and fstat must say S_ISREG before the descriptor is made
+// blocking again; on Windows GetFileType must say FILE_TYPE_DISK. A file descriptor, -1 when it
+// cannot (POSIX), or a HANDLE, INVALID_HANDLE_VALUE when it cannot (Windows, as intptr_t).
+#ifdef _WIN32
+intptr_t OpenRegular(const std::filesystem::path& path, uint64_t& size);
+#else
+int OpenRegular(const std::filesystem::path& path, uint64_t& size);
+#endif
 
 // The size of an open file, -1 when it has none (a pipe). Leaves the position at the end.
 long long SizeOf(std::FILE* file);
@@ -25,13 +37,22 @@ long long SizeOf(std::FILE* file);
 // Moves an open file to byte `offset`.
 bool SeekTo(std::FILE* file, long long offset);
 
-// The whole file, at most `maximum` bytes; false when it cannot be read or is larger.
+// The whole regular file (OpenRegular), at most `maximum` bytes; false when it cannot be read, is
+// larger, or is no regular file.
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content);
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint8_t>& content);
 
+// As ReadAll, for a `canonical` path (absolute, no symbolic link, no "." or ".."), and only while
+// it still names the file opened: on Linux the path the open descriptor names (/proc/self/fd/N)
+// must be `canonical`, else a directory of it was swapped for a link since the path was worked
+// out, and the file is refused. A check of a path and a later open of it by name cannot tell.
+// Elsewhere as ReadAll.
+bool ReadCanonical(const std::filesystem::path& canonical, size_t maximum, std::vector<uint8_t>& content);
+
 // Creates or replaces `path` with `content`. On POSIX systems an existing file is overwritten in
-// place and then cut to size (no O_TRUNC; see file_io.cpp).
-bool WriteAll(const std::filesystem::path& path, std::string_view content);
+// place and then cut to size (no O_TRUNC; see file_io.cpp). `ownerOnly`: a file it creates is
+// readable and writable by its owner only (0600) on POSIX.
+bool WriteAll(const std::filesystem::path& path, std::string_view content, bool ownerOnly = false);
 
 // What the file at a path is now: its size, its last write, its last status change (POSIX) or
 // creation (Windows), and its identity (POSIX); all zero when there is none. A file rewritten or

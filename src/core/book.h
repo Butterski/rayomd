@@ -30,9 +30,10 @@ struct BookFiles {
 // Parses each file of a book, `texts` and `titles` its chapters' Markdown and titles as the
 // renderer reads them. A file with a title that does not begin with a level-1 heading gets one of
 // it first, as mdBook prints it. The book has a table of contents with `toc`, or where the first
-// file with a "[TOC]" paragraph has it, listing `tocDepth` levels (BookContents).
+// file with a "[TOC]" paragraph has it, listing `tocDepth` levels (BookContents). Stops at the
+// next file once `cancel` (PdfOptions::cancel) is set, the build then abandoned.
 void ParseBookFiles(const std::vector<BookChapter>& chapters, const std::vector<std::string>& texts,
-    const std::vector<std::string>& titles, bool toc, int tocDepth, BookFiles& files);
+    const std::vector<std::string>& titles, bool toc, int tocDepth, const std::atomic<bool>* cancel, BookFiles& files);
 
 } // namespace TinyPdf::Internal
 

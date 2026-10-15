@@ -655,6 +655,30 @@ def verify(binary: Path, keep: Path | None) -> None:
         missing_input = run(binary, "--export", str(root / "missing.md"), str(root / "missing.pdf"), expect=3)
         if b"could not read input Markdown file" not in missing_input.stdout:
             raise AssertionError("missing input-file diagnostic")
+        if hasattr(os, "mkfifo"):
+            # A FIFO waits for a writer when opened for reading: as the input, RAYOMD_FONT or an
+            # image it must fail at once instead (the timeouts are hang guards); the Unicode text
+            # then takes a system font.
+            fifo_dir = root / "fifo"
+            fifo_dir.mkdir()
+            os.mkfifo(fifo_dir / "input.md")
+            os.mkfifo(fifo_dir / "font.ttf")
+            os.mkfifo(fifo_dir / "pipe.png")
+            fifo_input = run(binary, "--export", str(fifo_dir / "input.md"), str(fifo_dir / "in.pdf"), expect=3, timeout=20)
+            if b"could not read input Markdown file" not in fifo_input.stdout:
+                raise AssertionError("a FIFO as input was not refused")
+            (fifo_dir / "doc.md").write_text("# Zażółć\n\n![pipe-image](pipe.png)\n", encoding="utf-8")
+            proc = subprocess.run(
+                [str(binary), "--export", str(fifo_dir / "doc.md"), str(fifo_dir / "doc.pdf"), "--no-image-cache"],
+                env={**os.environ, "RAYOMD_FONT": str(fifo_dir / "font.ttf")},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=20,
+            )
+            if proc.returncode != 0:
+                raise AssertionError(f"export with a FIFO as RAYOMD_FONT failed: {proc.stdout!r}")
+            require_pdf(fifo_dir / "doc.pdf")
 
         doc = root / "security" / "doc"
         out = root / "security" / "out"

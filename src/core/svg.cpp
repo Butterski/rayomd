@@ -2561,7 +2561,8 @@ private:
         const Tag tag = TagAt(index);
         if (!IsRendered(tag) && !(tag == kTagSymbol && context.use >= 0)) return;   // a symbol only as a use's instance
         if (context.mode == kModeClip && tag == kTagImage) return;
-        if (depth > kMaxRenderDepth || ++instantiated_ > budget_ || work_ > workLimit_) {
+        if (depth > kMaxRenderDepth || ++instantiated_ > budget_ || work_ > workLimit_ ||
+            ((instantiated_ & 1023) == 0 && host_.Cancelled())) {
             failed_ = true;
             return;
         }

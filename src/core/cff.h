@@ -65,6 +65,7 @@ struct CffFont {
     bool cidKeyed = false;
     uint8_t fdSelectFormat = 0;      // CID-keyed: 0 or 3
     uint32_t fdSelect = 0;           // CID-keyed: offset of the FDSelect data after its format byte
+    uint16_t fdRanges = 0;           // FDSelect format 3: its ranges, as ParseCff checked them
     uint16_t glyphCount = 0;
     std::vector<FontDict> fds;
 

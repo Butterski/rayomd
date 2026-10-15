@@ -153,7 +153,12 @@ void StoreCachedImage(const std::string& directory, const std::string& digest, u
 
     std::error_code error;
     const fs::path path = EntryPath(directory, digest, fast);
-    fs::create_directories(path.parent_path(), error);
+    // Only its user reads the cache: the directory RayoMD creates is 0700 and each entry 0600, as
+    // the images of the documents exported are no one else's (POSIX; Windows inherits the ACL
+    // of %LOCALAPPDATA%).
+    if (fs::create_directories(path.parent_path(), error)) {
+        fs::permissions(path.parent_path(), fs::perms::owner_all, fs::perm_options::replace, error);
+    }
     static std::atomic<unsigned> stores{ 0 };
     const unsigned store = stores++;
 #ifdef _WIN32
@@ -163,7 +168,7 @@ void StoreCachedImage(const std::string& directory, const std::string& digest, u
 #endif
     fs::path temporary = path;
     temporary.replace_extension("." + std::to_string(process) + "-" + std::to_string(store) + ".tmp");
-    if (!RayoMd::File::WriteAll(temporary, file)) {
+    if (!RayoMd::File::WriteAll(temporary, file, true)) {
         fs::remove(temporary, error);
         return;
     }

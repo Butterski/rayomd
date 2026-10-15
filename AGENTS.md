@@ -444,7 +444,9 @@ Important image/link details:
   `tests/math_layout_tests.inc`, and `tests/no_math_golden.inc`, which it includes;
   `tests/inline_lookahead_tests.inc` holds the checks of the inline parser's
   look-ahead tables, `tests/parse_limits_tests.inc` the parser's limits on hostile input
-  (`CheckParseLimits`) and the golden digests of what they must leave alone.
+  (`CheckParseLimits`) and the golden digests of what they must leave alone, and
+  `tests/hardening_tests.inc` those of hostile and abandoned builds (cancellation, files that
+  are no regular files, fonts changed after loading, image containment, cache permissions).
 
 - tools/benchmark.py
   Maintained entry point for run, A/B (warm engine and fresh process),
@@ -650,6 +652,15 @@ GitHub CI entry points:
   link annotations must remain consistent.
 - `BuildOptions::sourcePath` matters for relative images; pass it from every
   file-based caller.
+- A caller abandons a build by setting `PdfOptions::cancel` (rayomd-gui does, for previews no
+  longer wanted): `BuildPdf` and `BuildBookPdf` then return `BuildError::Cancelled` without a
+  PDF. `BuildCancelled()` in `tiny_pdf.cpp` reads the flag of the build running on its thread
+  (`CancelScope`); the block loop, table rows, code lines, a book's files, PNG rows, URL fetches
+  and SVG conversion (`SvgHost::Cancelled`) ask it. A new loop that can run long asks it too. It
+  is out of line: inlined at its call sites it grew `tiny_pdf.cpp` past GCC's inlining budget
+  (+0.54 % instructions on README.md). Work a cancel cut short is never cached: a cancelled
+  image decode is no failed image (`StoreFailure` is skipped). The parser itself does not stop,
+  about 7 ms per MB of Markdown.
 - Keep visible link text and annotation rectangles aligned when changing text
   wrapping, painting, or page splitting.
 - A word is the text between two white spaces of the source, also across emphasis,
