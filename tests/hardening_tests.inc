@@ -801,10 +801,64 @@ bool CheckOverlappingGlyphs() {
     return ok;
 }
 
+// A CFF font whose glyph inlines a 30 KB subroutine twice: a CID-keyed subset of 65,000 such
+// glyphs held 65,000 x 60 KB, 3.9 GB, three times over. It now stops at 64 MiB of charstrings and
+// makes no font, in bounded time; a subset of 100 of them (6 MB) is still made.
+bool CheckCffSubsetBound() {
+    using namespace TinyPdf::Internal::Cff;
+    const auto int5 = [](uint32_t value) {
+        std::string out(1, '\x1D');
+        AppendBigEndian(out, value);
+        return out;
+    };
+    const auto index = [](const std::string& item) {   // an INDEX of one item, four-byte offsets
+        std::string out("\x00\x01\x04", 3);
+        AppendBigEndian(out, 1);
+        AppendBigEndian(out, (uint32_t)item.size() + 1);
+        return out + item;
+    };
+    std::string subr;
+    for (int i = 0; i < 10000; i++) subr += "\x8B\x8B\x05";   // 0 0 rlineto
+    subr += '\x0B';                                          // return
+    const std::string glyph("\x20\x0A\x20\x0A\x0E", 5);      // callsubr 0, callsubr 0, endchar
+    // As CheckCffSubset's fonts: name INDEX, top DICT (CharStrings, Private), no strings or global
+    // subroutines, the glyph, a private DICT whose Subrs follow it.
+    const std::string head = std::string("\x01\x00\x04\x01", 4) + index("T");
+    const size_t topIndexBytes = 11 + 17;
+    const size_t charStringsAt = head.size() + topIndexBytes + 4;
+    const std::string charStrings = index(glyph);
+    const size_t privateAt = charStringsAt + charStrings.size();
+    const std::string top = int5((uint32_t)charStringsAt) + "\x11" + int5(6) + int5((uint32_t)privateAt) + "\x12";
+    const std::string font = head + index(top) + std::string(4, '\0') + charStrings + int5(6) + "\x13" + index(subr);
+    CffFont parsed;
+    std::string flat;
+    if (!ParseCff(reinterpret_cast<const uint8_t*>(font.data()), font.size(), 1, parsed) ||
+        !Desubroutinize(parsed, 0, flat) || flat.size() != 60001) {
+        std::cerr << "the CFF subset bound's font does not read" << std::endl;
+        return false;
+    }
+    const auto glyphs = [](size_t count) {
+        std::vector<CidGlyph> list;
+        for (size_t i = 0; i < count; i++) list.push_back({ (uint16_t)(i + 1), 0 });
+        return list;
+    };
+    std::string small, large;
+    const bool made = WriteCidKeyedSubset(parsed, "T", glyphs(100), small);
+    const auto start = std::chrono::steady_clock::now();
+    const bool refused = !WriteCidKeyedSubset(parsed, "T", glyphs(65000), large);
+    const double ms = MillisecondsSince(start);
+    std::cout << "CFF subset bound: refused after " << ms << " ms" << std::endl;
+    if (!made || small.size() < 100 * 60001 || !refused || !large.empty()) {
+        std::cerr << "a CFF subset of long charstrings was not bounded" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
         CheckImageContainment() && CheckCachePermissions() && CheckDecodeBudget() && CheckInvalidUtf8Names() &&
-        CheckOverlappingGlyphs();
+        CheckOverlappingGlyphs() && CheckCffSubsetBound();
 }
 
 } // namespace hardening_tests

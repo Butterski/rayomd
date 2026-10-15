@@ -13,6 +13,11 @@ constexpr size_t kMaxDictEntries = 64;
 constexpr int kMaxSubrDepth = 10;
 constexpr size_t kMaxGlyphBytes = 65535;
 constexpr size_t kMaxInterpretedBytes = 1000000;
+// The charstrings of one subset in all, desubroutinized: as much as the largest font file RayoMD
+// reads, ten times what the 20,992 CJK ideographs of Noto Sans CJK JP take (a 6.8 MB PDF). A font
+// whose every glyph inlines long subroutines made 65,535 x kMaxGlyphBytes, 4 GiB, held three times
+// over as the subset was put together.
+constexpr size_t kMaxSubsetCharStringBytes = 64u * 1024u * 1024u;
 
 uint32_t ReadOffset(const uint8_t* at, uint8_t size) {
     uint32_t value = 0;
@@ -584,6 +589,7 @@ bool WriteCidKeyedSubset(const CffFont& font, const char* fontName, const std::v
         size_t length = 0;
         if (FlattenGlyph(font, source, program.get(), length)) charData.append(program.get(), length);
         else charData.append("\x8B\x0E", 2);
+        if (charData.size() > kMaxSubsetCharStringBytes) return false;
         charEnds.push_back((uint32_t)charData.size());
     }
     std::vector<std::string> privates(usedFds.size());
@@ -599,6 +605,7 @@ bool WriteCidKeyedSubset(const CffFont& font, const char* fontName, const std::v
     fdSelect += charSelect;
     std::string charStrings;
     PutIndex(charStrings, charData, charEnds);
+    std::string().swap(charData);   // copied: its memory back before `out` takes as much again
 
     // Twice: the offsets are five-byte integers, so the first pass gives every size.
     std::string header("\x01\x00\x04\x04", 4);
