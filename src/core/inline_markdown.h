@@ -3,6 +3,7 @@
 #pragma once
 
 #include "../common/text_utils.h"
+#include "shared_url.h"
 
 #include <cstdint>
 #include <string>
@@ -39,7 +40,7 @@ constexpr size_t kMaxDisplayMathBytes = 8192;
 
 struct InlineSpan {
     std::string text;   // math spans: the TeX source without its delimiters
-    std::string url;
+    SharedUrl url;      // one string for all the spans of a link
     bool bold = false;
     bool italic = false;
     bool strike = false;

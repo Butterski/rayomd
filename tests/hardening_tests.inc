@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Needs <atomic>, <chrono>, <filesystem>, <functional>, <iostream>, <string>, <thread>, <vector>,
-// rayomd/tiny_pdf.h, src/common/file_io.h and src/core/flate.h; on POSIX <fcntl.h>, <sys/stat.h>
-// and <unistd.h>.
+// rayomd/tiny_pdf.h, src/common/file_io.h, src/core/flate.h and src/core/theme.h; on POSIX
+// <fcntl.h>, <sys/stat.h> and <unistd.h>; Bounded of parse_limits_tests.inc.
 // Hostile and abandoned builds: cancellation (PdfOptions::cancel), files that are no regular
 // files, fonts changed after they were read, deep composite glyphs, image containment, the
-// decode budget and the image cache's permissions. Included inside the anonymous namespace of
-// tests/core_tests.cpp.
+// decode budget, the image cache's permissions, a theme's long header and footer text and a
+// book's files listed under several names or past its byte budget.
+// Included inside the anonymous namespace of tests/core_tests.cpp.
 
 namespace hardening_tests {
 
@@ -535,9 +536,125 @@ bool CheckCachePermissions() {
 #endif
 }
 
+// A theme's text in a stand-in font: each byte that begins a character `advance` units wide, each
+// text written as "[text]".
+class BandFont final : public TinyPdf::Internal::ThemeTextFont {
+public:
+    explicit BandFont(unsigned units) : advance(units) {}
+    double Width(std::string_view utf8, double size, bool) const override {
+        unsigned long long units = 0;
+        for (const char ch : utf8) units += ((unsigned char)ch & 0xC0) == 0x80 ? 0 : advance;
+        return (double)units * size / 1000.0;
+    }
+    void Emit(std::string& out, std::string_view utf8, double, double, double, bool) const override {
+        out += '[';
+        out.append(utf8.data(), utf8.size());
+        out += "]\n";
+    }
+    std::string_view Ellipsis() const override { return "\xE2\x80\xA6"; }
+
+private:
+    unsigned advance;
+};
+
+// A theme's header and footer: a field of thousands of {title} under a long title was expanded in
+// full on every page (4,096 x 256 KiB, 1 GiB a field), and text wider than its share of the line
+// lost a character at a time, measured whole each time. The text now stops past what the line can
+// show, which shortens it as before: as the old character-by-character cut does, and the same for
+// one {title} as for thousands.
+bool CheckThemeFields() {
+    using TinyPdf::Internal::ThemeBandStreams;
+    const TinyPdf::Internal::ThemePage page{ 612.0, 792.0, 72.0 };
+    const TinyPdf::Internal::ThemeLogoImage logo;
+    std::string title;
+    for (int word = 0; word < 400; word++) title += word % 3 == 0 ? "Ünïcödé " : word % 3 == 1 ? "中文 " : "words ";
+    const BandFont font(600);
+    // The old cut, from the whole text.
+    const auto shortened = [&font](std::string text, double slot) {
+        if (font.Width(text, 9.0, false) <= slot) return text;
+        const double room = slot - font.Width(font.Ellipsis(), 9.0, false);
+        while (!text.empty() && font.Width(text, 9.0, false) > room) {
+            while (!text.empty() && ((unsigned char)text.back() & 0xC0) == 0x80) text.pop_back();
+            if (!text.empty()) text.pop_back();
+        }
+        return text + std::string(font.Ellipsis());
+    };
+    TinyPdf::PdfTheme theme;
+    std::string many;
+    for (int index = 0; index < 4096; index++) many += "{title}";
+    theme.headerLeft = many;
+    theme.headerRight = "{author} {page}";
+
+    // Characters without width: the text stops at its limit, about 2 KiB on a US Letter page.
+    const std::string wide(size_t(256) << 10, 'x');
+    const TinyPdf::Internal::ThemeDocument longTitle{ wide, "", "", "" };
+    const BandFont zero(0);
+    if (!parse_limits_tests::Bounded("4,096 {title} of 256 KiB in a header", 10.0, 64, [&]() {
+            const std::vector<std::string> streams = ThemeBandStreams(theme, false, longTitle, 2, page, logo, zero);
+            return streams.size() == 2 && streams[0].size() < 4096 && streams[0].find("[xxxx") != std::string::npos;
+        })) {
+        return false;
+    }
+
+    const TinyPdf::Internal::ThemeDocument document{ title, "Ann", "", "" };
+    const std::vector<std::string> many4096 = ThemeBandStreams(theme, true, document, 3, page, logo, font);
+    theme.headerLeft = "{title}";
+    const std::vector<std::string> once = ThemeBandStreams(theme, true, document, 3, page, logo, font);
+    const std::string expected = "q 0.45 0.45 0.45 rg\n[" + shortened(title, (612.0 - 144.0) / 3.0) + "]\n[Ann 2]\n[2 / 3]\nQ";
+    if (once.size() != 3 || once[1] != expected || many4096 != once) {
+        std::cerr << "a theme's long header is shortened otherwise than before" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// A book reads each file once and at most 128 MiB in all: a SUMMARY.md that lists one file under
+// other names (a hard link, a link to its folder, "x/../") is refused as listing it twice, where
+// it was read once a name (8 names of a 65 MB file took 6.7 GB); files of more than 128 MiB in
+// all end the book with an error before they are read.
+bool CheckBookFiles() {
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-book-files";
+    fs::remove_all(root);
+    fs::create_directories(root / "sub");
+    bool ok = WriteFile(root / "a.md", "# A\n\ntext\n") && WriteFile(root / "big.md", std::string(size_t(48) << 20, 'x'));
+    std::error_code linked;
+    fs::create_hard_link(root / "a.md", root / "b.md", linked);
+    ok = ok && !linked;
+    const auto readBook = [](const std::vector<fs::path>& inputs, std::string& error) {
+        TinyPdf::Book book;
+        error.clear();
+        return RayoMd::Book::ReadBook(inputs, book, error) ? book.chapters.size() : size_t(0);
+    };
+    std::string error;
+    // Another name of a.md, each in a SUMMARY.md of its own.
+    std::vector<std::string> names = { "b.md", "sub/../a.md" };
+#ifndef _WIN32
+    fs::create_directory_symlink(".", root / "s", linked);
+    ok = ok && !linked;
+    names.push_back("s/a.md");
+    names.push_back("s/s/b.md");
+#endif
+    for (const std::string& name : names) {
+        ok = ok && WriteFile(root / "SUMMARY.md", "# S\n\n- [A](a.md)\n- [Again](" + name + ")\n");
+        if (readBook({ root / "SUMMARY.md" }, error) != 0 || error.find("lists " + name + " twice") == std::string::npos) {
+            std::cerr << "a book listing a.md as " << name << " too: " << (error.empty() ? "read" : error) << std::endl;
+            ok = false;
+        }
+    }
+    ok = ok && WriteFile(root / "SUMMARY.md", "# S\n\n- [A](a.md)\n- [Big](big.md)\n") &&
+        readBook({ root / "SUMMARY.md" }, error) == 2 && readBook({ root / "big.md", root / "big.md" }, error) == 2;
+    if (!ok) std::cerr << "a book of distinct files within 128 MiB is not read: " << error << std::endl;
+    ok = ok && parse_limits_tests::Bounded("a book of three 48 MiB files", 10.0, 160, [&]() {
+        return readBook({ root / "big.md", root / "a.md", root / "big.md", root / "big.md" }, error) == 0 &&
+            error.find("more than 128 MiB") != std::string::npos;
+    });
+    fs::remove_all(root);
+    return ok;
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
-        CheckImageContainment() && CheckCachePermissions();
+        CheckImageContainment() && CheckCachePermissions() && CheckThemeFields() && CheckBookFiles();
 }
 
 } // namespace hardening_tests

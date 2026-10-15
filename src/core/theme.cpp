@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <utility>
 
 namespace TinyPdf::Internal {
 namespace {
@@ -21,35 +22,108 @@ void AppendCount(std::string& out, size_t value) {
     out.append(digits, (size_t)(std::to_chars(digits, digits + sizeof(digits), value).ptr - digits));
 }
 
-// A header or footer field with its placeholders replaced; an unknown one stays as it is, so a
-// field that is just {logo} comes back unchanged.
-std::string FieldText(std::string_view field, const ThemeDocument& document, size_t page, size_t pages) {
+// The most bytes of a header's or footer's text on a line `width` points wide: a theme of
+// thousands of {title} under a long title made gigabytes for one line. A band shows one line,
+// and this many bytes, cut before a character (a quarter as many characters of four bytes, less
+// one), are wider than it unless its characters average under a tenth of an em: only text of
+// mostly zero-width characters can show differently. About 2 KiB for A4, 64 KiB at most.
+size_t FieldBytes(double width) {
+    constexpr double kMinAdvance = kBandTextSize * 0.1;
+    return (size_t)(std::max(width, 0.0) / kMinAdvance) * 4 + 64;
+}
+
+// The bytes of `piece` that fit in `room`: all, or those before the character that does not.
+size_t FittingBytes(std::string_view piece, size_t room) {
+    if (piece.size() <= room) return piece.size();
+    while (room > 0 && ((unsigned char)piece[room] & 0xC0) == 0x80) room--;
+    return room;
+}
+
+// Appends `piece` to `text` up to `limit` bytes in all, cut before a character; false when cut.
+bool AppendCapped(std::string& text, std::string_view piece, size_t limit) {
+    const size_t take = FittingBytes(piece, limit - std::min(text.size(), limit));
+    text.append(piece.data(), take);
+    return take == piece.size();
+}
+
+// A header or footer field with its placeholders replaced but {page} and {pages}, which each page
+// fills in where `numbers` says, so that no page reads the field again; an unknown placeholder
+// stays as it is, so a field that is just {logo} comes back unchanged. It ends where every page's
+// text passes `limit` bytes (a number has a digit at least).
+struct FieldTemplate {
     std::string text;
+    std::vector<std::pair<size_t, bool>> numbers;   // offset in text; {pages} (true) or {page}
+};
+
+FieldTemplate ExpandField(std::string_view field, const ThemeDocument& document, size_t limit) {
+    FieldTemplate out;
+    const auto append = [&out, limit](std::string_view piece) {
+        const size_t shown = out.text.size() + out.numbers.size();
+        const size_t take = FittingBytes(piece, limit - std::min(shown, limit));
+        out.text.append(piece.data(), take);
+        return take == piece.size();
+    };
     for (size_t at = 0; at < field.size();) {
         const size_t open = field.find('{', at);
         const size_t close = open == std::string_view::npos ? open : field.find('}', open);
         if (close == std::string_view::npos) {
-            text.append(field.data() + at, field.size() - at);
+            append(field.substr(at));
             break;
         }
-        text.append(field.data() + at, open - at);
+        if (!append(field.substr(at, open - at))) break;
         const std::string_view name = field.substr(open + 1, close - open - 1);
-        if (name == "title") text += document.title;
-        else if (name == "author") text += document.author;
-        else if (name == "subject") text += document.subject;
-        else if (name == "date") text += document.date;
-        else if (name == "page") AppendCount(text, page);
-        else if (name == "pages") AppendCount(text, pages);
-        else text.append(field.data() + open, close + 1 - open);
+        bool whole = true;
+        if (name == "title") whole = append(document.title);
+        else if (name == "author") whole = append(document.author);
+        else if (name == "subject") whole = append(document.subject);
+        else if (name == "date") whole = append(document.date);
+        else if (name == "page" || name == "pages") out.numbers.push_back({ out.text.size(), name == "pages" });
+        else whole = append(field.substr(open, close + 1 - open));
+        if (!whole || out.text.size() + out.numbers.size() >= limit) break;
         at = close + 1;
     }
+    return out;
+}
+
+// The text of a field on page `page` of `pages`, at most `limit` bytes.
+std::string FieldText(const FieldTemplate& field, size_t page, size_t pages, size_t limit) {
+    std::string text;
+    size_t from = 0;
+    for (const auto& [at, total] : field.numbers) {
+        if (!AppendCapped(text, std::string_view(field.text).substr(from, at - from), limit)) return text;
+        char digits[24];
+        const size_t length = (size_t)(std::to_chars(digits, digits + sizeof(digits), total ? pages : page).ptr - digits);
+        if (!AppendCapped(text, std::string_view(digits, length), limit)) return text;
+        from = at;
+    }
+    AppendCapped(text, std::string_view(field.text).substr(from), limit);
     return text;
 }
 
-// Drops the last character of UTF-8 text.
-void DropLastCharacter(std::string& text) {
-    while (!text.empty() && ((unsigned char)text.back() & 0xC0) == 0x80) text.pop_back();
-    if (!text.empty()) text.pop_back();
+// How much of `text`, which is wider than `room`, is left when its last character is dropped
+// until it is no wider (nothing when even no text is): text up to the end of a character, the
+// longest that fits. Its width only grows with it, so a search finds that in a few measures of
+// little more than it, where dropping a character at a time measured all of it for each.
+size_t FittingLength(const ThemeTextFont& font, std::string_view text, double room) {
+    // text[0, at] (at < size) cut before the character `at` is in: where dropping one steps.
+    const auto boundary = [text](size_t at) {
+        while (at > 0 && ((unsigned char)text[at] & 0xC0) == 0x80) at--;
+        return at;
+    };
+    const auto fitsIn = [&](size_t at) { return font.Width(text.substr(0, boundary(at)), kBandTextSize, false) <= room; };
+    size_t fits = 0;    // a length whose start fits, or 0
+    size_t over = 64;   // one whose start does not, or the whole text
+    while (over < text.size() && fitsIn(over)) {
+        fits = over;
+        over *= 2;
+    }
+    over = std::min(over, text.size());
+    while (over - fits > 1) {
+        const size_t middle = fits + (over - fits) / 2;
+        if (fitsIn(middle)) fits = middle;
+        else over = middle;
+    }
+    return boundary(fits);
 }
 
 // The image /Im(logo.index + 1) in a box of `width` by `height` from (x, y).
@@ -95,7 +169,7 @@ void AppendBand(std::string& out, const ThemeTextFont& font, const std::string (
         if (width > slot) {
             const std::string_view ellipsis = font.Ellipsis();
             const double room = slot - font.Width(ellipsis, kBandTextSize, false);
-            while (!text.empty() && font.Width(text, kBandTextSize, false) > room) DropLastCharacter(text);
+            text.resize(FittingLength(font, text, room));
             text += ellipsis;
             width = font.Width(text, kBandTextSize, false);
         }
@@ -133,13 +207,16 @@ std::vector<std::string> ThemeBandStreams(const PdfTheme& theme, bool pageNumber
     const std::string_view fields[6] = { theme.headerLeft, theme.headerCenter, theme.headerRight, theme.footerLeft,
         theme.footerCenter.empty() && pageNumbers ? std::string_view("{page} / {pages}") : theme.footerCenter,
         theme.footerRight };
+    const size_t limit = FieldBytes(page.width - page.margin * 2.0);
+    FieldTemplate templates[6];
+    for (size_t index = 0; index < 6; index++) templates[index] = ExpandField(fields[index], document, limit);
     std::vector<std::string> streams(pages);
     for (size_t number = 1; number <= pages; number++) {
         std::string header[3];
         std::string footer[3];
         for (size_t index = 0; index < 3; index++) {
-            header[index] = FieldText(fields[index], document, number, pages);
-            footer[index] = FieldText(fields[index + 3], document, number, pages);
+            header[index] = FieldText(templates[index], number, pages, limit);
+            footer[index] = FieldText(templates[index + 3], number, pages, limit);
         }
         std::string& stream = streams[number - 1];
         stream = "q 0.45 0.45 0.45 rg\n";

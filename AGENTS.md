@@ -270,7 +270,10 @@ Important image/link details:
 - `src/core/book.h` and `src/core/book.cpp`
   Books: reading `--book`'s inputs for both command lines (SUMMARY.md as mdBook and
   GitBook read it, a folder, files) and parsing a book's files for `BuildBookPdf`. Built at
-  `-Os`, outside `tiny_pdf.cpp` and its inlining budget.
+  `-Os`, outside `tiny_pdf.cpp` and its inlining budget. A book's files total at most 128 MiB,
+  what one document may have (`kMaxBookBytes`), and a SUMMARY.md that lists a file again under
+  any name (a link, letter case, `x/../`) is refused: files are told apart by their identity
+  (`RayoMd::File::FileIdentity`, device and inode or volume and file index), not their names.
 
 - `src/core/svg.h` and `src/core/svg.cpp`
   SVG to a PDF form XObject: a non-recursive XML reader, the CSS cascade for
@@ -309,7 +312,8 @@ Important image/link details:
   Renderer-neutral inline span parsing for emphasis, code, images, links, and math
   delimiters. Both renderers consume this model so visible text and link annotations
   cannot drift. `ParseInlineRuns` is the parser (flat runs for the hot paths);
-  `ParseInlineSpans` is the same result as strings, for tests and cold paths.
+  `ParseInlineSpans` is the same result as strings, for tests and cold paths; the spans of one
+  link share its target (`SharedUrl`, `shared_url.h`), never a copy each.
 
 - `src/core/math_parser.h` and `src/core/math_parser.cpp`
   Tokenizer, parser, error recovery, and limits for the TeX math subset; produces a
@@ -393,7 +397,9 @@ Important image/link details:
   The layout of a theme's header, footer and cover page (placeholders, ellipses,
   wrapping) on UTF-8 text, behind `ThemeTextFont`, which each renderer implements in
   `tiny_pdf.cpp`. Built at `-Os`, and kept out of `tiny_pdf.cpp` on purpose (see the
-  inlining guardrail below).
+  inlining guardrail below). A field is expanded once per build and its text stops at
+  `FieldBytes` of its line (more than normal text can show there); text too wide is cut by a
+  search over its character ends, not a character at a time.
 
 - `src/core/pdfa.h` and `src/core/pdfa.cpp`
   What PDF/A-3b adds: the 480-byte sRGB ICC profile (a v4.2 display profile written
@@ -646,7 +652,8 @@ GitHub CI entry points:
   nested level and footnote shares, so nesting cannot multiply it: the destination bytes resolved
   references copy in (twice the document and 1 MiB; a definition's destination has at most
   `kMaxReferenceDestinationBytes`) and the empty cells that complete short table rows (2^19, as
-  in cmark-gfm; a table header has at most `kMaxTableColumns` cells). Past a budget the input
+  in cmark-gfm; a table header has at most `kMaxTableColumns` cells, and a data row is split up
+  to its header's cells only, so a line of pipes makes no more). Past a budget the input
   stays text. A new expansion that copies or pads must draw on it. Rewrites of text go into a new
   buffer in one pass (`NormalizeSymbols`), never `std::string::replace` in a loop.
 - Prefer measured changes over plausible micro-optimizations.

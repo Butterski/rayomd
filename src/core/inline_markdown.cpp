@@ -1889,10 +1889,15 @@ std::vector<InlineSpan> ParseInlineSpans(std::string_view input, bool recognizeM
     for (size_t i = 0; i < spans.size(); i++) {
         const InlineRun& run = runs.runs[i];
         const std::string_view text = runs.Text(run);
-        const std::string_view url = runs.Url(run);
         InlineSpan& span = spans[i];
         span.text.assign(text.data(), text.size());
-        span.url.assign(url.data(), url.size());
+        // The runs of one link share its target in runs.urls: its spans share one string, where
+        // a copy each made a long target over text of alternating styles gigabytes.
+        if (i > 0 && run.urlBegin == runs.runs[i - 1].urlBegin && run.urlEnd == runs.runs[i - 1].urlEnd) {
+            span.url = spans[i - 1].url;
+        } else {
+            span.url = SharedUrl(runs.Url(run));
+        }
         span.bold = run.bold;
         span.italic = run.italic;
         span.strike = run.strike;

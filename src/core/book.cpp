@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <set>
 #include <string_view>
 #include <system_error>
 
@@ -77,7 +78,7 @@ std::string Plain(const std::string& text) {
 void AddLinks(const std::string& text, int depth, bool firstOnly, Summary& summary) {
     const std::vector<TinyPdf::Internal::InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(text, false);
     for (size_t at = 0; at < spans.size();) {
-        const std::string& url = spans[at].url;
+        const std::string_view url = spans[at].url;
         if (url.empty()) {
             at++;
             continue;
@@ -101,11 +102,52 @@ void AddItems(const std::vector<Block>& blocks, int depth, Summary& summary) {
 }
 
 // A file of the book, of at most 128 MiB, as the command line reads one document.
+constexpr size_t kMaxFileBytes = 128u * 1024u * 1024u;
+
 bool ReadFile(const fs::path& path, std::string& text) {
-    constexpr size_t kMaxFileBytes = 128u * 1024u * 1024u;
     std::error_code ec;
     return fs::is_regular_file(path, ec) && RayoMd::File::ReadAll(path, kMaxFileBytes, text);
 }
+
+// What a book's files may have in all: what one document may have, so that a book takes no more
+// than the largest document. The largest books (documentation sets in mdBook) have a few to tens
+// of MiB. A SUMMARY.md that listed one large file under many names (links, letter case,
+// "a/../a.md") read it once for each, 128 MiB a name.
+constexpr size_t kMaxBookBytes = kMaxFileBytes;
+
+// The files of a book, read within kMaxBookBytes in all; each known by its identity, so that a
+// file listed again under another name can be told.
+class ChapterReader {
+public:
+    enum class Result { Read, Unreadable, Again, PastBudget };
+
+    // `path` into `text`; Again, unread, when `once` and it is a file read before.
+    Result Read(const fs::path& path, std::string& text, bool once) {
+        std::error_code ec;
+        RayoMd::File::FileIdentity identity;
+        const bool whole = fs::is_regular_file(path, ec) &&
+            RayoMd::File::ReadAll(path, std::min(kMaxFileBytes, left), text, identity);
+        if (once && identity.opened && read.count(identity) != 0) {
+            text.clear();
+            return Result::Again;
+        }
+        if (!whole) {
+            return identity.opened && identity.size > left && identity.size <= kMaxFileBytes ? Result::PastBudget
+                : Result::Unreadable;
+        }
+        read.insert(identity);
+        left -= text.size();
+        return Result::Read;
+    }
+
+    static std::string PastBudget(const std::string& path) {
+        return "the book's files total more than 128 MiB with " + path;
+    }
+
+private:
+    std::set<RayoMd::File::FileIdentity> read;
+    size_t left = kMaxBookBytes;
+};
 
 // mdBook's title: `title = "..."` in the book.toml beside SUMMARY.md's directory or in it.
 std::string BookTomlTitle(const fs::path& directory) {
@@ -192,7 +234,8 @@ bool ReadSummaryBook(const fs::path& summaryPath, TinyPdf::Book& book, std::stri
     book.directory = directory.u8string();
     book.title = BookTomlTitle(directory);
     if (book.title.empty()) book.title = summary.title;
-    std::vector<std::string> listed;
+    bool listsFile = false;
+    ChapterReader reader;
     for (const SummaryEntry& entry : summary.entries) {
         TinyPdf::BookChapter chapter;
         chapter.title = entry.title;
@@ -201,19 +244,23 @@ bool ReadSummaryBook(const fs::path& summaryPath, TinyPdf::Book& book, std::stri
         if (!entry.part) {
             const fs::path path = (directory / fs::u8path(entry.path)).lexically_normal();
             chapter.path = path.u8string();
-            if (std::find(listed.begin(), listed.end(), chapter.path) != listed.end()) {
+            listsFile = true;
+            // A file listed again, under its name or another (a link, other letter case, "a/../"):
+            // each is read once.
+            const ChapterReader::Result read = reader.Read(path, chapter.markdown, true);
+            if (read == ChapterReader::Result::Again) {
                 error = summaryPath.u8string() + " lists " + entry.path + " twice";
                 return false;
             }
-            listed.push_back(chapter.path);
-            if (!ReadFile(path, chapter.markdown)) {
-                error = "could not read " + chapter.path + ", which " + summaryPath.u8string() + " lists";
+            if (read != ChapterReader::Result::Read) {
+                error = read == ChapterReader::Result::PastBudget ? ChapterReader::PastBudget(chapter.path)
+                    : "could not read " + chapter.path + ", which " + summaryPath.u8string() + " lists";
                 return false;
             }
         }
         book.chapters.push_back(std::move(chapter));
     }
-    if (listed.empty()) {
+    if (!listsFile) {
         error = summaryPath.u8string() + " lists no file";
         return false;
     }
@@ -274,10 +321,13 @@ bool ReadBook(const std::vector<fs::path>& inputs, TinyPdf::Book& book, std::str
         book.directory = CommonDirectory(inputs).u8string();
     }
     if (!summary.empty()) return ReadSummaryBook(summary, book, error);
+    ChapterReader reader;
     for (const fs::path& file : files) {
         TinyPdf::BookChapter chapter;
-        if (!ReadFile(file, chapter.markdown)) {
-            error = "could not read input Markdown file: " + file.u8string();
+        const ChapterReader::Result read = reader.Read(file, chapter.markdown, false);
+        if (read != ChapterReader::Result::Read) {
+            error = read == ChapterReader::Result::PastBudget ? ChapterReader::PastBudget(file.u8string())
+                : "could not read input Markdown file: " + file.u8string();
             return false;
         }
         chapter.path = file.u8string();

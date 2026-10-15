@@ -54,8 +54,9 @@ inline bool HasThemeBands(const PdfTheme& theme) {
 
 // The header and footer of every page, one content stream each: grey text in the middle of the
 // top and bottom margin, at its left, centre and right, shortened with an ellipsis to fit its
-// share of the line; {title}, {author}, {subject}, {date}, {page} and {pages} replaced, and a
-// field that is just {logo} showing the logo. With `pageNumbers` an empty footer centre shows
+// share of the line; {title}, {author}, {subject}, {date}, {page} and {pages} replaced (a field's
+// text up to about 4.4 bytes a point of the line, more than any normal text can show there), and
+// a field that is just {logo} showing the logo. With `pageNumbers` an empty footer centre shows
 // "{page} / {pages}".
 std::vector<std::string> ThemeBandStreams(const PdfTheme& theme, bool pageNumbers, const ThemeDocument& document,
     size_t pages, const ThemePage& page, const ThemeLogoImage& logo, const ThemeTextFont& font);

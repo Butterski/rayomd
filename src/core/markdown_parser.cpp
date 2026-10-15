@@ -236,13 +236,14 @@ static std::string_view TableRowBody(std::string_view line) {
 }
 
 // Cells of a row body that holds no backslash: every pipe separates two cells, so
-// each cell is a trimmed piece of the line and fn(cell) can read it in place.
+// each cell is a trimmed piece of the line and fn(cell) can read it in place. It stops after
+// `maxCells` cells, whose last then ends at the next pipe, as it would without the limit.
 template <typename Fn>
-static void ForEachPlainTableCell(std::string_view body, Fn fn) {
-    for (;;) {
+static void ForEachPlainTableCell(std::string_view body, Fn fn, size_t maxCells = SIZE_MAX) {
+    for (size_t cells = 1;; cells++) {
         size_t bar = body.find('|');
-        if (bar == std::string_view::npos) {
-            fn(TrimView(body));
+        if (bar == std::string_view::npos || cells == maxCells) {
+            fn(TrimView(body.substr(0, bar)));
             return;
         }
         fn(TrimView(body.substr(0, bar)));
@@ -250,7 +251,33 @@ static void ForEachPlainTableCell(std::string_view body, Fn fn) {
     }
 }
 
-// Number of cells SplitTableRow returns for this line.
+// Cells of a row body with a backslash in it: a backslash escapes the byte after it, which the
+// cell gets without the backslash. fn(cell) reads each cell in a buffer that the next one reuses.
+template <typename Fn>
+static void ForEachEscapedTableCell(std::string_view body, Fn fn) {
+    std::string cell;
+    bool escaped = false;
+    for (char c : body) {
+        if (escaped) {
+            cell.push_back(c);
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '|') {
+            fn(TrimView(cell));
+            cell.clear();
+        } else {
+            cell.push_back(c);
+        }
+    }
+    fn(TrimView(cell));
+}
+
+// Number of cells SplitTableCells returns for this line without a limit.
 static size_t CountTableCells(std::string_view line) {
     std::string_view s = TableRowBody(line);
     size_t cells = 1;
@@ -263,46 +290,11 @@ static size_t CountTableCells(std::string_view line) {
     return cells;
 }
 
-static std::vector<std::string> SplitTableRow(std::string_view line) {
+// The cells of a row with a backslash in it: split at every pipe that is not escaped, keeping
+// every backslash except the one that escapes a pipe, so "\*" and "\alpha" reach the inline
+// parser as written. At most `maxCells` cells, the first ones of the row.
+static std::vector<std::string> SplitTableRowRaw(std::string_view line, size_t maxCells) {
     std::string_view s = TableRowBody(line);
-
-    std::vector<std::string> cells;
-    cells.reserve(4);
-    if (s.find('\\') == std::string_view::npos) {
-        ForEachPlainTableCell(s, [&](std::string_view cell) { cells.emplace_back(cell.data(), cell.size()); });
-        return cells;
-    }
-    std::string cell;
-    bool escaped = false;
-    for (char c : s) {
-        if (escaped) {
-            cell.push_back(c);
-            escaped = false;
-            continue;
-        }
-        if (c == '\\') {
-            escaped = true;
-            continue;
-        }
-        if (c == '|') {
-            std::string_view v = TrimView(cell);
-            cells.emplace_back(v.data(), v.size());
-            cell.clear();
-        } else {
-            cell.push_back(c);
-        }
-    }
-    std::string_view v = TrimView(cell);
-    cells.emplace_back(v.data(), v.size());
-    return cells;
-}
-
-// Same cell boundaries as SplitTableRow, but keeps every backslash except the one
-// that escapes a pipe, so "\*" and "\alpha" reach the inline parser as written.
-static std::vector<std::string> SplitTableRowRaw(std::string_view line) {
-    std::string_view s = TrimView(line);
-    if (!s.empty() && s.front() == '|') s.remove_prefix(1);
-    if (!s.empty() && s.back() == '|') s.remove_suffix(1);
 
     std::vector<std::string> cells;
     cells.reserve(4);
@@ -322,6 +314,7 @@ static std::vector<std::string> SplitTableRowRaw(std::string_view line) {
         if (c == '|') {
             std::string_view v = TrimView(cell);
             cells.emplace_back(v.data(), v.size());
+            if (cells.size() == maxCells) return cells;
             cell.clear();
         } else {
             cell.push_back(c);
@@ -352,23 +345,15 @@ static bool IsTableSeparatorCell(std::string_view cell, int& align) {
 
 static bool ParseTableSeparator(std::string_view line, std::vector<int>& aligns) {
     std::vector<int> parsed;
-    if (line.find('\\') == std::string_view::npos) {
-        bool valid = true;
-        ForEachPlainTableCell(TableRowBody(line), [&](std::string_view cell) {
-            int align = -1;
-            valid = valid && IsTableSeparatorCell(cell, align);
-            if (valid) parsed.push_back(align);
-        });
-        if (!valid) return false;
-    } else {
-        std::vector<std::string> cells = SplitTableRow(line);
-        if (cells.empty()) return false;
-        for (const auto& cell : cells) {
-            int align = -1;
-            if (!IsTableSeparatorCell(cell, align)) return false;
-            parsed.push_back(align);
-        }
-    }
+    bool valid = true;
+    auto check = [&](std::string_view cell) {
+        int align = -1;
+        valid = valid && IsTableSeparatorCell(cell, align);
+        if (valid) parsed.push_back(align);
+    };
+    if (line.find('\\') == std::string_view::npos) ForEachPlainTableCell(TableRowBody(line), check);
+    else ForEachEscapedTableCell(TableRowBody(line), check);
+    if (!valid) return false;
 
     aligns = std::move(parsed);
     return true;
@@ -1096,9 +1081,15 @@ struct TableMathCell {
 
 // The cells of a table row as inline Markdown: split at every pipe that is not escaped,
 // with the backslash of an escaped pipe removed, as GFM does also inside code spans.
-// Every other backslash stays for the inline parser.
-static std::vector<std::string> SplitTableCells(std::string_view line) {
-    return line.find('\\') == std::string_view::npos ? SplitTableRow(line) : SplitTableRowRaw(line);
+// Every other backslash stays for the inline parser. At most `maxCells` cells, the first ones:
+// a data row stops at its header's count, so a line of pipes makes no more cells than that.
+static std::vector<std::string> SplitTableCells(std::string_view line, size_t maxCells = SIZE_MAX) {
+    if (line.find('\\') != std::string_view::npos) return SplitTableRowRaw(line, maxCells);
+    std::vector<std::string> cells;
+    cells.reserve(4);
+    ForEachPlainTableCell(TableRowBody(line), [&](std::string_view cell) { cells.emplace_back(cell.data(), cell.size()); },
+        maxCells);
+    return cells;
 }
 
 // Parks the formula cells of a row (as split by SplitTableCells) in mathCells, as visible
@@ -1419,7 +1410,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             size_t ownCells = ParseBudget::kPaddedCells;
             size_t& cellsLeft = budget != nullptr ? budget->paddedCells : ownCells;
             while (i < lines.size() && infos[i].kind == LineKind::Plain && !isSuppressed(i)) {
-                std::vector<std::string> row = SplitTableCells(lines[i]);
+                std::vector<std::string> row = SplitTableCells(lines[i], columns);
                 if (row.size() < columns) {
                     if (columns - row.size() > cellsLeft) break;
                     cellsLeft -= columns - row.size();

@@ -42,6 +42,22 @@ bool SeekTo(std::FILE* file, long long offset);
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content);
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint8_t>& content);
 
+// Which file ReadAll opened, the same for each of its names (links, letter case, "a/../a"): its
+// device and inode (POSIX) or volume serial number and file index (Windows); and its size, also
+// when that is more than ReadAll's `maximum`. `opened` is false when no regular file was opened.
+struct FileIdentity {
+    uint64_t volume = 0;
+    uint64_t index = 0;
+    uint64_t size = 0;
+    bool opened = false;
+
+    bool operator<(const FileIdentity& other) const {
+        return volume != other.volume ? volume < other.volume : index < other.index;
+    }
+};
+// As ReadAll, and the identity of the file it opened.
+bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content, FileIdentity& identity);
+
 // As ReadAll, for a `canonical` path (absolute, no symbolic link, no "." or ".."), and only while
 // it still names the file opened: on Linux the path the open descriptor names (/proc/self/fd/N)
 // must be `canonical`, else a directory of it was swapped for a link since the path was worked

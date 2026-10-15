@@ -64,8 +64,10 @@ Summary ParseSummary(const std::string& markdown);
 
 // The book of --book's inputs: one SUMMARY.md; one directory with a SUMMARY.md, or src/SUMMARY.md
 // as mdBook keeps it, or else the directory's Markdown files sorted by name, README.md or index.md
-// first; or the files given, in their order. Reads every file. False with `error` set when a file
-// cannot be read or SUMMARY.md lists one twice.
+// first; or the files given, in their order. Reads every file, each at most 128 MiB and all of
+// them at most 128 MiB too, as much as one document. False with `error` set when a file cannot be
+// read, the files pass that, or SUMMARY.md lists one twice, under its name or another (a link,
+// other letter case): the same file, by device and inode or volume and file index.
 bool ReadBook(const std::vector<std::filesystem::path>& inputs, TinyPdf::Book& book, std::string& error);
 
 } // namespace RayoMd::Book
