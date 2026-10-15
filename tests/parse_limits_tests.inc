@@ -67,7 +67,10 @@ bool CheckStatusSymbols() {
         }
     }
     // A paragraph of nothing but symbols: replaced in place, each moved the rest of the text,
-    // 10^11 bytes for the 4 MB here (minutes); a paragraph of 256 KB took seconds to export.
+    // 10^11 bytes for the 4 MB here (87 s before). A document the standard fonts can show is
+    // transcoded to WinAnsi in one pass first, its symbols with it; one character beyond them
+    // (U+4E2D) sends it to the Unicode renderer, which normalizes each paragraph: exporting
+    // 1.2 MB of symbols took 6 s.
     const std::string symbols = Repeat("\xE2\x9C\x85\xE2\x9D\x8C\xE2\x9A\xA0\xEF\xB8\x8F", 4 * 1024 * 1024 / 12);
     if (!Bounded("4 MB of status symbols", 5.0, 256, [&]() {
             const std::string normalized = TinyPdf::Internal::NormalizeSymbols(symbols);
@@ -75,8 +78,8 @@ bool CheckStatusSymbols() {
         })) {
         return false;
     }
-    const std::string paragraph = Repeat("\xE2\x9C\x85", 256 * 1024 / 3) + "\n";
-    return Bounded("a 256 KB paragraph of status symbols", 20.0, 512, [&]() {
+    const std::string paragraph = "\xE4\xB8\xAD *a* " + Repeat("\xE2\x9C\x85", 1024 * 1024 / 3) + "\n";
+    return Bounded("a 1 MB paragraph of status symbols in the Unicode renderer", 20.0, 512, [&]() {
         std::string pdf;
         return Build(paragraph, pdf);
     });
