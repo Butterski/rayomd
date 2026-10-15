@@ -501,9 +501,43 @@ bool CheckImageContainment() {
 #endif
 }
 
+// The persistent image cache is its user's alone: the directory it creates 0700, each entry 0600.
+bool CheckCachePermissions() {
+#ifdef _WIN32
+    return true;
+#else
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-cache-perms";
+    fs::remove_all(root);
+    fs::create_directories(root / "doc");
+    const std::string png = MakeRgbaPng(256, 256, [](uint32_t x, uint32_t y, int c) {
+        return c == 3 ? (uint8_t)(x ^ y) : (uint8_t)(x * 7 + y * 3 + (uint32_t)c);
+    });
+    bool ok = WriteFile(root / "doc" / "alpha.png", png);
+    TinyPdf::PdfOptions options;
+    options.sourcePath = (root / "doc" / "doc.md").u8string();
+    options.imageCacheDirectory = (root / "cache" / "images").u8string();
+    std::string pdf;
+    const ::mode_t mask = ::umask(022);
+    ok = ok && TinyPdf::BuildPdf("![a](alpha.png)\n", options, pdf).Ok();
+    ::umask(mask);
+    struct stat info {};
+    size_t entries = 0;
+    ok = ok && ::stat((root / "cache" / "images").c_str(), &info) == 0 && (info.st_mode & 0777) == 0700;
+    std::error_code error;
+    for (const auto& entry : fs::recursive_directory_iterator(root / "cache" / "images", error)) {
+        if (!entry.is_regular_file()) continue;
+        entries++;
+        ok = ok && ::stat(entry.path().c_str(), &info) == 0 && (info.st_mode & 0777) == 0600;
+    }
+    if (!ok || entries == 0) std::cerr << "the image cache is readable by others" << std::endl;
+    fs::remove_all(root);
+    return ok && entries != 0;
+#endif
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
-        CheckImageContainment();
+        CheckImageContainment() && CheckCachePermissions();
 }
 
 } // namespace hardening_tests

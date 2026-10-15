@@ -50,8 +50,9 @@ bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint
 bool ReadCanonical(const std::filesystem::path& canonical, size_t maximum, std::vector<uint8_t>& content);
 
 // Creates or replaces `path` with `content`. On POSIX systems an existing file is overwritten in
-// place and then cut to size (no O_TRUNC; see file_io.cpp).
-bool WriteAll(const std::filesystem::path& path, std::string_view content);
+// place and then cut to size (no O_TRUNC; see file_io.cpp). `ownerOnly`: a file it creates is
+// readable and writable by its owner only (0600) on POSIX.
+bool WriteAll(const std::filesystem::path& path, std::string_view content, bool ownerOnly = false);
 
 // What the file at a path is now: its size, its last write, its last status change (POSIX) or
 // creation (Windows), and its identity (POSIX); all zero when there is none. A file rewritten or
