@@ -395,6 +395,13 @@ Important image/link details:
 - `CMakeLists.txt`
   Cross-platform build. Windows and non-Windows builds produce `rayomd`
   (`rayomd.exe` on Windows).
+  `rayomd_engine` (alias `rayomd::engine`) is the exporter as a static library for other
+  front ends: not built by default, compiled from the same core sources a second time so the
+  CLI's link order and `src/hot.ld` placement stay, with `include` and `src` as public include
+  directories. rayomd-gui adds this directory with `add_subdirectory`; `tests/engine_consumer`
+  builds a program against it the same way. `RAYOMD_TOP_LEVEL` (this directory is the
+  top-level project) gates the tests, and `RAYOMD_BUILD_CLI` (default: `RAYOMD_TOP_LEVEL`)
+  the command-line executable.
 
 - `VERSION`
   Single source for the release version. CMake compiles it into both command-line

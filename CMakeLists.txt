@@ -4,6 +4,13 @@ cmake_minimum_required(VERSION 3.16)
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" RAYOMD_VERSION LIMIT_COUNT 1)
 project(rayomd VERSION ${RAYOMD_VERSION} LANGUAGES C CXX)
 
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(RAYOMD_TOP_LEVEL ON)
+else()
+    set(RAYOMD_TOP_LEVEL OFF)
+endif()
+option(RAYOMD_BUILD_CLI "Build the rayomd command-line tool" ${RAYOMD_TOP_LEVEL})
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -226,100 +233,135 @@ set(RAYOMD_CORE_SOURCES
     src/common/exact_math.cpp
     src/core/rayomd_pdf_source.cpp)
 
-if(WIN32)
-    enable_language(RC)
-    set(RAYOMD_IMGUI_SOURCES
-        third_party/imgui/imgui.cpp
-        third_party/imgui/imgui_draw.cpp
-        third_party/imgui/imgui_tables.cpp
-        third_party/imgui/imgui_widgets.cpp
-        third_party/imgui/misc/cpp/imgui_stdlib.cpp
-        third_party/imgui/backends/imgui_impl_win32.cpp
-        third_party/imgui/backends/imgui_impl_dx11.cpp)
-    add_executable(rayomd WIN32 ${RAYOMD_CORE_SOURCES} src/win32/main_win32.cpp src/win32/rayomd.rc
-        ${RAYOMD_IMGUI_SOURCES})
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        # Vendored ImGui stays as upstream wrote it, and quiet.
-        set_property(SOURCE ${RAYOMD_IMGUI_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -w)
-        target_sources(rayomd PRIVATE
-            src/win32/delay_load.cpp
-            src/win32/delay_import_pointers.cpp
-            src/win32/delay_image_load.cpp
-            src/win32/delay_image_import_pointers.cpp)
-        target_link_options(rayomd PRIVATE
-            -Wl,--wrap=GetOpenFileNameW
-            -Wl,--wrap=GetSaveFileNameW
-            -Wl,--wrap=D3D11CreateDeviceAndSwapChain
-            -Wl,--wrap=D3DCompile
-            -Wl,--wrap=DwmEnableBlurBehindWindow
-            -Wl,--wrap=DwmGetColorizationColor
-            -Wl,--wrap=DwmIsCompositionEnabled
-            -Wl,--wrap=DwmSetWindowAttribute
-            -Wl,--wrap=DragAcceptFiles
-            -Wl,--wrap=DragFinish
-            -Wl,--wrap=DragQueryFileW
-            -Wl,--wrap=SHGetFolderPathW
-            -Wl,--wrap=ShellExecuteW
-            -Wl,--wrap=CommandLineToArgvW)
-    endif()
-    target_compile_definitions(rayomd PRIVATE UNICODE _UNICODE)
-    target_include_directories(rayomd PRIVATE include . third_party third_party/imgui)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_link_libraries(rayomd PRIVATE
-            dxgi windowscodecs Threads::Threads)
-    else()
-        target_link_libraries(rayomd PRIVATE
-            d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi
-            winhttp windowscodecs ws2_32 Threads::Threads)
-    endif()
-    rayomd_common_definitions(rayomd)
-    rayomd_release_flags(rayomd)
-    rayomd_warnings(rayomd)
-    rayomd_experiments(rayomd)
-else()
+if(NOT WIN32)
     if(RAYOMD_USE_CURL)
         find_package(CURL REQUIRED)
     endif()
-    add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
-    if(RAYOMD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
-        # No .eh_frame registration at startup: the unwinder reads PT_GNU_EH_FRAME (static_frames.cpp).
-        target_sources(rayomd PRIVATE src/cli/static_frames.cpp)
-        target_link_options(rayomd PRIVATE -Wl,--eh-frame-hdr -Wl,--wrap=__register_frame_info
-            -Wl,--wrap=__deregister_frame_info)
-    endif()
-    target_include_directories(rayomd PRIVATE include)
-    target_link_libraries(rayomd PRIVATE Threads::Threads)
-    if(RAYOMD_USE_CURL)
-        target_link_libraries(rayomd PRIVATE CURL::libcurl)
-        target_compile_definitions(rayomd PRIVATE RAYOMD_USE_CURL=1)
-    endif()
-    rayomd_common_definitions(rayomd)
-    rayomd_libm(rayomd)
-    rayomd_release_flags(rayomd)
-    rayomd_warnings(rayomd)
-    rayomd_hot_sections(rayomd)
-    rayomd_experiments(rayomd)
 endif()
 
-include(CTest)
-if(BUILD_TESTING)
-    find_package(Python3 COMPONENTS Interpreter QUIET)
-    add_executable(rayomd-core-tests tests/core_tests.cpp ${RAYOMD_CORE_SOURCES})
-    target_include_directories(rayomd-core-tests PRIVATE include)
-    target_compile_definitions(rayomd-core-tests PRIVATE RAYOMD_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-    rayomd_libm(rayomd-core-tests)
-    target_link_libraries(rayomd-core-tests PRIVATE rayomd_inflate Threads::Threads)
-    if(WIN32)
-        target_link_libraries(rayomd-core-tests PRIVATE ole32 winhttp windowscodecs ws2_32)
+# The exporter as a static library for other programs (rayomd-gui adds this directory with
+# add_subdirectory). Not built by default; rayomd's own executables compile the sources directly.
+add_library(rayomd_engine STATIC EXCLUDE_FROM_ALL ${RAYOMD_CORE_SOURCES})
+add_library(rayomd::engine ALIAS rayomd_engine)
+target_include_directories(rayomd_engine PUBLIC include src)
+target_link_libraries(rayomd_engine PUBLIC Threads::Threads)
+if(WIN32)
+    target_compile_definitions(rayomd_engine PUBLIC UNICODE _UNICODE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_sources(rayomd_engine PRIVATE src/win32/delay_image_load.cpp src/win32/delay_image_import_pointers.cpp)
+        target_link_libraries(rayomd_engine PUBLIC windowscodecs)
+    else()
+        target_link_libraries(rayomd_engine PUBLIC ole32 winhttp windowscodecs ws2_32)
     endif()
-    rayomd_release_flags(rayomd-core-tests)
-    rayomd_warnings(rayomd-core-tests)
-    rayomd_experiments(rayomd-core-tests)
-    add_test(NAME rayomd-core COMMAND rayomd-core-tests)
-    if(Python3_Interpreter_FOUND)
-        add_test(
-            NAME rayomd-cli
-            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_cli.py"
-                --binary "$<TARGET_FILE:rayomd>")
+elseif(RAYOMD_USE_CURL)
+    target_link_libraries(rayomd_engine PUBLIC CURL::libcurl)
+    target_compile_definitions(rayomd_engine PRIVATE RAYOMD_USE_CURL=1)
+endif()
+if(RAYOMD_LIBM_DLOPEN)
+    target_compile_definitions(rayomd_engine PRIVATE RAYOMD_LIBM_DLOPEN=1)
+    if(NOT RAYOMD_DLOPEN_IN_LIBC)
+        target_link_libraries(rayomd_engine INTERFACE ${CMAKE_DL_LIBS})
+    endif()
+endif()
+rayomd_common_definitions(rayomd_engine)
+rayomd_release_flags(rayomd_engine)
+rayomd_warnings(rayomd_engine)
+
+if(RAYOMD_BUILD_CLI)
+    if(WIN32)
+        enable_language(RC)
+        set(RAYOMD_IMGUI_SOURCES
+            third_party/imgui/imgui.cpp
+            third_party/imgui/imgui_draw.cpp
+            third_party/imgui/imgui_tables.cpp
+            third_party/imgui/imgui_widgets.cpp
+            third_party/imgui/misc/cpp/imgui_stdlib.cpp
+            third_party/imgui/backends/imgui_impl_win32.cpp
+            third_party/imgui/backends/imgui_impl_dx11.cpp)
+        add_executable(rayomd WIN32 ${RAYOMD_CORE_SOURCES} src/win32/main_win32.cpp src/win32/rayomd.rc
+            ${RAYOMD_IMGUI_SOURCES})
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            # Vendored ImGui stays as upstream wrote it, and quiet.
+            set_property(SOURCE ${RAYOMD_IMGUI_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -w)
+            target_sources(rayomd PRIVATE
+                src/win32/delay_load.cpp
+                src/win32/delay_import_pointers.cpp
+                src/win32/delay_image_load.cpp
+                src/win32/delay_image_import_pointers.cpp)
+            target_link_options(rayomd PRIVATE
+                -Wl,--wrap=GetOpenFileNameW
+                -Wl,--wrap=GetSaveFileNameW
+                -Wl,--wrap=D3D11CreateDeviceAndSwapChain
+                -Wl,--wrap=D3DCompile
+                -Wl,--wrap=DwmEnableBlurBehindWindow
+                -Wl,--wrap=DwmGetColorizationColor
+                -Wl,--wrap=DwmIsCompositionEnabled
+                -Wl,--wrap=DwmSetWindowAttribute
+                -Wl,--wrap=DragAcceptFiles
+                -Wl,--wrap=DragFinish
+                -Wl,--wrap=DragQueryFileW
+                -Wl,--wrap=SHGetFolderPathW
+                -Wl,--wrap=ShellExecuteW
+                -Wl,--wrap=CommandLineToArgvW)
+        endif()
+        target_compile_definitions(rayomd PRIVATE UNICODE _UNICODE)
+        target_include_directories(rayomd PRIVATE include . third_party third_party/imgui)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_link_libraries(rayomd PRIVATE
+                dxgi windowscodecs Threads::Threads)
+        else()
+            target_link_libraries(rayomd PRIVATE
+                d3d11 dxgi d3dcompiler_47 comdlg32 shell32 ole32 dwmapi
+                winhttp windowscodecs ws2_32 Threads::Threads)
+        endif()
+        rayomd_common_definitions(rayomd)
+        rayomd_release_flags(rayomd)
+        rayomd_warnings(rayomd)
+        rayomd_experiments(rayomd)
+    else()
+        add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
+        if(RAYOMD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
+            # No .eh_frame registration at startup: the unwinder reads PT_GNU_EH_FRAME (static_frames.cpp).
+            target_sources(rayomd PRIVATE src/cli/static_frames.cpp)
+            target_link_options(rayomd PRIVATE -Wl,--eh-frame-hdr -Wl,--wrap=__register_frame_info
+                -Wl,--wrap=__deregister_frame_info)
+        endif()
+        target_include_directories(rayomd PRIVATE include)
+        target_link_libraries(rayomd PRIVATE Threads::Threads)
+        if(RAYOMD_USE_CURL)
+            target_link_libraries(rayomd PRIVATE CURL::libcurl)
+            target_compile_definitions(rayomd PRIVATE RAYOMD_USE_CURL=1)
+        endif()
+        rayomd_common_definitions(rayomd)
+        rayomd_libm(rayomd)
+        rayomd_release_flags(rayomd)
+        rayomd_warnings(rayomd)
+        rayomd_hot_sections(rayomd)
+        rayomd_experiments(rayomd)
+    endif()
+endif()
+
+if(RAYOMD_TOP_LEVEL)
+    include(CTest)
+    if(BUILD_TESTING)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        add_executable(rayomd-core-tests tests/core_tests.cpp ${RAYOMD_CORE_SOURCES})
+        target_include_directories(rayomd-core-tests PRIVATE include)
+        target_compile_definitions(rayomd-core-tests PRIVATE RAYOMD_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        rayomd_libm(rayomd-core-tests)
+        target_link_libraries(rayomd-core-tests PRIVATE rayomd_inflate Threads::Threads)
+        if(WIN32)
+            target_link_libraries(rayomd-core-tests PRIVATE ole32 winhttp windowscodecs ws2_32)
+        endif()
+        rayomd_release_flags(rayomd-core-tests)
+        rayomd_warnings(rayomd-core-tests)
+        rayomd_experiments(rayomd-core-tests)
+        add_test(NAME rayomd-core COMMAND rayomd-core-tests)
+        if(Python3_Interpreter_FOUND AND TARGET rayomd)
+            add_test(
+                NAME rayomd-cli
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_cli.py"
+                    --binary "$<TARGET_FILE:rayomd>")
+        endif()
     endif()
 endif()
