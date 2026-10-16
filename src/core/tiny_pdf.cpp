@@ -2342,14 +2342,21 @@ static bool TryApprovedNtRootForPolicy(
 
 // Whether a directory between `root` and the file `path` names, which lies in it by name, is a
 // symbolic link, junction or mount point (name surrogates): they may lead off the root, to a
-// share even, and are checked here by their entries, never followed. Other reparse points, such
-// as cloud-file placeholders, are plain folders to this test. A missing directory counts as one.
+// share even, and are checked here, never followed. Other reparse points, such as cloud-file
+// placeholders, are plain folders to this test. A missing directory counts as one.
+// One attribute query a folder (GetFileAttributesW reports a link's own attributes, not its
+// target's, and opens nothing beyond it); only a reparse point has its tag read from its entry.
+// FindFirstFileExW for every folder made each image of a document in a subfolder cost about
+// 20 µs a level and build on Windows (tester.md, three levels: +18 % a build).
 static bool DirectPathHasLink(const std::filesystem::path& root, const std::filesystem::path& path) {
     auto part = path.begin();
     for (auto rootPart = root.begin(); rootPart != root.end() && part != path.end(); ++rootPart) ++part;
     std::filesystem::path current = root;
     for (; part != path.end() && std::next(part) != path.end(); ++part) {
         current /= *part;
+        const DWORD attributes = GetFileAttributesW(current.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) return true;
+        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) continue;
         WIN32_FIND_DATAW entry{};
         HANDLE find = FindFirstFileExW(current.c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch, nullptr, 0);
         if (find == INVALID_HANDLE_VALUE) return true;
@@ -2363,24 +2370,31 @@ static bool DirectPathHasLink(const std::filesystem::path& root, const std::file
 
 // Opens `path`, in the approved root by name, without following a link: a file that is a
 // symbolic link (or another name surrogate) is rejected, so nothing outside the root, a share
-// least of all, is opened before the final-path check.
+// least of all, is opened before the final-path check. One GetFileInformationByHandle gives the
+// attributes, the size and the stamp; only a reparse point has its tag read.
 static DirectLocalImageResult TryOpenDirectLocalImage(
     const std::filesystem::path& path, const std::wstring& approvedRoot,
     std::string& key, WinLocalImageFile& file) {
     HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    BY_HANDLE_FILE_INFORMATION info{};
     if (handle != INVALID_HANDLE_VALUE) {
-        FILE_ATTRIBUTE_TAG_INFO tag{};
-        if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag, sizeof(tag))) {
+        if (!GetFileInformationByHandle(handle, &info)) {
             CloseHandle(handle);
             return DirectLocalImageResult::Rejected;
         }
-        if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            FILE_ATTRIBUTE_TAG_INFO tag{};
+            const bool tagged = GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag, sizeof(tag)) != 0;
             CloseHandle(handle);
-            if (IsReparseTagNameSurrogate(tag.ReparseTag)) return DirectLocalImageResult::Rejected;
+            if (!tagged || IsReparseTagNameSurrogate(tag.ReparseTag)) return DirectLocalImageResult::Rejected;
             // A placeholder of a cloud file and the like: its data comes through a normal open.
             handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+            if (handle != INVALID_HANDLE_VALUE && !GetFileInformationByHandle(handle, &info)) {
+                CloseHandle(handle);
+                return DirectLocalImageResult::Rejected;
+            }
         }
     }
     if (handle == INVALID_HANDLE_VALUE) {
@@ -2407,12 +2421,8 @@ static DirectLocalImageResult TryOpenDirectLocalImage(
         return DirectLocalImageResult::Rejected;
     }
 
-    BY_HANDLE_FILE_INFORMATION info{};
-    LARGE_INTEGER size{};
-    if (!GetFileInformationByHandle(handle, &info) ||
-        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
-        !GetFileSizeEx(handle, &size) || size.QuadPart <= 0 ||
-        size.QuadPart > (LONGLONG)kMaxImageBytes) {
+    const uint64_t size = (uint64_t)info.nFileSizeHigh << 32 | info.nFileSizeLow;
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 || size == 0 || size > (uint64_t)kMaxImageBytes) {
         CloseHandle(handle);
         return DirectLocalImageResult::Rejected;
     }
@@ -2425,8 +2435,8 @@ static DirectLocalImageResult TryOpenDirectLocalImage(
     key = "file-nt:" + finalUtf8;
     file.Reset();
     file.handle = handle;
-    file.size = (size_t)size.QuadPart;
-    file.stamp.size = (uint64_t)size.QuadPart;
+    file.size = (size_t)size;
+    file.stamp.size = size;
     file.stamp.modified = (uint64_t)info.ftLastWriteTime.dwHighDateTime << 32 | info.ftLastWriteTime.dwLowDateTime;
     file.stamp.changed = (uint64_t)info.ftCreationTime.dwHighDateTime << 32 | info.ftCreationTime.dwLowDateTime;
     return DirectLocalImageResult::Opened;
