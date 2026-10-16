@@ -127,6 +127,14 @@ every block opens its element. A new paint call in the Unicode renderer must do 
 or veraPDF fails with "content neither marked as Artifact nor tagged" (`verapdf -f ua1`),
 and Debug builds assert. Untagged documents keep their bytes: each hook tests `tags` first,
 and the tagged-only work is in `RAYOMD_COLD` functions and `tagged.cpp`.
+`PdfOptions::sourceMap` (rayomd-gui keeps its editor and preview together with it) gets each
+top-level block's source lines and where it is laid out (`SourceBlock`: pages counted with a
+theme's cover, y down from the page's top edge). The parser stamps the lines at depth 0 only
+(`Block::sourceLine`/`sourceLines`, in the padding after `align`; `StampSourceLines`), and
+`RenderBlocks` notes each stamped block after drawing it (`NoteSourceBlock`, cold); inserted
+blocks (the `--toc` table, a book's titles), nested ones and footnotes have no entry, and books
+never fill it. The hooks only read layout state: the PDF bytes are the same with or without a
+map (`CheckSourceMap`).
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and

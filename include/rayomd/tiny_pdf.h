@@ -115,6 +115,19 @@ struct BuildResult {
     constexpr explicit operator bool() const { return Ok(); }
 };
 
+// Where a top-level block of the Markdown is laid out (PdfOptions::sourceMap), for editors that
+// keep a view of the Markdown and one of its PDF together. Lines are counted from 0 and end at
+// '\n' (a "\r\n" is one line end, a lone '\r' none). Pages count from 0, a theme's cover page
+// included. y is in points down from the page's top edge.
+struct SourceBlock {
+    uint32_t firstLine = 0;  // the block's first line
+    uint32_t endLine = 0;    // the line after its last
+    uint32_t page = 0;       // where its top is
+    uint32_t endPage = 0;    // where its bottom is
+    float top = 0;           // on `page`
+    float bottom = 0;        // on `endPage`; the next block starts there
+};
+
 struct PdfOptions {
     PdfStyle style = PdfStyle::Elegant;
     PdfMargin margin = PdfMargin::Normal();
@@ -158,6 +171,11 @@ struct PdfOptions {
     // blocks and in loops that can run long (image fetch and decode, big tables, code, a book's
     // files), so a build returns within a few milliseconds. nullptr: never cancelled.
     const std::atomic<bool>* cancel = nullptr;
+    // When set, BuildPdf replaces its contents with the document's top-level blocks in the order
+    // they are laid out; footnotes, a --toc table and the blocks inside list items and quotes have
+    // no entry of their own. Meaningful only when the build succeeds. BuildBookPdf leaves it alone.
+    // The PDF bytes are the same with or without it.
+    std::vector<SourceBlock>* sourceMap = nullptr;
 };
 
 // Legacy error reporting is retained for the bool-returning compatibility

@@ -1162,6 +1162,17 @@ private:
     Slot* const slot;
 };
 
+// Gives blocks [from, blocks.size()) the source lines [first, end): what one pass of
+// ParseMarkdownImpl's loop read for them. `from` moves past them.
+RAYOMD_NOINLINE static void StampSourceLines(std::vector<Block>& blocks, size_t& from, size_t first, size_t end) {
+    const uint32_t line = static_cast<uint32_t>(std::min<size_t>(first, kNoSourceLine - 1));
+    const uint16_t count = static_cast<uint16_t>(std::min<size_t>(end - first, 0xFFFF));
+    for (; from < blocks.size(); from++) {
+        blocks[from].sourceLine = line;
+        blocks[from].sourceLines = count;
+    }
+}
+
 static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth, FootnoteParse* notes) {
     LevelLines level(depth);
     std::vector<std::string_view>& lines = level.lines;
@@ -1249,8 +1260,14 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         if (frontMatterEnd < infos.size()) i = frontMatterEnd + 1;
     }
 
+    const bool stampLines = depth == 0;
+    size_t stamped = 0;
+    size_t passStart = i;
     while (i < lines.size()) {
-
+        if (stampLines) {
+            if (blocks.size() > stamped) StampSourceLines(blocks, stamped, passStart, i);
+            passStart = i;
+        }
         if (isSuppressed(i)) {
             i++;
             continue;
@@ -1631,6 +1648,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         }
         AppendBlock(blocks, BlockType::Paragraph).text = std::move(paragraph);
     }
+    if (stampLines && blocks.size() > stamped) StampSourceLines(blocks, stamped, passStart, i);
     if (!alignments.empty()) Html::ApplyAlignments(blocks, alignments);
 
     return blocks;

@@ -3680,6 +3680,109 @@ bool CheckPngFilters() {
     return true;
 }
 
+// PdfOptions::sourceMap: each top-level block's lines and where it is laid out, in layout order,
+// footnote definitions without an entry; the PDF bytes are those of a build without it, also in
+// WinAnsi and in a TrueType font. A block after a page break starts at the top of the next page,
+// one across pages ends on a later one, a cover page moves every page on, and a book leaves the
+// map as it was.
+bool CheckSourceMap() {
+    using TinyPdf::SourceBlock;
+    using Lines = std::vector<std::pair<uint32_t, uint32_t>>;
+    const auto lines = [](const std::vector<SourceBlock>& map) {
+        Lines ranges;
+        for (const SourceBlock& entry : map) ranges.emplace_back(entry.firstLine, entry.endLine);
+        return ranges;
+    };
+    const auto build = [](const std::string& markdown, TinyPdf::PdfOptions options, std::vector<SourceBlock>* map,
+        std::string& pdf) {
+        options.sourceMap = map;
+        return TinyPdf::BuildPdf(markdown, options, pdf).Ok();
+    };
+    const std::string document =
+        "# Title\n\n"
+        "First paragraph\ncontinues here.\n\n"
+        "- one\n- two\n\n"
+        "```text\ncode\n```\n\n"
+        "| a | b |\n|---|---|\n| 1 | 2 |\n\n"
+        "Note[^n].\n\n"
+        "[^n]: The note.\n";
+    const TinyPdf::PdfOptions defaults;
+    std::vector<SourceBlock> first;
+    std::string mapped, plain;
+    if (!build(document, defaults, &first, mapped) || !build(document, defaults, nullptr, plain)) {
+        std::cerr << "source map: the document did not build" << std::endl;
+        return false;
+    }
+    if (lines(first) != Lines{ {0, 1}, {2, 4}, {5, 6}, {6, 8}, {8, 11}, {12, 15}, {16, 17} }) {
+        std::cerr << "source map: the blocks' lines differ" << std::endl;
+        return false;
+    }
+    if (first[0].top != 54.0f) {
+        std::cerr << "source map: the first block does not start at the margin: " << first[0].top << std::endl;
+        return false;
+    }
+    for (size_t k = 0; k < first.size(); k++) {
+        if (first[k].page != 0 || first[k].endPage != 0 || !(first[k].top < first[k].bottom) ||
+            (k + 1 < first.size() && first[k].bottom != first[k + 1].top)) {
+            std::cerr << "source map: block " << k << " is not where the one before it ends" << std::endl;
+            return false;
+        }
+    }
+    if (mapped != plain) {
+        std::cerr << "source map: the PDF bytes differ with a map" << std::endl;
+        return false;
+    }
+    for (const std::string& text : { std::string("# Caf\xC3\xA9\n\nNa\xC3\xAFve.\n"),
+             std::string("# \xE4\xB8\xAD\xE6\x96\x87\n\nText.\n") }) {
+        std::vector<SourceBlock> map;
+        if (!build(text, defaults, &map, mapped) || !build(text, defaults, nullptr, plain)) {
+            std::cerr << "source map: " << text << " did not build" << std::endl;
+            return false;
+        }
+        if (mapped != plain || lines(map) != Lines{ {0, 1}, {2, 3} }) {
+            std::cerr << "source map: the bytes or lines of " << text << " differ" << std::endl;
+            return false;
+        }
+    }
+    std::vector<SourceBlock> map;
+    if (!build("First\n\n\\pagebreak\n\nSecond\n", defaults, &map, mapped) || lines(map) != Lines{ {0, 1}, {4, 5} } ||
+        map[1].page != 1 || map[1].top != 54.0f) {
+        std::cerr << "source map: the block after a page break is not at the top of the next page" << std::endl;
+        return false;
+    }
+    std::string words;
+    for (int word = 0; word < 2000; word++) words += "word ";
+    if (!build(words + "\n", defaults, &map, mapped) || map.size() != 1 || !(map[0].endPage > map[0].page)) {
+        std::cerr << "source map: a paragraph across pages does not end on a later page" << std::endl;
+        return false;
+    }
+    TinyPdf::PdfOptions covered;
+    covered.theme.cover = true;
+    if (!build(document, covered, &map, mapped) || map.size() != first.size()) {
+        std::cerr << "source map: the document with a cover page differs" << std::endl;
+        return false;
+    }
+    for (size_t k = 0; k < map.size(); k++) {
+        if (map[k].firstLine != first[k].firstLine || map[k].endLine != first[k].endLine || map[k].page != first[k].page + 1 ||
+            map[k].endPage != first[k].endPage + 1 || map[k].top != first[k].top || map[k].bottom != first[k].bottom) {
+            std::cerr << "source map: block " << k << " is not one page on after a cover page" << std::endl;
+            return false;
+        }
+    }
+    TinyPdf::Book book;
+    book.chapters.push_back({ "# One\n\nText.\n", "one.md", "", 0, false });
+    book.chapters.push_back({ "# Two\n\nMore.\n", "two.md", "", 0, false });
+    TinyPdf::PdfOptions bookOptions;
+    map = { { 7, 8, 9, 9, 1.0f, 2.0f } };
+    bookOptions.sourceMap = &map;
+    if (!TinyPdf::BuildBookPdf(book, bookOptions, mapped).Ok() || map.size() != 1 || map[0].firstLine != 7 ||
+        map[0].endLine != 8 || map[0].page != 9 || map[0].endPage != 9 || map[0].top != 1.0f || map[0].bottom != 2.0f) {
+        std::cerr << "source map: a book changed it" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -3748,6 +3851,7 @@ int main() {
     if (!CheckUrlAddressFilter()) return 120;
     if (!CheckThemePathPolicy()) return 121;
     if (!CheckImageFormats()) return 122;
+    if (!CheckSourceMap()) return 124;
 #ifdef _WIN32
     if (!CheckDirectImageLinks()) return 123;
 #endif

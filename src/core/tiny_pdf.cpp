@@ -5838,6 +5838,33 @@ static void SplitCodeRuns(const Char* text, size_t length, const uint8_t* classe
     runs.push_back({ (uint32_t)length, color == 0xFF ? (uint8_t)0 : color });
 }
 
+// Where a block's layout started: the page it began on, y there, and the content length.
+struct SourceStart {
+    size_t page;
+    double y;
+    size_t content;
+};
+
+// Notes a top-level block's place in PdfOptions::sourceMap. A block that drew nothing on the
+// page it started on (its first line or a kept heading went to the next page) starts at the
+// top of the next. PDF/UA writes bytes at a page break before the next page starts, so there
+// such a block keeps the old page's bottom as its start.
+RAYOMD_COLD static void NoteSourceBlock(std::vector<SourceBlock>& map, const Block& block, SourceStart start,
+    const std::vector<size_t>& pageStarts, double endY, double pageH, double margin) {
+    SourceBlock entry;
+    entry.firstLine = block.sourceLine;
+    entry.endLine = block.sourceLine + block.sourceLines;
+    if (start.page + 1 < pageStarts.size() && pageStarts[start.page + 1] == start.content) {
+        start.page++;
+        start.y = pageH - margin;
+    }
+    entry.page = static_cast<uint32_t>(start.page);
+    entry.top = static_cast<float>(pageH - start.y);
+    entry.endPage = static_cast<uint32_t>(pageStarts.size() - 1);
+    entry.bottom = static_cast<float>(pageH - endY);
+    map.push_back(entry);
+}
+
 template <typename RendererType>
 static void RenderBlocks(RendererType& renderer, const std::vector<Block>& blocks) {
     if (blocks.empty()) {
@@ -5851,6 +5878,9 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         if (block.type == BlockType::PageBreak) { pageBreakPending = true; continue; }
         if (pageBreakPending) { renderer.RenderPageBreak(); pageBreakPending = false; }
         renderer.TagBlock(block);
+        const bool mapped = renderer.sourceMap != nullptr && block.sourceLine != Internal::kNoSourceLine;
+        SourceStart start{};
+        if (mapped) start = { renderer.pageStarts.size() - 1, renderer.y, renderer.content.size() };
         switch (block.type) {
         case BlockType::Heading: {
             const double keep = HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight);
@@ -5877,6 +5907,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         case BlockType::Contents: renderer.RenderContents(); break;
         case BlockType::Anchor: renderer.MarkAnchor(block.text); break;
         }
+        if (mapped) NoteSourceBlock(*renderer.sourceMap, block, start, renderer.pageStarts, renderer.y, renderer.pageH, renderer.margin);
     }
     renderer.TagLeaveBlocks();
 }
@@ -6169,6 +6200,8 @@ public:
     }
     // The entries of the table of contents (contents.h), which RenderContents draws.
     void SetContents(const std::vector<Internal::ContentsEntry>* entries) { contents = entries; }
+    // PdfOptions::sourceMap: where RenderBlocks notes each top-level block; none without it.
+    void SetSourceMap(std::vector<SourceBlock>* map) { sourceMap = map; }
     // PDF/UA: the structure tree the pages' marked content goes into (tagged.h); none untagged.
     void SetTags(Internal::StructTree* tree) { tags = tree; }
     // A theme's own bold, italic and bold italic faces, each of them optional; with any, every
@@ -6283,6 +6316,7 @@ private:
     std::vector<std::vector<LinkRect>> pageLinks;
     RunLinkUrls runLinkUrls;        // the target of the last link a run drew (AddRunLink)
     std::vector<HeadingMark> headings;
+    std::vector<SourceBlock>* sourceMap = nullptr;   // PdfOptions::sourceMap (SetSourceMap)
     std::vector<HeadingMark> ids;   // where the HTML ids (Block::Anchor) are, for "#id" links
     // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
     // the alert it is in.
@@ -9667,6 +9701,8 @@ public:
     }
     // The entries of the table of contents (contents.h), which RenderContents draws.
     void SetContents(const std::vector<Internal::ContentsEntry>* entries) { contents = entries; }
+    // PdfOptions::sourceMap: where RenderBlocks notes each top-level block; none without it.
+    void SetSourceMap(std::vector<SourceBlock>* map) { sourceMap = map; }
 
     // The page numbers of the table's entries, right-aligned on the last line of each and after a
     // row of dots below the top level: one stream for each page, for the builder to add to the
@@ -9740,6 +9776,7 @@ private:
     std::vector<std::vector<LinkRect>> pageLinks;
     RunLinkUrls runLinkUrls;        // the target of the last link a run drew (AddRunLink)
     std::vector<HeadingMark> headings;
+    std::vector<SourceBlock>* sourceMap = nullptr;   // PdfOptions::sourceMap (SetSourceMap)
     std::vector<HeadingMark> ids;   // where the HTML ids (Block::Anchor) are, for "#id" links
     // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
     // the alert it is in.
@@ -11926,6 +11963,14 @@ RAYOMD_COLD static int AddCoverPage(PdfObjects& pdf, int pagesId, double pageW, 
     return pdf.Add(std::move(page));
 }
 
+// A cover page goes before the rendered pages: the source map's pages move one on.
+RAYOMD_COLD static void ShiftSourceMapPages(std::vector<SourceBlock>& map) {
+    for (SourceBlock& entry : map) {
+        entry.page++;
+        entry.endPage++;
+    }
+}
+
 // With a cover, a viewer numbers the pages as the footer does: "Cover", then 1, 2 and on.
 constexpr const char* kCoverPageLabels = " /PageLabels << /Nums [0 << /P (Cover) >> 1 << /S /D >>] >>";
 
@@ -12088,6 +12133,10 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     StandardRenderer renderer(pdfBytes, options.style, options.margin, options.pageSize, &imageRegistry, winAnsi, palette);
     if (!options.highlightCode) renderer.DisableHighlighting();
     if (!contents.empty()) renderer.SetContents(&contents);
+    if (options.sourceMap != nullptr) {
+        options.sourceMap->clear();
+        renderer.SetSourceMap(options.sourceMap);
+    }
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover);
@@ -12185,6 +12234,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         AppendInt(fonts, fontBoldId);
         fonts += " 0 R";
         coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.PageHeight(), fonts, imageObjectIds, cover);
+        if (coverId != 0 && options.sourceMap != nullptr) ShiftSourceMapPages(*options.sourceMap);
     }
     pdf.Set(pagesId, PagesDictionary(pageIds, coverId));
     AddInternalLinks(pdf, internalLinks, pageIds, false);
@@ -12675,6 +12725,10 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     imageRegistry.SetFont(&font, &renderer.Cids(), faceFonts[1], faceFonts[1] ? renderer.FaceCidSet(1) : nullptr);
     if (!options.highlightCode) renderer.DisableHighlighting();
     if (!contents.empty()) renderer.SetContents(&contents);
+    if (options.sourceMap != nullptr) {
+        options.sourceMap->clear();
+        renderer.SetSourceMap(options.sourceMap);
+    }
     if (check != nullptr && check->stopEarly) renderer.ProbeFallback(markdown);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
@@ -12824,6 +12878,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         fonts += " 0 R";
         fonts += faceResources;
         coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.PageHeight(), fonts, imageObjectIds, cover);
+        if (coverId != 0 && options.sourceMap != nullptr) ShiftSourceMapPages(*options.sourceMap);
     }
     pdf.Set(pagesId, PagesDictionary(pageIds, coverId));
     const int structTreeRoot = tags ? AddStructTree(pdf, *tags, pageIds) : 0;
@@ -13030,6 +13085,7 @@ BuildResult BuildBookPdf(const Book& book, const PdfOptions& options, std::strin
     g_lastError = 0;
     const CancelScope cancelScope(options.cancel);
     PdfOptions bookOptions = options;
+    bookOptions.sourceMap = nullptr;
     bookOptions.embedSource = false;
     bookOptions.sourcePath = book.directory.empty() ? std::string() : book.directory + '/';
     // Its text as the renderer reads it, and all of it, for the choice of its fonts and the output

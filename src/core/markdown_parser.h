@@ -46,6 +46,8 @@ struct ImageSource {
     std::vector<ImageSource> row;
 };
 
+constexpr uint32_t kNoSourceLine = 0xFFFFFFFFu;
+
 struct Block {
     BlockType type = BlockType::Paragraph;
     int level = 0;
@@ -79,6 +81,12 @@ struct Block {
     // The alignment of an HTML element around the block (align="center", <center>): 0 for
     // none, 1 left, 2 centred, 3 right. In the padding after hasMath.
     uint8_t align = 0;
+    // Top-level blocks only (ParseMarkdown's depth 0): how many lines of the Markdown the block
+    // came from (at most 65,535) and the first of them (0-based, lines end at '\n'), for
+    // PdfOptions::sourceMap. Blocks inside list items, quotes and notes, and inserted ones (the
+    // --toc table, a book's title), keep kNoSourceLine. In the padding after `align`.
+    uint16_t sourceLines = 0;
+    uint32_t sourceLine = kNoSourceLine;
 };
 static_assert(sizeof(Block) <= 136, "Block keeps its size: align lives in the padding");
 
