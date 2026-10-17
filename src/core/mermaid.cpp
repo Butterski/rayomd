@@ -3026,6 +3026,237 @@ bool DrawSequence(Canvas& canvas, Cursor cursor, double& width, double& height) 
 }
 
 // ---------------------------------------------------------------------------------------------
+// Pie charts
+
+constexpr size_t kMaxSlices = 64;
+constexpr double kPieRadius = 150.0;
+constexpr double kPi = 3.14159265358979323846;
+
+// sin and cos of 2 pi turns without libm: a quarter turn's Taylor series to the 19th power
+// (error below 1e-13), turned into its quadrant.
+void SinCosTurns(double turns, double& sine, double& cosine) {
+    turns -= RayoMd::ExactMath::Floor(turns);
+    const double scaled = turns * 4.0;
+    int quadrant = static_cast<int>(scaled);
+    if (quadrant > 3) quadrant = 3;
+    const double a = (scaled - quadrant) * (kPi / 2.0), a2 = a * a;
+    double s = a, c = 1.0, term = a, cterm = 1.0;
+    for (int k = 1; k <= 9; k++) {
+        term *= -a2 / static_cast<double>((2 * k) * (2 * k + 1));
+        cterm *= -a2 / static_cast<double>((2 * k - 1) * (2 * k));
+        s += term;
+        c += cterm;
+    }
+    switch (quadrant) {
+    case 1: sine = c; cosine = -s; break;
+    case 2: sine = -s; cosine = -c; break;
+    case 3: sine = -c; cosine = s; break;
+    default: sine = s; cosine = c; break;
+    }
+}
+
+uint32_t Mix(uint32_t a, uint32_t b, double t) {
+    uint32_t out = 0;
+    for (int shift = 16; shift >= 0; shift -= 8) {
+        const double ca = (a >> shift) & 255u, cb = (b >> shift) & 255u;
+        out |= static_cast<uint32_t>(LlRound(ca + (cb - ca) * t)) << shift;
+    }
+    return out;
+}
+
+// The colour of slice `index`: accent and clusterStroke in turn, their channels rotated
+// (r, g, b to g, b, r), then mixed towards nodeFill.
+uint32_t SliceColour(const Palette& palette, size_t index) {
+    uint32_t base = index % 2 == 0 ? palette.accent : palette.clusterStroke;
+    for (size_t turn = 0; turn < (index / 2) % 3; turn++) base = ((base << 8) | (base >> 16)) & 0xFFFFFFu;
+    static const double kTints[] = { 0.0, 0.45, 0.7 };
+    return Mix(base, palette.nodeFill, kTints[(index / 6) % 3]);
+}
+
+struct Slice {
+    std::string_view label, value;
+    double amount = 0.0;
+    std::string legendText;
+    Label legend;
+};
+
+// A non-negative decimal: digits with an optional fraction, at most 15 digits.
+bool ParseAmount(std::string_view text, double& value) {
+    if (text.empty() || text.size() > 16) return false;
+    double whole = 0.0, scale = 1.0;
+    bool point = false, digit = false;
+    for (char ch : text) {
+        if (ch == '.' && !point) {
+            point = true;
+        } else if (IsDigit(ch)) {
+            digit = true;
+            if (point) {
+                scale /= 10.0;
+                whole += (ch - '0') * scale;
+            } else {
+                whole = whole * 10.0 + (ch - '0');
+            }
+        } else {
+            return false;
+        }
+    }
+    value = whole;
+    return digit;
+}
+
+bool DrawPie(Canvas& canvas, Cursor cursor, double& width, double& height) {
+    std::string_view titleText;
+    bool showData = false;
+    // The header's options: showData, then title and its text.
+    for (;;) {
+        cursor.SkipBlanks();
+        if (TakeKeyword(cursor, "showData", false)) {
+            showData = true;
+            continue;
+        }
+        if (TakeKeyword(cursor, "title", false)) {
+            const char* start = cursor.at;
+            while (!cursor.Done() && *cursor.at != '\n') cursor.at++;
+            titleText = Trim(std::string_view(start, static_cast<size_t>(cursor.at - start)));
+            break;
+        }
+        break;
+    }
+    cursor.SkipBlanks();
+    if (!cursor.AtStatementEnd(false)) return false;
+    std::vector<Slice> slices;
+    while (!cursor.Done()) {
+        const std::string_view line = Trim(cursor.Line());
+        if (line.empty() || line.substr(0, 2) == "%%") continue;
+        Cursor c{ line.data(), line.data() + line.size() };
+        if (TakeKeyword(c, "title", false)) {
+            titleText = Trim(std::string_view(c.at, static_cast<size_t>(c.end - c.at)));
+            continue;
+        }
+        if (TakeKeyword(c, "showData", false) && c.Done()) {
+            showData = true;
+            continue;
+        }
+        if (line.substr(0, 8) == "accTitle" || line.substr(0, 8) == "accDescr") {
+            if (line.find(':') == std::string_view::npos) return false;
+            continue;
+        }
+        if (line.front() != '"') return false;
+        const size_t close = line.find('"', 1);
+        if (close == std::string_view::npos) return false;
+        std::string_view rest = Trim(line.substr(close + 1));
+        if (rest.empty() || rest.front() != ':') return false;
+        Slice slice;
+        slice.label = line.substr(1, close - 1);
+        slice.value = Trim(rest.substr(1));
+        if (!ParseAmount(slice.value, slice.amount) || slices.size() >= kMaxSlices) return false;
+        slices.push_back(std::move(slice));
+    }
+    double total = 0.0;
+    for (const Slice& slice : slices) total += slice.amount;
+    if (!(total > 0.0)) return false;
+
+    SvgHost& host = canvas.host;
+    const Palette& pal = canvas.palette;
+    Label title;
+    if (!SetLabel(titleText, kTitleSize, host, title)) return false;
+    double legendWidth = 0.0;
+    for (Slice& slice : slices) {
+        slice.legendText = std::string(slice.label);
+        if (showData) {
+            slice.legendText += " [";
+            slice.legendText += slice.value;
+            slice.legendText += ']';
+        }
+        if (!SetLabel(slice.legendText, kFontSize, host, slice.legend)) return false;
+        legendWidth = std::max(legendWidth, slice.legend.width);
+    }
+    const double rowHeight = 22.0;
+    const double legendHeight = rowHeight * static_cast<double>(slices.size());
+    const double r = kPieRadius;
+    const double top = kMargin + (title.text.empty() ? 0.0 : title.height + 10.0);
+    const double chartHeight = std::max(2.0 * r, legendHeight);
+    const double cx = kMargin + r, cy = top + chartHeight / 2.0;
+    const double legendX = cx + r + 40.0;
+    width = std::max(legendX + 20.0 + legendWidth, kMargin + title.width) + kMargin;
+    height = top + chartHeight + kMargin;
+    std::string& out = canvas.body;
+    if (!title.text.empty()) LabelLines(canvas, title, width / 2.0, kMargin, kMiddle, pal.text);
+
+    auto point = [&](double turns, double radius) -> Point {
+        double sine, cosine;
+        SinCosTurns(turns, sine, cosine);
+        return { cx + radius * sine, cy - radius * cosine };
+    };
+    double start = 0.0;
+    for (size_t index = 0; index < slices.size(); index++) {
+        const double fraction = slices[index].amount / total;
+        if (fraction <= 0.0) continue;
+        const uint32_t colour = SliceColour(pal, index);
+        if (fraction >= 1.0 - 1e-12) {
+            out += "<circle";
+            NumAttr(out, "cx", cx);
+            NumAttr(out, "cy", cy);
+            NumAttr(out, "r", r);
+        } else {
+            // The arc as cubic Béziers of at most a quarter turn: control points 4/3 tan(a/4) out
+            // along the tangents.
+            const int pieces = static_cast<int>(RayoMd::ExactMath::Ceil(fraction * 4.0 - 1e-9));
+            out += "<path d=\"M";
+            PointText(out, { cx, cy });
+            out += " L";
+            PointText(out, point(start, r));
+            for (int k = 0; k < pieces; k++) {
+                const double from = start + fraction * k / pieces, to = start + fraction * (k + 1) / pieces;
+                double s4, c4, s0, c0, s1, c1;
+                SinCosTurns((to - from) / 4.0, s4, c4);
+                SinCosTurns(from, s0, c0);
+                SinCosTurns(to, s1, c1);
+                const double kappa = 4.0 / 3.0 * s4 / c4 * r;
+                out += " C";
+                PointText(out, { cx + r * s0 + kappa * c0, cy - r * c0 + kappa * s0 });
+                out += ' ';
+                PointText(out, { cx + r * s1 - kappa * c1, cy - r * c1 - kappa * s1 });
+                out += ' ';
+                PointText(out, point(to, r));
+            }
+            out += " Z\"";
+        }
+        PaintAttr(out, "fill", colour);
+        PaintAttr(out, "stroke", pal.line);
+        out += " stroke-width=\"1\"/>\n";
+        start += fraction;
+    }
+    if (canvas.geometry) canvas.geometry->clusters.push_back({ cx - r, cy - r, 2.0 * r, 2.0 * r, -1 });
+    // Percentages inside the slices wide enough for them.
+    start = 0.0;
+    for (const Slice& slice : slices) {
+        const double fraction = slice.amount / total;
+        const long long percent = LlRound(fraction * 100.0);
+        std::string text;
+        if (percent >= 100) text = "100";
+        else if (percent >= 10) text = { static_cast<char>('0' + percent / 10), static_cast<char>('0' + percent % 10) };
+        else text = std::string(1, static_cast<char>('0' + percent));
+        text += '%';
+        const double textWidth = host.TextWidth(text, kFontSize, false);
+        if (fraction > 0.0 && fraction * 2.0 * kPi * 0.75 * r >= textWidth + 8.0) {
+            const Point at = point(start + fraction / 2.0, 0.75 * r);
+            TextLine(canvas, text, at.x, at.y + 0.3 * kFontSize, kFontSize, kMiddle, pal.text, {}, -1);
+        }
+        start += fraction;
+    }
+    for (size_t index = 0; index < slices.size(); index++) {
+        const double rowTop = cy - legendHeight / 2.0 + rowHeight * static_cast<double>(index);
+        Rect(out, legendX, rowTop + 4.0, 14.0, 14.0);
+        PaintAttr(out, "fill", SliceColour(pal, index));
+        PaintAttr(out, "stroke", pal.line);
+        out += " stroke-width=\"0.5\"/>\n";
+        LabelLines(canvas, slices[index].legend, legendX + 20.0, rowTop + (rowHeight - LineHeight(kFontSize)) / 2.0, kStart, pal.text);
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------------
 // The diagram types
 
 // The first statement: after blank lines, comments and a front matter block.
@@ -3076,6 +3307,7 @@ bool ToSvg(std::string_view source, SvgHost& host, const Palette& palette, std::
     bool drawn = false;
     if (keyword == "flowchart" || keyword == "graph") drawn = Flowchart(canvas, cursor, width, height);
     else if (keyword == "sequenceDiagram") drawn = DrawSequence(canvas, cursor, width, height);
+    else if (keyword == "pie") drawn = DrawPie(canvas, cursor, width, height);
     if (!drawn || canvas.body.empty() || !(width > 0.0 && height > 0.0) || width > 1e9 || height > 1e9) {
         if (geometry) *geometry = Geometry();
         return false;

@@ -520,6 +520,64 @@ std::vector<std::pair<const char*, std::string>> RefusedSequences() {
     };
 }
 
+bool CheckPieSyntax() {
+    const std::vector<Accepted> cases = {
+        { "pie", "pie\n \"Dogs\" : 386\n \"Cats\" : 85.5\n \"Rats\" : 15\n", { ">Dogs<", ">Cats<", "%<" } },
+        { "pie with options", "pie showData title Pets adopted\n \"Dogs\" : 386\n \"Cats\" : 85\n", { ">Pets adopted<", ">Dogs [386]<" } },
+        { "pie title statement", "pie\n title Shares\n %% a comment\n accTitle: x\n \"A\" : 1\n \"B\" : 0\n showData\n", { ">Shares<", ">B [0]<" } },
+        { "one slice", "pie\n \"All\" : 3\n", { "<circle", ">100%<" } },
+    };
+    if (!CheckAccepted(cases)) return false;
+    // Four quarters end where the circle meets the axes; thirds where 120 degrees put them.
+    std::string svg;
+    if (!Draw("pie\n \"a\" : 1\n \"b\" : 1\n \"c\" : 1\n \"d\" : 1\n", svg) || !Contains(svg, " 158 8 ") || !Contains(svg, " 308 158 ") ||
+        !Contains(svg, " 158 308 ") || !Contains(svg, " 8 158")) {
+        std::cerr << "Mermaid pie quarters misplaced\n" << svg << std::endl;
+        return false;
+    }
+    if (!Draw("pie\n \"a\" : 1\n \"b\" : 1\n \"c\" : 1\n", svg) || !Contains(svg, " 287.9 233 ") || !Contains(svg, " 28.1 233 ")) {
+        std::cerr << "Mermaid pie thirds misplaced\n" << svg << std::endl;
+        return false;
+    }
+    Geometry geometry;
+    if (!Draw("pie title T\n \"a\" : 70\n \"b\" : 20\n \"c\" : 9\n \"d\" : 1\n", svg, &geometry) || geometry.clusters.size() != 1) return false;
+    const Geometry::Box& pie = geometry.clusters[0];
+    size_t inside = 0;
+    for (const Geometry::Box& text : geometry.texts) {
+        const double cx = text.x + text.width / 2, cy = text.y + text.height / 2;
+        if (Distance(cx, cy, pie.x + pie.width / 2, pie.y + pie.height / 2) < pie.width / 2) {
+            inside++;
+            if (!Within(text, pie)) return false;
+        } else if (Overlap(text, pie)) {
+            std::cerr << "Mermaid pie text overlaps the pie" << std::endl;
+            return false;
+        }
+    }
+    if (inside != 3) {
+        std::cerr << "Mermaid pie: " << inside << " percentages drawn, 3 expected" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+std::vector<std::pair<const char*, std::string>> RefusedPies() {
+    std::string many = "pie\n";
+    for (int k = 0; k < 65; k++) many += "\"s" + std::to_string(k) + "\" : 1\n";
+    return {
+        { "no slices", "pie\n" },
+        { "only zeros", "pie\n \"a\" : 0\n" },
+        { "a negative value", "pie\n \"a\" : -1\n \"b\" : 2\n" },
+        { "an exponent", "pie\n \"a\" : 1e5\n" },
+        { "a word", "pie\n \"a\" : many\n" },
+        { "no colon", "pie\n \"a\" 1\n" },
+        { "an unquoted label", "pie\n a : 1\n" },
+        { "an unclosed label", "pie\n \"a : 1\n" },
+        { "text after the value", "pie\n \"a\" : 1 more\n" },
+        { "an unknown header option", "pie donut\n \"a\" : 1\n" },
+        { "65 slices", many },
+    };
+}
+
 // ---- Golden SVG digests (FixedHost): a change of the output shows here. Re-pin them only for a
 // deliberate change of what diagrams look like, and say why.
 
@@ -540,6 +598,8 @@ bool CheckGoldens() {
         { "sequenceDiagram\n autonumber\n actor C as Customer\n C->>+W: Order\n W-->>-C: Done\n loop Hourly\n W->>W: Check\n end\n"
           " alt ok\n W-)C: Mail\n else not\n W-xC: Error\n end\n Note right of W: noted\n",
           "bba39899050c1bb4bef7a55f8ea72f89e8093ca6595e8686c32942a0989b4dc4" },
+        { "pie showData title Pets\n \"Dogs\" : 386\n \"Cats\" : 85\n \"Rats\" : 15\n",
+          "f2c514cc92464aa7fcbae84f49207a662b35e0ac66396056a43a5a9df1d5bdde" },
     };
     bool ok = true;
     for (const auto& golden : goldens) {
@@ -608,6 +668,12 @@ bool CheckBounds() {
         source += "P" + std::to_string(a) + "->>P" + std::to_string((state >> 8) % 64) + ": message " + std::to_string(k) + "\n";
     }
     if (!Bounded("Mermaid: 2,000 messages between 64 participants", 5.0, 128, [&]() { return Draw(source, svg) && Converts(svg); })) return false;
+    source = "pie\n";
+    for (int k = 0; k < 10000; k++) source += "\"a\" : 1\n";
+    if (!Bounded("Mermaid: 10,000 slices", 2.0, 64, [&]() { return !Draw(source, svg); })) return false;
+    source = "pie\n";
+    for (int k = 0; k < 64; k++) source += "\"slice " + std::to_string(k) + "\" : " + std::to_string(k + 1) + "\n";
+    if (!Bounded("Mermaid: 64 slices", 2.0, 64, [&]() { return Draw(source, svg) && Converts(svg); })) return false;
     // 200 nodes in a random tree with 100 more edges: the size of a large real diagram.
     source = "flowchart TD\n";
     state = 11;
@@ -626,7 +692,7 @@ bool CheckBounds() {
 
 bool CheckMermaid() {
     return CheckFlowchartSyntax() && CheckRefused(RefusedFlowcharts()) && CheckFlowchartLayout() && CheckSequenceSyntax() &&
-           CheckRefused(RefusedSequences()) && CheckSequenceLayout() &&
+           CheckRefused(RefusedSequences()) && CheckSequenceLayout() && CheckPieSyntax() && CheckRefused(RefusedPies()) &&
            CheckGoldens() && CheckBounds();
 }
 
