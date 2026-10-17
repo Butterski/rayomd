@@ -371,7 +371,7 @@ void MergeStyle(Style& to, const Style& from) {
 // A paint value written as given: a colour name, #hex, rgb()/rgba()/hsl()/hsla() or none; the
 // SVG converter reads it. Only the characters those use, so it cannot leave its attribute.
 bool IsPaintValue(std::string_view value) {
-    if (value.empty() || value.size() > 64) return false;
+    if (value.empty() || value.size() > 64 || (value.size() >= 4 && EqualsNoCase(value.substr(0, 4), "url("))) return false;
     for (char ch : value) {
         if (!(IsAlpha(ch) || IsDigit(ch) || ch == '#' || ch == '(' || ch == ')' || ch == ',' || ch == '.' ||
               ch == '%' || ch == ' ' || ch == '/' || ch == '-')) {
@@ -2292,6 +2292,740 @@ bool Flowchart(Canvas& canvas, Cursor cursor, double& width, double& height) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Sequence diagrams
+
+constexpr size_t kMaxParticipants = 64;
+constexpr size_t kMaxStatements = 2000;      // messages, notes, frame lines, activations
+constexpr size_t kMaxFrameDepth = 16;
+constexpr double kTitleSize = 16.0;
+constexpr double kLaneGap = 50.0;            // between two participants' boxes
+constexpr double kActivationHalf = 5.0;      // half an activation box's width; nested ones move this much
+
+enum SeqKind : uint8_t { kSeqMessage, kSeqNote, kSeqFrame, kSeqSection, kSeqEnd, kSeqActivate, kSeqDeactivate };
+enum SeqHead : uint8_t { kSeqNoHead, kSeqArrow, kSeqCross, kSeqOpen };
+enum NotePlace : uint8_t { kLeftOf, kRightOf, kOver };
+enum FrameKind : uint8_t { kLoop, kAlt, kOpt, kPar, kCritical, kBreak, kRectFrame };
+
+const char* const kFrameWords[] = { "loop", "alt", "opt", "par", "critical", "break", "" };
+
+struct Participant {
+    std::string_view name;
+    std::string_view text;
+    bool actor = false;
+    Label label;
+    double width = 0.0;
+    double x = 0.0;                    // its lifeline
+    std::vector<double> active;        // the tops of its open activations
+};
+
+struct SeqStatement {
+    SeqKind kind = kSeqMessage;
+    int a = -1, b = -1;                // participants: from and to, or a note's first and last
+    bool dotted = false;
+    SeqHead head = kSeqNoHead;
+    int activation = 0;                // +1 activates b, -1 deactivates a
+    NotePlace place = kOver;
+    FrameKind frame = kLoop;
+    int number = 0;                    // its autonumber, 0 for none
+    std::string text;                  // as drawn: a frame's condition in brackets
+    std::string_view color;            // a rect frame's
+    Label label;
+};
+
+struct Sequence {
+    std::vector<Participant> participants;
+    std::unordered_map<std::string_view, int> names;
+    std::vector<SeqStatement> statements;
+    std::string_view title;
+};
+
+// Whether a participant's name may hold `ch`: Mermaid's names end at these.
+bool IsNameStop(char ch) {
+    return ch == '<' || ch == '=' || ch == '>' || ch == '-' || ch == ':' || ch == ',' || ch == ';' || ch == '\n';
+}
+
+bool IsName(std::string_view name) {
+    if (name.empty()) return false;
+    for (char ch : name) {
+        if (IsNameStop(ch)) return false;
+    }
+    return true;
+}
+
+class SequenceReader {
+public:
+    SequenceReader(Sequence& sequence, Cursor cursor) : s_(sequence), c_(cursor) {}
+
+    bool Read() {
+        for (;;) {
+            c_.SkipBlanks();
+            if (c_.Done()) break;
+            if (*c_.at == '\n' || *c_.at == ';') {
+                c_.at++;
+                continue;
+            }
+            if (c_.StartsWith("%%")) {
+                c_.Line();
+                continue;
+            }
+            const char* start = c_.at;
+            while (!c_.AtStatementEnd(true)) c_.at++;
+            if (!Statement(Trim(std::string_view(start, static_cast<size_t>(c_.at - start))))) return false;
+        }
+        return frames_.empty() && !s_.participants.empty();
+    }
+
+private:
+    // The statement's first word when a blank, ':' or its end follows, else empty.
+    static std::string_view Keyword(std::string_view statement) {
+        size_t end = 0;
+        while (end < statement.size() && IsAlpha(statement[end])) end++;
+        if (end < statement.size() && !IsBlank(statement[end]) && statement[end] != ':') return {};
+        return statement.substr(0, end);
+    }
+
+    bool Find(std::string_view name, int& index) {
+        name = Trim(name);
+        if (!IsName(name)) return false;
+        const auto found = s_.names.find(name);
+        if (found != s_.names.end()) {
+            index = found->second;
+            return true;
+        }
+        if (s_.participants.size() >= kMaxParticipants) return false;
+        index = static_cast<int>(s_.participants.size());
+        s_.participants.emplace_back();
+        s_.participants.back().name = name;
+        s_.participants.back().text = name;
+        s_.names.emplace(name, index);
+        return true;
+    }
+
+    bool Add(SeqStatement&& statement) {
+        if (s_.statements.size() >= kMaxStatements) return false;
+        s_.statements.push_back(std::move(statement));
+        return true;
+    }
+
+    bool Statement(std::string_view statement) {
+        const std::string_view word = Keyword(statement);
+        const std::string_view rest = Trim(statement.substr(word.size()));
+        if (word == "participant" || word == "actor") {
+            std::string_view name = rest, alias;
+            for (size_t at = 0; at + 4 <= rest.size(); at++) {
+                if (IsBlank(rest[at]) && rest.substr(at + 1, 2) == "as" && IsBlank(rest[at + 3])) {
+                    name = rest.substr(0, at);
+                    alias = Trim(rest.substr(at + 4));
+                    break;
+                }
+            }
+            int index;
+            if (!Find(name, index)) return false;
+            Participant& p = s_.participants[static_cast<size_t>(index)];
+            p.actor = word == "actor";
+            if (!alias.empty()) p.text = alias;
+            return true;
+        }
+        if (word == "activate" || word == "deactivate") {
+            SeqStatement item;
+            item.kind = word == "activate" ? kSeqActivate : kSeqDeactivate;
+            return Find(rest, item.a) && Add(std::move(item));
+        }
+        if (EqualsNoCase(word, "note")) return Note(rest);
+        for (int kind = kLoop; kind <= kBreak; kind++) {
+            if (word == kFrameWords[kind]) return Frame(static_cast<FrameKind>(kind), rest);
+        }
+        if (word == "rect") {
+            if (!IsPaintValue(rest)) return false;
+            SeqStatement item;
+            item.kind = kSeqFrame;
+            item.frame = kRectFrame;
+            item.color = rest;
+            frames_.push_back(kRectFrame);
+            return frames_.size() <= kMaxFrameDepth && Add(std::move(item));
+        }
+        if (word == "else" || word == "and" || word == "option") {
+            const FrameKind owner = word == "else" ? kAlt : word == "and" ? kPar : kCritical;
+            if (frames_.empty() || frames_.back() != owner) return false;
+            SeqStatement item;
+            item.kind = kSeqSection;
+            item.frame = owner;
+            if (!rest.empty()) item.text = "[" + std::string(rest) + "]";
+            return Add(std::move(item));
+        }
+        if (word == "end" && rest.empty()) {
+            if (frames_.empty()) return false;
+            frames_.pop_back();
+            SeqStatement item;
+            item.kind = kSeqEnd;
+            return Add(std::move(item));
+        }
+        if (word == "autonumber") return Autonumber(rest);
+        if (word == "title") {
+            s_.title = rest.size() > 0 && rest.front() == ':' ? Trim(rest.substr(1)) : rest;
+            return true;
+        }
+        if (word == "accTitle" || word == "accDescr") return true;   // read past (a statement)
+        return Message(statement);
+    }
+
+    bool Frame(FrameKind kind, std::string_view text) {
+        frames_.push_back(kind);
+        if (frames_.size() > kMaxFrameDepth) return false;
+        SeqStatement item;
+        item.kind = kSeqFrame;
+        item.frame = kind;
+        if (!text.empty()) item.text = "[" + std::string(text) + "]";
+        return Add(std::move(item));
+    }
+
+    bool Note(std::string_view rest) {
+        SeqStatement item;
+        item.kind = kSeqNote;
+        auto take = [&](std::string_view words) {
+            if (rest.size() < words.size() || !EqualsNoCase(rest.substr(0, words.size()), words)) return false;
+            if (rest.size() > words.size() && !IsBlank(rest[words.size()])) return false;
+            rest = Trim(rest.substr(words.size()));
+            return true;
+        };
+        if (take("left of")) item.place = kLeftOf;
+        else if (take("right of")) item.place = kRightOf;
+        else if (take("over")) item.place = kOver;
+        else return false;
+        const size_t colon = rest.find(':');
+        if (colon == std::string_view::npos) return false;
+        const std::string_view names = rest.substr(0, colon);
+        const size_t comma = names.find(',');
+        if (comma == std::string_view::npos) {
+            if (!Find(names, item.a)) return false;
+            item.b = item.a;
+        } else {
+            if (item.place != kOver || !Find(names.substr(0, comma), item.a) || !Find(names.substr(comma + 1), item.b)) return false;
+        }
+        item.text = std::string(Trim(rest.substr(colon + 1)));
+        return Add(std::move(item));
+    }
+
+    static bool Integer(std::string_view text, int& value) {
+        if (text.empty() || text.size() > 6) return false;
+        value = 0;
+        for (char ch : text) {
+            if (!IsDigit(ch)) return false;
+            value = value * 10 + (ch - '0');
+        }
+        return true;
+    }
+
+    bool Autonumber(std::string_view rest) {
+        if (rest == "off") {
+            step_ = 0;
+            return true;
+        }
+        next_ = 1;
+        step_ = 1;
+        if (rest.empty()) return true;
+        size_t blank = 0;
+        while (blank < rest.size() && !IsBlank(rest[blank])) blank++;
+        if (!Integer(rest.substr(0, blank), next_)) return false;
+        const std::string_view second = Trim(rest.substr(blank));
+        return second.empty() || (Integer(second, step_) && step_ > 0);
+    }
+
+    // "A->>B: text" and the other arrows, with an activation mark after the arrow.
+    bool Message(std::string_view statement) {
+        SeqStatement item;
+        size_t at = 0;
+        while (at < statement.size() && !IsNameStop(statement[at])) at++;
+        if (at == statement.size() || statement[at] != '-' || !Find(statement.substr(0, at), item.a)) return false;
+        size_t dashes = 0;
+        while (at < statement.size() && statement[at] == '-') {
+            at++;
+            dashes++;
+        }
+        if (dashes > 2 || at == statement.size()) return false;
+        item.dotted = dashes == 2;
+        const std::string_view arrow = statement.substr(at);
+        if (arrow.substr(0, 2) == ">>") {
+            item.head = kSeqArrow;
+            at += 2;
+        } else if (arrow[0] == '>') {
+            item.head = kSeqNoHead;
+            at++;
+        } else if (arrow[0] == 'x') {
+            item.head = kSeqCross;
+            at++;
+        } else if (arrow[0] == ')') {
+            item.head = kSeqOpen;
+            at++;
+        } else {
+            return false;
+        }
+        while (at < statement.size() && IsBlank(statement[at])) at++;
+        if (at < statement.size() && (statement[at] == '+' || statement[at] == '-')) {
+            item.activation = statement[at] == '+' ? 1 : -1;
+            at++;
+        }
+        const size_t nameStart = at;
+        while (at < statement.size() && !IsNameStop(statement[at])) at++;
+        if (at < statement.size() && statement[at] != ':') return false;
+        if (!Find(statement.substr(nameStart, at - nameStart), item.b)) return false;
+        if (at < statement.size()) item.text = std::string(Trim(statement.substr(at + 1)));
+        if (step_ > 0) {
+            item.number = next_;
+            if (next_ > 1000000) return false;
+            next_ += step_;
+        }
+        return Add(std::move(item));
+    }
+
+    Sequence& s_;
+    Cursor c_;
+    std::vector<FrameKind> frames_;   // open frames, innermost last
+    int next_ = 1, step_ = 0;         // autonumber: the next number, 0 steps when off
+};
+
+// What the walk down the rows places, drawn afterwards in layers.
+struct SeqMessageBox {
+    const SeqStatement* statement;
+    double from, to, line, labelTop;   // the ends' x, the line's y, the label's top
+    bool self;
+};
+
+struct SeqFrameBox {
+    const SeqStatement* statement;
+    double x0, x1, y0, y1;
+    std::vector<std::pair<double, const SeqStatement*>> sections;   // the y of each divider
+};
+
+struct SeqActivationBox {
+    int lane;
+    double x, y0, y1;
+};
+
+struct SeqNoteBox {
+    const SeqStatement* statement;
+    double x, y, width, height;
+};
+
+// The x where a message meets a lifeline, on the side towards `toward`: the edge of its open
+// activation, or the line.
+double LifelineEdge(const Participant& p, double toward) {
+    if (p.active.empty()) return p.x;
+    const double centre = p.x + kActivationHalf * static_cast<double>(p.active.size() - 1);
+    return toward >= centre ? centre + kActivationHalf : centre - kActivationHalf;
+}
+
+void OpenHead(std::string& out, Point tip, double ux, uint32_t rgb) {
+    out += "<path d=\"M";
+    PointText(out, { tip.x - ux * 9.0, tip.y - 5.0 });
+    out += " L";
+    PointText(out, tip);
+    out += " L";
+    PointText(out, { tip.x - ux * 9.0, tip.y + 5.0 });
+    out += '"';
+    PaintAttr(out, "fill", 0, "none");
+    PaintAttr(out, "stroke", rgb);
+    out += " stroke-width=\"1.5\"/>\n";
+}
+
+void Line(std::string& out, Point a, Point b, uint32_t rgb, double width, const char* dash = nullptr) {
+    out += "<path d=\"M";
+    PointText(out, a);
+    out += " L";
+    PointText(out, b);
+    out += '"';
+    PaintAttr(out, "fill", 0, "none");
+    PaintAttr(out, "stroke", rgb);
+    NumAttr(out, "stroke-width", width);
+    if (dash) {
+        out += " stroke-dasharray=\"";
+        out += dash;
+        out += '"';
+    }
+    out += "/>\n";
+}
+
+bool DrawSequence(Canvas& canvas, Cursor cursor, double& width, double& height) {
+    Sequence s;
+    cursor.SkipBlanks();
+    if (!cursor.AtStatementEnd(true)) return false;
+    if (!SequenceReader(s, cursor).Read()) return false;
+    SvgHost& host = canvas.host;
+    const Palette& pal = canvas.palette;
+
+    // Sizes.
+    double rowHeight = 0.0;
+    for (Participant& p : s.participants) {
+        if (!SetLabel(p.text, kFontSize, host, p.label)) return false;
+        p.width = p.actor ? std::max(p.label.width + 20.0, 60.0) : std::max(p.label.width + 30.0, 90.0);
+        rowHeight = std::max(rowHeight, p.actor ? 44.0 + p.label.height + 2.0 : std::max(p.label.height + 20.0, 40.0));
+    }
+    for (SeqStatement& item : s.statements) {
+        const double size = item.kind == kSeqFrame || item.kind == kSeqSection ? kEdgeFontSize : kFontSize;
+        if (!SetLabel(item.text, size, host, item.label)) return false;
+    }
+    Label title;
+    if (!SetLabel(s.title, kTitleSize, host, title)) return false;
+    const double numberRadius = 9.0;
+
+    // Lanes: the space between neighbours is the widest need of what lies between them, needs
+    // taken by span, the narrowest first.
+    const size_t lanes = s.participants.size();
+    std::vector<double> gaps(lanes > 1 ? lanes - 1 : 0, 0.0);
+    for (size_t k = 0; k + 1 < lanes; k++) gaps[k] = s.participants[k].width / 2.0 + kLaneGap + s.participants[k + 1].width / 2.0;
+    struct Need {
+        size_t lo, hi;
+        double width;
+    };
+    std::vector<Need> needs;
+    double leftExtra = 0.0, rightExtra = 0.0;
+    auto need = [&](int lo, int hi, double size) {
+        if (lo < 0) leftExtra = std::max(leftExtra, size);
+        else if (static_cast<size_t>(hi) >= lanes) rightExtra = std::max(rightExtra, size);
+        else if (lo < hi) needs.push_back({ static_cast<size_t>(lo), static_cast<size_t>(hi), size });
+    };
+    for (const SeqStatement& item : s.statements) {
+        const double noteWidth = item.label.width + 20.0;
+        if (item.kind == kSeqMessage) {
+            const double number = item.number > 0 ? 2.0 * numberRadius : 0.0;
+            if (item.a == item.b) need(item.a, item.a + 1, std::max(item.label.width + 10.0, 40.0) + 16.0 + number);
+            else need(std::min(item.a, item.b), std::max(item.a, item.b), item.label.width + 24.0 + number);
+        } else if (item.kind == kSeqNote) {
+            if (item.place == kRightOf) need(item.a, item.a + 1, noteWidth + 20.0);
+            else if (item.place == kLeftOf) need(item.a - 1, item.a, noteWidth + 20.0);
+            else if (item.a == item.b) {
+                need(item.a - 1, item.a, noteWidth / 2.0 + 10.0);
+                need(item.a, item.a + 1, noteWidth / 2.0 + 10.0);
+            } else {
+                need(std::min(item.a, item.b), std::max(item.a, item.b), noteWidth - 40.0);
+            }
+        }
+    }
+    std::stable_sort(needs.begin(), needs.end(), [](const Need& p, const Need& q) { return p.hi - p.lo < q.hi - q.lo; });
+    for (const Need& item : needs) {
+        double span = 0.0;
+        for (size_t k = item.lo; k < item.hi; k++) span += gaps[k];
+        if (span < item.width) gaps[item.hi - 1] += item.width - span;
+    }
+    double x = 0.0;
+    for (size_t k = 0; k < lanes; k++) {
+        if (k > 0) x += gaps[k - 1];
+        s.participants[k].x = x;
+    }
+    double minX = -s.participants[0].width / 2.0 - leftExtra;
+    double maxX = s.participants[lanes - 1].x + s.participants[lanes - 1].width / 2.0 + rightExtra;
+
+    // Rows, top down.
+    const double top = kMargin + (title.text.empty() ? 0.0 : title.height + 10.0);
+    double y = top + rowHeight + 20.0;
+    std::vector<SeqMessageBox> messages;
+    std::vector<SeqFrameBox> frames;
+    std::vector<SeqActivationBox> activations;
+    std::vector<SeqNoteBox> notes;
+    struct Open {
+        size_t frame;
+        double lo, hi;
+    };
+    std::vector<Open> open;
+    auto extend = [&](double lo, double hi) {
+        minX = std::min(minX, lo);
+        maxX = std::max(maxX, hi);
+        if (!open.empty()) {
+            open.back().lo = std::min(open.back().lo, lo);
+            open.back().hi = std::max(open.back().hi, hi);
+        }
+    };
+    double lastLine = 0.0;
+    bool afterMessage = false;
+    auto close = [&](Participant& p, int lane, double end) {
+        const double centre = p.x + kActivationHalf * static_cast<double>(p.active.size() - 1);
+        activations.push_back({ lane, centre, p.active.back(), std::max(end, p.active.back() + 10.0) });
+        p.active.pop_back();
+    };
+    for (const SeqStatement& item : s.statements) {
+        switch (item.kind) {
+        case kSeqMessage: {
+            Participant& a = s.participants[static_cast<size_t>(item.a)];
+            Participant& b = s.participants[static_cast<size_t>(item.b)];
+            const double line = y + item.label.height + 8.0;
+            SeqMessageBox box{ &item, 0.0, 0.0, line, y, item.a == item.b };
+            if (box.self) {
+                box.from = LifelineEdge(a, a.x + 1e9);
+                if (item.activation > 0) b.active.push_back(line);
+                box.to = LifelineEdge(b, b.x + 1e9);
+                extend(box.from - (item.number > 0 ? numberRadius : 0.0), std::max(box.from + 40.0, box.from + 6.0 + item.label.width));
+                y = line + 20.0 + 14.0;
+            } else {
+                box.from = LifelineEdge(a, b.x);
+                if (item.activation > 0) b.active.push_back(line);
+                box.to = LifelineEdge(b, a.x);
+                const double centre = (box.from + box.to) / 2.0;
+                extend(std::min(box.from, box.to) - (item.number > 0 ? numberRadius : 0.0), std::max(box.from, box.to));
+                extend(centre - item.label.width / 2.0, centre + item.label.width / 2.0);
+                y = line + 14.0;
+            }
+            if (item.activation < 0) {
+                if (a.active.empty()) return false;
+                close(a, item.a, line);
+            }
+            messages.push_back(box);
+            lastLine = line;
+            afterMessage = true;
+            break;
+        }
+        case kSeqNote: {
+            const Participant& a = s.participants[static_cast<size_t>(item.a)];
+            const Participant& b = s.participants[static_cast<size_t>(item.b)];
+            const double noteWidth = item.label.width + 20.0, noteHeight = item.label.height + 12.0;
+            double left;
+            double w = noteWidth;
+            if (item.place == kRightOf) {
+                left = a.x + 10.0;
+            } else if (item.place == kLeftOf) {
+                left = a.x - 10.0 - noteWidth;
+            } else {
+                const double lo = std::min(a.x, b.x) - (item.a == item.b ? 0.0 : 20.0);
+                const double hi = std::max(a.x, b.x) + (item.a == item.b ? 0.0 : 20.0);
+                w = std::max(noteWidth, hi - lo);
+                left = (lo + hi) / 2.0 - w / 2.0;
+            }
+            notes.push_back({ &item, left, y, w, noteHeight });
+            extend(left, left + w);
+            y += noteHeight + 10.0;
+            afterMessage = false;
+            break;
+        }
+        case kSeqFrame:
+            frames.push_back({ &item, 0.0, 0.0, y, 0.0, {} });
+            open.push_back({ frames.size() - 1, 1e300, -1e300 });
+            if (item.frame == kRectFrame) y += 10.0;
+            else y += std::max(LineHeight(kEdgeFontSize) + 6.0, item.label.height + 6.0) + 10.0;
+            afterMessage = false;
+            break;
+        case kSeqSection: {
+            SeqFrameBox& frame = frames[open.back().frame];
+            frame.sections.emplace_back(y + 2.0, &item);
+            y += 2.0 + 3.0 + item.label.height + 10.0;
+            afterMessage = false;
+            break;
+        }
+        case kSeqEnd: {
+            const Open done = open.back();
+            open.pop_back();
+            SeqFrameBox& frame = frames[done.frame];
+            y += 6.0;
+            frame.y1 = y;
+            double lo = done.lo, hi = done.hi;
+            if (lo > hi) {
+                lo = s.participants[0].x - s.participants[0].width / 2.0;
+                hi = s.participants[lanes - 1].x + s.participants[lanes - 1].width / 2.0;
+            }
+            frame.x0 = lo - 10.0;
+            frame.x1 = hi + 10.0;
+            const SeqStatement& head = *frame.statement;
+            if (head.frame != kRectFrame) {
+                const double word = host.TextWidth(kFrameWords[head.frame], kEdgeFontSize, false) + 16.0;
+                frame.x1 = std::max(frame.x1, frame.x0 + word + 8.0 + head.label.width + 10.0);
+            }
+            for (const auto& section : frame.sections) frame.x1 = std::max(frame.x1, frame.x0 + section.second->label.width + 20.0);
+            extend(frame.x0, frame.x1);
+            y += 12.0;
+            afterMessage = false;
+            break;
+        }
+        case kSeqActivate:
+            s.participants[static_cast<size_t>(item.a)].active.push_back(afterMessage ? lastLine : y);
+            break;
+        case kSeqDeactivate: {
+            Participant& p = s.participants[static_cast<size_t>(item.a)];
+            if (p.active.empty()) return false;
+            close(p, item.a, afterMessage ? lastLine : y);
+            break;
+        }
+        }
+        if (canvas.host.Cancelled()) return false;
+    }
+    y += 10.0;
+    for (size_t k = 0; k < lanes; k++) {
+        Participant& p = s.participants[k];
+        while (!p.active.empty()) close(p, static_cast<int>(k), y);
+    }
+    const double bottom = y + 10.0;
+    if (!title.text.empty() && maxX - minX < title.width) {
+        const double grow = (title.width - (maxX - minX)) / 2.0;
+        minX -= grow;
+        maxX += grow;
+    }
+    const double dx = kMargin - minX;
+    width = maxX - minX + 2.0 * kMargin;
+    height = bottom + rowHeight + kMargin;
+
+    std::string& out = canvas.body;
+    if (!title.text.empty()) LabelLines(canvas, title, width / 2.0, kMargin, kMiddle, pal.text);
+    // Backgrounds, lifelines, participants, activations, frames, notes, messages.
+    for (const SeqFrameBox& frame : frames) {
+        if (frame.statement->frame != kRectFrame) continue;
+        Rect(out, frame.x0 + dx, frame.y0, frame.x1 - frame.x0, frame.y1 - frame.y0);
+        PaintAttr(out, "fill", 0, frame.statement->color);
+        out += "/>\n";
+    }
+    for (const Participant& p : s.participants) Line(out, { p.x + dx, top + rowHeight }, { p.x + dx, bottom }, pal.line, 0.5);
+    for (int row = 0; row < 2; row++) {
+        const double boxTop = row == 0 ? top : bottom;
+        for (size_t k = 0; k < lanes; k++) {
+            const Participant& p = s.participants[k];
+            const double cx = p.x + dx, left = cx - p.width / 2.0;
+            const int node = row == 0 ? static_cast<int>(k) : -1;
+            if (p.actor) {
+                out += "<circle";
+                NumAttr(out, "cx", cx);
+                NumAttr(out, "cy", boxTop + 9.0);
+                NumAttr(out, "r", 8.0);
+                PaintAttr(out, "fill", pal.nodeFill);
+                PaintAttr(out, "stroke", pal.nodeStroke);
+                out += " stroke-width=\"1.5\"/>\n<path d=\"M";
+                PointText(out, { cx, boxTop + 17.0 });
+                out += " L";
+                PointText(out, { cx, boxTop + 31.0 });
+                out += " M";
+                PointText(out, { cx - 12.0, boxTop + 22.0 });
+                out += " L";
+                PointText(out, { cx + 12.0, boxTop + 22.0 });
+                out += " M";
+                PointText(out, { cx - 10.0, boxTop + 43.0 });
+                out += " L";
+                PointText(out, { cx, boxTop + 31.0 });
+                out += " L";
+                PointText(out, { cx + 10.0, boxTop + 43.0 });
+                out += '"';
+                PaintAttr(out, "fill", 0, "none");
+                PaintAttr(out, "stroke", pal.nodeStroke);
+                out += " stroke-width=\"1.5\"/>\n";
+                LabelLines(canvas, p.label, cx, boxTop + 45.0, kMiddle, pal.text, {}, node);
+            } else {
+                Rect(out, left, boxTop, p.width, rowHeight);
+                NumAttr(out, "rx", 3.0);
+                PaintAttr(out, "fill", pal.nodeFill);
+                PaintAttr(out, "stroke", pal.nodeStroke);
+                out += "/>\n";
+                CentredLabel(canvas, p.label, cx, boxTop + rowHeight / 2.0, pal.text, {}, node);
+            }
+            if (row == 0 && canvas.geometry) canvas.geometry->nodes.push_back({ left, boxTop, p.width, rowHeight, Geometry::kRect });
+        }
+    }
+    for (const SeqActivationBox& box : activations) {
+        Rect(out, box.x + dx - kActivationHalf, box.y0, 2.0 * kActivationHalf, box.y1 - box.y0);
+        PaintAttr(out, "fill", pal.clusterFill);
+        PaintAttr(out, "stroke", pal.nodeStroke);
+        out += "/>\n";
+    }
+    for (const SeqFrameBox& frame : frames) {
+        if (frame.statement->frame == kRectFrame) continue;
+        const double x0 = frame.x0 + dx, x1 = frame.x1 + dx;
+        Rect(out, x0, frame.y0, x1 - x0, frame.y1 - frame.y0);
+        PaintAttr(out, "fill", 0, "none");
+        PaintAttr(out, "stroke", pal.clusterStroke);
+        out += "/>\n";
+        const char* word = kFrameWords[frame.statement->frame];
+        const double tagWidth = host.TextWidth(word, kEdgeFontSize, false) + 16.0;
+        const double tagHeight = LineHeight(kEdgeFontSize) + 6.0;
+        out += "<polygon points=\"";
+        PointText(out, { x0, frame.y0 });
+        out += ' ';
+        PointText(out, { x0 + tagWidth, frame.y0 });
+        out += ' ';
+        PointText(out, { x0 + tagWidth, frame.y0 + tagHeight - 5.0 });
+        out += ' ';
+        PointText(out, { x0 + tagWidth - 5.0, frame.y0 + tagHeight });
+        out += ' ';
+        PointText(out, { x0, frame.y0 + tagHeight });
+        out += '"';
+        PaintAttr(out, "fill", pal.clusterFill);
+        PaintAttr(out, "stroke", pal.clusterStroke);
+        out += "/>\n";
+        const double wordTop = frame.y0 + 3.0;
+        TextLine(canvas, word, x0 + 8.0, wordTop + (LineHeight(kEdgeFontSize) - kEdgeFontSize) / 2.0 + 0.8 * kEdgeFontSize,
+                 kEdgeFontSize, kStart, pal.text, {}, -1);
+        LabelLines(canvas, frame.statement->label, x0 + tagWidth + 8.0, wordTop, kStart, pal.text);
+        for (const auto& [lineY, section] : frame.sections) {
+            Line(out, { x0, lineY }, { x1, lineY }, pal.clusterStroke, 1.0, "3 3");
+            LabelLines(canvas, section->label, (x0 + x1) / 2.0, lineY + 3.0, kMiddle, pal.text);
+        }
+        if (canvas.geometry) canvas.geometry->clusters.push_back({ x0, frame.y0, x1 - x0, frame.y1 - frame.y0, -1 });
+    }
+    for (const SeqFrameBox& frame : frames) {
+        if (frame.statement->frame == kRectFrame && canvas.geometry) {
+            canvas.geometry->clusters.push_back({ frame.x0 + dx, frame.y0, frame.x1 - frame.x0, frame.y1 - frame.y0, -1 });
+        }
+    }
+    for (const SeqNoteBox& note : notes) {
+        Rect(out, note.x + dx, note.y, note.width, note.height);
+        PaintAttr(out, "fill", pal.noteFill);
+        PaintAttr(out, "stroke", pal.clusterStroke);
+        out += "/>\n";
+        CentredLabel(canvas, note.statement->label, note.x + dx + note.width / 2.0, note.y + note.height / 2.0, pal.text);
+        if (canvas.geometry) canvas.geometry->clusters.push_back({ note.x + dx, note.y, note.width, note.height, -1 });
+    }
+    for (const SeqMessageBox& box : messages) {
+        const SeqStatement& item = *box.statement;
+        const double from = box.from + dx, to = box.to + dx;
+        const char* dash = item.dotted ? "3 3" : nullptr;
+        Point tip;
+        double ux;
+        if (box.self) {
+            const double far = std::max(from, to) + 40.0, low = box.line + 20.0;
+            tip = { to, low };
+            ux = -1.0;
+            const double cut = item.head == kSeqArrow ? kArrowLength - 1.0 : 0.0;
+            out += "<path d=\"M";
+            PointText(out, { from, box.line });
+            out += " L";
+            PointText(out, { far, box.line });
+            out += " L";
+            PointText(out, { far, low });
+            out += " L";
+            PointText(out, { to + cut, low });
+            out += '"';
+            PaintAttr(out, "fill", 0, "none");
+            PaintAttr(out, "stroke", pal.line);
+            out += " stroke-width=\"1.5\"";
+            if (dash) out += " stroke-dasharray=\"3 3\"";
+            out += "/>\n";
+            LabelLines(canvas, item.label, from + 6.0, box.labelTop, kStart, pal.text);
+        } else {
+            tip = { to, box.line };
+            ux = to >= from ? 1.0 : -1.0;
+            const double cut = item.head == kSeqArrow ? kArrowLength - 1.0 : 0.0;
+            Line(out, { from, box.line }, { to - ux * cut, box.line }, pal.line, 1.5, dash);
+            LabelLines(canvas, item.label, (from + to) / 2.0, box.labelTop, kMiddle, pal.text);
+        }
+        if (item.head == kSeqArrow) ArrowHead(out, tip, ux, 0.0, pal.line);
+        else if (item.head == kSeqCross) DrawHead(out, kCrossHead, { tip.x + ux * 5.0, tip.y }, ux, 0.0, pal.line);
+        else if (item.head == kSeqOpen) OpenHead(out, tip, ux, pal.line);
+        if (item.number > 0) {
+            out += "<circle";
+            NumAttr(out, "cx", from);
+            NumAttr(out, "cy", box.line);
+            NumAttr(out, "r", numberRadius);
+            PaintAttr(out, "fill", pal.accent);
+            out += "/>\n";
+            char digits[12];
+            int count = 0;
+            for (int value = item.number; value > 0 && count < 11; value /= 10) digits[count++] = static_cast<char>('0' + value % 10);
+            std::string number;
+            while (count > 0) number += digits[--count];
+            TextLine(canvas, number, from, box.line + 0.3 * kEdgeFontSize, kEdgeFontSize * (number.size() > 2 ? 0.75 : 1.0), kMiddle,
+                     pal.nodeFill, {}, -1);
+        }
+        if (canvas.geometry) {
+            canvas.geometry->ends.push_back({ from, box.line, -1 });
+            canvas.geometry->ends.push_back({ box.self ? to : tip.x, box.self ? box.line + 20.0 : box.line, -1 });
+        }
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------------
 // The diagram types
 
 // The first statement: after blank lines, comments and a front matter block.
@@ -2341,6 +3075,7 @@ bool ToSvg(std::string_view source, SvgHost& host, const Palette& palette, std::
     double width = 0.0, height = 0.0;
     bool drawn = false;
     if (keyword == "flowchart" || keyword == "graph") drawn = Flowchart(canvas, cursor, width, height);
+    else if (keyword == "sequenceDiagram") drawn = DrawSequence(canvas, cursor, width, height);
     if (!drawn || canvas.body.empty() || !(width > 0.0 && height > 0.0) || width > 1e9 || height > 1e9) {
         if (geometry) *geometry = Geometry();
         return false;

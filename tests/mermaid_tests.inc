@@ -360,6 +360,11 @@ bool CheckInvariants(const char* name, std::string_view source) {
         if (end.node < 0) continue;
         if (OffBorder(g.nodes[static_cast<size_t>(end.node)], end.x, end.y) > 0.5) return fail("an edge does not end on its node");
     }
+    for (size_t a = 0; a < g.texts.size(); a++) {
+        for (size_t b = a + 1; b < g.texts.size(); b++) {
+            if (Overlap(g.texts[a], g.texts[b])) return fail("texts overlap");
+        }
+    }
     for (size_t k = 0; k < g.texts.size(); k++) {
         const Geometry::Box& t = g.texts[k];
         const int node = g.textNode[k];
@@ -404,6 +409,117 @@ bool CheckFlowchartLayout() {
     return true;
 }
 
+bool CheckSequenceLayout() {
+    const std::pair<const char*, const char*> cases[] = {
+        { "a conversation", "sequenceDiagram\n title Ordering\n autonumber\n participant W as Web shop\n actor C as Customer\n"
+                            " participant P as Payments\n C->>+W: Place order\n W->>P: Charge the card on file\n activate P\n P-->>W: Charged\n"
+                            " deactivate P\n Note right of P: Logged for<br>the audit\n loop Every hour\n W->>W: Check stock\n end\n"
+                            " alt Paid\n W-->>C: Confirmation\n else Declined\n W-xC: Error\n end\n par Shipping\n W->>P: Settle\n and Mail\n"
+                            " W--)C: Tracking link\n end\n rect rgb(230, 240, 255)\n Note over C,W: Done\n end\n W-->>-C: Bye\n"
+                            " Note left of C: a long note on the far left\n Note over P: over P\n" },
+        { "long messages over far lanes", "sequenceDiagram\n A->>D: a message that crosses every lane of the diagram\n B->>C: short\n"
+                                          " C->>C: a long message to itself\n D->>A: back\n Note over B,C: a note wider than the two lanes it covers\n" },
+        { "nested frames", "sequenceDiagram\n loop a\n alt b\n critical c\n A->>B: x\n option d\n B->>A: y\n end\n else e\n opt f\n"
+                           " A->>A: z\n end\n end\n end\n" },
+    };
+    for (const auto& [name, source] : cases) {
+        if (!CheckInvariants(name, source)) return false;
+    }
+    return true;
+}
+
+bool CheckSequenceSyntax() {
+    const std::vector<Accepted> cases = {
+        { "messages", "sequenceDiagram\n Alice->>Bob: Hello\n Bob-->>Alice: Hi\n", { ">Alice<", ">Bob<", ">Hello<", ">Hi<", "<polygon" } },
+        { "every arrow",
+          "sequenceDiagram\n A->B: solid\n A-->B: dotted\n A->>B: arrow\n A-->>B: dotted arrow\n A-xB: cross\n A--xB: dotted cross\n"
+          " A-)B: async\n A--)B: dotted async\n A->>A: self\n",
+          { ">solid<", ">dotted async<", ">self<", "stroke-dasharray=\"3 3\"" } },
+        { "participants and aliases",
+          "sequenceDiagram\n participant W as Web shop\n actor C as The customer\n participant Alice Smith\n C->>W: order\n"
+          " Alice Smith->>C: hi\n",
+          { ">Web shop<", ">The customer<", ">Alice Smith<", "<circle" } },
+        { "activations",
+          "sequenceDiagram\n A->>+B: go\n B->>+B: nested\n B-->>-B: back\n B-->>-A: done\n activate A\n A->>B: x\n deactivate A\n",
+          { "width=\"10\"" } },
+        { "notes",
+          "sequenceDiagram\n A->>B: x\n Note left of A: on the left\n note right of B: on the right\n Note over A: over one\n"
+          " NOTE OVER A,B: over both<br>in two lines\n",
+          { ">on the left<", ">on the right<", ">over one<", ">over both<", ">in two lines<", "fill=\"#fff5ad\"" } },
+        { "frames",
+          "sequenceDiagram\n loop Every minute\n A->>B: ping\n end\n alt ok\n B->>A: pong\n else failed\n B-xA: error\n end\n"
+          " opt maybe\n A->>B: extra\n end\n par one\n A->>B: a\n and two\n A->>B: b\n end\n critical lock\n A->>B: c\n"
+          " option timeout\n A->>B: d\n end\n break stop\n A->>B: e\n end\n rect rgba(0, 0, 255, 0.1)\n A->>B: f\n end\n",
+          { ">loop<", ">[Every minute]<", ">alt<", ">[failed]<", ">opt<", ">par<", ">[two]<", ">critical<", ">[timeout]<", ">break<",
+            "fill=\"rgba(0, 0, 255, 0.1)\"" } },
+        { "nested frames", "sequenceDiagram\n loop outer\n loop inner\n A->>B: x\n end\n end\n loop empty\n end\n", { ">[inner]<", ">[empty]<" } },
+        { "autonumber", "sequenceDiagram\n autonumber\n A->>B: x\n B->>A: y\n autonumber 10 5\n A->>B: z\n A->>B: w\n autonumber off\n A->>B: v\n",
+          { ">1<", ">2<", ">10<", ">15<" } },
+        { "title, comments, semicolons",
+          "sequenceDiagram\n title: Talk\n %% a comment\n accTitle: ignored\n A->>B: one; B->>A: two\n", { ">Talk<", ">one<", ">two<" } },
+        { "a participant alone", "sequenceDiagram\n participant A\n", { ">A<" } },
+    };
+    if (!CheckAccepted(cases)) return false;
+    std::string svg;
+    Geometry geometry;
+    if (!Draw("sequenceDiagram\n A->>B: x\n B->>C: y\n C->>A: z\n", svg, &geometry) || geometry.nodes.size() != 3 || geometry.ends.size() != 6 ||
+        Count(svg, ">A<") != 2) {
+        std::cerr << "Mermaid sequence participants or messages missing" << std::endl;
+        return false;
+    }
+    // Lanes in order of first mention; the declared order where declared.
+    if (!Draw("sequenceDiagram\n participant C\n A->>B: x\n B->>C: y\n", svg, &geometry) || geometry.nodes.size() != 3 ||
+        !(geometry.nodes[0].x < geometry.nodes[1].x && geometry.nodes[1].x < geometry.nodes[2].x) || !Contains(svg, ">C<")) {
+        return false;
+    }
+    if (geometry.texts.empty() || svg.find(">C<") > svg.find(">A<")) {
+        std::cerr << "Mermaid sequence lanes out of order" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+std::vector<std::pair<const char*, std::string>> RefusedSequences() {
+    std::string many = "sequenceDiagram\n";
+    for (int k = 0; k < 65; k++) many += "participant P" + std::to_string(k) + "\n";
+    std::string statements = "sequenceDiagram\n";
+    for (int k = 0; k < 2001; k++) statements += "A->>B: x\n";
+    std::string deep = "sequenceDiagram\n";
+    for (int k = 0; k < 17; k++) deep += "loop x\n";
+    deep += "A->>B: x\n";
+    for (int k = 0; k < 17; k++) deep += "end\n";
+    return {
+        { "a header alone", "sequenceDiagram\n" },
+        { "text after the header", "sequenceDiagram LR\n A->>B: x\n" },
+        { "create", "sequenceDiagram\n create participant A\n" },
+        { "destroy", "sequenceDiagram\n A->>B: x\n destroy B\n" },
+        { "box", "sequenceDiagram\n box Purple Group\n participant A\n end\n" },
+        { "links", "sequenceDiagram\n participant A\n links A: {\"x\": \"https://example.com\"}\n" },
+        { "bidirectional arrow", "sequenceDiagram\n A<<->>B: x\n" },
+        { "three dashes", "sequenceDiagram\n A--->>B: x\n" },
+        { "an unknown arrow", "sequenceDiagram\n A-|B: x\n" },
+        { "no target", "sequenceDiagram\n A->>: x\n" },
+        { "a stray word", "sequenceDiagram\n hello\n" },
+        { "else outside alt", "sequenceDiagram\n loop x\n A->>B: x\n else y\n end\n" },
+        { "and outside par", "sequenceDiagram\n alt x\n A->>B: x\n and y\n end\n" },
+        { "option outside critical", "sequenceDiagram\n opt x\n A->>B: x\n option y\n end\n" },
+        { "end alone", "sequenceDiagram\n A->>B: x\n end\n" },
+        { "an open frame", "sequenceDiagram\n loop x\n A->>B: x\n" },
+        { "deactivating what is not active", "sequenceDiagram\n A->>B: x\n deactivate B\n" },
+        { "deactivating the source that is not active", "sequenceDiagram\n A->>-B: x\n" },
+        { "a note without a place", "sequenceDiagram\n Note A: x\n" },
+        { "a note without text", "sequenceDiagram\n Note over A\n" },
+        { "a note beside two", "sequenceDiagram\n Note left of A,B: x\n" },
+        { "a note over three", "sequenceDiagram\n Note over A,B,C: x\n" },
+        { "rect without a colour", "sequenceDiagram\n rect\n A->>B: x\n end\n" },
+        { "rect with a reference", "sequenceDiagram\n rect url(#g)\n A->>B: x\n end\n" },
+        { "a bad autonumber", "sequenceDiagram\n autonumber x\n A->>B: x\n" },
+        { "65 participants", many },
+        { "2,001 statements", statements },
+        { "frames 17 deep", deep },
+    };
+}
+
 // ---- Golden SVG digests (FixedHost): a change of the output shows here. Re-pin them only for a
 // deliberate change of what diagrams look like, and say why.
 
@@ -421,6 +537,9 @@ bool CheckGoldens() {
         { "flowchart TB\n c1-->a2\n subgraph one\n a1-->a2\n end\n subgraph two\n b1-->b2\n end\n subgraph three\n c1-->c2\n end\n"
           " one --> two\n three --> two\n two --> c2\n classDef hot fill:#f96\n class a1 hot\n",
           "6ba385f6d75c82af41b392076588af0d0a18703701dd69beeb9c11946b82707f" },
+        { "sequenceDiagram\n autonumber\n actor C as Customer\n C->>+W: Order\n W-->>-C: Done\n loop Hourly\n W->>W: Check\n end\n"
+          " alt ok\n W-)C: Mail\n else not\n W-xC: Error\n end\n Note right of W: noted\n",
+          "bba39899050c1bb4bef7a55f8ea72f89e8093ca6595e8686c32942a0989b4dc4" },
     };
     bool ok = true;
     for (const auto& golden : goldens) {
@@ -476,6 +595,19 @@ bool CheckBounds() {
         source += "m" + std::to_string(a) + " --> m" + std::to_string((state >> 8) % 1000) + "\n";
     }
     if (!Bounded("Mermaid: 2,000 random edges over 1,000 nodes", 5.0, 256, [&]() { Draw(source, svg); return true; })) return false;
+    source = "sequenceDiagram\n";
+    for (int k = 0; k < 10000; k++) source += "loop x\n";
+    if (!Bounded("Mermaid: 10,000 unterminated loops", 2.0, 64, [&]() { return !Draw(source, svg); })) return false;
+    source = "sequenceDiagram\n A->>B: " + std::string(100 << 10, 'x') + "\n";
+    if (!Bounded("Mermaid: a 100 KiB message", 2.0, 64, [&]() { return !Draw(source, svg); })) return false;
+    source = "sequenceDiagram\n";
+    for (int k = 0; k < 2000; k++) {
+        state = state * 1103515245u + 12345u;
+        const uint32_t a = (state >> 8) % 64;
+        state = state * 1103515245u + 12345u;
+        source += "P" + std::to_string(a) + "->>P" + std::to_string((state >> 8) % 64) + ": message " + std::to_string(k) + "\n";
+    }
+    if (!Bounded("Mermaid: 2,000 messages between 64 participants", 5.0, 128, [&]() { return Draw(source, svg) && Converts(svg); })) return false;
     // 200 nodes in a random tree with 100 more edges: the size of a large real diagram.
     source = "flowchart TD\n";
     state = 11;
@@ -493,7 +625,9 @@ bool CheckBounds() {
 }
 
 bool CheckMermaid() {
-    return CheckFlowchartSyntax() && CheckRefused(RefusedFlowcharts()) && CheckFlowchartLayout() && CheckGoldens() && CheckBounds();
+    return CheckFlowchartSyntax() && CheckRefused(RefusedFlowcharts()) && CheckFlowchartLayout() && CheckSequenceSyntax() &&
+           CheckRefused(RefusedSequences()) && CheckSequenceLayout() &&
+           CheckGoldens() && CheckBounds();
 }
 
 } // namespace mermaid_tests
