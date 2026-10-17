@@ -4775,11 +4775,13 @@ static void AppendLanguage(std::string& catalog, const DocumentMetadata& metadat
 }
 
 // PDF/A-3b and PDF/UA-1: the XMP metadata, which holds the reversible profile's properties when
-// `source` is embedded, and for PDF/A the sRGB output intent. The Info dictionary has to tell
-// what the packet does: `metadata` takes the title, else the first heading's text, and every
-// value as both hold it, and the Info dictionary is then made from it without the headings.
-// PDF/UA adds what makes a document tagged: the structure tree `structTreeRoot`, the language
-// readers speak it in (`metadata.lang`) and its title in the viewer's title bar.
+// a source is embedded, and for PDF/A the sRGB output intent. `source` views the embedded
+// Markdown, a std::string, so never a null pointer even when empty (an empty source is embedded
+// too), and is a null view when none is. The Info dictionary has to tell what the packet does:
+// `metadata` takes the title, else the first heading's text, and every value as both hold it,
+// and the Info dictionary is then made from it without the headings. PDF/UA adds what makes a
+// document tagged: the structure tree `structTreeRoot`, the language readers speak it in
+// (`metadata.lang`) and its title in the viewer's title bar.
 RAYOMD_COLD static void AddArchivalCatalogEntries(PdfObjects& pdf, std::string& catalog, DocumentMetadata& metadata,
     const std::vector<HeadingMark>& headings, const char* producer, std::string_view source, bool pdfa,
     int structTreeRoot) {
@@ -4801,7 +4803,7 @@ RAYOMD_COLD static void AddArchivalCatalogEntries(PdfObjects& pdf, std::string& 
     }
     catalog += " /Metadata ";
     const Internal::PdfaMetadata xmp{ producer, metadata.title, metadata.author, metadata.subject, metadata.keywords,
-        source, RAYOMD_VERSION, pdfa, structTreeRoot != 0 };
+        source, RAYOMD_VERSION, pdfa, structTreeRoot != 0, source.data() != nullptr };
     AppendInt(catalog, pdf.AddStream("/Type /Metadata /Subtype /XML", Internal::PdfaXmpMetadata(xmp)));
     catalog += " 0 R";
 }

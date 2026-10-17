@@ -156,7 +156,7 @@ std::string PdfaText(std::string_view utf8) {
 
 std::string PdfaXmpMetadata(const PdfaMetadata& metadata) {
     std::string out;
-    out.reserve(metadata.source.empty() ? 1024 : 3584);
+    out.reserve(metadata.embedded ? 3584 : 1024);
     out += "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?><x:xmpmeta xmlns:x=\"adobe:ns:meta/\">"
         "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">";
     if (metadata.pdfa) {
@@ -192,7 +192,7 @@ std::string PdfaXmpMetadata(const PdfaMetadata& metadata) {
         out += "</rdf:li></rdf:Alt></dc:description>";
     }
     out += "</rdf:Description>";
-    if (!metadata.source.empty()) {
+    if (metadata.embedded) {
         // The reversible profile's properties, each once (Inspect reads them).
         out += "<rdf:Description rdf:about=\"\" xmlns:rayomd=\"https://rayomd.dev/ns/source/1.0/\" "
             "rayomd:profile=\"rayomd-source/1\" rayomd:producer=\"";
@@ -201,12 +201,12 @@ std::string PdfaXmpMetadata(const PdfaMetadata& metadata) {
         out += "\" rayomd:sha256=\"" + RayoMd::PdfSource::Sha256Hex(metadata.source);
         out += "\" rayomd:attachment=\"source.md\"/>";
     }
-    if (metadata.pdfa && (!metadata.source.empty() || metadata.pdfua)) {
+    if (metadata.pdfa && (metadata.embedded || metadata.pdfua)) {
         // The extension schemas that declare to PDF/A the properties it does not know.
         out += "<rdf:Description rdf:about=\"\" xmlns:pdfaExtension=\"http://www.aiim.org/pdfa/ns/extension/\" "
             "xmlns:pdfaSchema=\"http://www.aiim.org/pdfa/ns/schema#\" xmlns:pdfaProperty=\"http://www.aiim.org/pdfa/ns/property#\">"
             "<pdfaExtension:schemas><rdf:Bag>";
-        if (!metadata.source.empty()) {
+        if (metadata.embedded) {
             out += "<rdf:li rdf:parseType=\"Resource\">"
                 "<pdfaSchema:schema>RayoMD reversible source</pdfaSchema:schema>"
                 "<pdfaSchema:namespaceURI>https://rayomd.dev/ns/source/1.0/</pdfaSchema:namespaceURI>"

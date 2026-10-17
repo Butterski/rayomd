@@ -20,20 +20,21 @@ std::string_view SrgbIccProfile();
 // such values keep a packet within the 16 KiB that source recovery reads.
 std::string PdfaText(std::string_view utf8);
 
-// What the XMP packet tells, as the Info dictionary does (PdfaText values); with `source`, also
-// the reversible profile's properties. `pdfa` claims PDF/A-3b, with the extension schemas PDF/A
-// needs for the reversible profile's properties and PDF/UA's identification; `pdfua` claims
-// PDF/UA-1 (ISO 14289-1).
+// What the XMP packet tells, as the Info dictionary does (PdfaText values); with `embedded`, also
+// the reversible profile's properties of `source`, which may be empty. `pdfa` claims PDF/A-3b,
+// with the extension schemas PDF/A needs for the reversible profile's properties and PDF/UA's
+// identification; `pdfua` claims PDF/UA-1 (ISO 14289-1).
 struct PdfaMetadata {
     std::string_view producer;
     std::string_view title;
     std::string_view author;
     std::string_view subject;
     std::string_view keywords;
-    std::string_view source;    // the embedded Markdown, or empty
+    std::string_view source;    // the embedded Markdown
     std::string_view version;   // RayoMD's, for rayomd:producer
     bool pdfa = true;
     bool pdfua = false;
+    bool embedded = false;      // the source is embedded: told by this, as an empty one can be
 };
 
 std::string PdfaXmpMetadata(const PdfaMetadata& metadata);
