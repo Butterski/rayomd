@@ -112,13 +112,19 @@ of numbers by the heading's text address, never written into `Block::text`); the
 a numbered heading through `RenderAlignedHeading` with the number before the text, its mark
 keeping the text alone so anchors and titles do not change, the table's entries carry the number
 (`NumberContents`) and the bookmarks a numbered copy of the marks (`NumberedHeadings`).
-Obsidian's Markdown (`--dialect=obsidian`, `PdfOptions::dialect`; `dialect.cpp`, built at `-Os`):
+Obsidian's Markdown (`--dialect=obsidian`, `PdfOptions::dialect`; `dialect_rewrite.cpp`, at `-O2`):
 `BuildPdf` and `BuildBookPdf` keep the dialect for their thread (`DialectScope`), and
 `ParseMarkdown` then turns Obsidian's syntax into RayoMD's before it parses
 (`ObsidianToCommonMark`: one pass, every line kept where it was for the source map, fences,
 code spans, formulas and the front matter left alone; each opener's search is cached per line, so
-text of unclosed openers stays linear). Highlights become `<mark>`, comments go, wiki links become
-links to `note.md#heading` and so pass `Html::SafeUrl` as any Markdown link, embeds Markdown images
+text of unclosed openers stays linear). The pass changes only lines with "[[", "==" or "%%" (or in
+a comment): it jumps between those pairs (`FindSyntaxPair`, SSE2) and copies the text between
+them in runs, reading the other lines only for the fences and formulas they open; within a line
+it skips to the next byte that can start syntax (`NextSyntaxByte`). A document without a pair is
+parsed as it is. Keep it so: a preview builds the note on every edit, and a byte-at-a-time pass
+at `-Os` made README.md 32 % slower to build in this dialect, now 2 %. Highlights become
+`<mark>`, comments go, wiki links become links to `note.md#heading` and so pass `Html::SafeUrl` as
+any Markdown link, embeds Markdown images
 or a sized `<img>`. Callouts are the parser's (`TakeCallout`): `Block::alert` 1 to 7 picks the bar
 colour, `Block::text` holds the title, which the renderers draw (`RenderCallout`); GitHub alerts
 keep an empty `text`. In a book `BookTargets::FileByName` resolves a link by the note's name. The
@@ -333,10 +339,13 @@ Important image/link details:
   numbers of `--number-headings`. Built at `-Os`; the marker scan runs for every document, so
   it looks at a block's text length first.
 
-- `src/core/dialect.h` and `src/core/dialect.cpp`
-  Obsidian's dialect: the thread's dialect (`DialectScope`), its syntax turned into RayoMD's
-  before the parse (`ObsidianToCommonMark`) and its callouts (`TakeCallout`). Built at `-Os`;
-  checked by `tests/dialect_tests.inc`.
+- `src/core/dialect.h`, `src/core/dialect.cpp` and `src/core/dialect_rewrite.cpp`
+  Obsidian's dialect: the thread's dialect (`DialectScope`, `ObsidianDialect`: `dialect.cpp`, at
+  `-Os`, as every build reads it), its syntax turned into RayoMD's before the parse
+  (`ObsidianToCommonMark`) and its callouts (`TakeCallout`: `dialect_rewrite.cpp`, at `-O2`, as the
+  pass reads every note on every build of a preview). At `-O2` the flag's functions, which every
+  build runs from `src/hot.ld`'s group, were aligned to 16 bytes and moved every hot function after
+  them 32 bytes: essay.md 2.3 % slower at equal instructions. Checked by `tests/dialect_tests.inc`.
 
 - `src/core/book.h` and `src/core/book.cpp`
   Books: reading `--book`'s inputs for both command lines (SUMMARY.md as mdBook and

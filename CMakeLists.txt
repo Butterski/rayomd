@@ -200,8 +200,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
     # RayoMD's streams at half the code; the inflater, 1.5 % slower than -O3 at 8.9 KB of code
     # against 17.7. The highlighter's lexers read every byte of a code block: 1.5 times as fast at
-    # -O2 as at -Os. The HTML scanner reads every byte of the tags in a document.
+    # -O2 as at -Os. The HTML scanner reads every byte of the tags in a document, and Obsidian's
+    # rewrite every byte of a note on every build of a preview.
     set_source_files_properties(src/core/flate.cpp src/core/inflate.cpp src/core/highlight.cpp src/core/html.cpp
+        src/core/dialect_rewrite.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
 endif()
 
@@ -253,7 +255,8 @@ set(RAYOMD_CORE_SOURCES
     src/core/access_policy.cpp
     src/core/dialect.cpp
     src/core/mermaid.cpp
-    src/core/diagram_cache.cpp)
+    src/core/diagram_cache.cpp
+    src/core/dialect_rewrite.cpp)
 
 if(NOT WIN32)
     if(RAYOMD_USE_CURL)

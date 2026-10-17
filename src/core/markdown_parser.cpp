@@ -1674,11 +1674,15 @@ std::vector<Block> ParseMarkdownLevel(const std::string& markdown, int depth, Fo
     return ParseMarkdownImpl(markdown, depth, notes);
 }
 
-// Obsidian's dialect: its syntax turned into RayoMD's first (ObsidianToCommonMark), out of line.
+// Obsidian's dialect: its syntax turned into RayoMD's first (RewriteObsidian), out of line; a
+// document without any is parsed as it is. The rewrite fills a string of this frame, no assignment:
+// a move-assignment here changed what GCC inlined into ParseMarkdownImpl (+0.36 % instructions on
+// notes.md, a string destructor no longer inlined).
 static RAYOMD_NOINLINE std::vector<Block> ParseObsidian(const std::string& markdown, Footnotes* footnotes) {
-    const std::string converted = ObsidianToCommonMark(markdown);
-    const ParseBudget budget(converted.size());
-    return footnotes == nullptr ? ParseMarkdownImpl(converted, 0, nullptr) : ParseWithFootnotes(converted, *footnotes);
+    std::string converted;
+    const std::string& text = RewriteObsidian(markdown, converted) ? converted : markdown;
+    const ParseBudget budget(text.size());
+    return footnotes == nullptr ? ParseMarkdownImpl(text, 0, nullptr) : ParseWithFootnotes(text, *footnotes);
 }
 
 std::vector<Block> ParseMarkdown(const std::string& markdown, Footnotes* footnotes) {

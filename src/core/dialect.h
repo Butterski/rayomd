@@ -36,6 +36,10 @@ bool ObsidianDialect();
 // and "[[_TOC_]]" are left as they are.
 std::string ObsidianToCommonMark(std::string_view markdown);
 
+// ObsidianToCommonMark into `out` when `markdown` has any of what it rewrites ("[[", "==",
+// "%%"); false, `out` untouched, without: the parser reads the document itself.
+bool RewriteObsidian(std::string_view markdown, std::string& out);
+
 // A callout: the first line of a quote "[!type]", with "+" or "-" (folded or not: both show
 // unfolded) and a title, any of Obsidian's types (and GitHub's, in Obsidian's colours), taken out
 // of `quote`. Returns the colour (Block::alert: 1 note, 2 success, 3 example, 4 warning, 5 danger,
