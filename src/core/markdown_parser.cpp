@@ -1372,7 +1372,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             }
             Block& code = AppendBlock(blocks, BlockType::Code);
             code.text = std::move(text);
-            if (!infoString.empty()) code.codeLanguage = CodeLanguage(infoString);
+            if (!infoString.empty()) code.codeLanguage = FenceLanguage(infoString);
             continue;
         }
 

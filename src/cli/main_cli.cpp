@@ -277,6 +277,7 @@ struct CliExportOptions {
     bool pdfa = false;
     bool pdfua = false;
     bool highlightCode = true;
+    bool diagrams = true;
     bool toc = false;
     int tocDepth = 3;
     int pageBreakBeforeLevel = 0;
@@ -310,6 +311,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--pdfa") options.pdfa = true;
         else if (value == "--pdfua") options.pdfua = true;
         else if (value == "--no-highlight") options.highlightCode = false;
+        else if (value == "--no-diagrams") options.diagrams = false;
         else if (value == "--toc") options.toc = true;
         else if (value.rfind("--toc-depth=", 0) == 0) {
             if (value.size() != 13 || value[12] < '1' || value[12] > '6') {
@@ -450,6 +452,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     pdfOptions.pdfa = options.pdfa;
     pdfOptions.pdfua = options.pdfua;
     pdfOptions.highlightCode = options.highlightCode;
+    pdfOptions.diagrams = options.diagrams;
     pdfOptions.toc = options.toc;
     pdfOptions.tocDepth = options.tocDepth;
     pdfOptions.pageBreakBeforeLevel = options.pageBreakBeforeLevel;
@@ -905,7 +908,9 @@ void PrintUsage() {
         "  value lines: font, font-bold, font-italic, font-bold-italic, logo, heading-color, link-color,\n"
         "  accent-color, header-left/center/right, footer-left/center/right with {title} {author}\n"
         "  {subject} {date} {page} {pages} {logo}, cover), --no-highlight (code\n"
-        "  blocks in one colour; by default fenced code in a language GitHub knows is coloured), --toc\n"
+        "  blocks in one colour; by default fenced code in a language GitHub knows is coloured),\n"
+        "  --no-diagrams (```mermaid blocks as code; by default flowcharts, sequence diagrams and pie\n"
+        "  charts are drawn), --toc\n"
         "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
         "  --toc-depth=N (heading levels it lists, 1-6; default 3), --number-headings[=N] (1, 1.1, 1.1.1\n"
         "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks),\n"

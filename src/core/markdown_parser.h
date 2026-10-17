@@ -61,8 +61,8 @@ struct Block {
     // Heading and Table only, while ParseMarkdown runs: the text or cells are still Markdown
     // that may refer to a footnote, made plain once all footnotes are known. In the same padding.
     uint8_t notesPending = 0;
-    // Code only: the language the info string of its fence names (CodeLanguage), or 0 for one
-    // shown in one colour. In the same padding.
+    // Code only: the language the info string of its fence names (FenceLanguage, highlight.h),
+    // kMermaidCode for a Mermaid diagram's, or 0 for one shown in one colour. In the same padding.
     uint8_t codeLanguage = 0;
     std::string text;
     // Set for every Image block and for no other: the other blocks carry a null pointer

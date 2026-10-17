@@ -199,27 +199,27 @@ bool SetLabel(std::string_view raw, double size, SvgHost& host, Label& label) {
 // ---------------------------------------------------------------------------------------------
 // SVG output
 
-// A number with at most two decimals, trailing zeros dropped.
+// A number with at most two decimals, trailing zeros dropped; written backwards into a buffer and
+// appended once.
 void Num(std::string& out, double value) {
     long long hundredths = LlRound(value * 100.0);
-    if (hundredths < 0) {
-        out += '-';
-        hundredths = -hundredths;
-    }
-    char digits[24];
-    int count = 0;
-    long long whole = hundredths / 100;
-    do {
-        digits[count++] = static_cast<char>('0' + whole % 10);
-        whole /= 10;
-    } while (whole > 0);
-    while (count > 0) out += digits[--count];
+    const bool negative = hundredths < 0;
+    if (negative) hundredths = -hundredths;
+    char buffer[32];
+    char* start = buffer + sizeof(buffer);
     const int fraction = static_cast<int>(hundredths % 100);
     if (fraction != 0) {
-        out += '.';
-        out += static_cast<char>('0' + fraction / 10);
-        if (fraction % 10 != 0) out += static_cast<char>('0' + fraction % 10);
+        if (fraction % 10 != 0) *--start = static_cast<char>('0' + fraction % 10);
+        *--start = static_cast<char>('0' + fraction / 10);
+        *--start = '.';
     }
+    long long whole = hundredths / 100;
+    do {
+        *--start = static_cast<char>('0' + whole % 10);
+        whole /= 10;
+    } while (whole > 0);
+    if (negative) *--start = '-';
+    out.append(start, static_cast<size_t>(buffer + sizeof(buffer) - start));
 }
 
 void NumAttr(std::string& out, const char* name, double value) {

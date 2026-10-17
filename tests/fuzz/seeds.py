@@ -489,6 +489,40 @@ break.
 <a id="anchor"></a>
 [to anchor](#anchor)
 """,
+    "diagrams.md": """# Diagrams
+
+```mermaid
+flowchart LR
+    A[Start] -->|yes| B{Choice}
+    B --> C((End))
+    subgraph S [Group]
+        D --> E
+    end
+    C -.-> D
+```
+
+> ```mermaid
+> sequenceDiagram
+>     Alice->>+Bob: Hi
+>     Bob-->>-Alice: Hello
+> ```
+
+- ```mermaid
+  pie title Share
+      "A" : 2
+      "B" : 3
+  ```
+
+```mermaid
+xychart-beta
+    bar [1, 2]
+```
+
+```mermaid
+graph TD
+    a --
+```
+""",
     # Ends in "Z" (0x5A): Obsidian's dialect, heading numbers 3 deep, a page before each h2 (fuzz_public.cpp).
     "obsidian.md": """---
 title: Vault

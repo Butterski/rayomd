@@ -2002,6 +2002,16 @@ uint8_t CodeLanguage(std::string_view info) {
     return 0;
 }
 
+uint8_t FenceLanguage(std::string_view info) {
+    const uint8_t language = CodeLanguage(info);
+    if (language != 0) return language;
+    size_t at = 0;
+    while (at < info.size() && IsOneOf(info[at], " \t{.")) at++;
+    size_t end = at;
+    while (end < info.size() && !IsOneOf(info[end], " \t\r,{}:")) end++;
+    return end - at == 7 && SameCaseless(info.data() + at, "mermaid", 7) ? kMermaidCode : 0;
+}
+
 void ClassifyCode(uint8_t language, std::string_view code, uint8_t* classes) {
     if (code.empty()) return;
     memset(classes, kCodePlain, code.size());

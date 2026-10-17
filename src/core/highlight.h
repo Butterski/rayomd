@@ -34,6 +34,14 @@ enum CodeClass : uint8_t {
 // highlighted: the block stays one colour.
 uint8_t CodeLanguage(std::string_view info);
 
+// Block::codeLanguage of a ```mermaid fence: drawn as its diagram where it can be, else as a code
+// block in one colour.
+constexpr uint8_t kMermaidCode = 0xFF;
+
+// Block::codeLanguage for a fence's info string: CodeLanguage's, else kMermaidCode for "mermaid",
+// else 0. Here and not in the parser, whose inlining it would change.
+uint8_t FenceLanguage(std::string_view info);
+
 // Writes the class of each byte of `code` to `classes`, which has room for code.size().
 void ClassifyCode(uint8_t language, std::string_view code, uint8_t* classes);
 

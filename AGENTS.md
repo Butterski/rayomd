@@ -84,6 +84,13 @@ Dockerfile, diff) is drawn in the colours of GitHub's light theme; `--no-highlig
 and its bytes. The lexers in `highlight.cpp` read every byte once in one forward pass;
 every rule is bounded, so time stays linear for any input. Keep it that way: a new rule
 that scans ahead must stop at the end of its line or mark what it scanned, never rescan.
+A ```` ```mermaid ```` fence (`Block::codeLanguage == kMermaidCode`, set by the parser's
+`FenceLanguage`) is drawn as its diagram: `RenderCode` asks `RenderDiagram` first, which takes it
+through `ImageRegistry::AddDiagram` (`Mermaid::ToSvg` with the renderer's `SvgHost`, a theme's
+accent colour, then `ConvertSvgImage`) and draws the form centred as an image, a Figure under
+PDF/UA with the source as its alt text. With `--no-diagrams` (`PdfOptions::diagrams`), or for a
+type, syntax or size the module refuses, the block takes the one-colour code path with the bytes
+of a fence without a language; documents without such fences are unchanged.
 A table of contents comes at the first paragraph `[TOC]` or `[[_TOC_]]` (later ones draw
 nothing), or with `--toc` (`PdfOptions::toc`) first or after a title heading; it lists
 the top-level headings to `--toc-depth` levels, without a document's only level-1 heading

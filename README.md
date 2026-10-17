@@ -331,6 +331,24 @@ def greet(name):
 ```
 ````
 
+### Diagrams
+
+A ` ```mermaid ` block is drawn as its diagram, laid out by RayoMD itself as vector graphics in
+the document's font, with no browser or Node.js: flowcharts (`flowchart`/`graph`, every shape and
+link, subgraphs, `classDef` and `style`), sequence diagrams (participants, messages, activations,
+notes, loops and other frames, `autonumber`) and pie charts. Other diagram types, and anything
+past the limits in [`native_mermaid.md`](docs/development/native_mermaid.md), show their source
+as a code block, as does every block with `--no-diagrams`.
+
+````markdown
+```mermaid
+flowchart LR
+    A[Write Markdown] --> B{Diagrams?}
+    B -->|yes| C[Drawn natively]
+    B -->|no| D[Code block]
+```
+````
+
 ### Math
 
 A TeX subset typeset natively, with no LaTeX, in text, lists, quotes, headings and table cells,
@@ -527,11 +545,12 @@ rayomd --bench report.md bench-out 200 modern normal
 It does not promise full CommonMark/Pandoc compatibility, complete LaTeX math (packages,
 macros, automatic numbering), highlighting for every language, citations, filters, templates,
 right-to-left scripts (Arabic and Hebrew are drawn left to right, unshaped), complete SVG
-(radial gradients and patterns are approximated; markers, filters and masks are not drawn), or
-HTML/CSS layout (inline styles, classes and style sheets are read only for page breaks). Under
-`--pdfua` a theme's cover page is tagged as decoration and an inline formula is text showing its
-TeX source. Missing or unsupported images and malformed math degrade to readable fallbacks
-instead of failing the export. The complete matrix is in
+(radial gradients and patterns are approximated; markers, filters and masks are not drawn), all of
+Mermaid (only flowcharts, sequence diagrams and pie charts are drawn, Mermaid's own layout is not
+copied exactly), or HTML/CSS layout (inline styles, classes and style sheets are read only for
+page breaks). Under `--pdfua` a theme's cover page is tagged as decoration and an inline formula
+is text showing its TeX source. Missing or unsupported images and malformed math degrade to
+readable fallbacks instead of failing the export. The complete matrix is in
 [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support).
 
 ## Documentation

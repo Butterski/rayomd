@@ -165,6 +165,10 @@ struct PdfOptions {
     // Fenced code whose info string names a language GitHub knows (python, js, bash, ...) in
     // the colours of GitHub's light theme; false shows every code block in one colour.
     bool highlightCode = true;
+    // A fenced ```mermaid block drawn as its diagram (flowcharts, sequence diagrams and pie charts,
+    // laid out natively as vector graphics); false, or a diagram RayoMD cannot draw, shows its
+    // source as a code block.
+    bool diagrams = true;
     // A table of contents, with links and page numbers: where the document has a paragraph
     // "[TOC]" or "[[_TOC_]]" (which always gets one), else first, after the title heading.
     bool toc = false;

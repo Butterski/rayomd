@@ -701,10 +701,35 @@ bool CheckBounds() {
     return Bounded("Mermaid: 200 nodes and 299 edges", 1.0, 64, [&]() { return Draw(source, svg) && Converts(svg); });
 }
 
+// A ```mermaid fence in a document: a form in both renderers, also in a quote; with
+// PdfOptions::diagrams off, or of a type RayoMD does not draw, a code block with exactly the bytes
+// of a fence of no language.
+bool CheckDiagramBlocks() {
+    TinyPdf::PdfOptions off;
+    off.diagrams = false;
+    const std::string flow = "flowchart LR\n  A[Start] --> B[End]\n```\n";
+    const std::string chart = "xychart-beta\n  bar [1, 2]\n```\n";
+    for (const std::string prefix : { "", "\xC5\xBC\n\n" }) {   // the standard and the Unicode renderer
+        std::string drawn, quoted, disabled, plain, unsupported, plainChart;
+        const bool built = TinyPdf::BuildPdf(prefix + "```mermaid\n" + flow, TinyPdf::PdfOptions(), drawn).Ok() &&
+            TinyPdf::BuildPdf(prefix + "> ```mermaid\n> flowchart TD\n>   a --> b\n> ```\n", TinyPdf::PdfOptions(), quoted).Ok() &&
+            TinyPdf::BuildPdf(prefix + "```mermaid\n" + flow, off, disabled).Ok() &&
+            TinyPdf::BuildPdf(prefix + "```\n" + flow, TinyPdf::PdfOptions(), plain).Ok() &&
+            TinyPdf::BuildPdf(prefix + "```mermaid\n" + chart, TinyPdf::PdfOptions(), unsupported).Ok() &&
+            TinyPdf::BuildPdf(prefix + "```\n" + chart, TinyPdf::PdfOptions(), plainChart).Ok();
+        if (!built || !Contains(drawn, "/Subtype /Form") || !Contains(quoted, "/Subtype /Form") || disabled != plain ||
+            Contains(plain, "/Subtype /Form") || unsupported != plainChart || (prefix.empty() && Contains(drawn, "(flowchart LR)"))) {
+            std::cerr << "Mermaid blocks mismatch" << (prefix.empty() ? "" : " (Unicode)") << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool CheckMermaid() {
     return CheckFlowchartSyntax() && CheckRefused(RefusedFlowcharts()) && CheckFlowchartLayout() && CheckSequenceSyntax() &&
            CheckRefused(RefusedSequences()) && CheckSequenceLayout() && CheckPieSyntax() && CheckRefused(RefusedPies()) &&
-           CheckGoldens() && CheckBounds();
+           CheckGoldens() && CheckBounds() && CheckDiagramBlocks();
 }
 
 } // namespace mermaid_tests

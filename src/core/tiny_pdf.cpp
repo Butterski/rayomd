@@ -18,6 +18,7 @@
 #include "inflate.h"
 #include "contents.h"
 #include "dialect.h"
+#include "mermaid.h"
 #include "markdown_parser.h"
 #include "highlight.h"
 #include "math_layout.h"
@@ -3818,6 +3819,10 @@ public:
     uint32_t FailedImages() const { return failed; }
     // Whether the document had an SVG image (ConvertSvgImage), whose text takes its font.
     bool SvgAttempted() const { return svgAttempted; }
+    // A ```mermaid block's diagram (Internal::Mermaid::ToSvg) as an SVG form among the document's
+    // images, its text in the document's font; false when diagrams are off or its type, syntax or
+    // a limit is not supported, and the block shows its source. Defined after the hosts.
+    RAYOMD_COLD bool AddDiagram(std::string_view source, int& index);
 
     // An image a theme names, such as its logo: the caller's own configuration, as a font is, so
     // outside the policy for images in documents. False, and one more failed image, when it cannot
@@ -4170,6 +4175,28 @@ bool ImageRegistry::ConvertSvgImage(std::string_view svg, PdfImage& image) {
     image.width = pixels(form->width);
     image.height = pixels(form->height);
     image.svg = std::move(form);
+    return true;
+}
+
+bool ImageRegistry::AddDiagram(std::string_view source, int& index) {
+    if (!options.diagrams) return false;
+    Internal::Mermaid::Palette palette = Internal::Mermaid::kDefaultPalette;
+    if (options.theme.accentColor != PdfTheme::kStyleColor) {
+        palette.nodeStroke = palette.accent = (uint32_t)options.theme.accentColor;
+    }
+    std::string svg;
+    bool made = false;
+    if (svgFont != nullptr) {
+        UnicodeSvgHost host(*svgFont, *svgCids, *this, svgBoldFont, svgBoldCids);
+        made = Internal::Mermaid::ToSvg(source, host, palette, svg);
+    } else {
+        StandardSvgHost host(*this);
+        made = Internal::Mermaid::ToSvg(source, host, palette, svg);
+    }
+    PdfImage image;
+    if (!made || !ConvertSvgImage(svg, image)) return false;
+    index = (int)images.size();
+    images.push_back(std::make_shared<PdfImage>(std::move(image)));
     return true;
 }
 
@@ -6151,6 +6178,11 @@ constexpr char kAlertTitles[][10] = { "", "Note", "Tip", "Important", "Warning",
 static bool CalloutHasBody(const Block& block) {
     return !block.children.empty() &&
         (block.children.size() > 1 || block.children[0].type != BlockType::Paragraph || !block.children[0].text.empty());
+}
+
+// A code block's language that the highlighter colours (Block::codeLanguage): not none, not Mermaid.
+static bool Highlighted(uint8_t language) {
+    return language != 0 && language != Internal::kMermaidCode;
 }
 
 // The colours a theme can change, as PDF colour operands: the style's own where the theme sets
@@ -8445,10 +8477,34 @@ private:
         TagEnd(tagged);
     }
 
+    // A ```mermaid fence as its diagram (ImageRegistry::AddDiagram), centred, as large as it was
+    // laid out unless the page is smaller; a figure under PDF/UA whose alt text is its source.
+    // False when it cannot be drawn: RenderCode shows the source.
+    RAYOMD_COLD bool RenderDiagram(const Block& block) {
+        int index = -1;
+        if (images == nullptr || !images->AddDiagram(block.text, index)) return false;
+        const PdfImage& image = images->Get(index);
+        const double maxW = pageW - margin * 2.0;
+        const double scale = std::min(1.0, std::min(maxW / (image.width * 0.75), (pageH - margin * 2.0) / (image.height * 0.75)));
+        const double w = image.width * 0.75 * scale;
+        const double h = image.height * 0.75 * scale;
+        Ensure(h + 10.0);
+        const double x = margin + (maxW - w) / 2.0;
+        const int tagged = tags != nullptr ? TagFigure(block.text, std::string(), x, y - h, x + w, y) : -1;
+        DrawImage(index, x, y, w, h);
+        if (tags != nullptr) {
+            tags->End(tagged);
+            tags->SetArtifacts(false);
+        }
+        y -= h + 10.0;
+        return true;
+    }
+
     void RenderCode(const Block& block) {
+        if (block.codeLanguage == Internal::kMermaidCode && RenderDiagram(block)) return;
         const int tagged = TagBegin(Internal::StructType::Code);
         if (tagged >= 0) tags->SetBlockPlacement(tagged);
-        if (block.codeLanguage != 0 && highlightCode) {
+        if (Highlighted(block.codeLanguage) && highlightCode) {
             RenderHighlightedCode(block.text, block.codeLanguage);
             TagEnd(tagged);
             return;
@@ -11506,8 +11562,24 @@ private:
         y -= 7.0;
     }
 
+    // A ```mermaid fence as its diagram, as the Unicode renderer draws it (RenderDiagram there).
+    RAYOMD_COLD bool RenderDiagram(const Block& block) {
+        int index = -1;
+        if (images == nullptr || !images->AddDiagram(block.text, index)) return false;
+        const PdfImage& image = images->Get(index);
+        const double maxW = pageW - margin * 2.0;
+        const double scale = std::min(1.0, std::min(maxW / (image.width * 0.75), (pageH - margin * 2.0) / (image.height * 0.75)));
+        const double w = image.width * 0.75 * scale;
+        const double h = image.height * 0.75 * scale;
+        Ensure(h + 10.0);
+        DrawImage(index, margin + (maxW - w) / 2.0, y, w, h);
+        y -= h + 10.0;
+        return true;
+    }
+
     void RenderCode(const Block& block) {
-        if (block.codeLanguage != 0 && highlightCode) {
+        if (block.codeLanguage == Internal::kMermaidCode && RenderDiagram(block)) return;
+        if (Highlighted(block.codeLanguage) && highlightCode) {
             RenderHighlightedCode(block.text, block.codeLanguage);
             return;
         }
