@@ -91,11 +91,13 @@ accent colour, then `ConvertSvgImage`) and draws the form centred as an image, a
 PDF/UA with the source as its alt text. With `--no-diagrams` (`PdfOptions::diagrams`), or for a
 type, syntax or size the module refuses, the block takes the one-colour code path with the bytes
 of a fence without a language; documents without such fences are unchanged. A drawn diagram is
-kept for the process (`ImageRegistry::Diagrams`, at most 16 MiB) by its renderer's fonts (their
+kept for the process (`diagram_cache.cpp`, at most 16 MiB) by its renderer's fonts (their
 `TtfFont::loadId`), palette and source, with the text runs its form shows: a later build, such as
 the GUI's preview on every edit, takes the form and replays the runs into its own glyph sets
-(`WriteCidText`), so the PDF is the one an uncached build makes (`Mermaid::Layouts` counts the
-layouts for the tests).
+(`CidText`), so the PDF is the one an uncached build makes (`Mermaid::Layouts` counts the
+layouts for the tests). Its containers live in that unit: inside `tiny_pdf.cpp` they changed what
+GCC inlined into `PdfObjects::BuildInto`, moving `WrapAsciiInline` 144 bytes and essay.md 2 to 4 %
+slower at equal instructions.
 A table of contents comes at the first paragraph `[TOC]` or `[[_TOC_]]` (later ones draw
 nothing), or with `--toc` (`PdfOptions::toc`) first or after a title heading; it lists
 the top-level headings to `--toc-depth` levels, without a document's only level-1 heading
@@ -358,6 +360,10 @@ Important image/link details:
   labels measured with the converter's own `SvgHost::TextWidth`. Built at `-Os`; an unsupported,
   malformed or over-limit diagram makes `Mermaid::ToSvg` return false, and the caller draws the
   code block. Pie arcs are Béziers from the module's own sine; keep transcendental calls out.
+
+- `src/core/diagram_cache.h` and `src/core/diagram_cache.cpp`
+  The process's drawn diagrams for `ImageRegistry::AddDiagram`: key, bound and lock, and the
+  containers whose instantiations stay out of `tiny_pdf.cpp`. Built at `-Os`.
 
 - `src/core/cff.h` and `src/core/cff.cpp`
   OpenType fonts with PostScript outlines: the 'CFF ' table checked once when the font

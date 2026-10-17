@@ -18,6 +18,7 @@
 #include "inflate.h"
 #include "contents.h"
 #include "dialect.h"
+#include "diagram_cache.h"
 #include "mermaid.h"
 #include "markdown_parser.h"
 #include "highlight.h"
@@ -3758,22 +3759,6 @@ uint64_t Internal::SvgImageDecodes() {
     return g_svgImageDecodes.load(std::memory_order_relaxed);
 }
 
-// How many diagrams the process has laid out and converted (ImageRegistry::AddDiagram), not
-// counting those it took from its cache.
-static std::atomic<uint64_t> g_diagramLayouts{ 0 };
-
-uint64_t Internal::Mermaid::Layouts() {
-    return g_diagramLayouts.load(std::memory_order_relaxed);
-}
-
-// A run of an SVG form's text in the Unicode renderer (UnicodeSvgHost::AppendText): in a theme's
-// bold face or the text face. A diagram taken from the process's cache replays its runs into the
-// document's glyph sets, so its fonts are subset as they were for the diagram's first build.
-struct SvgTextRun {
-    bool bold = false;
-    std::wstring text;
-};
-
 class ImageRegistry {
 public:
     explicit ImageRegistry(const PdfOptions& opts) : options(opts), localPolicy(opts) {}
@@ -3839,12 +3824,6 @@ public:
     // images, its text in the document's font; false when diagrams are off or its type, syntax or
     // a limit is not supported, and the block shows its source. Defined after the hosts.
     RAYOMD_COLD bool AddDiagram(std::string_view source, int& index);
-    // Drops the diagrams the process has drawn (Internal::Mermaid::ForgetDiagrams, for tests).
-    RAYOMD_COLD static void ForgetDiagrams() {
-        std::lock_guard<std::mutex> lock(CacheMutex());
-        Diagrams().clear();
-        DiagramBytes() = 0;
-    }
 
     // An image a theme names, such as its logo: the caller's own configuration, as a font is, so
     // outside the policy for images in documents. False, and one more failed image, when it cannot
@@ -4011,37 +3990,7 @@ private:
 
     // An SVG as a form XObject (svg.h), its text in the document's font; defined after the hosts.
     // With `runs`, the Unicode renderer's text runs are noted there in order.
-    RAYOMD_COLD bool ConvertSvgImage(std::string_view svg, PdfImage& image, std::vector<SvgTextRun>* runs = nullptr);
-
-    // The diagrams the process has drawn, for AddDiagram: a preview builds the same ones again on
-    // every edit, each costing 50 to 100 microseconds to lay out and convert. Kept by everything
-    // that decides the form (DiagramKey) with the text runs to replay; at most 16 MiB, all dropped
-    // when a new one would pass that.
-    struct CachedDiagram {
-        SharedPdfImage image;
-        std::vector<SvgTextRun> runs;
-        size_t cost = 0;
-    };
-    static std::unordered_map<std::string, std::shared_ptr<const CachedDiagram>>& Diagrams() {
-        static std::unordered_map<std::string, std::shared_ptr<const CachedDiagram>> diagrams;
-        return diagrams;
-    }
-    static size_t& DiagramBytes() {
-        static size_t bytes = 0;
-        return bytes;
-    }
-    // The renderer (its fonts, by their load: the standard ones, or the document's and a theme's
-    // bold face), the palette and the source.
-    std::string DiagramKey(std::string_view source, const Internal::Mermaid::Palette& palette) const {
-        const uint64_t fonts[2] = { svgFont != nullptr ? svgFont->loadId : 0, svgBoldFont != nullptr ? svgBoldFont->loadId : 0 };
-        std::string key;
-        key.reserve(1 + sizeof(fonts) + sizeof(palette) + source.size());
-        key += svgFont != nullptr ? 'U' : 'S';
-        key.append(reinterpret_cast<const char*>(fonts), sizeof(fonts));
-        key.append(reinterpret_cast<const char*>(&palette), sizeof(palette));
-        key.append(source.data(), source.size());
-        return key;
-    }
+    RAYOMD_COLD bool ConvertSvgImage(std::string_view svg, PdfImage& image, std::vector<Internal::SvgTextRun>* runs = nullptr);
 
     const PdfOptions& options;
     LocalImagePolicy localPolicy;
@@ -4180,7 +4129,7 @@ private:
 class UnicodeSvgHost : public Internal::SvgHost {
 public:
     UnicodeSvgHost(const TtfFont& textFont, UsedCidSet& usedCids, ImageRegistry& registry, const TtfFont* boldFont,
-        UsedCidSet* boldCids, std::vector<SvgTextRun>* textRuns = nullptr)
+        UsedCidSet* boldCids, std::vector<Internal::SvgTextRun>* textRuns = nullptr)
         : font(textFont), cids(usedCids), images(registry), bold(boldFont), boldSet(boldCids), runs(textRuns) {}
 
     double TextWidth(std::string_view text, double size, bool isBold) override {
@@ -4193,7 +4142,7 @@ public:
         const bool face = isBold && bold != nullptr;
         out.resize(start + CidTextBytes(wide));
         out.resize((size_t)(WriteCidText(&out[start], face ? *bold : font, wide, face ? *boldSet : cids) - out.data()));
-        if (runs != nullptr) runs->push_back({ face, wide });
+        if (runs != nullptr) Internal::NoteSvgTextRun(*runs, face, wide);
     }
 
     bool HasBoldFace() const override { return bold != nullptr; }
@@ -4206,10 +4155,10 @@ private:
     ImageRegistry& images;
     const TtfFont* bold;
     UsedCidSet* boldSet;
-    std::vector<SvgTextRun>* runs;   // AppendText's runs, when noted (ImageRegistry::AddDiagram)
+    std::vector<Internal::SvgTextRun>* runs;   // AppendText's runs, when noted (ImageRegistry::AddDiagram)
 };
 
-bool ImageRegistry::ConvertSvgImage(std::string_view svg, PdfImage& image, std::vector<SvgTextRun>* runs) {
+bool ImageRegistry::ConvertSvgImage(std::string_view svg, PdfImage& image, std::vector<Internal::SvgTextRun>* runs) {
     svgAttempted = true;
     auto form = std::make_shared<Internal::SvgForm>();
     const size_t rasters = images.size();   // its data: images go after them (AddDecoded)
@@ -4239,23 +4188,16 @@ bool ImageRegistry::AddDiagram(std::string_view source, int& index) {
     if (options.theme.accentColor != PdfTheme::kStyleColor) {
         palette.nodeStroke = palette.accent = (uint32_t)options.theme.accentColor;
     }
-    std::string key = DiagramKey(source, palette);
-    std::shared_ptr<const CachedDiagram> cached;
-    {
-        std::lock_guard<std::mutex> lock(CacheMutex());
-        const auto found = Diagrams().find(key);
-        if (found != Diagrams().end()) cached = found->second;
-    }
-    if (cached) {
+    const Internal::DiagramKey key{ svgFont != nullptr, svgFont != nullptr ? svgFont->loadId : 0,
+        svgBoldFont != nullptr ? svgBoldFont->loadId : 0, &palette, source };
+    if (const std::shared_ptr<const Internal::DrawnDiagram> cached = Internal::FindDrawnDiagram(key)) {
         // What ConvertSvgImage left behind for the first build: the flag, and the glyphs in the sets.
         svgAttempted = true;
-        std::string scratch;
-        for (const SvgTextRun& run : cached->runs) {
-            scratch.resize(CidTextBytes(run.text));
-            WriteCidText(&scratch[0], run.bold ? *svgBoldFont : *svgFont, run.text, run.bold ? *svgBoldCids : *svgCids);
+        for (const Internal::SvgTextRun& run : cached->runs) {
+            CidText(run.bold ? *svgBoldFont : *svgFont, run.text, run.bold ? *svgBoldCids : *svgCids);
         }
         index = (int)images.size();
-        images.push_back(cached->image);
+        images.push_back(std::static_pointer_cast<const PdfImage>(cached->image));
         return true;
     }
     std::string svg;
@@ -4268,30 +4210,19 @@ bool ImageRegistry::AddDiagram(std::string_view source, int& index) {
         made = Internal::Mermaid::ToSvg(source, host, palette, svg);
     }
     PdfImage image;
-    auto entry = std::make_shared<CachedDiagram>();
-    if (!made || !ConvertSvgImage(svg, image, svgFont != nullptr ? &entry->runs : nullptr)) return false;
-    g_diagramLayouts.fetch_add(1, std::memory_order_relaxed);
-    entry->image = std::make_shared<PdfImage>(std::move(image));
+    const std::shared_ptr<Internal::DrawnDiagram> drawn = Internal::NewDrawnDiagram();
+    if (!made || !ConvertSvgImage(svg, image, svgFont != nullptr ? &drawn->runs : nullptr)) return false;
+    Internal::CountDiagramLayout();
+    SharedPdfImage shared = std::make_shared<PdfImage>(std::move(image));
+    const Internal::SvgForm& form = *shared->svg;
+    drawn->image = shared;
     index = (int)images.size();
-    images.push_back(entry->image);
-    const Internal::SvgForm& form = *entry->image->svg;
-    if (!form.images.empty() || BuildCancelled()) return true;   // a form of the document's own images stays its own
-    size_t cost = key.size() + form.content.size() + form.extGStates.size() + form.shadings.size() + 256;
-    for (const SvgTextRun& run : entry->runs) cost += run.text.size() * sizeof(wchar_t) + sizeof(SvgTextRun);
-    if (cost > 4u * 1024u * 1024u) return true;
-    std::lock_guard<std::mutex> lock(CacheMutex());
-    size_t& bytes = DiagramBytes();
-    if (bytes + cost > 16u * 1024u * 1024u) {
-        Diagrams().clear();
-        bytes = 0;
+    images.push_back(std::move(shared));
+    // A form of the document's own images stays its own.
+    if (form.images.empty() && !BuildCancelled()) {
+        Internal::KeepDrawnDiagram(key, drawn, form.content.size() + form.extGStates.size() + form.shadings.size());
     }
-    entry->cost = cost;
-    if (Diagrams().emplace(std::move(key), std::move(entry)).second) bytes += cost;
     return true;
-}
-
-void Internal::Mermaid::ForgetDiagrams() {
-    ImageRegistry::ForgetDiagrams();
 }
 
 static std::string BuildImageStreamDict(const PdfImage& image, int smaskId) {
