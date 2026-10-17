@@ -766,7 +766,9 @@ GitHub CI entry points:
   the release workflow's `arch` job runs `packaging/arch/update.sh <version>` (pkgver,
   pkgrel, sha256sums, `.SRCINFO`), builds, checks and smoke-tests both packages on Arch,
   commits the result to the default branch and, when the `AUR_SSH_PRIVATE_KEY` secret is
-  set, pushes both to the AUR.
+  set, pushes both to the AUR. `publish` and `arch` run only for `master`/`main` or a tag and in
+  the `release` environment, which holds that secret (with its protection rules in the
+  repository settings); a manual run on another branch builds but publishes nothing.
 - RayoMD's own code is licensed under Apache-2.0. Keep `LICENSE`,
   `NOTICE`, README license wording, and SPDX headers aligned when changing
   licensing metadata.

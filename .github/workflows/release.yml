@@ -184,6 +184,12 @@ jobs:
   publish:
     name: Publish GitHub release
     needs: [version, linux, windows]
+    # Only a release branch or a tag publishes: a manual run on another branch builds and stops
+    # here, so it cannot replace the assets of a release (--clobber) with unreviewed code. The
+    # environment lets the repository's settings require a reviewer and limit its branches; keep
+    # AUR_SSH_PRIVATE_KEY as a secret of that environment, not of the repository.
+    if: github.ref_type == 'tag' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    environment: release
     runs-on: ubuntu-22.04
 
     env:
@@ -221,6 +227,7 @@ jobs:
   arch:
     name: Arch Linux packages
     needs: [version, publish]
+    environment: release
     runs-on: ubuntu-latest
     container: archlinux:latest
 
@@ -276,8 +283,8 @@ jobs:
           git pull --rebase origin "$DEFAULT_BRANCH"
           git push origin "HEAD:${DEFAULT_BRANCH}"
 
-      # Needs the repository secret AUR_SSH_PRIVATE_KEY: the private half of a key added to the
-      # AUR account that maintains rayomd and rayomd-bin. Without it the step is skipped.
+      # Needs the secret AUR_SSH_PRIVATE_KEY of the release environment: the private half of a key
+      # added to the AUR account that maintains rayomd and rayomd-bin. Without it the step is skipped.
       - name: Publish to the AUR
         if: env.AUR_SSH_PRIVATE_KEY != ''
         run: |
