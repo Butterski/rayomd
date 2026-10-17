@@ -725,6 +725,14 @@ bool CheckDiagramBlocks() {
         std::cerr << "Mermaid PDF golden changed: " << RayoMd::PdfSource::Sha256Hex(golden) << std::endl;
         return false;
     }
+    // A Latin document is transcoded to WinAnsiEncoding; its diagram's source goes back to UTF-8,
+    // and its labels show in the standard fonts' codes.
+    std::string latin;
+    if (!TinyPdf::BuildPdf("```mermaid\nflowchart LR\n  A[Caf\xC3\xA9] --> B[Cr\xC3\xA8me]\n```\n", TinyPdf::PdfOptions(), latin).Ok() ||
+        !Contains(latin, "/Subtype /Form") || !Contains(latin, "(Caf\xE9)") || Contains(latin, "flowchart")) {
+        std::cerr << "Mermaid in a Latin document mismatch" << std::endl;
+        return false;
+    }
     for (const std::string prefix : { "", "\xC5\xBC\n\n" }) {   // the standard and the Unicode renderer
         std::string drawn, quoted, disabled, plain, unsupported, plainChart;
         const bool built = TinyPdf::BuildPdf(prefix + "```mermaid\n" + flow, TinyPdf::PdfOptions(), drawn).Ok() &&

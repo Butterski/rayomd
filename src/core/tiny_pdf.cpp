@@ -11562,10 +11562,15 @@ private:
         y -= 7.0;
     }
 
-    // A ```mermaid fence as its diagram, as the Unicode renderer draws it (RenderDiagram there).
+    // A ```mermaid fence as its diagram, as the Unicode renderer draws it (RenderDiagram there); the
+    // source of a transcoded Latin document goes back to the UTF-8 the module reads.
     RAYOMD_COLD bool RenderDiagram(const Block& block) {
         int index = -1;
-        if (images == nullptr || !images->AddDiagram(block.text, index)) return false;
+        std::string utf8;
+        if (winAnsiText && !IsAllAscii(block.text)) utf8 = RayoMd::Text::WinAnsiToUtf8(block.text);
+        if (images == nullptr || !images->AddDiagram(utf8.empty() ? std::string_view(block.text) : std::string_view(utf8), index)) {
+            return false;
+        }
         const PdfImage& image = images->Get(index);
         const double maxW = pageW - margin * 2.0;
         const double scale = std::min(1.0, std::min(maxW / (image.width * 0.75), (pageH - margin * 2.0) / (image.height * 0.75)));
