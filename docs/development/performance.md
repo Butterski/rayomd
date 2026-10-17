@@ -113,6 +113,13 @@ What changed:
   registration into no-ops (`src/cli/static_frames.cpp`): 0.42 M fewer user instructions a
   process, 40-50 µs. The release's static asset, built by GCC 11, registers lazily. `rayomd-bin`
   on Arch now installs the static asset.
+- **Static edition position-independent** (2026-10-17): `RAYOMD_STATIC` links `-static-pie`
+  instead of `-static`, so the static asset gets the address randomisation the dynamic build has
+  (its plain `-static` was an ET_EXEC at 0x400000). Fresh exports, 64 runs each against the same
+  code linked `-static`: 4 to 6 more page faults (glibc relocates 2,164 pointers at start), +0.02
+  to +0.04 ms on a 205-byte document and within noise on the 15 and 33 KB ones; 57 KB larger. It
+  stays 0.25 to 0.35 ms (13 %) faster to start than the dynamic build. Its crtbeginS.o registers
+  no frames, so the wrap above does not run there. Checked with GCC 11 (the release's) and 13.
 
 ## Phases 1 and 2 against 4.3.1
 

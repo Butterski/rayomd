@@ -91,8 +91,14 @@ jobs:
           ./build/linux-static/rayomd --version
           ./build/linux-static/rayomd --bench docs/benchmark_smoke.md benchmark-output/linux-static-release 50 modern normal
           test -s benchmark-output/linux-static-release/sample.pdf
-          if ldd build/linux-static/rayomd >/dev/null 2>&1; then
+          # No interpreter and no shared library, and position-independent (-static-pie): ldd
+          # calls a static-pie "statically linked" and succeeds, so it cannot tell.
+          if readelf -lW build/linux-static/rayomd | grep -q INTERP || readelf -dW build/linux-static/rayomd | grep -q NEEDED; then
             echo "The static Linux CLI must not be a dynamic executable." >&2
+            exit 1
+          fi
+          if ! readelf -hW build/linux-static/rayomd | grep -q 'Type: *DYN'; then
+            echo "The static Linux CLI must be position-independent (-static-pie)." >&2
             exit 1
           fi
 

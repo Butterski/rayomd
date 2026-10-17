@@ -62,13 +62,24 @@ function(rayomd_release_flags target)
                 $<$<CONFIG:Release>:-O3>
                 $<$<CONFIG:Release>:-ffunction-sections>
                 $<$<CONFIG:Release>:-fdata-sections>)
-            target_link_options(${target} PRIVATE
-                $<$<CONFIG:Release>:-s>
-                $<$<CONFIG:Release>:-static-libgcc>
-                $<$<CONFIG:Release>:-static-libstdc++>
-                $<$<CONFIG:Release>:-Wl,--gc-sections>)
             if(RAYOMD_STATIC)
-                target_link_options(${target} PRIVATE -static)
+                # Position-independent, so the kernel maps it at a random address as it does the
+                # dynamic build: -static alone overrides the compiler's default PIE and makes an
+                # ET_EXEC at a fixed address, a gift to any memory-safety bug in reading untrusted
+                # Markdown, SVG, PNG and fonts. glibc relocates it itself at start. Without
+                # -static-libgcc and -static-libstdc++, which GCC 13 follows with -Bdynamic even
+                # under -static-pie: libc was then linked dynamically, and the program crashed.
+                target_compile_options(${target} PRIVATE -fPIE)
+                target_link_options(${target} PRIVATE
+                    $<$<CONFIG:Release>:-s>
+                    $<$<CONFIG:Release>:-Wl,--gc-sections>
+                    -static-pie)
+            else()
+                target_link_options(${target} PRIVATE
+                    $<$<CONFIG:Release>:-s>
+                    $<$<CONFIG:Release>:-static-libgcc>
+                    $<$<CONFIG:Release>:-static-libstdc++>
+                    $<$<CONFIG:Release>:-Wl,--gc-sections>)
             endif()
         endif()
     endif()

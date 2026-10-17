@@ -559,8 +559,13 @@ The default Linux build intentionally avoids a libcurl runtime dependency. Use
 `-DRAYOMD_USE_CURL=ON` only when producing a Linux build that should fetch
 HTTP/HTTPS images and can target a known distro/libcurl baseline. Release builds link
 libstdc++ and libgcc statically and do without libm (`exact_math.h`), so the binary needs only libc.
-`-DRAYOMD_STATIC=ON` links glibc in as well: the `-static` release asset, about
-0.9 MB larger and 0.3 ms faster to start, with no runtime dependency.
+`-DRAYOMD_STATIC=ON` links glibc in as well: the static release asset, about
+0.95 MB larger and 0.3 ms faster to start, with no runtime dependency. It is linked
+`-static-pie`, position-independent like the dynamic build so the kernel loads it at a random
+address (up to 0.04 ms of a fresh start more than plain `-static`'s fixed-address ET_EXEC). Not with
+`-static-libgcc`/`-static-libstdc++`, after which GCC 13 links libc dynamically under
+`-static-pie`; CI checks the result with `readelf` (no INTERP or NEEDED, Type DYN), as `ldd`
+calls a static-pie "statically linked" and succeeds.
 
 CMake 3.21 or newer can use the presets of `CMakePresets.json` instead: `release`
 (`build/linux`), `release-static`, `release-curl`, `asan` (AddressSanitizer and
