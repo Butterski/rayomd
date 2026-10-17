@@ -1,0 +1,18 @@
+sequenceDiagram
+    title Checkout
+    autonumber
+    participant B as Browser
+    actor U as Shopper
+    participant API
+    U->>B: Click buy
+    B->>+API: POST /orders
+    API-->>-B: 201 Created
+    B-)U: Thank you
+    B->API: plain
+    B-->API: dotted
+    B-xAPI: cross
+    B--xAPI: dotted cross
+    API--)B: async
+    API->>API: self check
+    activate API
+    deactivate API

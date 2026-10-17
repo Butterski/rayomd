@@ -24,7 +24,7 @@ while [ $# -gt 0 ] && [ "$1" != "--" ]; do
     shift
 done
 [ $# -gt 0 ] && shift
-[ -n "$targets" ] || targets="buildpdf pdfsource theme font cff image svg"
+[ -n "$targets" ] || targets="buildpdf pdfsource theme font cff image svg mermaid"
 
 corpus=$build/fuzz-corpus
 artifacts=$build/fuzz-artifacts
@@ -48,6 +48,7 @@ for target in $targets; do
         cff) max_len=16384 dict="" ;;
         image) max_len=65536 dict="" ;;
         svg) max_len=65536 dict=svg.dict ;;
+        mermaid) max_len=16384 dict=mermaid.dict ;;
         *) echo "unknown target $target" >&2; exit 2 ;;
     esac
     mkdir -p "$corpus/$target"

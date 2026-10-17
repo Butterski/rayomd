@@ -32,6 +32,7 @@ constexpr size_t kMaxLayoutNodes = 20000;        // nodes, subgraphs, ports and 
 constexpr int kMaxEdgeLength = 8;                // extra dashes of a longer edge
 constexpr size_t kMaxClasses = 256;              // classDef names
 constexpr size_t kMaxSvgBytes = 4u << 20;
+constexpr size_t kMaxTextBytes = 768u << 10;     // all text drawn, under svg.cpp's 1 MiB
 constexpr double kMaxExtent = 32767.0;           // the SVG's width and height in px, scaled to fit
 
 // ---------------------------------------------------------------------------------------------
@@ -267,6 +268,8 @@ struct Canvas {
     const Palette& palette;
     std::string body;
     Geometry* geometry;
+    size_t textBytes = 0;   // the text drawn: labels repeat when '&' expands a labelled link
+    bool painted = false;   // something drawn in a palette colour, which ConvertSvg surely paints
 };
 
 enum Anchor { kStart, kMiddle, kEnd };
@@ -275,6 +278,8 @@ enum Anchor { kStart, kMiddle, kEnd };
 void TextLine(Canvas& canvas, std::string_view line, double x, double baseline, double size, Anchor anchor,
               uint32_t rgb, std::string_view css, int node) {
     if (line.empty()) return;
+    canvas.textBytes += line.size();
+    if (css.empty()) canvas.painted = true;
     std::string& out = canvas.body;
     out += "<text";
     NumAttr(out, "x", x);
@@ -452,7 +457,9 @@ void ParseStyle(std::string_view text, Style& style) {
 }
 
 // Fill, stroke and stroke width of a shape: the style's where it has them, else the palette's.
-void ShapePaint(std::string& out, uint32_t fill, uint32_t stroke, double width, const Style& style) {
+void ShapePaint(Canvas& canvas, uint32_t fill, uint32_t stroke, double width, const Style& style) {
+    std::string& out = canvas.body;
+    if (style.fill.empty() || (style.stroke.empty() && style.width != 0.0)) canvas.painted = true;
     PaintAttr(out, "fill", fill, style.fill);
     PaintAttr(out, "stroke", stroke, style.stroke);
     NumAttr(out, "stroke-width", style.width >= 0.0 ? style.width : width);
@@ -937,6 +944,7 @@ private:
     // their longer forms, and "~~~". Sets `next` past it; false when there is none.
     bool LinkBody(const char* at, Edge& edge, const char*& next, bool afterText) const {
         const char* end = c_.end;
+        if (at >= end) return false;
         if (*at == '~') {
             const size_t count = Run(at, end, '~');
             if (count < 3) return false;
@@ -995,6 +1003,7 @@ private:
             edge.startHead = *at == 'x' ? kCrossHead : kCircleHead;
             at++;
         }
+        if (at >= end) return false;
         const char* next = nullptr;
         if (!LinkBody(at, edge, next, false)) {
             // "-- text -->", "== text ==>", "-. text .->": an opener, the text, a link.
@@ -1949,7 +1958,7 @@ void DrawNode(Canvas& canvas, const Vertex& v, int index) {
         NumAttr(out, "cx", x + w / 2.0);
         NumAttr(out, "cy", y + h / 2.0);
         NumAttr(out, "r", w / 2.0);
-        ShapePaint(out, p.nodeFill, p.nodeStroke, 1.0, v.style);
+        ShapePaint(canvas, p.nodeFill, p.nodeStroke, 1.0, v.style);
         out += "/>\n";
         break;
     case Geometry::kCylinder: {
@@ -1983,7 +1992,7 @@ void DrawNode(Canvas& canvas, const Vertex& v, int index) {
         out += ' ';
         PointText(out, { x, y1 - ry });
         out += " Z\"";
-        ShapePaint(out, p.nodeFill, p.nodeStroke, 1.0, v.style);
+        ShapePaint(canvas, p.nodeFill, p.nodeStroke, 1.0, v.style);
         out += "/>\n<path d=\"M";
         PointText(out, { x, y + ry });
         out += " C";
@@ -2012,7 +2021,7 @@ void DrawNode(Canvas& canvas, const Vertex& v, int index) {
         Rect(out, x, y, w, h);
         if (v.shape == Geometry::kRound) NumAttr(out, "rx", 5.0);
         else if (v.shape == Geometry::kStadium) NumAttr(out, "rx", h / 2.0);
-        ShapePaint(out, p.nodeFill, p.nodeStroke, 1.0, v.style);
+        ShapePaint(canvas, p.nodeFill, p.nodeStroke, 1.0, v.style);
         out += "/>\n";
         if (v.shape == Geometry::kSubroutine) {
             out += "<path d=\"M";
@@ -2039,7 +2048,7 @@ void DrawNode(Canvas& canvas, const Vertex& v, int index) {
             PointText(out, corners[k]);
         }
         out += '"';
-        ShapePaint(out, p.nodeFill, p.nodeStroke, 1.0, v.style);
+        ShapePaint(canvas, p.nodeFill, p.nodeStroke, 1.0, v.style);
         out += "/>\n";
         break;
     }
@@ -2134,6 +2143,7 @@ void LineStyle(std::string& out, LineKind line, uint32_t rgb) {
 
 void EdgeLabel(Canvas& canvas, const Label& label, Point centre) {
     if (label.text.empty()) return;
+    canvas.painted = true;
     std::string& out = canvas.body;
     Rect(out, centre.x - label.width / 2.0 - 2.0, centre.y - label.height / 2.0 - 2.0, label.width + 4.0, label.height + 4.0);
     PaintAttr(out, "fill", canvas.palette.clusterFill);
@@ -2159,7 +2169,7 @@ bool DrawFlow(Canvas& canvas, Flow& f, double& width, double& height) {
     for (int index : f.clusterOrder) {
         const Vertex& v = f.vertices[static_cast<size_t>(index)];
         Rect(out, v.ax, v.ay, v.width, v.height);
-        ShapePaint(out, p.clusterFill, p.clusterStroke, 1.0, v.style);
+        ShapePaint(canvas, p.clusterFill, p.clusterStroke, 1.0, v.style);
         out += "/>\n";
         LabelLines(canvas, v.label, v.ax + v.width / 2.0, v.ay + kClusterPad / 2.0 + 2.0, kMiddle, p.text, v.style.color);
         if (canvas.geometry) canvas.geometry->clusters.push_back({ v.ax, v.ay, v.width, v.height, -1 });
@@ -2170,6 +2180,7 @@ bool DrawFlow(Canvas& canvas, Flow& f, double& width, double& height) {
         const std::vector<Point>& points = edge.points;
         EdgePath(out, points, HeadCut(edge.startHead), HeadCut(edge.endHead));
         LineStyle(out, edge.line, p.line);
+        canvas.painted = true;
         double ux, uy;
         Direction(points[points.size() - 2], points.back(), ux, uy);
         DrawHead(out, edge.endHead, points.back(), ux, uy, p.line);
@@ -2223,6 +2234,7 @@ bool DrawFlow(Canvas& canvas, Flow& f, double& width, double& height) {
                 PointText(out, cut);
                 out += '"';
                 LineStyle(out, edge.line, p.line);
+                canvas.painted = true;
                 DrawHead(out, edge.endHead, end, ux, uy, p.line);
                 Direction(c1, start, ux, uy);
                 DrawHead(out, edge.startHead, start, ux, uy, p.line);
@@ -2861,6 +2873,7 @@ bool DrawSequence(Canvas& canvas, Cursor cursor, double& width, double& height) 
     height = bottom + rowHeight + kMargin;
 
     std::string& out = canvas.body;
+    canvas.painted = true;   // participants and lifelines in palette colours
     if (!title.text.empty()) LabelLines(canvas, title, width / 2.0, kMargin, kMiddle, pal.text);
     // Backgrounds, lifelines, participants, activations, frames, notes, messages.
     for (const SeqFrameBox& frame : frames) {
@@ -3181,6 +3194,7 @@ bool DrawPie(Canvas& canvas, Cursor cursor, double& width, double& height) {
     width = std::max(legendX + 20.0 + legendWidth, kMargin + title.width) + kMargin;
     height = top + chartHeight + kMargin;
     std::string& out = canvas.body;
+    canvas.painted = true;   // slices and the legend in palette colours
     if (!title.text.empty()) LabelLines(canvas, title, width / 2.0, kMargin, kMiddle, pal.text);
 
     auto point = [&](double turns, double radius) -> Point {
@@ -3302,18 +3316,19 @@ bool ToSvg(std::string_view source, SvgHost& host, const Palette& palette, std::
     Cursor cursor{ source.data(), source.data() + source.size() };
     std::string_view keyword;
     if (!Header(cursor, keyword)) return false;
-    Canvas canvas{ host, palette, std::string(), geometry };
+    Canvas canvas{ host, palette, std::string(), geometry, 0 };
     double width = 0.0, height = 0.0;
     bool drawn = false;
     if (keyword == "flowchart" || keyword == "graph") drawn = Flowchart(canvas, cursor, width, height);
     else if (keyword == "sequenceDiagram") drawn = DrawSequence(canvas, cursor, width, height);
     else if (keyword == "pie") drawn = DrawPie(canvas, cursor, width, height);
-    if (!drawn || canvas.body.empty() || !(width > 0.0 && height > 0.0) || width > 1e9 || height > 1e9) {
+    // Too large for a content stream's numbers: drawn smaller, the same picture, unless that
+    // leaves less than a pixel across.
+    const double scale = drawn && width > 0.0 && height > 0.0 && width <= 1e9 && height <= 1e9 ? std::min(1.0, std::min(kMaxExtent / width, kMaxExtent / height)) : 0.0;
+    if (!drawn || !canvas.painted || canvas.textBytes > kMaxTextBytes || !(width * scale >= 1.0 && height * scale >= 1.0)) {
         if (geometry) *geometry = Geometry();
         return false;
     }
-    // Too large for a content stream's numbers: drawn smaller, the same picture.
-    const double scale = std::min(1.0, std::min(kMaxExtent / width, kMaxExtent / height));
     svg.reserve(canvas.body.size() + 200);
     svg += "<svg xmlns=\"http://www.w3.org/2000/svg\"";
     NumAttr(svg, "width", width * scale);

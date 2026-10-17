@@ -1,0 +1,5 @@
+flowchart BT
+    %% chains and groups
+    s1 & s2 & s3 --> mid --> e1 & e2
+    mid --> mid2["quoted [with] (brackets)"] --> end1["one<br>two<br/>three"]
+    end1 -->|back| s1;

@@ -134,6 +134,7 @@ bool CheckFlowchartSyntax() {
           " classDef default stroke:green\n",
           { "fill=\"#f96\"", "stroke=\"#333\"", "stroke-width=\"4\"", "fill=\"rgb(1, 2, 3)\"", "fill=\"#bbf\"", "stroke-dasharray=\"5 5\"",
             "fill=\"#fff\">C<", "stroke=\"green\"" } },
+        { "invisible nodes, a visible link", "flowchart TD\n A --> B\n classDef default fill:none,stroke:none,color:none\n", { "<polygon" } },
         { "subgraph style", "flowchart TD\n subgraph S [Styled]\n A\n end\n style S fill:#eee,stroke:#999\n", { "fill=\"#eee\"" } },
         { "self loop", "flowchart TD\n A --> A\n A -->|again| A\n", { ">again<" } },
         { "an edge to a subgraph and out of it", "flowchart TD\n subgraph S\n x --> y\n end\n a --> S\n S --> b\n y --> b\n a --> x\n", { ">S<" } },
@@ -246,6 +247,8 @@ std::vector<std::pair<const char*, std::string>> RefusedFlowcharts() {
         { "a source past 128 KiB", "flowchart TD\n A --> B\n%%" + std::string(128 << 10, 'x') + "\n" },
         { "unfinished front matter", "---\ntitle: x\nflowchart TD\n A --> B\n" },
         { "a bad style statement", "flowchart TD\n A\n style\n" },
+        { "nothing visible", "flowchart TD\n A\n style A fill:none,stroke:none,color:none\n" },
+        { "nothing visible by class", "flowchart TD\n A & B ~~~ C\n classDef default fill:transparent,stroke-width:0,color:rgba(0,0,0,0)\n" },
     };
 }
 
@@ -637,6 +640,12 @@ bool CheckBounds() {
     for (int k = 0; k < 333; k++) source += " & B";
     source += "\n";
     if (!Bounded("Mermaid: 100,000 edges between two nodes", 2.0, 64, [&]() { return !Draw(source, svg); })) return false;
+    source = "flowchart LR\n A0";
+    for (int k = 1; k < 40; k++) source += " & A" + std::to_string(k);
+    source += " -->|" + std::string(2000, 'x') + "| B0";
+    for (int k = 1; k < 40; k++) source += " & B" + std::to_string(k);
+    source += "\n";
+    if (!Bounded("Mermaid: a 2,000-byte label on 1,600 links", 5.0, 256, [&]() { return !Draw(source, svg); })) return false;
     source = "flowchart TD\n";
     for (int k = 0; k < 2000; k++) source += "A-->B\n";
     if (!Bounded("Mermaid: 2,000 edges between two nodes", 5.0, 128, [&]() { return Draw(source, svg) && Converts(svg); })) return false;

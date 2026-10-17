@@ -137,8 +137,8 @@ of `< = > - : , ;`.
 | `activate A` `deactivate A` | Activation boxes, nested, offset 5 px a level. |
 | `Note left of A: text` `Note right of A: text` `Note over A: text` `Note over A,B: text` | Notes. |
 | `loop` `alt`/`else` `opt` `par`/`and` `critical`/`option` `break` + text ... `end` | Frames with their keyword and condition, nested up to 16 deep. |
-| `rect COLOR` ... `end` | A background in that colour (checked as styles are). |
-| `autonumber` | Numbers each message from here. |
+| `rect COLOR` ... `end` | A background in that colour (checked as styles are; no `url()`). |
+| `autonumber` `autonumber 10 5` `autonumber off` | Numbers each message from here (from 1 by 1, or from 10 by 5), or stops. |
 | `title text` | A title above the diagram. |
 
 - Participants are drawn again under the diagram, as Mermaid does.
@@ -170,9 +170,10 @@ wrap what they hold.
 One diagram: 128 KiB of source, labels of 2,048 bytes and 32 lines; flowcharts of 1,000 nodes,
 256 subgraphs nested 12 deep, 2,000 edges (after chains and `&` are expanded), 256 class names,
 20,000 nodes of all levels' layered graphs (items, ports and bends); sequence diagrams of 64
-participants, 2,000 statements and frames nested 16 deep; pies of 64 slices; 4 MiB of SVG.
-Past any limit the diagram is refused and shown as code. A 200-node flowchart lays out in about
-3 ms.
+participants, 2,000 statements and frames nested 16 deep; pies of 64 slices; 768 KiB of text
+drawn (a label repeats on every link `&` makes) and 4 MiB of SVG.
+Past any limit the diagram is refused and shown as code. A 200-node flowchart with 299 edges
+lays out in about 3 ms (2.8 ms at `-Os`, and 1.5 ms more for `ConvertSvg`; 186 KB of SVG).
 
 These keep the SVG within the converter's limits: 1 MiB of text, 64 KiB a text element,
 500,000 elements and 64 MiB of content.

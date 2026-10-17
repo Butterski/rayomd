@@ -32,6 +32,7 @@ const NamedTarget kTargets[] = {
     { "cff", Cff },
     { "image", Image },
     { "svg", Svg },
+    { "mermaid", Mermaid },
 };
 const size_t kTargetCount = sizeof(kTargets) / sizeof(kTargets[0]);
 
