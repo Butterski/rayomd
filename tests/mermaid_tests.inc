@@ -701,14 +701,30 @@ bool CheckBounds() {
     return Bounded("Mermaid: 200 nodes and 299 edges", 1.0, 64, [&]() { return Draw(source, svg) && Converts(svg); });
 }
 
-// A ```mermaid fence in a document: a form in both renderers, also in a quote; with
-// PdfOptions::diagrams off, or of a type RayoMD does not draw, a code block with exactly the bytes
-// of a fence of no language.
+// A ```mermaid fence in a document: the parser's mark (FenceLanguage: the highlighter's languages
+// first, "mermaid" alone as the first word in any case), a form in both renderers, also in a quote,
+// pinned by a digest of the standard renderer's PDF; with PdfOptions::diagrams off, or of a type
+// RayoMD does not draw, a code block with exactly the bytes of a fence of no language.
 bool CheckDiagramBlocks() {
+    using TinyPdf::Internal::FenceLanguage;
+    using TinyPdf::Internal::kMermaidCode;
+    if (FenceLanguage("mermaid") != kMermaidCode || FenceLanguage(" Mermaid {.x}") != kMermaidCode ||
+        FenceLanguage("mermaid title=\"a\"") != kMermaidCode || FenceLanguage("mermaids") != 0 || FenceLanguage("mer") != 0 ||
+        FenceLanguage("python") != TinyPdf::Internal::CodeLanguage("python") || TinyPdf::Internal::CodeLanguage("mermaid") != 0) {
+        std::cerr << "Mermaid fence language mismatch" << std::endl;
+        return false;
+    }
     TinyPdf::PdfOptions off;
     off.diagrams = false;
     const std::string flow = "flowchart LR\n  A[Start] --> B[End]\n```\n";
     const std::string chart = "xychart-beta\n  bar [1, 2]\n```\n";
+    std::string golden;
+    if (!TinyPdf::BuildPdf("# D\n\n```mermaid\n" + flow + "\n```mermaid\nsequenceDiagram\n  A->>B: hi\n```\n\n"
+            "```mermaid\npie\n  \"a\" : 1\n  \"b\" : 2\n```\n", TinyPdf::PdfOptions(), golden).Ok() ||
+        RayoMd::PdfSource::Sha256Hex(golden) != "86d61c5588ec05382f76406fa139349d02ed8f01ed44114a40afcad818461bb4") {
+        std::cerr << "Mermaid PDF golden changed: " << RayoMd::PdfSource::Sha256Hex(golden) << std::endl;
+        return false;
+    }
     for (const std::string prefix : { "", "\xC5\xBC\n\n" }) {   // the standard and the Unicode renderer
         std::string drawn, quoted, disabled, plain, unsupported, plainChart;
         const bool built = TinyPdf::BuildPdf(prefix + "```mermaid\n" + flow, TinyPdf::PdfOptions(), drawn).Ok() &&

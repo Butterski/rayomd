@@ -35,14 +35,14 @@ Line numbers are those of 5.0.0 (`5b78767`); they move, the names do not.
 
 ## Order
 
-| Step | Item | Repo | Size | Release |
-|---:|---|---|---|---|
-| 1 | HTML page breaks, `--page-break-before` | engine | S | 5.1 |
-| 2 | Heading numbering | engine, GUI option | S | 5.1 |
-| 3 | Obsidian dialect | engine, GUI option | M | 5.2 |
-| 4 | GUI typing helpers | GUI | M | GUI 1.2 |
-| 5 | Native Mermaid (flowchart, then sequence, then more) | engine | L | 5.2 / 5.3 |
-| 6 | Backlog from the report | both | — | later |
+| Step | Item | Repo | Size | Release | Status (2026-10-17) |
+|---:|---|---|---|---|---|
+| 1 | HTML page breaks, `--page-break-before` | engine | S | 5.1 | done, d8b28d9 |
+| 2 | Heading numbering | engine, GUI option | S | 5.1 | done, 775ee9c |
+| 3 | Obsidian dialect | engine, GUI option | M | 5.2 | done, 121cd31 |
+| 4 | GUI typing helpers | GUI | M | GUI 1.2 | done; GUI options for 2, 3 and 5 too |
+| 5 | Native Mermaid (flowchart, then sequence, then more) | engine | L | 5.2 / 5.3 | flowchart, sequence, pie done, e884be7 |
+| 6 | Backlog from the report | both | — | later | open |
 
 Small engine items first: they ship value within days and touch the parts Mermaid and the
 dialect build on (HTML block mapping, heading marks, `PdfOptions`). Mermaid is the largest and
