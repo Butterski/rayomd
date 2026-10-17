@@ -164,7 +164,8 @@ bool CheckTagLimits() {
 bool CheckSafeUrls() {
     for (std::string_view unsafe : { "javascript:alert(1)", " JavaScript:x", "java\tscript:x", "\x01javascript:x",
              "VBScript:x", "data:text/html,x", "data:image/png;base64,x", "file:///etc/passwd", "FILE://host/x",
-             "\\\\host\\share", "\\/host", "/\\host", " \\\\host", "C:\\Windows\\x.exe", "c:/x" }) {
+             "\\\\host\\share", "\\/host", "/\\host", " \\\\host", "C:\\Windows\\x.exe", "c:/x", "\x7fjavascript:x",
+             "java\x01script:x", "fi\x1fle:///x", "c\x7f:/x", "C\x02:\\x", "\\\x01\\host", "d\x7f" "ata:text/html,x" }) {
         if (SafeUrl(unsafe)) {
             std::cerr << "unsafe URL allowed: " << unsafe << std::endl;
             return false;

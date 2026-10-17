@@ -231,7 +231,9 @@ Important image/link details:
   `ParseImageAt`) and HTML `<a href>`. A refused one (`javascript:`, `vbscript:`, `data:`,
   `file:`, a drive path, a `\\host` share) keeps its text without an annotation. Bare URLs and
   `<…>` autolinks are `http(s)` or `mailto:` by construction. A new way to make a link must call
-  it too.
+  it too. `SafeUrl` reads the scheme without the control bytes and DEL that `AppendUriLiteral`
+  leaves out of the `/URI`, so what it checks is what a viewer gets (`java&#1;script:` was a
+  `javascript:` link); keep the two in step when either changes.
 - Headings make the PDF outline, and `#anchor` links go to them by GitHub's
   anchor rules (`HeadingTargets`) with explicit destinations; a link to a missing
   anchor is dropped. Renderers note a heading where its first line lands

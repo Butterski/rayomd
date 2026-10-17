@@ -272,7 +272,9 @@ bool CheckLinkSchemes() {
         "[x](javascript:alert(1))", "[x](JaVaScRiPt:alert(1))", "[x](<java\tscript:a>)", "[x](&#106;avascript:a)",
         "[x](vbscript:msgbox)", "[x](data:text/html,a)", "[x](file:///etc/passwd)", "[x](\\\\\\\\host\\\\share)",
         "[x](<\\\\\\\\host\\\\share>)", "[x](C:\\\\Windows\\\\calc.exe)", "[x](<file://host/a b>)", "[![x](a.png)](javascript:a)",
-        "[*x*](javascript:a)",
+        "[*x*](javascript:a)", "[x](&#127;javascript:a)", "[x](java&#1;script:a)", "[x](fi&#31;le:///etc/passwd)",
+        "[x](C&#127;:/Windows/calc.exe)", "[x](\\\\&#1;\\\\host\\\\share)", "<a href=\"&#127;javascript:a\">x</a>",
+        "<a href=\"java&#9;&#1;script:a\">x</a>",
     };
     for (const char* text : unsafe) {
         std::string visible;

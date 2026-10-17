@@ -333,9 +333,15 @@ bool HtmlBlockEnds(std::string_view line, int condition) {
     }
 }
 
+// The bytes a /URI leaves out (AppendUriLiteral in tiny_pdf.cpp): the C0 controls and DEL. The
+// scheme is read without them, so the target checked is the one a viewer gets.
+static bool DroppedFromUri(char c) {
+    return static_cast<unsigned char>(c) < 0x20 || c == 0x7f;
+}
+
 bool SafeUrl(std::string_view url, bool image) {
     size_t index = 0;
-    while (index < url.size() && static_cast<unsigned char>(url[index]) <= 0x20) index++;
+    while (index < url.size() && (url[index] == ' ' || DroppedFromUri(url[index]))) index++;
     // Most targets ("https:", "mailto:", "#top", "page.md") are answered from two bytes: a first
     // byte that starts none of the refused forms below, then one that is no drive letter's ':'
     // and none of the bytes the scheme reading skips.
@@ -343,7 +349,7 @@ bool SafeUrl(std::string_view url, bool image) {
         const char first = Lower(url[index]);
         const char second = url[index + 1];
         if (first != 'j' && first != 'v' && first != 'd' && first != 'f' && first != '\\' && first != '/' &&
-            second != ':' && second != '\t' && second != '\n' && second != '\r') {
+            second != ':' && !DroppedFromUri(second)) {
             return true;
         }
     }
@@ -351,7 +357,7 @@ bool SafeUrl(std::string_view url, bool image) {
     size_t length = 0;
     for (; index < url.size() && length < sizeof(scheme); index++) {
         const char c = url[index];
-        if (c == '\t' || c == '\n' || c == '\r') continue;
+        if (DroppedFromUri(c)) continue;
         scheme[length++] = Lower(c);
     }
     const std::string_view start(scheme, length);
