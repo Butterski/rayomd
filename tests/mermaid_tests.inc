@@ -424,6 +424,8 @@ bool CheckSequenceLayout() {
                                           " C->>C: a long message to itself\n D->>A: back\n Note over B,C: a note wider than the two lanes it covers\n" },
         { "nested frames", "sequenceDiagram\n loop a\n alt b\n critical c\n A->>B: x\n option d\n B->>A: y\n end\n else e\n opt f\n"
                            " A->>A: z\n end\n end\n end\n" },
+        { "a pie", "pie showData title Shares<br>of the year\n \"First<br>quarter\" : 10\n \"Second\" : 20\n \"Third\" : 30\n"
+                   " \"Fourth<br>and<br>last\" : 40\n" },
     };
     for (const auto& [name, source] : cases) {
         if (!CheckInvariants(name, source)) return false;
@@ -602,7 +604,7 @@ bool CheckGoldens() {
           " alt ok\n W-)C: Mail\n else not\n W-xC: Error\n end\n Note right of W: noted\n",
           "bba39899050c1bb4bef7a55f8ea72f89e8093ca6595e8686c32942a0989b4dc4" },
         { "pie showData title Pets\n \"Dogs\" : 386\n \"Cats\" : 85\n \"Rats\" : 15\n",
-          "f2c514cc92464aa7fcbae84f49207a662b35e0ac66396056a43a5a9df1d5bdde" },
+          "a0a79277e30e023c006ce74853d2c733369281b75525b16f92ee21cb12950e71" },
     };
     bool ok = true;
     for (const auto& golden : goldens) {

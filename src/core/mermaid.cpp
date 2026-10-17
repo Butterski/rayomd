@@ -3184,8 +3184,9 @@ bool DrawPie(Canvas& canvas, Cursor cursor, double& width, double& height) {
         if (!SetLabel(slice.legendText, kFontSize, host, slice.legend)) return false;
         legendWidth = std::max(legendWidth, slice.legend.width);
     }
-    const double rowHeight = 22.0;
-    const double legendHeight = rowHeight * static_cast<double>(slices.size());
+    // Legend rows of 22 px, taller for labels of several lines.
+    double legendHeight = 0.0;
+    for (const Slice& slice : slices) legendHeight += std::max(22.0, slice.legend.height + 4.0);
     const double r = kPieRadius;
     const double top = kMargin + (title.text.empty() ? 0.0 : title.height + 10.0);
     const double chartHeight = std::max(2.0 * r, legendHeight);
@@ -3259,13 +3260,15 @@ bool DrawPie(Canvas& canvas, Cursor cursor, double& width, double& height) {
         }
         start += fraction;
     }
+    double rowTop = cy - legendHeight / 2.0;
     for (size_t index = 0; index < slices.size(); index++) {
-        const double rowTop = cy - legendHeight / 2.0 + rowHeight * static_cast<double>(index);
+        const double rowHeight = std::max(22.0, slices[index].legend.height + 4.0);
         Rect(out, legendX, rowTop + 4.0, 14.0, 14.0);
         PaintAttr(out, "fill", SliceColour(pal, index));
         PaintAttr(out, "stroke", pal.line);
         out += " stroke-width=\"0.5\"/>\n";
-        LabelLines(canvas, slices[index].legend, legendX + 20.0, rowTop + (rowHeight - LineHeight(kFontSize)) / 2.0, kStart, pal.text);
+        LabelLines(canvas, slices[index].legend, legendX + 20.0, rowTop + (22.0 - LineHeight(kFontSize)) / 2.0, kStart, pal.text);
+        rowTop += rowHeight;
     }
     return true;
 }
