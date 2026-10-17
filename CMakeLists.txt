@@ -189,6 +189,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/contents.cpp
         src/core/book.cpp
         src/core/svg.cpp
+        src/core/mermaid.cpp
         src/core/cff.cpp
         src/core/tagged.cpp
         src/core/html_blocks.cpp
@@ -238,6 +239,7 @@ set(RAYOMD_CORE_SOURCES
     src/core/contents.cpp
     src/core/book.cpp
     src/core/svg.cpp
+    src/core/mermaid.cpp
     src/core/cff.cpp
     src/core/tagged.cpp
     src/core/math_parser.cpp
