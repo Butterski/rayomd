@@ -1111,17 +1111,18 @@ static bool IsTextLine(const void* infos, size_t line) {
     return (*static_cast<const std::vector<LineInfo>*>(infos))[line].kind == LineKind::Plain;
 }
 
-// Whether the table at lines[start] (its header, separator and rows) has a "[^" in a line,
-// so that a cell may refer to a footnote.
-static RAYOMD_NOINLINE bool TableMayReferToNote(const std::vector<std::string_view>& lines,
-    const std::vector<LineInfo>& infos, const std::vector<unsigned char>& suppressed, size_t start) {
-    for (size_t line = start; line < lines.size(); line++) {
-        if (line >= start + 2 && (infos[line].kind != LineKind::Plain || (!suppressed.empty() && suppressed[line] != 0))) {
-            break;
-        }
-        if (lines[line].find("[^") != std::string_view::npos) return true;
+// Whether a line of a table has a "[^", so that a cell may refer to a footnote.
+static RAYOMD_NOINLINE bool LineMayReferToNote(std::string_view line) {
+    return line.find("[^") != std::string_view::npos;
+}
+
+// FindTableMath for each row of the table at lines[start] once all are read: its header there,
+// its separator on the next line and its data rows on the lines after that.
+static RAYOMD_NOINLINE void FindTableMathAfterRows(const std::vector<std::string_view>& lines, size_t start,
+    std::vector<std::vector<std::string>>& rows, std::vector<TableMathCell>& mathCells) {
+    for (size_t row = 0; row < rows.size(); row++) {
+        FindTableMath(lines[row == 0 ? start : start + 1 + row], row, rows[row], mathCells);
     }
-    return false;
 }
 
 // The lines of a nested level (list items, quotes, footnotes) and their classes, kept by each
@@ -1402,9 +1403,12 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             std::vector<std::vector<std::string>> rows;
             std::vector<TableMathCell> mathCells;
             rows.reserve(8);
-            // A table that may refer to a footnote keeps its cells as Markdown, formulas
-            // included, until all footnotes are known.
-            const bool notesPending = notesPossible && TableMayReferToNote(lines, infos, suppressed, i);
+            // A table that may refer to a footnote, one with a "[^" in a line it takes, keeps its
+            // cells as Markdown, formulas included, until all footnotes are known; its formulas are
+            // then found once its rows are read. (A look for "[^" up to the next block, past the
+            // rows a spent ParseBudget leaves out, made tables in one run of lines quadratic.)
+            const size_t start = i;
+            bool notesPending = notesPossible && (LineMayReferToNote(lines[i]) || LineMayReferToNote(lines[i + 1]));
             // Reference links resolve cell by cell, so a link target cannot split a row.
             auto addRow = [&](std::string_view rowLine, std::vector<std::string> row) {
                 if (!definitions.empty()) {
@@ -1412,7 +1416,8 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                         if (cell.find('[') != std::string::npos) cell = ResolveReferenceLinks(cell, definitions);
                     }
                 }
-                if (!notesPending) FindTableMath(rowLine, rows.size(), row, mathCells);
+                if (!notesPossible) FindTableMath(rowLine, rows.size(), row, mathCells);
+                else if (!notesPending) notesPending = LineMayReferToNote(rowLine);
                 rows.push_back(std::move(row));
             };
             addRow(lines[i], SplitTableCells(lines[i]));
@@ -1436,6 +1441,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 addRow(lines[i], std::move(row));
                 i++;
             }
+            if (notesPossible && !notesPending) FindTableMathAfterRows(lines, start, rows, mathCells);
 
             Block table;
             table.type = BlockType::Table;

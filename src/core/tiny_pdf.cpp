@@ -5726,9 +5726,12 @@ constexpr double kHeadingSizes[] = { 0, 26, 22, 18, 15, 13, 12 };
 // The room a heading keeps under its first line, so that it never ends a page: the space after
 // it, the headings right after it (each with its space before and after and its first line)
 // and two lines of what follows them, unless nothing or a page break does. Anchors draw nothing.
-static double HeadingKeep(const Block& heading, const Block* next, const Block* end, double lineHeight) {
+// The sum stops once it passes `pageH`: then the heading breaks the page (Ensure: y never exceeds
+// pageH - margin, margin > 0) however much more follows, so the result decides the same, and a
+// run of n headings no longer costs n * n steps (200,000 of them took over a minute).
+static double HeadingKeep(const Block& heading, const Block* next, const Block* end, double lineHeight, double pageH) {
     double keep = std::max(1, std::min(6, heading.level)) <= 2 ? 8.0 : 5.0;
-    for (; next != end && (next->type == BlockType::Heading || next->type == BlockType::Anchor); next++) {
+    for (; next != end && keep <= pageH && (next->type == BlockType::Heading || next->type == BlockType::Anchor); next++) {
         if (next->type == BlockType::Anchor) continue;
         const int level = std::max(1, std::min(6, next->level));
         keep += (level <= 2 ? 20.0 : 13.0) + kHeadingSizes[level] * 1.35;
@@ -5883,7 +5886,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         if (mapped) start = { renderer.pageStarts.size() - 1, renderer.y, renderer.content.size() };
         switch (block.type) {
         case BlockType::Heading: {
-            const double keep = HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight);
+            const double keep = HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight, renderer.pageH);
             if (block.align >= 2) renderer.RenderAlignedHeading(block, keep);
             else renderer.RenderHeading(block, keep);
             break;

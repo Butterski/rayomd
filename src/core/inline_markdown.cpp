@@ -1494,15 +1494,21 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
         bytesLeft -= definition.destination.size();
         return true;
     };
-    // First ']' at or after `from`: one search serves every '[' in front of the same bracket.
-    size_t bracketFrom = std::string_view::npos;
-    size_t bracketAt = std::string_view::npos;
-    auto nextCloseBracket = [&](size_t from) {
-        if (from < bracketFrom || (bracketAt != std::string_view::npos && from > bracketAt)) {
-            bracketFrom = from;
-            bracketAt = input.find(']', from);
+    // First ']' at or after `from`: one search serves every '[' in front of the same bracket. One
+    // such cache for the label's ']' and one for the reference's ("[a][b]"), whose searches would
+    // otherwise evict each other: "[[[…][" then text without ']' searched the text once a '['.
+    struct CloseBracket {
+        size_t from = std::string_view::npos;
+        size_t at = std::string_view::npos;
+    };
+    CloseBracket labelBracket;
+    CloseBracket referenceBracket;
+    auto nextCloseBracket = [&input](CloseBracket& cache, size_t from) {
+        if (from < cache.from || (cache.at != std::string_view::npos && from > cache.at)) {
+            cache.from = from;
+            cache.at = input.find(']', from);
         }
-        return bracketAt;
+        return cache.at;
     };
     // "[text](<destination>)", the inline link a resolved reference becomes.
     const auto appendLink = [&](bool image, std::string_view text, const ReferenceDefinition& definition) {
@@ -1538,7 +1544,7 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
             output.push_back(input[i++]);
             continue;
         }
-        size_t close = nextCloseBracket(labelStart + 1);
+        size_t close = nextCloseBracket(labelBracket, labelStart + 1);
         if (close == std::string_view::npos || (close + 1 < input.size() && input[close + 1] == '(')) {
             output.push_back(input[i++]);
             continue;
@@ -1560,7 +1566,7 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
             i = close + 1;
             continue;
         }
-        size_t referenceClose = input.find(']', cursor + 1);
+        size_t referenceClose = nextCloseBracket(referenceBracket, cursor + 1);
         if (referenceClose == std::string_view::npos) {
             output.push_back(input[i++]);
             continue;

@@ -1109,11 +1109,43 @@ bool CheckLongLinkTarget() {
     return ok;
 }
 
+// An SVG gradient filling many shapes: each paint built the shading's dictionary again to look it
+// up (25 KB for 256 stops), charged to no budget; this 1.8 MB SVG of two million shapes of one
+// gradient took 34 s before the converter's limits ended it.
+bool CheckSvgGradientPaints() {
+    using math_markdown_tests::Repeat;
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-svg-gradient";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    std::string svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\"><defs><linearGradient id=\"g\">";
+    for (int i = 0; i < 256; i++) {
+        char stop[80];
+        std::snprintf(stop, sizeof(stop), "<stop offset=\"%.5f\" stop-color=\"#%02x%02x00\"/>", i / 256.0, i, 255 - i);
+        svg += stop;
+    }
+    svg += "</linearGradient><g id=\"a\">" + Repeat("<rect width=\"1\" height=\"1\" fill=\"url(#g)\"/>", 1000) + "</g>";
+    svg += "<g id=\"b\">" + Repeat("<use href=\"#a\"/>", 10) + "</g><g id=\"c\">" + Repeat("<use href=\"#b\"/>", 10) +
+        "</g><g id=\"d\">" + Repeat("<use href=\"#c\"/>", 10) + "</g></defs>" + Repeat("<use href=\"#d\"/>", 2) +
+        Repeat("<g/>", 450000) + "</svg>";
+    if (!WriteFile(root / "g.svg", svg)) {
+        std::cerr << "cannot write the SVG gradient test's file" << std::endl;
+        return false;
+    }
+    TinyPdf::PdfOptions options;
+    options.sourcePath = (root / "doc.md").u8string();
+    const bool ok = parse_limits_tests::Bounded("two million paints of one SVG gradient", 10.0, 512, [&]() {
+        std::string pdf;
+        return TinyPdf::BuildPdf("![g](g.svg)\n", options, pdf).Ok() && ValidPdf(pdf);
+    });
+    fs::remove_all(root);
+    return ok;
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
         CheckImageContainment() && CheckCachePermissions() && CheckThemeFields() && CheckBookFiles() &&
         CheckDecodeBudget() && CheckInvalidUtf8Names() && CheckOverlappingGlyphs() && CheckCffSubsetBound() &&
-        CheckLongLinkTarget();
+        CheckLongLinkTarget() && CheckSvgGradientPaints();
 }
 
 } // namespace hardening_tests

@@ -2839,6 +2839,7 @@ private:
     void ResolveGradient(int index) {
         if (index == gradientNode_) return;   // the gradient resolved last
         gradientNode_ = -1;
+        shadingNode_ = -1;   // gradient_ changes: its shading must be built again
         Gradient& g = gradient_;
         int chain[kMaxGradientHops + 1];
         int count = 0;
@@ -3013,8 +3014,21 @@ private:
     }
 
     // The /Shading entry of the resolved linear gradient: an axial shading over its stops,
-    // padded to 0 and 1, extended at both ends. Returns its number, deduplicated.
+    // padded to 0 and 1, extended at both ends. Returns its number, deduplicated. The entry
+    // depends on gradient_ alone, so its number is kept until ResolveGradient changes gradient_:
+    // rebuilding a dictionary of 256 stops (25 KB) for each of a million shapes of one gradient
+    // took 30 s, uncharged to any budget.
     int ShadingFor(const Gradient& g) {
+        if (gradientNode_ >= 0 && gradientNode_ == shadingNode_) return shadingNumber_;
+        const int number = NewShading(g);
+        if (number >= 0) {
+            shadingNode_ = gradientNode_;
+            shadingNumber_ = number;
+        }
+        return number;
+    }
+
+    int NewShading(const Gradient& g) {
         std::vector<GradientStop> stops;
         stops.reserve(g.stops.size() + 2);
         if (g.stops.front().offset > 0.0) stops.push_back({ 0.0, g.stops.front().rgb, 1.0 });
@@ -3678,6 +3692,8 @@ private:
     std::string dash_;
     Gradient gradient_;
     int gradientNode_ = -1;  // the element gradient_ was resolved from
+    int shadingNode_ = -1;   // the element of the last ShadingFor, and its number
+    int shadingNumber_ = 0;
     std::vector<TextRun> runs_;
     double pendingX_ = NAN, pendingY_ = NAN, pendingDx_ = NAN, pendingDy_ = NAN;
     bool lastSpace_ = true;

@@ -243,7 +243,8 @@ Important image/link details:
   anchor is dropped. Renderers note a heading where its first line lands
   (`MarkHeading`, next to that line's `Ensure`): keep them together when
   changing heading layout. A heading keeps room for what follows it on its page
-  (`HeadingKeep`), and a table's header row repeats after a page break (the row
+  (`HeadingKeep`; its sum over a run of headings stops past the page height, where the page
+  breaks anyway, so a run is linear), and a table's header row repeats after a page break (the row
   loop goes back to row 0): keep link rectangles on the page they are drawn on.
 
 ## Architecture Map
@@ -683,7 +684,8 @@ GitHub CI entry points:
   references copy in (twice the document and 1 MiB; a definition's destination has at most
   `kMaxReferenceDestinationBytes`) and the empty cells that complete short table rows (2^19, as
   in cmark-gfm; a table header has at most `kMaxTableColumns` cells, and a data row is split up
-  to its header's cells only, so a line of pipes makes no more). Past a budget the input
+  to its header's cells only, so a line of pipes makes no more; HTML tables take theirs from the
+  same budget, `TakePaddedCells`, and one past it is read as text). Past a budget the input
   stays text. A new expansion that copies or pads must draw on it. Rewrites of text go into a new
   buffer in one pass (`NormalizeSymbols`), never `std::string::replace` in a loop.
 - Prefer measured changes over plausible micro-optimizations.

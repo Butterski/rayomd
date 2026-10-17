@@ -682,6 +682,9 @@ private:
         // Rows that hold no cell (a <tr> before the first cell, or closed twice) are left out.
         rows.erase(std::remove_if(rows.begin(), rows.end(), [](const std::vector<std::string>& row) { return row.empty(); }),
             rows.end());
+        size_t columns = 0;
+        for (const auto& row : rows) columns = std::max(columns, row.size());
+        if (simple && !rows.empty() && !TakePaddedCells(rows, columns)) simple = false;
         if (!simple || rows.empty()) {
             BlockMapper(state, out, nesting + 1, containers).Map(inner);
             return;
@@ -693,14 +696,26 @@ private:
             paragraphAlign = 2;
             Map(caption);
         }
-        size_t columns = 0;
-        for (const auto& row : rows) columns = std::max(columns, row.size());
         for (auto& row : rows) row.resize(columns);
         aligns.resize(columns, -1);
         Block& table = Append(BlockType::Table);
         table.rows = std::move(rows);
         table.aligns = std::move(aligns);
         table.align = tableAlign != 0 ? tableAlign : state.Align();
+    }
+
+    // Takes the empty cells that complete `rows` to `columns` from the document's ParseBudget, as
+    // a pipe table's short rows do (or from a budget of its own outside one); false, taking none,
+    // when they would pass it, and the table is read as text. Each table may have 1,000 rows of 64
+    // cells, so tables of one cell a row made 250 times their size in empty cells.
+    static bool TakePaddedCells(const std::vector<std::vector<std::string>>& rows, size_t columns) {
+        size_t needed = 0;
+        for (const auto& row : rows) needed += columns - row.size();
+        ParseBudget* const budget = ParseBudget::Current();
+        if (budget == nullptr) return needed <= ParseBudget::kPaddedCells;
+        if (needed > budget->paddedCells) return false;
+        budget->paddedCells -= needed;
+        return true;
     }
 
     HtmlState& state;

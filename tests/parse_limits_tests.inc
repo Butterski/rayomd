@@ -154,14 +154,25 @@ bool CheckReferenceLinks() {
     // of "b", a definition of the quote's own, which the nested parse resolved into 16 GB.
     const std::string nested = "[a]: <" + Repeat("[b]", 2000) + ">\n\n> [b]: <" + std::string(8000, 'z') + ">\n>\n> " +
         Repeat("[a] ", 1000) + "\n";
-    return Bounded("references resolving to references in a quote", 20.0, 192, [&]() {
-        const std::vector<TinyPdf::Internal::Block> parsed = ParseMarkdown(nested);
-        if (parsed.size() != 1 || parsed[0].type != BlockType::Quote) return false;
-        size_t bytes = parsed[0].text.size();
-        for (const TinyPdf::Internal::Block& child : parsed[0].children) bytes += child.text.size();
-        if (bytes == 0 || bytes > 3 * nested.size() + (size_t(1) << 20)) return false;
-        std::string pdf;
-        return Build(nested, pdf);
+    if (!Bounded("references resolving to references in a quote", 20.0, 192, [&]() {
+            const std::vector<TinyPdf::Internal::Block> parsed = ParseMarkdown(nested);
+            if (parsed.size() != 1 || parsed[0].type != BlockType::Quote) return false;
+            size_t bytes = parsed[0].text.size();
+            for (const TinyPdf::Internal::Block& child : parsed[0].children) bytes += child.text.size();
+            if (bytes == 0 || bytes > 3 * nested.size() + (size_t(1) << 20)) return false;
+            std::string pdf;
+            return Build(nested, pdf);
+        })) {
+        return false;
+    }
+
+    // Each '[' before a "][" searched the rest of the paragraph for the reference's ']': 2^21 of
+    // them before 2 MiB without one took 37 s.
+    const std::string unclosed =
+        "[d]: /u\n\n" + std::string(size_t(1) << 21, '[') + "][" + std::string(size_t(1) << 21, 'x') + "\n";
+    return Bounded("2^21 '[' before a \"][\" and no ']'", 5.0, 128, [&]() {
+        const std::vector<TinyPdf::Internal::Block> parsed = ParseMarkdown(unclosed);
+        return parsed.size() == 1 && parsed[0].type == BlockType::Paragraph;
     });
 }
 
@@ -261,6 +272,23 @@ bool CheckTables() {
     }) && Bounded("a separator of 2^23 cells and a backslash", 10.0, 160, [&]() {
         const std::vector<Block> parsed = ParseMarkdown(separator);
         return parsed.size() == 1 && parsed[0].type == BlockType::Paragraph;
+    }) && Bounded("70,000 tables in one run of lines, a footnote possible", 10.0, 256, [&]() {
+        // With a "]:" in the document, each table looked for "[^" up to the next block, past the
+        // rows a spent budget leaves out: 70,000 tables in one run of lines (1 MB) took 27 s.
+        const std::string run = "[d]: /u\n\n" + Repeat("| a ", 1000) + "|\n|---|\n" + Repeat("x\n", 600) + "\n" +
+            Repeat("a|b\n---|---\nc\n", 70000);
+        TinyPdf::Internal::Footnotes notes;
+        size_t tables = 0;
+        for (const Block& block : ParseMarkdown(run, &notes)) tables += block.type == BlockType::Table;
+        return tables > 60000;
+    }) && Bounded("200 HTML tables of 999 one-cell rows", 10.0, 256, [&]() {
+        // HTML tables complete their short rows from the same budget: 200 tables of one row of
+        // 64 cells and 999 of one (1.6 MB) were 12.6 million empty cells, 1.2 GB. Those past it
+        // are read as text.
+        const std::string html = Repeat("<table><tr>" + Repeat("<td>", 64) + Repeat("<tr><td>", 999) + "</table>\n\n", 200);
+        size_t tables = 0;
+        for (const Block& block : ParseMarkdown(html)) tables += block.type == BlockType::Table;
+        return tables == (size_t(1) << 19) / (999 * 63);
     });
 }
 
@@ -347,9 +375,27 @@ bool CheckLinkSpans() {
     });
 }
 
+// A heading keeps room for the headings right after it (HeadingKeep), and summed the whole run
+// for each: 100,000 headings in a row (400 KB) took 25 s. The sum now stops past the page's
+// height, where it decides nothing more: runs longer than a page keep their bytes.
+bool CheckHeadingRun() {
+    using math_markdown_tests::Repeat;
+    const std::string mixed = Repeat("# One\n", 30) + Repeat("## Two\n###### Six\n", 25) + "text\n\n" +
+        Repeat("### Three\n\n<a id=\"x\"></a>\n\n", 40) + "---\n" + Repeat("#### Four\n", 70);
+    if (!SameBytes("runs of headings", mixed, 73373, "a0e2ff7cbe02ec1cb98aec1f7fe18d85ec1171e66a2867e37e2e64f32e07f9b5")) {
+        return false;
+    }
+    const std::string run = Repeat("# a\n", 100000);
+    return Bounded("100,000 headings in a row", 10.0, 1024, [&]() {
+        std::string pdf;
+        return Build(run, pdf);
+    });
+}
+
 } // namespace parse_limits_tests
 
 bool CheckParseLimits() {
     return parse_limits_tests::CheckStatusSymbols() && parse_limits_tests::CheckReferenceLinks() &&
-        parse_limits_tests::CheckTables() && parse_limits_tests::CheckLinkSchemes() && parse_limits_tests::CheckLinkSpans();
+        parse_limits_tests::CheckTables() && parse_limits_tests::CheckLinkSchemes() && parse_limits_tests::CheckLinkSpans() &&
+        parse_limits_tests::CheckHeadingRun();
 }
