@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "markdown_parser.h"
+#include "dialect.h"
 #include "footnotes.h"
 #include "highlight.h"
 #include "html.h"
@@ -700,6 +701,13 @@ static RAYOMD_NOINLINE uint8_t TakeAlertMarker(std::string& quote) {
         return (uint8_t)(kind + 1);
     }
     return 0;
+}
+
+// The marker on the first line of a quote: a GitHub alert at the top level, or in Obsidian's
+// dialect a callout at any level that parses its content, whose title goes into `title`.
+static RAYOMD_NOINLINE uint8_t TakeQuoteMarker(std::string& quote, int depth, std::string& title) {
+    if (ObsidianDialect()) return depth < 8 ? TakeCallout(quote, title) : 0;
+    return depth == 0 ? TakeAlertMarker(quote) : 0;
 }
 
 static std::string_view StripLeadingColumns(std::string_view line, int columnsToRemove) {
@@ -1614,7 +1622,8 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 break;
             }
             // A GitHub alert names itself before references resolve: its marker looks like one.
-            const uint8_t alert = depth == 0 ? TakeAlertMarker(quoteMarkdown) : 0;
+            std::string calloutTitle;
+            const uint8_t alert = TakeQuoteMarker(quoteMarkdown, depth, calloutTitle);
             if (!definitions.empty() && quoteMarkdown.find('[') != std::string::npos) quoteMarkdown = ResolveReferenceLinks(quoteMarkdown, definitions);
             Block& quote = AppendBlock(blocks, BlockType::Quote);
             quote.alert = alert;
@@ -1628,6 +1637,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 quote.text = StripInlineMarkdown(quoteMarkdown);
             }
             if (quote.children.empty()) quote.text = StripInlineMarkdown(quoteMarkdown);
+            if (!calloutTitle.empty()) quote.text = std::move(calloutTitle);
             continue;
         }
 
@@ -1664,7 +1674,15 @@ std::vector<Block> ParseMarkdownLevel(const std::string& markdown, int depth, Fo
     return ParseMarkdownImpl(markdown, depth, notes);
 }
 
+// Obsidian's dialect: its syntax turned into RayoMD's first (ObsidianToCommonMark), out of line.
+static RAYOMD_NOINLINE std::vector<Block> ParseObsidian(const std::string& markdown, Footnotes* footnotes) {
+    const std::string converted = ObsidianToCommonMark(markdown);
+    const ParseBudget budget(converted.size());
+    return footnotes == nullptr ? ParseMarkdownImpl(converted, 0, nullptr) : ParseWithFootnotes(converted, *footnotes);
+}
+
 std::vector<Block> ParseMarkdown(const std::string& markdown, Footnotes* footnotes) {
+    if (ObsidianDialect()) return ParseObsidian(markdown, footnotes);
     const ParseBudget budget(markdown.size());
     return footnotes == nullptr ? ParseMarkdownImpl(markdown, 0, nullptr) : ParseWithFootnotes(markdown, *footnotes);
 }

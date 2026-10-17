@@ -297,6 +297,26 @@ Press <kbd>Ctrl</kbd>+<kbd>C</kbd>, then <mark>paste</mark>: H<sub>2</sub>O, E =
 <p align="right"><a href="#top">back to top</a></p>
 ```
 
+### Obsidian notes
+
+`--dialect=obsidian` reads a note as Obsidian shows it: callouts of any of Obsidian's types,
+with their own titles, folded or not (both print unfolded) and nested; `==highlights==`;
+`%%comments%%`, also over several lines, left out; `[[wiki links]]` to a note (`note.md`), a
+heading in it or in this note; and `![[embedded images]]`, sized with `|300` or `|300x200` when
+the image has a line of its own. In a book (`--book`), a wiki link finds its note by name
+wherever it is. Embedded notes are linked, not copied in.
+
+```markdown
+> [!tip]- Before you start
+> Read [[Setup#Requirements|the requirements]] and ==back up== the vault. %%draft%%
+
+![[diagram.png|300]]
+```
+
+```sh
+rayomd --export note.md note.pdf --dialect=obsidian
+```
+
 ### Code highlighting
 
 Fenced code in one of 29 languages is coloured as GitHub's light theme colours it: shell,

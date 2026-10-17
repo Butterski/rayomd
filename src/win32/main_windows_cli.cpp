@@ -63,6 +63,7 @@ struct WinExportOptions {
     int tocDepth = 3;
     int pageBreakBeforeLevel = 0;
     int numberHeadings = 0;
+    TinyPdf::MarkdownDialect dialect = TinyPdf::MarkdownDialect::GitHub;
     TinyPdf::PdfTheme theme;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
@@ -285,6 +286,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const s
     options.tocDepth = exportOptions.tocDepth;
     options.pageBreakBeforeLevel = exportOptions.pageBreakBeforeLevel;
     options.numberHeadings = exportOptions.numberHeadings;
+    options.dialect = exportOptions.dialect;
     options.theme = exportOptions.theme;
     return options;
 }
@@ -369,6 +371,13 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
                 return false;
             }
             options.numberHeadings = depth[0] - L'0';
+        } else if (lstrcmpiW(argv[i], L"--dialect=github") == 0) {
+            options.dialect = TinyPdf::MarkdownDialect::GitHub;
+        } else if (lstrcmpiW(argv[i], L"--dialect=obsidian") == 0) {
+            options.dialect = TinyPdf::MarkdownDialect::Obsidian;
+        } else if (_wcsnicmp(argv[i], L"--dialect=", 10) == 0) {
+            error = L"--dialect must be github or obsidian";
+            return false;
         } else if (_wcsnicmp(argv[i], L"--theme=", 8) == 0) {
             const std::wstring themePath = argv[i] + 8;
             const size_t slash = themePath.find_last_of(L"\\/");
@@ -1037,7 +1046,9 @@ void PrintUsage() {
         "  blocks in one colour; by default fenced code in a language GitHub knows is coloured), --toc\n"
         "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
         "  --toc-depth=N (heading levels it lists, 1-6; default 3), --number-headings[=N] (1, 1.1, 1.1.1\n"
-        "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks).\n"
+        "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks),\n"
+        "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]] and\n"
+        "  ![[images]]; default github).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4),\n"
         "  --page-break-before=hN (a new page before each heading of level 1 to N; h1 for chapters).\n"

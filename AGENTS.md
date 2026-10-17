@@ -98,6 +98,17 @@ of numbers by the heading's text address, never written into `Block::text`); the
 a numbered heading through `RenderAlignedHeading` with the number before the text, its mark
 keeping the text alone so anchors and titles do not change, the table's entries carry the number
 (`NumberContents`) and the bookmarks a numbered copy of the marks (`NumberedHeadings`).
+Obsidian's Markdown (`--dialect=obsidian`, `PdfOptions::dialect`; `dialect.cpp`, built at `-Os`):
+`BuildPdf` and `BuildBookPdf` keep the dialect for their thread (`DialectScope`), and
+`ParseMarkdown` then turns Obsidian's syntax into RayoMD's before it parses
+(`ObsidianToCommonMark`: one pass, every line kept where it was for the source map, fences,
+code spans, formulas and the front matter left alone; each opener's search is cached per line, so
+text of unclosed openers stays linear). Highlights become `<mark>`, comments go, wiki links become
+links to `note.md#heading` and so pass `Html::SafeUrl` as any Markdown link, embeds Markdown images
+or a sized `<img>`. Callouts are the parser's (`TakeCallout`): `Block::alert` 1 to 7 picks the bar
+colour, `Block::text` holds the title, which the renderers draw (`RenderCallout`); GitHub alerts
+keep an empty `text`. In a book `BookTargets::FileByName` resolves a link by the note's name. The
+GitHub dialect never runs any of it: its bytes stay as they are.
 Books (`--book`, `BuildBookPdf`) make one PDF of the files a SUMMARY.md lists (mdBook,
 GitBook), of a folder, or of the files given. Each file is parsed on its own (its link
 definitions, footnotes and heading anchors are its own) and begins on a new page, so the
@@ -304,9 +315,14 @@ Important image/link details:
 
 - `src/core/contents.h` and `src/core/contents.cpp`
   The table of contents: turning the marker paragraph into a `BlockType::Contents` block
-  (or inserting one for `--toc`) and listing the headings it shows, also a book's. Built
-  at `-Os`; the marker scan runs for every document, so it looks at a block's text length
-  first.
+  (or inserting one for `--toc`) and listing the headings it shows, also a book's, and the
+  numbers of `--number-headings`. Built at `-Os`; the marker scan runs for every document, so
+  it looks at a block's text length first.
+
+- `src/core/dialect.h` and `src/core/dialect.cpp`
+  Obsidian's dialect: the thread's dialect (`DialectScope`), its syntax turned into RayoMD's
+  before the parse (`ObsidianToCommonMark`) and its callouts (`TakeCallout`). Built at `-Os`;
+  checked by `tests/dialect_tests.inc`.
 
 - `src/core/book.h` and `src/core/book.cpp`
   Books: reading `--book`'s inputs for both command lines (SUMMARY.md as mdBook and
@@ -515,7 +531,8 @@ Important image/link details:
   (`CheckParseLimits`) and the golden digests of what they must leave alone, and
   `tests/hardening_tests.inc` those of hostile and abandoned builds (cancellation, files that
   are no regular files, fonts changed after loading, image containment, cache permissions, the
-  decode budget and the SVG `data:` image cache).
+  decode budget and the SVG `data:` image cache); `tests/dialect_tests.inc` checks Obsidian's
+  dialect.
 
 - `tests/fuzz/`
   libFuzzer targets of the engine's untrusted-input entry points (`fuzz_targets.h`): Markdown

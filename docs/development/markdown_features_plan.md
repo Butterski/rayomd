@@ -86,8 +86,8 @@ Support*.
 **Do.** `--number-headings[=DEPTH]` (`PdfOptions::numberHeadings`, depth 1-6, default 3).
 - Numbers `1`, `1.1`, `1.1.1` by level, from the top level present; a document whose only
   level-1 heading comes first (the title, as the TOC already treats it,
-  `contents.cpp` `HeadingCensus`) is numbered from level 2. A skipped level counts as 1
-  (decide and document; check Pandoc's `-N` output for the same case first).
+  `contents.cpp` `HeadingCensus`) is numbered from level 2. A skipped level shows 0
+  (`1.0.1`), as LaTeX numbers sections. *(Done in 5.1.)*
 - `block.text` stays unnumbered, so anchors keep GitHub's slugs and `#links` keep working. The
   prefix lives in a side table built once after `PlaceContents` (cold), keyed by the heading's
   text address like the TOC match. It is painted before the text (`RenderHeading`,
@@ -123,17 +123,22 @@ thread-local scope, as `ParseBudget` already passes per-parse state.
    byte); the title is kept in the quote block's own text, which quotes leave empty (check
    while implementing, `sizeof(Block) <= 136` must hold).
 2. **Highlights** `==text==` as `kDecorMark`. Only under the dialect: `=` is not in
-   `kByteInlineSyntax`, and adding it for every document would slow the fast path. The dialect
-   uses a second classification table.
+   `kByteInlineSyntax`, and adding it for every document would slow the fast path.
 3. **Wiki links.** `[[#Heading]]` to an anchor of the document (`HeadingSlug`); `[[Note]]`,
    `[[Note#Heading]]` and `[[Note|alias]]` in a book through a name index of its files
-   (basename without `.md`, as Obsidian resolves them) added to `BookTargets::FileOfLink`; a
-   target that resolves nowhere keeps its text, shown as the alias or the note name, without a
-   link. `[[a\|b]]` in tables as in Obsidian.
+   (basename without `.md`, as Obsidian resolves them) added to `BookTargets::FileOfLink`.
+   `[[a\|b]]` in tables as in Obsidian.
 4. **Embeds.** `![[image.png]]` and `![[image.png|300]]` (width) through the image path and
    `ApplySizeHints`, under the local-image policy. Note embeds `![[Note]]` (transclusion) come
    later, confined to the book's folder like chapters.
 5. **Comments** `%%...%%`, inline and as blocks, are left out of the PDF.
+
+*Done in 5.1, differently from the above in three points:* highlights, comments, wiki links and
+embeds are rewritten into Markdown and HTML before the parse (`dialect.cpp`
+`ObsidianToCommonMark`, line for line), so the inline parser has no second table and a wiki link
+passes `Html::SafeUrl` as any link; a wiki link that resolves to no file of a book is a link to
+`note.md`, as a Markdown link to the note would be, instead of plain text; and a sized embed is an
+HTML `<img>`, so only one with a line of its own is sized.
 
 **Later, same gate family.** MkDocs `!!!` and Docusaurus `:::` admonitions and Markdown
 definition lists (backlog), as `--dialect=mkdocs` and an extended set.

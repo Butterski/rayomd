@@ -128,6 +128,11 @@ struct SourceBlock {
     float bottom = 0;        // on `endPage`; the next block starts there
 };
 
+// The Markdown a document is written in: GitHub's (CommonMark and its extensions), or Obsidian's,
+// which adds callouts with titles and their types, ==highlights==, %%comments%%, [[wiki links]] and
+// ![[embedded images]].
+enum class MarkdownDialect : uint8_t { GitHub, Obsidian };
+
 struct PdfOptions {
     PdfStyle style = PdfStyle::Elegant;
     PdfMargin margin = PdfMargin::Normal();
@@ -173,6 +178,7 @@ struct PdfOptions {
     // level-1 heading, first) has none, and `#anchor` links keep going by the heading's own text.
     // 0 for none.
     int numberHeadings = 0;
+    MarkdownDialect dialect = MarkdownDialect::GitHub;
     PdfTheme theme;
     // Set to true by another thread to abandon a build no longer wanted: BuildPdf (and
     // BuildBookPdf) then return soon after with BuildError::Cancelled and no PDF. Checked between

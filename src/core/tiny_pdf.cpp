@@ -17,6 +17,7 @@
 #include "image_encoder.h"
 #include "inflate.h"
 #include "contents.h"
+#include "dialect.h"
 #include "markdown_parser.h"
 #include "highlight.h"
 #include "math_layout.h"
@@ -6112,6 +6113,21 @@ private:
                 if (!files[file].path.empty() && files[file].path == key) return file;
             }
         }
+        return Internal::ObsidianDialect() ? FileByName(PathToUtf8(PathFromUtf8(path).lexically_normal())) : kNone;
+    }
+
+    // In Obsidian's dialect a wiki link names a note by its name, or the end of its path, wherever
+    // in the book it is: the first file whose path ends in `name`, in any case.
+    RAYOMD_COLD size_t FileByName(std::string_view name) const {
+        for (size_t file = 0; file < files.size(); file++) {
+            const std::string& path = files[file].path;
+            if (name.empty() || path.size() < name.size()) continue;
+            const size_t at = path.size() - name.size();
+            if (at > 0 && path[at - 1] != '/' && path[at - 1] != '\\') continue;
+            size_t index = 0;
+            while (index < name.size() && std::tolower((unsigned char)path[at + index]) == std::tolower((unsigned char)name[index])) index++;
+            if (index == name.size()) return file;
+        }
         return kNone;
     }
 
@@ -6125,10 +6141,17 @@ private:
 };
 
 // The bar beside quoted text, by Block::alert: a plain quote's, then those of the GitHub alerts
-// in GitHub's colours, whose titles follow. Arrays, not pointers: no relocations.
+// in GitHub's colours, whose titles follow, and the two more colours of Obsidian's callouts (tip,
+// quote). Arrays, not pointers: no relocations.
 constexpr char kQuoteBars[][15] = { "0.45 0.62 0.72", "0.04 0.41 0.85", "0.10 0.50 0.22", "0.51 0.31 0.87",
-    "0.60 0.40 0.00", "0.82 0.14 0.18" };
-constexpr char kAlertTitles[][10] = { "", "Note", "Tip", "Important", "Warning", "Caution" };
+    "0.60 0.40 0.00", "0.82 0.14 0.18", "0.00 0.58 0.62", "0.50 0.50 0.50" };
+constexpr char kAlertTitles[][10] = { "", "Note", "Tip", "Important", "Warning", "Caution", "Tip", "Quote" };
+
+// An Obsidian callout (its title in Block::text) has content beyond its title.
+static bool CalloutHasBody(const Block& block) {
+    return !block.children.empty() &&
+        (block.children.size() > 1 || block.children[0].type != BlockType::Paragraph || !block.children[0].text.empty());
+}
 
 // The colours a theme can change, as PDF colour operands: the style's own where the theme sets
 // none. Built for one export, which the renderer holding its strings must not outlive.
@@ -8255,6 +8278,11 @@ private:
     RAYOMD_COLD void RenderAlert(const Block& block) {
         quoteBar = kQuoteBars[block.alert];
         Ensure(lineHeight * 2.0 + 2.0);
+        if (!block.text.empty()) {
+            RenderCallout(block);
+            quoteBar = plainQuoteBar;
+            return;
+        }
         QuoteStrip(lineHeight + 3.0);
         const std::string_view title = kAlertTitles[block.alert];
         const int tagged = TagBegin(Internal::StructType::P);
@@ -8264,6 +8292,21 @@ private:
         if (block.children.empty()) RenderQuote(block.text);
         else RenderQuoteChildren(block.children);
         quoteBar = plainQuoteBar;
+    }
+
+    // An Obsidian callout: its own title, wrapped, as an alert's.
+    RAYOMD_COLD void RenderCallout(const Block& block) {
+        const double width = pageW - margin * 2.0 - 22.0;
+        const int tagged = TagBegin(Internal::StructType::P);
+        for (const std::wstring& line : WrapText(SpanFont(true, false), Utf8ToWide(block.text), width, bodySize)) {
+            Ensure(lineHeight + 2.0);
+            QuoteStrip(lineHeight + 3.0);
+            PaintSpanText(margin + 14.0, y - bodySize, bodySize, line, quoteBar, true, false, false);
+            y -= lineHeight;
+        }
+        TagEnd(tagged);
+        if (CalloutHasBody(block)) RenderQuoteChildren(block.children);
+        else y -= 7.0;   // the gap below a quote's last paragraph
     }
 
     void RenderQuoteChildren(const std::vector<Block>& children) {
@@ -11305,12 +11348,31 @@ private:
     RAYOMD_COLD void RenderAlert(const Block& block) {
         quoteBar = kQuoteBars[block.alert];
         Ensure(lineHeight * 2.0 + 2.0);
+        if (!block.text.empty()) {
+            RenderCallout(block);
+            quoteBar = plainQuoteBar;
+            return;
+        }
         QuoteStrip(lineHeight + 3.0);
         Text(margin + 14.0, y - bodySize, bodySize, kAlertTitles[block.alert], "F2", quoteBar);
         y -= lineHeight;
         if (block.children.empty()) RenderQuote(block.text);
         else RenderQuoteChildren(block.children);
         quoteBar = plainQuoteBar;
+    }
+
+    // An Obsidian callout: its own title, wrapped, as an alert's.
+    RAYOMD_COLD void RenderCallout(const Block& block) {
+        AsciiLines lines;
+        WrapAsciiTextCold(block.text, pageW - margin * 2.0 - 22.0, bodySize, StandardTextFont::Bold, lines);
+        for (size_t i = 0; i < lines.Count(); i++) {
+            Ensure(lineHeight + 2.0);
+            QuoteStrip(lineHeight + 3.0);
+            Text(margin + 14.0, y - bodySize, bodySize, lines.Text(i), "F2", quoteBar);
+            y -= lineHeight;
+        }
+        if (CalloutHasBody(block)) RenderQuoteChildren(block.children);
+        else y -= 7.0;   // the gap below a quote's last paragraph
     }
 
     void RenderQuoteChildren(const std::vector<Block>& children) {
@@ -13163,6 +13225,7 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
     }
     g_lastError = 0;
     const CancelScope cancelScope(options.cancel);
+    const Internal::DialectScope dialectScope(options.dialect);
     uint32_t missingCharacters = 0;
     BuildResult stats;
     bool built = !BuildCancelled() && BuildDocument(markdown, options, pdfBytes, stats, missingCharacters, nullptr);
@@ -13186,6 +13249,7 @@ BuildResult BuildBookPdf(const Book& book, const PdfOptions& options, std::strin
     const auto profileBefore = RayoMd::Profiling::Capture();
     g_lastError = 0;
     const CancelScope cancelScope(options.cancel);
+    const Internal::DialectScope dialectScope(options.dialect);
     PdfOptions bookOptions = options;
     bookOptions.sourceMap = nullptr;
     bookOptions.embedSource = false;

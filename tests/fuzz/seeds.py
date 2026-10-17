@@ -488,6 +488,42 @@ break.
 <a id="anchor"></a>
 [to anchor](#anchor)
 """,
+    # Ends in "Z" (0x5A): Obsidian's dialect, heading numbers 3 deep, a page before each h2 (fuzz_public.cpp).
+    "obsidian.md": """---
+title: Vault
+---
+
+# Note
+
+## Part ==one==
+
+> [!tip]- A *custom* title
+> Text with [[Other#Part|alias]], [[#Part one]], [[#^block]] and ==mark %%hidden%%==.
+> > [!bug]
+> > Nested.
+
+> [!quote] Title only
+
+%%
+A comment over lines with [[links]]
+%%
+
+![[rgba.png|40]]
+
+Inline ![[gray.jpg|20x10]] and ![[Other]] and `[[code]]` and $a==b$.
+
+| A | B |
+|---|---|
+| [[x\\|y]] | ==z== |
+
+```
+[[fenced]] ==text==
+```
+
+[[_TOC_]]
+
+%%unclosed
+Z""",
 }
 
 OPTION_PREFIXES = [b"\x01\x00", b"\x00\x01", b"\x87\x10", b"\x25\x22", b"\x40\x04", b"\x13\x08", b"\xf2\x51", b"\x00\xc3"]
