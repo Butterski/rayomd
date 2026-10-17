@@ -348,9 +348,83 @@ bool CheckHtmlRendering() {
     return true;
 }
 
+// The page breaks people write for printed HTML, as PageBreak blocks: CSS 2 and CSS
+// Fragmentation declarations on block elements (before, after, `!important`, any case), the
+// classes md-to-pdf and others use, on headings and rules too, at an element's close, in a quote;
+// and what is none (`avoid`, a span, a style of something else). --page-break-before puts one
+// before each heading of its levels and the anchors in front of it, in both renderers.
+bool CheckHtmlPageBreaks() {
+    using TinyPdf::Internal::Block;
+    using TinyPdf::Internal::BlockType;
+    using TinyPdf::Internal::ParseMarkdown;
+    const auto types = [](const std::vector<Block>& blocks) {
+        std::string out;
+        for (const Block& block : blocks) {
+            switch (block.type) {
+            case BlockType::PageBreak: out += 'B'; break;
+            case BlockType::Paragraph: out += 'P'; break;
+            case BlockType::Heading: out += 'H'; break;
+            case BlockType::Rule: out += 'R'; break;
+            case BlockType::Quote: out += 'Q'; break;
+            case BlockType::Anchor: out += 'A'; break;
+            default: out += '?'; break;
+            }
+        }
+        return out;
+    };
+    const std::pair<const char*, const char*> cases[] = {
+        { "a\n\n<div style=\"page-break-after: always;\"></div>\n\nb\n", "PBP" },
+        { "a\n\n<div style=\"page-break-before:always\"></div>\n\nb\n", "PBP" },
+        { "a\n\n<DIV STYLE=\"Break-After: Page !important\"></DIV>\n\nb\n", "PBP" },
+        { "a\n\n<div class=\"note page-break\"></div>\n\nb\n", "PBP" },
+        { "a\n\n<p style=\"break-before: page\">b</p>\n", "PBP" },
+        { "<h2 style=\"page-break-before: always\" id=\"x\">T</h2>\n", "BAH" },
+        { "<h2 style=\"page-break-after: always\">T</h2>\n\nb\n", "HBP" },
+        { "a\n\n<hr style=\"page-break-after: always\">\n\nb\n", "PRBP" },
+        { "a\n\n<div style=\"page-break-after: always\">\n\nb\n\n</div>\n\nc\n", "PPBP" },
+        { "a\n\n<div style=\"page-break-after: avoid\"></div>\n\nb\n", "PP" },
+        { "a\n\n<div style=\"color: red; break-after: column\">b</div>\n", "PP" },
+        { "a <span style=\"page-break-after: always\">b</span>\n", "P" },
+    };
+    for (const auto& [text, expected] : cases) {
+        const std::string got = types(ParseMarkdown(text));
+        if (got != expected) {
+            std::cerr << "HTML page break: " << text << " gave " << got << ", not " << expected << std::endl;
+            return false;
+        }
+    }
+    const std::vector<Block> quoted = ParseMarkdown("> a\n>\n> <div style=\"page-break-after: always\"></div>\n>\n> b\n");
+    if (quoted.size() != 1 || types(quoted[0].children) != "PBP") {
+        std::cerr << "HTML page break in a quote" << std::endl;
+        return false;
+    }
+    std::vector<Block> headings = ParseMarkdown("# A\n\ntext\n\n<a id=\"x\"></a>\n\n# B\n\n## C\n");
+    TinyPdf::Internal::BreakBeforeHeadings(headings, 1);
+    std::vector<Block> second = ParseMarkdown("# A\n\ntext\n\n<a id=\"x\"></a>\n\n# B\n\n## C\n");
+    TinyPdf::Internal::BreakBeforeHeadings(second, 2);
+    if (types(headings) != "BHPBAHH" || types(second) != "BHPBAHBH") {
+        std::cerr << "page breaks before headings: " << types(headings) << " " << types(second) << std::endl;
+        return false;
+    }
+    TinyPdf::PdfOptions options;
+    options.pageBreakBeforeLevel = 1;
+    for (const char* prefix : { "", "\xC5\xBC " }) {   // the standard and the Unicode renderer
+        const std::string document = std::string("# ") + prefix + "A\n\nx\n\n<div class=\"page-break\"></div>\n\ny\n\n# B\n\n# C\n";
+        std::string plain, broken;
+        TinyPdf::PdfOptions none;
+        if (!TinyPdf::BuildPdf(document, none, plain).Ok() || !TinyPdf::BuildPdf(document, options, broken).Ok() ||
+            CountOccurrences(plain, "/Type /Page ") != 2 || CountOccurrences(broken, "/Type /Page ") != 4) {
+            std::cerr << "page breaks in the PDF: " << CountOccurrences(plain, "/Type /Page ") << " "
+                      << CountOccurrences(broken, "/Type /Page ") << " pages" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool CheckHtmlEngine() {
     return CheckTagNames() && CheckRawHtml() && CheckHtmlBlockConditions() && CheckTagLimits() && CheckSafeUrls() &&
-        CheckInlineHtml() && CheckHtmlBlocks() && CheckHtmlRendering();
+        CheckInlineHtml() && CheckHtmlBlocks() && CheckHtmlRendering() && CheckHtmlPageBreaks();
 }
 
 } // namespace html_tests

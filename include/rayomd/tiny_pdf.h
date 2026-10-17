@@ -165,6 +165,9 @@ struct PdfOptions {
     bool toc = false;
     // The heading levels the table lists, from its top one: 1 to 6.
     int tocDepth = 3;
+    // A new page before every heading of the top level whose level is this or less (1: each
+    // `#` heading, 2: `#` and `##`), unless the page has nothing on it yet; 0 for none.
+    int pageBreakBeforeLevel = 0;
     PdfTheme theme;
     // Set to true by another thread to abandon a build no longer wanted: BuildPdf (and
     // BuildBookPdf) then return soon after with BuildError::Cancelled and no PDF. Checked between

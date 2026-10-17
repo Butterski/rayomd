@@ -279,6 +279,7 @@ struct CliExportOptions {
     bool highlightCode = true;
     bool toc = false;
     int tocDepth = 3;
+    int pageBreakBeforeLevel = 0;
     TinyPdf::PdfTheme theme;
     unsigned workers = 0;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
@@ -314,6 +315,13 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
                 return false;
             }
             options.tocDepth = value[12] - '0';
+        }
+        else if (value.rfind("--page-break-before=", 0) == 0) {
+            if (value.size() != 22 || (value[20] != 'h' && value[20] != 'H') || value[21] < '1' || value[21] > '6') {
+                error = "--page-break-before must be h1 to h6";
+                return false;
+            }
+            options.pageBreakBeforeLevel = value[21] - '0';
         }
         else if (value.rfind("--theme=", 0) == 0) {
             const fs::path themePath(argv[i] + 8);
@@ -428,6 +436,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     pdfOptions.highlightCode = options.highlightCode;
     pdfOptions.toc = options.toc;
     pdfOptions.tocDepth = options.tocDepth;
+    pdfOptions.pageBreakBeforeLevel = options.pageBreakBeforeLevel;
     pdfOptions.theme = options.theme;
     return pdfOptions;
 }
@@ -882,7 +891,8 @@ void PrintUsage() {
         "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
         "  --toc-depth=N (heading levels it lists, 1-6; default 3).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
-        "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4).\n"
+        "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4),\n"
+        "  --page-break-before=hN (a new page before each heading of level 1 to N; h1 for chapters).\n"
         "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
         "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
         "  line per document; - for standard output).\n"

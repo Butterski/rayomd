@@ -98,10 +98,16 @@ void Build(const std::string& markdown, const TinyPdf::PdfOptions& options) {
 
 } // namespace
 
+// Byte 0 and 1 choose the options of OptionsFrom; the options added since are chosen by the
+// document's last byte, which stays in the document, so earlier seeds keep their text. Its bits
+// 0-2: the page-break level (mod 7).
 int BuildPdf(const uint8_t* data, size_t size) {
     if (size < 2) return 0;
     const std::string markdown(reinterpret_cast<const char*>(data) + 2, size - 2);
-    Build(markdown, OptionsFrom(data[0], data[1]));
+    TinyPdf::PdfOptions options = OptionsFrom(data[0], data[1]);
+    const uint8_t last = data[size - 1];
+    options.pageBreakBeforeLevel = (last & 7) % 7;
+    Build(markdown, options);
     return 0;
 }
 

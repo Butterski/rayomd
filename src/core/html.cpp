@@ -129,10 +129,10 @@ size_t SkipSpace(std::string_view text, size_t at, size_t limit) {
 
 // The values RayoMD keeps, in the order of TagToken::seen.
 constexpr std::string_view kAttributeNames[] = { "align", "width", "height", "src", "alt", "href", "start", "id",
-    "name", "open" };
+    "name", "open", "style", "class" };
 constexpr std::string_view TagToken::*kAttributeFields[] = { &TagToken::align, &TagToken::width, &TagToken::height,
     &TagToken::src, &TagToken::alt, &TagToken::href, &TagToken::start, &TagToken::id, &TagToken::name,
-    &TagToken::open };
+    &TagToken::open, &TagToken::style, &TagToken::classes };
 static_assert(std::size(kAttributeNames) == std::size(kAttributeFields), "a field for every name");
 
 // Keeps the value of an attribute RayoMD uses; of a repeated one, the first, as browsers do.

@@ -61,7 +61,12 @@ keep the unchanged renderers), image sizes (`ImageSource::widthHint`/`heightHint
 the fit to the page by `ApplySizeHints`) and rows (`ImageSource::row`, `RenderImageRow`: 6 points
 apart, one bottom per line, the alt texts joined by " · " when one image cannot be shown), and
 `BlockType::Anchor`, a `#id` target where the next block starts (`MarkAnchor`, the renderers'
-`ids`).
+`ids`). Of `style` and `class` only page breaks are read (`PageBreaks` in `html_blocks.cpp`:
+`page-break-*`/`break-*` that force one, the classes `page-break`, `pagebreak`, `new-page`),
+as `BlockType::PageBreak` blocks before an element or at its close (`HtmlState::Open::breakAfter`).
+`PdfOptions::pageBreakBeforeLevel` (`--page-break-before=hN`) inserts PageBreak blocks before the
+top-level headings of those levels and their anchors (`BreakBeforeHeadings`, `contents.cpp`,
+before `PlaceContents`); renderers break only a page with something on it.
 Footnotes as on GitHub (`[^label]` and `[^label]:` definitions, also in quotes and
 list items): numbered by first reference in reading order, drawn as raised link
 numbers (one `MathPool` box each, so they take the cold formula paths and the fast

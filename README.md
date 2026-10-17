@@ -357,10 +357,14 @@ $$
 Styles `elegant` (default), `modern` and `tech`; margins `compact`, `normal`, `wide`,
 `margin=0.75in` or `margin=54pt`; page sizes `a4` (default), `a3`, `a5`, `letter`, `legal`,
 each also `-landscape`, or any `WIDTHxHEIGHT` in `mm`, `cm`, `in` or `pt`; "N / M" page
-numbers.
+numbers. A new page starts at `\pagebreak`, `\newpage` or `<!-- pagebreak -->`, at the HTML
+page breaks other tools are given (`<div style="page-break-after: always"></div>`,
+`break-before: page`, `class="page-break"`), and with `--page-break-before=h1` before each
+chapter heading (`h2`: and each section).
 
 ```sh
 rayomd --export report.md report.pdf modern wide --page-size=letter-landscape --page-numbers
+rayomd --export notes.md notes.pdf --page-break-before=h1
 ```
 
 ### Document metadata
@@ -502,10 +506,10 @@ It does not promise full CommonMark/Pandoc compatibility, complete LaTeX math (p
 macros, automatic numbering), highlighting for every language, citations, filters, templates,
 right-to-left scripts (Arabic and Hebrew are drawn left to right, unshaped), complete SVG
 (radial gradients and patterns are approximated; markers, filters and masks are not drawn), or
-HTML/CSS layout (inline styles, classes and style sheets are not read). Under `--pdfua` a theme's
-cover page is tagged as decoration and an inline formula is text showing its TeX source. Missing
-or unsupported images and malformed math degrade to readable fallbacks instead of failing the
-export. The complete matrix is in
+HTML/CSS layout (inline styles, classes and style sheets are read only for page breaks). Under
+`--pdfua` a theme's cover page is tagged as decoration and an inline formula is text showing its
+TeX source. Missing or unsupported images and malformed math degrade to readable fallbacks
+instead of failing the export. The complete matrix is in
 [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support).
 
 ## Documentation

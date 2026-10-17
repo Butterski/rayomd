@@ -152,6 +152,25 @@ bool BeginsWithTitle(const std::vector<Block>& blocks) {
     return false;
 }
 
+void BreakBeforeHeadings(std::vector<Block>& blocks, int level) {
+    size_t count = 0;
+    for (const Block& block : blocks) count += block.type == BlockType::Heading && block.level <= level;
+    if (level <= 0 || count == 0) return;
+    std::vector<Block> broken;
+    broken.reserve(blocks.size() + count);
+    for (Block& block : blocks) {
+        if (block.type == BlockType::Heading && block.level <= level) {
+            size_t at = broken.size();
+            while (at > 0 && broken[at - 1].type == BlockType::Anchor) at--;
+            Block pageBreak;
+            pageBreak.type = BlockType::PageBreak;
+            broken.insert(broken.begin() + (std::ptrdiff_t)at, std::move(pageBreak));
+        }
+        broken.push_back(std::move(block));
+    }
+    blocks = std::move(broken);
+}
+
 std::vector<ContentsEntry> BookContents(const std::vector<BookContentsFile>& files, int depth) {
     // The entries at their levels in the book, as its bookmarks have them (RenderBook).
     std::vector<ContentsEntry> entries;

@@ -61,6 +61,7 @@ struct WinExportOptions {
     bool highlightCode = true;
     bool toc = false;
     int tocDepth = 3;
+    int pageBreakBeforeLevel = 0;
     TinyPdf::PdfTheme theme;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
@@ -281,6 +282,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const s
     options.highlightCode = exportOptions.highlightCode;
     options.toc = exportOptions.toc;
     options.tocDepth = exportOptions.tocDepth;
+    options.pageBreakBeforeLevel = exportOptions.pageBreakBeforeLevel;
     options.theme = exportOptions.theme;
     return options;
 }
@@ -349,6 +351,13 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
                 return false;
             }
             options.tocDepth = depth[0] - L'0';
+        } else if (_wcsnicmp(argv[i], L"--page-break-before=", 20) == 0) {
+            const wchar_t* level = argv[i] + 20;
+            if ((level[0] != L'h' && level[0] != L'H') || level[1] < L'1' || level[1] > L'6' || level[2] != L'\0') {
+                error = L"--page-break-before must be h1 to h6";
+                return false;
+            }
+            options.pageBreakBeforeLevel = level[1] - L'0';
         } else if (_wcsnicmp(argv[i], L"--theme=", 8) == 0) {
             const std::wstring themePath = argv[i] + 8;
             const size_t slash = themePath.find_last_of(L"\\/");
@@ -1018,7 +1027,8 @@ void PrintUsage() {
         "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
         "  --toc-depth=N (heading levels it lists, 1-6; default 3).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
-        "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4).\n"
+        "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4),\n"
+        "  --page-break-before=hN (a new page before each heading of level 1 to N; h1 for chapters).\n"
         "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
         "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
         "  line per document; - for standard output).\n"

@@ -436,13 +436,13 @@ BookFiles::BookFiles() = default;
 BookFiles::~BookFiles() = default;
 
 void ParseBookFiles(const std::vector<BookChapter>& chapters, const std::vector<std::string>& texts,
-    const std::vector<std::string>& titles, bool toc, int tocDepth, const std::atomic<bool>* cancel, BookFiles& files) {
+    const std::vector<std::string>& titles, const PdfOptions& options, BookFiles& files) {
     const size_t count = chapters.size();
     files.blocks.resize(count);
     files.footnotes.resize(count);
     bool marker = false;
     for (size_t index = 0; index < count; index++) {
-        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return;
+        if (options.cancel != nullptr && options.cancel->load(std::memory_order_relaxed)) return;
         if (chapters[index].part) continue;
         std::vector<Block>& blocks = files.blocks[index];
         blocks = ParseMarkdown(texts[index], &files.footnotes[index]);
@@ -454,15 +454,16 @@ void ParseBookFiles(const std::vector<BookChapter>& chapters, const std::vector<
             title.text = titles[index];
             blocks.insert(blocks.begin(), std::move(title));
         }
+        if (options.pageBreakBeforeLevel > 0) BreakBeforeHeadings(blocks, options.pageBreakBeforeLevel);
         files.notes = files.notes || !files.footnotes[index].notes.empty();
     }
-    if (!toc && !marker) return;
+    if (!options.toc && !marker) return;
     std::vector<BookContentsFile> listed(count);
     for (size_t index = 0; index < count; index++) {
         const BookChapter& chapter = chapters[index];
         listed[index] = { chapter.part ? nullptr : &files.blocks[index], &titles[index], std::max(0, chapter.depth) };
     }
-    files.contents = BookContents(listed, tocDepth);
+    files.contents = BookContents(listed, options.tocDepth);
 }
 
 } // namespace TinyPdf::Internal

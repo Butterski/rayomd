@@ -281,6 +281,57 @@ Block AnchorBlock(std::string id) {
     return block;
 }
 
+// The page breaks an element asks for, as people are told to write them for printed HTML: a
+// declaration `page-break-before|after` (CSS 2) or `break-before|after` (CSS Fragmentation) in
+// its style whose value forces a page break (always, left, right; page, recto, verso), or a class
+// `page-break`, `pagebreak` or `new-page` (a break after it, as md-to-pdf's stylesheet has it).
+// Nothing else of either attribute is read; each is at most a tag's 4,096 bytes, read once.
+constexpr uint8_t kBreakBefore = 1;
+constexpr uint8_t kBreakAfter = 2;
+
+std::string_view TrimCss(std::string_view text) {
+    while (!text.empty() && IsSpace(text.front())) text.remove_prefix(1);
+    while (!text.empty() && IsSpace(text.back())) text.remove_suffix(1);
+    return text;
+}
+
+uint8_t PageBreaks(const TagToken& token) {
+    uint8_t breaks = 0;
+    for (std::string_view style = token.style; !style.empty();) {
+        const size_t end = std::min(style.find(';'), style.size());
+        const std::string_view declaration = style.substr(0, end);
+        style.remove_prefix(std::min(end + 1, style.size()));
+        const size_t colon = declaration.find(':');
+        if (colon == kNone) continue;
+        const std::string_view property = TrimCss(declaration.substr(0, colon));
+        std::string_view value = TrimCss(declaration.substr(colon + 1));
+        constexpr std::string_view kImportant = "!important";
+        if (value.size() >= kImportant.size() && EqualsNoCase(value.substr(value.size() - kImportant.size()), kImportant)) {
+            value = TrimCss(value.substr(0, value.size() - kImportant.size()));
+        }
+        const bool before = EqualsNoCase(property, "page-break-before") || EqualsNoCase(property, "break-before");
+        const bool after = EqualsNoCase(property, "page-break-after") || EqualsNoCase(property, "break-after");
+        if (!before && !after) continue;
+        const bool fragmentation = property.size() < 15;   // break-before, break-after
+        if (EqualsNoCase(value, "always") || EqualsNoCase(value, "left") || EqualsNoCase(value, "right") ||
+            (fragmentation && (EqualsNoCase(value, "page") || EqualsNoCase(value, "recto") || EqualsNoCase(value, "verso")))) {
+            breaks = static_cast<uint8_t>(breaks | (before ? kBreakBefore : kBreakAfter));
+        }
+    }
+    for (std::string_view classes = token.classes; !classes.empty();) {
+        size_t start = 0;
+        while (start < classes.size() && IsSpace(classes[start])) start++;
+        size_t end = start;
+        while (end < classes.size() && !IsSpace(classes[end])) end++;
+        const std::string_view name = classes.substr(start, end - start);
+        classes.remove_prefix(end);
+        if (EqualsNoCase(name, "page-break") || EqualsNoCase(name, "pagebreak") || EqualsNoCase(name, "new-page")) {
+            breaks = static_cast<uint8_t>(breaks | kBreakAfter);
+        }
+    }
+    return breaks;
+}
+
 // What Text does with a byte: append it (kPlain), collapse it (kSpace), escape it with a backslash
 // (kEscaped), write it as a character reference (kReference: '~' and '$'), or stop (kMarkup: '<').
 enum : uint8_t { kPlain, kSpace, kEscaped, kReference, kMarkup };
@@ -407,14 +458,19 @@ private:
         if (!id.empty()) out.push_back(AnchorBlock(DecodeAscii(id)));
     }
 
-    void Push(Tag tag, uint8_t align) {
-        if (state.depth < HtmlState::kMaxOpen) state.open[state.depth++] = { tag, align };
+    void Push(Tag tag, uint8_t align, bool breakAfter = false) {
+        if (state.depth < HtmlState::kMaxOpen) state.open[state.depth++] = { tag, align, breakAfter };
     }
 
+    // Closes the innermost open `tag` and those inside it; a page break if one of them asked for
+    // one after it.
     void Pop(Tag tag) {
         for (size_t index = state.depth; index-- > 0;) {
             if (state.open[index].tag == tag) {
+                bool breakAfter = false;
+                for (size_t inner = index; inner < state.depth; inner++) breakAfter = breakAfter || state.open[inner].breakAfter;
                 state.depth = index;
+                if (breakAfter) Append(BlockType::PageBreak);
                 return;
             }
         }
@@ -452,23 +508,37 @@ private:
             if (token.closing) {
                 Pop(tag);
             } else {
+                const uint8_t breaks = PageBreaks(token);
+                if (breaks & kBreakBefore) Append(BlockType::PageBreak);
                 Anchor(token.id);
-                if (opens) Push(tag, tag == Tag::Center ? 2 : AlignOf(token.align));
+                if (opens) Push(tag, tag == Tag::Center ? 2 : AlignOf(token.align), (breaks & kBreakAfter) != 0);
+                else if (breaks & kBreakAfter) Append(BlockType::PageBreak);
             }
             return end;
         case Tag::H1: case Tag::H2: case Tag::H3: case Tag::H4: case Tag::H5: case Tag::H6:
             Flush();
             heading = 0;
-            if (!token.closing) {
+            if (token.closing) {
+                if (headingBreakAfter) Append(BlockType::PageBreak);
+                headingBreakAfter = false;
+            } else {
+                const uint8_t breaks = PageBreaks(token);
+                if (breaks & kBreakBefore) Append(BlockType::PageBreak);
+                headingBreakAfter = (breaks & kBreakAfter) != 0;
                 Anchor(token.id);
                 heading = static_cast<int>(tag) - static_cast<int>(Tag::H1) + 1;
                 if (AlignOf(token.align) != 0) paragraphAlign = AlignOf(token.align);
             }
             return end;
-        case Tag::Hr:
+        case Tag::Hr: {
             Flush();
-            if (!token.closing) Append(BlockType::Rule);
+            if (token.closing) return end;
+            const uint8_t breaks = PageBreaks(token);
+            if (breaks & kBreakBefore) Append(BlockType::PageBreak);
+            Append(BlockType::Rule);
+            if (breaks & kBreakAfter) Append(BlockType::PageBreak);
             return end;
+        }
         case Tag::Pre:
             Flush();
             return token.closing || token.selfClosing ? end : Pre(html, end);
@@ -727,6 +797,7 @@ private:
     bool space = false;             // white space seen since the last text
     bool visible = false;           // the paragraph has text or an image, not only tags
     int heading = 0;                // the level of an h1-h6 being read
+    bool headingBreakAfter = false; // the h1-h6 being read asked for a page break after it
     uint8_t paragraphAlign = 0;     // the alignment of the element the paragraph is, over state's
     std::vector<std::string> anchors;   // ids of <a> met in the paragraph, for blocks before it
     uint64_t linkBits = 0;              // of the <a> elements open, the outermost 64: whether each has an href

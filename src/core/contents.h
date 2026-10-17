@@ -38,6 +38,13 @@ bool MarkContents(std::vector<Block>& blocks);
 // Whether a file's first heading on its top level is of level 1, its title (ParseBook).
 bool BeginsWithTitle(const std::vector<Block>& blocks);
 
+// --page-break-before (PdfOptions::pageBreakBeforeLevel): a PageBreak block before each heading of
+// the top level whose level is `level` or less, and before the Anchor blocks right in front of it,
+// which mark where the heading starts. The renderers break only a page with something on it, so
+// one before the first heading draws nothing. Called before PlaceContents, which finds headings
+// by their text's address.
+void BreakBeforeHeadings(std::vector<Block>& blocks, int level);
+
 // A file of a book, or a part, as its table of contents lists it (BookContents).
 struct BookContentsFile {
     const std::vector<Block>* blocks = nullptr;   // the file's; null for a part

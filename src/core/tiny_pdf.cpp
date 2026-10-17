@@ -12060,8 +12060,7 @@ RAYOMD_COLD static std::vector<std::string> ContentsOverlays(RendererType& rende
 // A book's files parsed (Internal::ParseBookFiles), and the entries of its table of contents.
 RAYOMD_COLD static std::vector<Internal::ContentsEntry> ParseBook(const BookSource& source, const PdfOptions& options,
     BookParse& parse) {
-    Internal::ParseBookFiles(source.book->chapters, source.texts, source.titles, options.toc, options.tocDepth, options.cancel,
-        parse.files);
+    Internal::ParseBookFiles(source.book->chapters, source.texts, source.titles, options, parse.files);
     parse.contentsFirst = options.toc;
     parse.noteMarks.resize(source.book->chapters.size());
     return std::move(parse.files.contents);
@@ -12116,6 +12115,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
         if (book == nullptr) {
             blocks = ParseMarkdown(text, &footnotes);
+            if (options.pageBreakBeforeLevel > 0) Internal::BreakBeforeHeadings(blocks, options.pageBreakBeforeLevel);
             contents = Internal::PlaceContents(blocks, options.toc, options.tocDepth);
         } else {
             bookParse = std::make_unique<BookParse>();
@@ -12692,6 +12692,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Parse);
         if (book == nullptr) {
             blocks = ParseMarkdown(markdown, &footnotes);
+            if (options.pageBreakBeforeLevel > 0) Internal::BreakBeforeHeadings(blocks, options.pageBreakBeforeLevel);
             contents = Internal::PlaceContents(blocks, options.toc, options.tocDepth);
         } else {
             bookParse = std::make_unique<BookParse>();
