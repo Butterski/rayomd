@@ -425,7 +425,9 @@ parts and nesting), a folder's files by name with `README.md` first, or the file
 starts on a new page, links between them (`other.md#heading`) stay links inside the PDF, the
 bookmarks nest by part, and `--toc` gives one table of contents for the whole book. A book's
 files may total 128 MiB, as much as one document, and a `SUMMARY.md` lists each file once
-(another name for it, such as a link, counts as the same file).
+(another name for it, such as a link, counts as the same file). The files a `SUMMARY.md` lists
+or a book folder holds must lie in that folder, also once links and `..` are resolved, so a
+book from elsewhere cannot put your other files into its PDF.
 
 ```sh
 rayomd --book docs/src/SUMMARY.md manual.pdf --toc --page-numbers

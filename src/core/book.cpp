@@ -6,6 +6,16 @@
 #include "markdown_parser.h"
 #include "../common/file_io.h"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -112,6 +122,52 @@ bool ReadFile(const fs::path& path, std::string& text) {
     return fs::is_regular_file(path, ec) && RayoMd::File::ReadAll(path, kMaxFileBytes, text);
 }
 
+// The path that `path` names with its links, junctions, "." and ".." resolved; empty when it
+// names nothing. On Windows the file system's own answer (GetFinalPathNameByHandleW): the
+// standard library there resolves no link.
+fs::path Resolved(const fs::path& path) {
+#ifdef _WIN32
+    const HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return fs::path();
+    std::wstring name(MAX_PATH, L'\0');
+    DWORD length = GetFinalPathNameByHandleW(handle, name.data(), (DWORD)name.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (length >= name.size()) {
+        name.resize(length + 1);
+        length = GetFinalPathNameByHandleW(handle, name.data(), (DWORD)name.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    }
+    CloseHandle(handle);
+    if (length == 0 || length >= name.size()) return fs::path();
+    name.resize(length);
+    return fs::path(name);
+#else
+    std::error_code ec;
+    fs::path canonical = fs::canonical(path, ec);
+    return ec ? fs::path() : canonical;
+#endif
+}
+
+// Whether the resolved path `file` lies in the resolved directory `root`, component by component
+// (so "/a/bc" is not in "/a/b"); on Windows with ASCII letters folded.
+bool IsWithin(const fs::path& file, const fs::path& root) {
+    auto at = file.begin();
+    for (const fs::path& part : root) {
+        if (at == file.end()) return false;
+#ifdef _WIN32
+        const std::wstring& a = at->native();
+        const std::wstring& b = part.native();
+        const auto fold = [](wchar_t c) { return c >= L'A' && c <= L'Z' ? (wchar_t)(c - L'A' + L'a') : c; };
+        if (a.size() != b.size() || !std::equal(a.begin(), a.end(), b.begin(), [&](wchar_t x, wchar_t y) { return fold(x) == fold(y); })) {
+            return false;
+        }
+#else
+        if (at->native() != part.native()) return false;
+#endif
+        ++at;
+    }
+    return at != file.end();
+}
+
 // What a book's files may have in all: what one document may have, so that a book takes no more
 // than the largest document. The largest books (documentation sets in mdBook) have a few to tens
 // of MiB. A SUMMARY.md that listed one large file under many names (links, letter case,
@@ -119,17 +175,27 @@ bool ReadFile(const fs::path& path, std::string& text) {
 constexpr size_t kMaxBookBytes = kMaxFileBytes;
 
 // The files of a book, read within kMaxBookBytes in all; each known by its identity, so that a
-// file listed again under another name can be told.
+// file listed again under another name can be told. With a `root` (the resolved folder of a
+// SUMMARY.md or of a book given as a folder), only files that lie in it once their links and ".."
+// are resolved: a book from elsewhere must not put the reader's other files into its PDF.
 class ChapterReader {
 public:
-    enum class Result { Read, Unreadable, Again, PastBudget };
+    enum class Result { Read, Unreadable, Again, PastBudget, Outside };
+
+    explicit ChapterReader(fs::path folder = fs::path()) : root(std::move(folder)) {}
 
     // `path` into `text`; Again, unread, when `once` and it is a file read before.
     Result Read(const fs::path& path, std::string& text, bool once) {
         std::error_code ec;
+        fs::path file = path;
+        if (!root.empty()) {
+            file = Resolved(path);
+            if (file.empty()) return Result::Unreadable;
+            if (!IsWithin(file, root)) return Result::Outside;
+        }
         RayoMd::File::FileIdentity identity;
-        const bool whole = fs::is_regular_file(path, ec) &&
-            RayoMd::File::ReadAll(path, std::min(kMaxFileBytes, left), text, identity);
+        const bool whole = fs::is_regular_file(file, ec) &&
+            RayoMd::File::ReadAll(file, std::min(kMaxFileBytes, left), text, identity);
         if (once && identity.opened && read.count(identity) != 0) {
             text.clear();
             return Result::Again;
@@ -148,6 +214,7 @@ public:
     }
 
 private:
+    fs::path root;
     std::set<RayoMd::File::FileIdentity> read;
     size_t left = kMaxBookBytes;
 };
@@ -240,7 +307,13 @@ bool ReadSummaryBook(const fs::path& summaryPath, TinyPdf::Book& book, std::stri
     book.title = BookTomlTitle(directory);
     if (book.title.empty()) book.title = summary.title;
     bool listsFile = false;
-    ChapterReader reader;
+    // The files must lie in SUMMARY.md's folder (for mdBook, its src/).
+    fs::path root = Resolved(directory);
+    if (root.empty()) {
+        error = "could not read the folder of " + PathToUtf8(summaryPath);
+        return false;
+    }
+    ChapterReader reader(std::move(root));
     for (const SummaryEntry& entry : summary.entries) {
         TinyPdf::BookChapter chapter;
         chapter.title = entry.title;
@@ -255,6 +328,10 @@ bool ReadSummaryBook(const fs::path& summaryPath, TinyPdf::Book& book, std::stri
             const ChapterReader::Result read = reader.Read(path, chapter.markdown, true);
             if (read == ChapterReader::Result::Again) {
                 error = PathToUtf8(summaryPath) + " lists " + entry.path + " twice";
+                return false;
+            }
+            if (read == ChapterReader::Result::Outside) {
+                error = PathToUtf8(summaryPath) + " lists " + entry.path + ", which lies outside its folder";
                 return false;
             }
             if (read != ChapterReader::Result::Read) {
@@ -305,6 +382,7 @@ bool ReadBook(const std::vector<fs::path>& inputs, TinyPdf::Book& book, std::str
     std::error_code ec;
     fs::path summary;
     std::vector<fs::path> files;
+    fs::path root;   // a folder's: its files (links among them) must lie in it
     if (inputs.size() == 1 && fs::is_directory(inputs[0], ec)) {
         for (const fs::path& candidate : { inputs[0] / "SUMMARY.md", inputs[0] / "src" / "SUMMARY.md" }) {
             if (!fs::is_regular_file(candidate, ec)) continue;
@@ -318,6 +396,11 @@ bool ReadBook(const std::vector<fs::path>& inputs, TinyPdf::Book& book, std::str
                 return false;
             }
             book.directory = PathToUtf8(inputs[0]);
+            root = Resolved(inputs[0]);
+            if (root.empty()) {
+                error = "could not read the folder " + PathToUtf8(inputs[0]);
+                return false;
+            }
         }
     } else if (inputs.size() == 1 && Lower(PathToUtf8(inputs[0].filename())) == "summary.md") {
         summary = inputs[0];
@@ -326,10 +409,14 @@ bool ReadBook(const std::vector<fs::path>& inputs, TinyPdf::Book& book, std::str
         book.directory = PathToUtf8(CommonDirectory(inputs));
     }
     if (!summary.empty()) return ReadSummaryBook(summary, book, error);
-    ChapterReader reader;
+    ChapterReader reader(std::move(root));
     for (const fs::path& file : files) {
         TinyPdf::BookChapter chapter;
         const ChapterReader::Result read = reader.Read(file, chapter.markdown, false);
+        if (read == ChapterReader::Result::Outside) {
+            error = PathToUtf8(file) + " leads outside the folder " + PathToUtf8(inputs[0]);
+            return false;
+        }
         if (read != ChapterReader::Result::Read) {
             error = read == ChapterReader::Result::PastBudget ? ChapterReader::PastBudget(PathToUtf8(file))
                 : "could not read input Markdown file: " + PathToUtf8(file);

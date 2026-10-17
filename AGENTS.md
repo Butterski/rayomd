@@ -94,6 +94,10 @@ page of a link, a heading mark or a note mark tells its file: `BookTargets` reso
 `#fragment` within the file and `b.md#fragment` across files with no file field on the
 renderers' structures. Single documents pass `book == nullptr` through the builders and
 must keep their bytes; book-only work stays in `RAYOMD_COLD` code and `book.cpp`.
+The files a SUMMARY.md lists or a book folder holds must lie in that folder once links and
+`..` are resolved (`ChapterReader`'s root; `GetFinalPathNameByHandleW` on Windows, whose
+standard library resolves no link): a book from elsewhere must not put the reader's files into
+its PDF. Files named on the command line are the user's choice and are not confined.
 Opt-in compression (`--compress`, `PdfOptions::compress`) writes page content, the
 font program and both CMaps as FlateDecode where that makes the file smaller, with
 RayoMD's own DEFLATE encoder; never the XMP metadata or an embedded source, which

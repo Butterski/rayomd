@@ -978,6 +978,32 @@ bool CheckBookFiles() {
             ok = false;
         }
     }
+    // A file outside the book's folder, by "..", an absolute path or a link, is refused: a book
+    // from elsewhere put any file the reader could read into its PDF.
+    const fs::path outside = root.parent_path() / "rayomd-test-book-outside.md";
+    ok = ok && WriteFile(outside, "# Outside\n\nnot the book's\n");
+    std::vector<std::string> escapes = { "../rayomd-test-book-outside.md", "sub/../../rayomd-test-book-outside.md" };
+#ifndef _WIN32
+    escapes.push_back(outside.string());
+    fs::create_symlink(outside, root / "sub" / "link.md", linked);
+    ok = ok && !linked;
+    escapes.push_back("sub/link.md");
+#endif
+    for (const std::string& name : escapes) {
+        ok = ok && WriteFile(root / "SUMMARY.md", "# S\n\n- [A](a.md)\n- [Out](" + name + ")\n");
+        if (readBook({ root / "SUMMARY.md" }, error) != 0 || error.find("outside its folder") == std::string::npos) {
+            std::cerr << "a book listing " << name << ": " << (error.empty() ? "read" : error) << std::endl;
+            ok = false;
+        }
+    }
+#ifndef _WIN32
+    // A book given as a folder that holds a link to a file outside it.
+    if (readBook({ root / "sub" }, error) != 0 || error.find("outside the folder") == std::string::npos) {
+        std::cerr << "a book folder with a link out of it: " << (error.empty() ? "read" : error) << std::endl;
+        ok = false;
+    }
+#endif
+    fs::remove(outside);
     ok = ok && WriteFile(root / "SUMMARY.md", "# S\n\n- [A](a.md)\n- [Big](big.md)\n") &&
         readBook({ root / "SUMMARY.md" }, error) == 2 && readBook({ root / "big.md", root / "big.md" }, error) == 2;
     if (!ok) std::cerr << "a book of distinct files within 128 MiB is not read: " << error << std::endl;
