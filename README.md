@@ -9,7 +9,7 @@
 **Markdown to PDF in milliseconds, from a single small executable.**<br>
 No browser. No LaTeX. No Pandoc. No runtime.
 
-<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 4.7.0 MathTex" src="https://img.shields.io/badge/version-4.7.0%20MathTex-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 5.0.0 MathTex" src="https://img.shields.io/badge/version-5.0.0%20MathTex-informational?style=for-the-badge"></a>
 <a href="https://github.com/Butterski/rayomd/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Butterski/rayomd/total?style=for-the-badge&color=2ea44f"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 
@@ -31,10 +31,11 @@ No browser. No LaTeX. No Pandoc. No runtime.
 </div>
 
 > [!TIP]
-> **New in 4.7:** the same PDFs, sooner. In batches, `--serve` and the app, tables with formulas
-> take about 28 % less time, documents with formulas 11 %, highlighted code 8 % and CJK text in a
-> fallback font 28 %; one-shot exports of CJK text and of cached images 15 to 28 %. `--fast-images`
-> converts a new PNG with transparency about 10 % sooner, for image streams a few percent larger.
+> **New in 5.0:** `rayomd.exe` is the command-line tool alone (the desktop app is RayoMD GUI), and
+> untrusted documents are safer to export: link targets are checked as a PDF viewer reads them, a
+> book's files stay in its folder, hostile runs of headings, tables, references and SVG gradients
+> take linear time, and the static Linux build loads at a random address. Embedders get
+> `PdfOptions::cancel` and `PdfOptions::sourceMap`; ordinary documents keep their PDF bytes.
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code: a small
 command-line tool for Linux and Windows, and an exporter you can embed through the
@@ -97,9 +98,9 @@ veraPDF.
 <summary><b>Linux</b>: download and run</summary>
 
 ```sh
-curl -LO https://github.com/Butterski/rayomd/releases/download/v4.7.0/rayomd-4.7.0-linux-x64-static.tar.gz
-tar -xzf rayomd-4.7.0-linux-x64-static.tar.gz
-./rayomd-4.7.0-linux-x64-static/rayomd --export input.md output.pdf
+curl -LO https://github.com/Butterski/rayomd/releases/download/v5.0.0/rayomd-5.0.0-linux-x64-static.tar.gz
+tar -xzf rayomd-5.0.0-linux-x64-static.tar.gz
+./rayomd-5.0.0-linux-x64-static/rayomd --export input.md output.pdf
 ```
 
 </details>
@@ -107,7 +108,7 @@ tar -xzf rayomd-4.7.0-linux-x64-static.tar.gz
 <details>
 <summary><b>Windows</b>: the command-line tool, <code>rayomd.exe</code></summary>
 
-Download `rayomd-4.7.0-windows-x64.zip` from
+Download `rayomd-5.0.0-windows-x64.zip` from
 [Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
 is the same CLI as on Linux:
 
@@ -115,8 +116,8 @@ is the same CLI as on Linux:
 rayomd.exe --export input.md output.pdf
 ```
 
-Up to 4.7.0, `rayomd.exe` started without arguments also opens a desktop app; the next major
-release leaves that to RayoMD GUI and prints its usage instead.
+Since 5.0.0, `rayomd.exe` started without arguments prints its usage; up to 4.7.0 it opened a
+desktop app, which RayoMD GUI replaces.
 
 </details>
 
@@ -138,7 +139,7 @@ cmake --build build --config Release
 | Package | Size, 4.7.0 | For |
 |---|---:|---|
 | `rayomd-<version>-linux-x64-static.tar.gz` | 1,187 KB | Linux, recommended: no dependency, the fastest start |
-| `rayomd-<version>-windows-x64.zip` | 1,598 KB | Windows: the app and every CLI mode in one `rayomd.exe` |
+| `rayomd-<version>-windows-x64.zip` | 1,598 KB | Windows: every CLI mode in one `rayomd.exe` |
 | `rayomd-<version>-linux-x64.tar.gz` | 787 KB | Linux: needs only glibc |
 | `rayomd-<version>-linux-x64-curl.tar.gz` | 789 KB | Linux with HTTP/HTTPS images through libcurl |
 
