@@ -4359,6 +4359,16 @@ static void AppendUriLiteral(std::string& out, std::string_view url, bool winAns
 
 // ---- Headings: the outline (bookmarks) and the targets of internal links -----------------
 
+// A heading's text after its number and a space (--number-headings, Internal::NumberHeadings).
+RAYOMD_COLD static std::string NumberedText(std::string_view number, std::string_view text) {
+    std::string numbered;
+    numbered.reserve(number.size() + 1 + text.size());
+    numbered.append(number);
+    numbered += ' ';
+    numbered += text;
+    return numbered;
+}
+
 // A heading as drawn: its level, its text as the parser left it (WinAnsi bytes in a Latin
 // document of the standard renderer, else UTF-8), its page and the top of its first line.
 // The text lies in the document's blocks, which outlive the assembly of the file.
@@ -5889,7 +5899,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         switch (block.type) {
         case BlockType::Heading: {
             const double keep = HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight, renderer.pageH);
-            if (block.align >= 2) renderer.RenderAlignedHeading(block, keep);
+            if (block.align >= 2 || renderer.numbers != nullptr) renderer.RenderAlignedHeading(block, keep, renderer.NumberOf(block));
             else renderer.RenderHeading(block, keep);
             break;
         }
@@ -6205,6 +6215,8 @@ public:
     }
     // The entries of the table of contents (contents.h), which RenderContents draws.
     void SetContents(const std::vector<Internal::ContentsEntry>* entries) { contents = entries; }
+    // --number-headings: the numbers of the headings of the top level (contents.h), in order.
+    void SetNumbers(const std::vector<Internal::HeadingNumber>* list) { numbers = list; }
     // PdfOptions::sourceMap: where RenderBlocks notes each top-level block; none without it.
     void SetSourceMap(std::vector<SourceBlock>* map) { sourceMap = map; }
     // PDF/UA: the structure tree the pages' marked content goes into (tagged.h); none untagged.
@@ -6360,6 +6372,9 @@ private:
     std::wstring headingText;
     // The table of contents' entries, and where each ended (RenderContents).
     const std::vector<Internal::ContentsEntry>* contents = nullptr;
+    // The headings' numbers (SetNumbers), and the next of them to draw.
+    const std::vector<Internal::HeadingNumber>* numbers = nullptr;
+    size_t nextNumber = 0;
     std::vector<ContentsLine> contentsLines;
     // PDF/UA's structure tree, or none: every hook below tests it before anything else.
     Internal::StructTree* tags = nullptr;
@@ -8005,8 +8020,10 @@ private:
 
     // A heading an HTML element centres or sets right (Block::align 2 or 3): as RenderHeading
     // draws it, each line moved by what it leaves of the text width; one with formulas as
-    // RenderHeading draws it (a call of RenderHeading here took it out of RenderBlocks).
-    RAYOMD_COLD void RenderAlignedHeading(const Block& block, double keep) {
+    // RenderHeading draws it (a call of RenderHeading here took it out of RenderBlocks). Also a
+    // heading with a `number` (--number-headings), drawn before its text; its mark keeps the text
+    // alone, so its #anchor stays the heading's own.
+    RAYOMD_COLD void RenderAlignedHeading(const Block& block, double keep, std::string_view number = {}) {
         const int level = std::max(1, std::min(6, block.level));
         const double size = kHeadingSizes[level];
         const double width = pageW - margin * 2.0;
@@ -8014,10 +8031,12 @@ private:
         Ensure(size * 1.35 + keep);
         const int tagged = tags != nullptr ? tags->BeginHeading(level) : -1;
         if (block.hasMath) {
-            RenderMathTextLines(block.text, level, margin, width, size, headingColor, multiFace, false);
+            if (number.empty()) RenderMathTextLines(block.text, level, margin, width, size, headingColor, multiFace, false);
+            else RenderMathTextLines(NumberedText(number, block.text), level, margin, width, size, headingColor, multiFace, false, &block.text);
         } else {
             MarkHeading(level, block.text, size * 1.35);
-            AssignUtf8ToWide(headingText, block.text);
+            if (number.empty()) AssignUtf8ToWide(headingText, block.text);
+            else AssignUtf8ToWide(headingText, NumberedText(number, block.text));
             const TtfFont& face = SpanFont(multiFace, false);
             for (const auto& line : WrapText(face, headingText, width, size)) {
                 DrawTextLine(margin + AlignShift(width, TextWidth(face, line, size), block.align), size, line, headingColor,
@@ -8028,11 +8047,19 @@ private:
         TagEnd(tagged);
     }
 
+    // The number of a heading of the top level (SetNumbers, in the headings' order); none for
+    // others, which the list does not hold.
+    RAYOMD_COLD std::string_view NumberOf(const Block& block) {
+        if (numbers == nullptr || nextNumber >= numbers->size() || (*numbers)[nextNumber].heading != block.text.data()) return {};
+        return (*numbers)[nextNumber++].number;
+    }
+
     // Heading lines that contain formulas: plain text and formulas in one colour,
     // each line as tall as its tallest formula needs. `quote` adds the quote strip. The
-    // heading, at `level`, is noted once its first line has found its page.
+    // heading, at `level`, is noted once its first line has found its page, as `markText` when
+    // that is given (the text without its number).
     RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, int level, double x, double width, double size,
-        const char* color, bool bold, bool quote) {
+        const char* color, bool bold, bool quote, const std::string* markText = nullptr) {
         math.Clear();
         double lh = size * 1.35;
         bool marked = false;
@@ -8046,7 +8073,7 @@ private:
                 Ensure(lh + extra);
             }
             if (!marked) {
-                MarkHeading(level, text, 0.0);
+                MarkHeading(level, markText != nullptr ? *markText : text, 0.0);
                 marked = true;
             }
             y -= extent.above;
@@ -9706,6 +9733,8 @@ public:
     }
     // The entries of the table of contents (contents.h), which RenderContents draws.
     void SetContents(const std::vector<Internal::ContentsEntry>* entries) { contents = entries; }
+    // --number-headings: the numbers of the headings of the top level (contents.h), in order.
+    void SetNumbers(const std::vector<Internal::HeadingNumber>* list) { numbers = list; }
     // PdfOptions::sourceMap: where RenderBlocks notes each top-level block; none without it.
     void SetSourceMap(std::vector<SourceBlock>* map) { sourceMap = map; }
 
@@ -9817,6 +9846,9 @@ private:
     std::vector<CodeRun> codeRuns;
     // The table of contents' entries, and where each ended (RenderContents).
     const std::vector<Internal::ContentsEntry>* contents = nullptr;
+    // The headings' numbers (SetNumbers), and the next of them to draw.
+    const std::vector<Internal::HeadingNumber>* numbers = nullptr;
+    size_t nextNumber = 0;
     std::vector<ContentsLine> contentsLines;
 
     double MaxMathHeight() const {
@@ -11021,29 +11053,41 @@ private:
 
     // A heading an HTML element centres or sets right (Block::align 2 or 3): as RenderHeading
     // draws it, each line moved by what it leaves of the text width; one with formulas as
-    // RenderHeading draws it (a call of RenderHeading here took it out of RenderBlocks).
-    RAYOMD_COLD void RenderAlignedHeading(const Block& block, double keep) {
+    // RenderHeading draws it (a call of RenderHeading here took it out of RenderBlocks). Also a
+    // heading with a `number` (--number-headings), drawn before its text; its mark keeps the text
+    // alone, so its #anchor stays the heading's own.
+    RAYOMD_COLD void RenderAlignedHeading(const Block& block, double keep, std::string_view number = {}) {
         const int level = std::max(1, std::min(6, block.level));
         const double size = kHeadingSizes[level];
         const double width = pageW - margin * 2.0;
         if (y < pageH - margin - 4.0) y -= level <= 2 ? 12.0 : 8.0;
         Ensure(size * 1.35 + keep);
+        const std::string numbered = number.empty() ? std::string() : NumberedText(number, block.text);
+        const std::string& shown = number.empty() ? block.text : numbered;
         if (block.hasMath) {
-            RenderMathTextLines(block.text, level, margin, width, size, headingColor, true, false);
+            RenderMathTextLines(shown, level, margin, width, size, headingColor, true, false, &block.text);
         } else {
             MarkHeading(level, block.text, size * 1.35);
-            ForEachWrappedAsciiLine(block.text, width, size, StandardTextFont::Bold, [&](std::string_view line, double used) {
+            ForEachWrappedAsciiLine(shown, width, size, StandardTextFont::Bold, [&](std::string_view line, double used) {
                 DrawTextLine(margin + AlignShift(width, used, block.align), size, line, "F2", headingColor);
             });
         }
         y -= level <= 2 ? 8.0 : 5.0;
     }
 
+    // The number of a heading of the top level (SetNumbers, in the headings' order); none for
+    // others, which the list does not hold.
+    RAYOMD_COLD std::string_view NumberOf(const Block& block) {
+        if (numbers == nullptr || nextNumber >= numbers->size() || (*numbers)[nextNumber].heading != block.text.data()) return {};
+        return (*numbers)[nextNumber++].number;
+    }
+
     // Heading lines that contain formulas: plain text and formulas in one colour,
     // each line as tall as its tallest formula needs. `quote` adds the quote strip. The
-    // heading, at `level`, is noted once its first line has found its page.
+    // heading, at `level`, is noted once its first line has found its page, as `markText` when
+    // that is given (the text without its number).
     RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, int level, double x, double width, double size,
-        const char* color, bool bold, bool quote) {
+        const char* color, bool bold, bool quote, const std::string* markText = nullptr) {
         math.Clear();
         double lh = size * 1.35;
         bool marked = false;
@@ -11057,7 +11101,7 @@ private:
                 Ensure(lh + extra);
             }
             if (!marked) {
-                MarkHeading(level, text, 0.0);
+                MarkHeading(level, markText != nullptr ? *markText : text, 0.0);
                 marked = true;
             }
             y -= extent.above;
@@ -12100,6 +12144,48 @@ static void PrepareOutput(std::string& pdfBytes, size_t expectedBytes) {
     if (pdfBytes.capacity() < expectedBytes) pdfBytes.reserve(expectedBytes);
 }
 
+// --number-headings: the numbers of a document's or a book's headings (Internal::NumberHeadings),
+// and the table of contents' entries numbered as their headings are.
+RAYOMD_COLD static std::vector<Internal::HeadingNumber> NumberDocument(const PdfOptions& options,
+    const std::vector<Block>& blocks, const BookSource* book, const BookParse* bookParse,
+    std::vector<Internal::ContentsEntry>& contents) {
+    std::vector<Internal::HeadingNumber> numbers;
+    if (book == nullptr) {
+        numbers = Internal::NumberHeadings(blocks, options.numberHeadings);
+    } else {
+        const std::vector<BookChapter>& chapters = book->book->chapters;
+        std::vector<Internal::BookContentsFile> listed(chapters.size());
+        for (size_t index = 0; index < chapters.size(); index++) {
+            listed[index] = { chapters[index].part ? nullptr : &bookParse->files.blocks[index], &book->titles[index],
+                std::max(0, chapters[index].depth) };
+        }
+        numbers = Internal::NumberBookHeadings(listed, options.numberHeadings);
+    }
+    Internal::NumberContents(contents, numbers);
+    return numbers;
+}
+
+// --number-headings: the marks the bookmarks are made of, each numbered heading's text after its
+// number. `headings` as anchors and titles take them (TitledHeadings), `drawn` the renderer's
+// own, whose texts are the headings' blocks', by which `numbers` names them; anchors keep
+// `headings`, so a #link goes by the heading's own text.
+struct NumberedMarks {
+    std::vector<HeadingMark> marks;
+    std::vector<std::string> titles;
+};
+RAYOMD_COLD static const std::vector<HeadingMark>& NumberedHeadings(const std::vector<HeadingMark>& headings,
+    const std::vector<HeadingMark>& drawn, const std::vector<Internal::HeadingNumber>& numbers, NumberedMarks& out) {
+    out.marks = headings;
+    out.titles.reserve(numbers.size());   // no growth: the marks see into it
+    size_t next = 0;
+    for (size_t index = 0; index < drawn.size() && next < numbers.size(); index++) {
+        if (drawn[index].text.data() != numbers[next].heading) continue;
+        out.titles.push_back(NumberedText(numbers[next++].number, headings[index].text));
+        out.marks[index].text = out.titles.back();
+    }
+    return out.marks;
+}
+
 // `text` is ASCII, or with `winAnsi` the document transcoded to WinAnsiEncoding; `source` is
 // the document as given, which a reversible PDF embeds. With `book`, the book's files instead,
 // and `text` all of their text.
@@ -12123,6 +12209,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         }
     }
     if (BuildCancelled()) return CancelBuild();
+    std::vector<Internal::HeadingNumber> numbers;   // --number-headings
+    if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
     PdfObjects pdf;
     int pagesId = pdf.Reserve();
     // WinAnsiEncoding: without it the fonts' built-in StandardEncoding shows the straight
@@ -12138,6 +12226,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     StandardRenderer renderer(pdfBytes, options.style, options.margin, options.pageSize, &imageRegistry, winAnsi, palette);
     if (!options.highlightCode) renderer.DisableHighlighting();
     if (!contents.empty()) renderer.SetContents(&contents);
+    if (!numbers.empty()) renderer.SetNumbers(&numbers);
     if (options.sourceMap != nullptr) {
         options.sourceMap->clear();
         renderer.SetSourceMap(options.sourceMap);
@@ -12252,7 +12341,9 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     AppendLanguage(catalog, metadata);
     if (coverId != 0) catalog += kCoverPageLabels;
     KeptLocal<std::string, 1> outline;      // kept from export to export; must outlive BuildInto
-    AddOutline(pdf, catalog, headings, pageIds, winAnsi, outline.value);
+    NumberedMarks numberedMarks;
+    AddOutline(pdf, catalog, numbers.empty() ? headings : NumberedHeadings(headings, renderer.Headings(), numbers, numberedMarks),
+        pageIds, winAnsi, outline.value);
     if (options.embedSource) AddReversibleSource(pdf, catalog, source);
     AppendLit(catalog, " >>");
     int catalogId = pdf.Add(std::move(catalog));
@@ -12700,6 +12791,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         }
     }
     if (BuildCancelled()) return CancelBuild();
+    std::vector<Internal::HeadingNumber> numbers;   // --number-headings
+    if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
 
     PdfObjects pdf;
 
@@ -12731,6 +12824,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     imageRegistry.SetFont(&font, &renderer.Cids(), faceFonts[1], faceFonts[1] ? renderer.FaceCidSet(1) : nullptr);
     if (!options.highlightCode) renderer.DisableHighlighting();
     if (!contents.empty()) renderer.SetContents(&contents);
+    if (!numbers.empty()) renderer.SetNumbers(&numbers);
     if (options.sourceMap != nullptr) {
         options.sourceMap->clear();
         renderer.SetSourceMap(options.sourceMap);
@@ -12899,7 +12993,9 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     AppendLanguage(catalog, metadata);
     if (coverId != 0) catalog += kCoverPageLabels;
     KeptLocal<std::string, 1> outline;      // kept from export to export; must outlive BuildInto
-    AddOutline(pdf, catalog, headings, pageIds, false, outline.value);
+    NumberedMarks numberedMarks;
+    AddOutline(pdf, catalog, numbers.empty() ? headings : NumberedHeadings(headings, renderer.Headings(), numbers, numberedMarks),
+        pageIds, false, outline.value);
     const char* const producer = "RayoMD Native Tiny PDF";
     if (options.pdfa || tags) {
         AddArchivalCatalogEntries(pdf, catalog, metadata, headings, producer,

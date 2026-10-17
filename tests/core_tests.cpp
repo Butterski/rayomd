@@ -2837,6 +2837,60 @@ bool CheckBook() {
     return true;
 }
 
+// --number-headings: 1, 1.1, 1.1.1 from the top level of the listed headings, the title (a
+// document's only level-1 heading, first) and headings of footnote references alone without, a
+// skipped level shown as 0, and none past the depth; in the text, the table of contents and the
+// bookmarks of both renderers, while #anchor links still go by the heading's own text; across a
+// book's files at their levels in the book.
+bool CheckHeadingNumbers() {
+    using TinyPdf::Internal::HeadingNumber;
+    const auto numbersOf = [](const std::string& markdown, int depth) {
+        const std::vector<TinyPdf::Internal::Block> blocks = TinyPdf::Internal::ParseMarkdown(markdown);
+        std::string out;
+        for (const HeadingNumber& number : TinyPdf::Internal::NumberHeadings(blocks, depth)) out += number.number + ";";
+        return out;
+    };
+    if (numbersOf("# T\n\n## A\n\n### B\n\n### C\n\n## D\n\n#### E\n", 6) != "1;1.1;1.2;2;2.0.1;" ||
+        numbersOf("# T\n\n## A\n\n### B\n\n#### C\n", 2) != "1;1.1;" || numbersOf("# A\n\n# B\n\n## C\n", 3) != "1;2;2.1;" ||
+        numbersOf("## A\n\n### B\n", 3) != "1;1.1;" || numbersOf("Text\n", 3) != "") {
+        std::cerr << "heading numbers mismatch" << std::endl;
+        return false;
+    }
+    TinyPdf::PdfOptions options;
+    options.numberHeadings = 3;
+    options.toc = true;
+    for (const char* prefix : { "", "\xC5\xBC" }) {   // the standard and the Unicode renderer
+        const std::string document = std::string("# Title\n\n## Intro") + prefix + "\n\nSee [the method](#method).\n\n## Method\n\n"
+            "### Data\n\n> ## Quoted\n";
+        std::string pdf;
+        const bool unicode = *prefix != '\0';
+        const auto has = [&pdf, unicode](const char* text) {
+            if (!unicode) return pdf.find(std::string("(") + text + ") Tj") != std::string::npos;
+            return true;   // the Unicode renderer draws glyph ids; its numbers are checked in the bookmarks
+        };
+        if (!TinyPdf::BuildPdf(document, options, pdf).Ok() || !has("Title") || !has("2 Method") || !has("2.1 Data") ||
+            !has("Quoted") || pdf.find("/Title (2 Method) /Parent") == std::string::npos ||
+            pdf.find("/Title (2.1 Data) /Parent") == std::string::npos || pdf.find("/Title (Title) /Parent") == std::string::npos ||
+            pdf.find("/Title (Quoted)") == std::string::npos || pdf.find("/URI (#method)") != std::string::npos ||
+            CountOccurrences(pdf, "/Subtype /Link") != 1 + 3) {   // the link and the table's three entries
+            std::cerr << "numbered headings mismatch" << (unicode ? " (Unicode)" : "") << std::endl;
+            return false;
+        }
+    }
+    TinyPdf::Book book;
+    book.chapters.push_back({ "# One\n\n## A\n", "a.md", "One", 0, false });
+    book.chapters.push_back({ "", "", "Part", 0, true });
+    book.chapters.push_back({ "# Two\n\n## B\n", "b.md", "Two", 1, false });
+    std::string bookPdf;
+    if (!TinyPdf::BuildBookPdf(book, options, bookPdf).Ok() || bookPdf.find("/Title (1 One)") == std::string::npos ||
+        bookPdf.find("/Title (1.1 A)") == std::string::npos || bookPdf.find("/Title (Part)") == std::string::npos ||
+        bookPdf.find("/Title (1.2 Two)") == std::string::npos || bookPdf.find("/Title (1.2.1 B)") == std::string::npos) {
+        std::cerr << "numbered book mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // An SVG image is drawn as a form XObject over the unit square, as images are drawn: its
 // gradient as a shading, its opacity as a graphics state, its text in the document's font (the
 // standard fonts' literal strings, the minus sign as a hyphen, the Unicode renderer's glyph ids).
@@ -3852,6 +3906,7 @@ int main() {
     if (!CheckThemePathPolicy()) return 121;
     if (!CheckImageFormats()) return 122;
     if (!CheckSourceMap()) return 124;
+    if (!CheckHeadingNumbers()) return 125;
 #ifdef _WIN32
     if (!CheckDirectImageLinks()) return 123;
 #endif

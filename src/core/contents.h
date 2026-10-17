@@ -56,4 +56,25 @@ struct BookContentsFile {
 // as many levels down as the bookmarks have them; `depth` levels from the top one (taken as 1 to 6).
 std::vector<ContentsEntry> BookContents(const std::vector<BookContentsFile>& files, int depth);
 
+// --number-headings (PdfOptions::numberHeadings): a heading's number, "2" or "2.1", and the text
+// of the heading's block, by whose address the renderers find it, as they find a table's entries.
+struct HeadingNumber {
+    const char* heading = nullptr;
+    std::string number;
+};
+
+// The numbers of the headings of a document's top level, in its order: from the top level of the
+// headings a table of contents lists (the title, a document's only level-1 heading when it comes
+// first, and headings of footnote references alone have none), `depth` levels deep (taken as 1 to
+// 6), each level counted within the one above; a level skipped shows 0 ("1.0.1"), as LaTeX
+// numbers sections.
+std::vector<HeadingNumber> NumberHeadings(const std::vector<Block>& blocks, int depth);
+
+// The same for a book: its files' headings in order, at their levels in the book, counted across
+// the files; parts have none.
+std::vector<HeadingNumber> NumberBookHeadings(const std::vector<BookContentsFile>& files, int depth);
+
+// Puts each entry's heading number, and a space, before its text.
+void NumberContents(std::vector<ContentsEntry>& entries, const std::vector<HeadingNumber>& numbers);
+
 } // namespace TinyPdf::Internal

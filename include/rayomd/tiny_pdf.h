@@ -168,6 +168,11 @@ struct PdfOptions {
     // A new page before every heading of the top level whose level is this or less (1: each
     // `#` heading, 2: `#` and `##`), unless the page has nothing on it yet; 0 for none.
     int pageBreakBeforeLevel = 0;
+    // Numbers the headings, "1", "1.1", "1.1.1", this many levels from the top one (1 to 6), in
+    // the text, the table of contents and the bookmarks; a document's title heading (its only
+    // level-1 heading, first) has none, and `#anchor` links keep going by the heading's own text.
+    // 0 for none.
+    int numberHeadings = 0;
     PdfTheme theme;
     // Set to true by another thread to abandon a build no longer wanted: BuildPdf (and
     // BuildBookPdf) then return soon after with BuildError::Cancelled and no PDF. Checked between

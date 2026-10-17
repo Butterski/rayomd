@@ -280,6 +280,7 @@ struct CliExportOptions {
     bool toc = false;
     int tocDepth = 3;
     int pageBreakBeforeLevel = 0;
+    int numberHeadings = 0;
     TinyPdf::PdfTheme theme;
     unsigned workers = 0;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
@@ -322,6 +323,14 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
                 return false;
             }
             options.pageBreakBeforeLevel = value[21] - '0';
+        }
+        else if (value == "--number-headings") options.numberHeadings = 3;
+        else if (value.rfind("--number-headings=", 0) == 0) {
+            if (value.size() != 19 || value[18] < '1' || value[18] > '6') {
+                error = "--number-headings must be 1 to 6";
+                return false;
+            }
+            options.numberHeadings = value[18] - '0';
         }
         else if (value.rfind("--theme=", 0) == 0) {
             const fs::path themePath(argv[i] + 8);
@@ -437,6 +446,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     pdfOptions.toc = options.toc;
     pdfOptions.tocDepth = options.tocDepth;
     pdfOptions.pageBreakBeforeLevel = options.pageBreakBeforeLevel;
+    pdfOptions.numberHeadings = options.numberHeadings;
     pdfOptions.theme = options.theme;
     return pdfOptions;
 }
@@ -889,7 +899,8 @@ void PrintUsage() {
         "  {subject} {date} {page} {pages} {logo}, cover), --no-highlight (code\n"
         "  blocks in one colour; by default fenced code in a language GitHub knows is coloured), --toc\n"
         "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
-        "  --toc-depth=N (heading levels it lists, 1-6; default 3).\n"
+        "  --toc-depth=N (heading levels it lists, 1-6; default 3), --number-headings[=N] (1, 1.1, 1.1.1\n"
+        "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4),\n"
         "  --page-break-before=hN (a new page before each heading of level 1 to N; h1 for chapters).\n"

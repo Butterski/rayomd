@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <string_view>
+#include <unordered_map>
 
 namespace TinyPdf::Internal {
 namespace {
@@ -196,6 +197,79 @@ std::vector<ContentsEntry> BookContents(const std::vector<BookContentsFile>& fil
     }
     entries.erase(entries.begin() + (std::ptrdiff_t)kept, entries.end());
     return entries;
+}
+
+namespace {
+
+// The counts of the levels a numbering has open, from its top: the next number at a level.
+class SectionCounters {
+public:
+    std::string Next(int relative) {
+        count[relative]++;
+        for (int level = relative + 1; level < 6; level++) count[level] = 0;
+        std::string number;
+        for (int level = 0; level <= relative; level++) {
+            if (level > 0) number += '.';
+            number += std::to_string(count[level]);
+        }
+        return number;
+    }
+
+private:
+    int count[6] = {};
+};
+
+} // namespace
+
+std::vector<HeadingNumber> NumberHeadings(const std::vector<Block>& blocks, int depth) {
+    std::vector<HeadingNumber> numbers;
+    const HeadingCensus census(blocks);
+    int top = 1;
+    while (top < 7 && census.perLevel[top] == 0) top++;
+    if (top == 7) return numbers;
+    const int last = std::min(6, top + std::clamp(depth, 1, 6) - 1);
+    SectionCounters counters;
+    for (size_t index = 0; index < blocks.size(); index++) {
+        const Block& block = blocks[index];
+        if (!IsListedHeading(block) || index == census.title) continue;
+        const int level = std::clamp(block.level, 1, 6);
+        if (level <= last) numbers.push_back({ block.text.data(), counters.Next(level - top) });
+    }
+    return numbers;
+}
+
+std::vector<HeadingNumber> NumberBookHeadings(const std::vector<BookContentsFile>& files, int depth) {
+    std::vector<HeadingNumber> numbers;
+    const auto levelOf = [](const Block& block, int shift) { return std::min(6, std::clamp(block.level, 1, 6) + shift); };
+    int top = 7;
+    for (const BookContentsFile& file : files) {
+        if (file.blocks == nullptr) continue;
+        for (const Block& block : *file.blocks) {
+            if (IsListedHeading(block)) top = std::min(top, levelOf(block, file.shift));
+        }
+    }
+    if (top == 7) return numbers;
+    const int last = std::min(6, top + std::clamp(depth, 1, 6) - 1);
+    SectionCounters counters;
+    for (const BookContentsFile& file : files) {
+        if (file.blocks == nullptr) continue;
+        for (const Block& block : *file.blocks) {
+            if (!IsListedHeading(block)) continue;
+            const int level = levelOf(block, file.shift);
+            if (level <= last) numbers.push_back({ block.text.data(), counters.Next(level - top) });
+        }
+    }
+    return numbers;
+}
+
+void NumberContents(std::vector<ContentsEntry>& entries, const std::vector<HeadingNumber>& numbers) {
+    std::unordered_map<const char*, const std::string*> byHeading;
+    byHeading.reserve(numbers.size());
+    for (const HeadingNumber& number : numbers) byHeading.emplace(number.heading, &number.number);
+    for (ContentsEntry& entry : entries) {
+        const auto found = byHeading.find(entry.heading);
+        if (found != byHeading.end()) entry.text = *found->second + ' ' + entry.text;
+    }
 }
 
 } // namespace TinyPdf::Internal

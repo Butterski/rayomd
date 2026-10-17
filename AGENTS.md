@@ -92,6 +92,12 @@ lay out its entries in the flow and link them to the headings; the builder adds 
 numbers and the dot leaders afterwards as a content stream of each table page's own,
 beside a theme's header and footer, so one layout pass suffices. A TOC entry finds its
 heading by the address of the heading's text, which `HeadingMark::text` keeps.
+`--number-headings[=N]` (`PdfOptions::numberHeadings`) numbers the headings of the top level as
+the table would list them (`NumberHeadings`, `NumberBookHeadings` in `contents.cpp`: a side table
+of numbers by the heading's text address, never written into `Block::text`); the renderers draw
+a numbered heading through `RenderAlignedHeading` with the number before the text, its mark
+keeping the text alone so anchors and titles do not change, the table's entries carry the number
+(`NumberContents`) and the bookmarks a numbered copy of the marks (`NumberedHeadings`).
 Books (`--book`, `BuildBookPdf`) make one PDF of the files a SUMMARY.md lists (mdBook,
 GitBook), of a folder, or of the files given. Each file is parsed on its own (its link
 definitions, footnotes and heading anchors are its own) and begins on a new page, so the

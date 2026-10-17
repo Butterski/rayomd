@@ -386,10 +386,12 @@ lang: en-GB
 
 A paragraph `[TOC]` or `[[_TOC_]]` becomes a table of contents with dot leaders, page numbers
 and links to the headings; `--toc` puts one first, and `--toc-depth=N` (1 to 6, default 3) sets
-how many heading levels it lists.
+how many heading levels it lists. `--number-headings` numbers the headings 1, 1.1, 1.1.1 (to
+`--number-headings=N` levels, default 3) in the text, the table of contents and the bookmarks;
+a document's title heading stays unnumbered, and `#links` keep working.
 
 ```sh
-rayomd --export handbook.md handbook.pdf --toc --toc-depth=2
+rayomd --export handbook.md handbook.pdf --toc --toc-depth=2 --number-headings
 ```
 
 ### Themes
