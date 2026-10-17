@@ -189,6 +189,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/contents.cpp
         src/core/book.cpp
         src/core/svg.cpp
+        src/core/mermaid.cpp
         src/core/cff.cpp
         src/core/tagged.cpp
         src/core/html_blocks.cpp
@@ -249,7 +250,8 @@ set(RAYOMD_CORE_SOURCES
     src/common/exact_math.cpp
     src/core/rayomd_pdf_source.cpp
     src/core/access_policy.cpp
-    src/core/dialect.cpp)
+    src/core/dialect.cpp
+    src/core/mermaid.cpp)
 
 if(NOT WIN32)
     if(RAYOMD_USE_CURL)

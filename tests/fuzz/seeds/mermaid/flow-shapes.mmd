@@ -1,0 +1,9 @@
+flowchart TD
+    intake[Intake form] --> triage(Triage)
+    triage --> queue([Queue]) --> worker[[Worker pool]]
+    worker --> store[(Results)] --> hub((Hub))
+    hub --> gate{Approved?}
+    gate -->|yes| pack{{Package}}
+    gate -->|no| redo[/Redo step/]
+    redo --> back[\Send back\]
+    pack --> ship[/Ship\] --> done[\Done/]

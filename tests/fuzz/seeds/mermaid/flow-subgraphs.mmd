@@ -1,0 +1,16 @@
+flowchart RL
+    outside --> inner1
+    subgraph box1 [First box]
+        direction TB
+        inner1 --> inner2
+        subgraph nest [Nested]
+            deep1 --> deep2
+        end
+    end
+    subgraph box2
+        direction LR
+        p1 --> p2
+    end
+    box1 --> box2
+    deep2 --> p1
+    p2 --> outside

@@ -6,7 +6,8 @@
       Writes the synthetic seeds committed under tests/fuzz/seeds/: PNGs of every colour type the
       engine reads, JPEGs (baseline, 4:2:0, progressive, restarts) when cjpeg is given, a TrueType
       and an OpenType/CFF font drawn here (no third-party font data), the CFF table alone, SVGs,
-      theme files and Markdown, and, with --rayomd, PDFs of the reversible profile.
+      theme files, Markdown and Mermaid diagrams, and, with --rayomd, PDFs of the reversible
+      profile.
   seeds.py collect OUT
       Makes OUT/<target>/ corpora for libFuzzer: the committed seeds plus the repository's
       Markdown (tester.md, docs/**/*.md) and the string literals of the core tests, each Markdown
@@ -543,6 +544,163 @@ def make_text_seeds(images):
             write(SEEDS / "buildpdf" / ("%s.%d" % (name, index)), prefix + text.encode("utf-8"))
 
 
+# Mermaid -----------------------------------------------------------------------------------------
+# Written here for the mermaid target, one per form RayoMD draws (docs/development/native_mermaid.md),
+# and a few it refuses; none copied from Mermaid's documentation.
+
+MERMAID = {
+    "flow-shapes.mmd": """flowchart TD
+    intake[Intake form] --> triage(Triage)
+    triage --> queue([Queue]) --> worker[[Worker pool]]
+    worker --> store[(Results)] --> hub((Hub))
+    hub --> gate{Approved?}
+    gate -->|yes| pack{{Package}}
+    gate -->|no| redo[/Redo step/]
+    redo --> back[\\Send back\\]
+    pack --> ship[/Ship\\] --> done[\\Done/]
+""",
+    "flow-links.mmd": """graph LR
+    a --- b
+    a -.-> c
+    a -.- d
+    a ==> e
+    a === f
+    a --x g
+    a --o h
+    a <--> i
+    j x--x k
+    l o--o m
+    n ~~~ o
+    p ----> q
+    r -..-> s
+    t -- words --> u
+    v == heavy ==> w
+    x -. light .-> y
+    y -->|"a | bar"| z
+    z --> z
+""",
+    "flow-chains.mmd": """flowchart BT
+    %% chains and groups
+    s1 & s2 & s3 --> mid --> e1 & e2
+    mid --> mid2["quoted [with] (brackets)"] --> end1["one<br>two<br/>three"]
+    end1 -->|back| s1;
+""",
+    "flow-subgraphs.mmd": """flowchart RL
+    outside --> inner1
+    subgraph box1 [First box]
+        direction TB
+        inner1 --> inner2
+        subgraph nest [Nested]
+            deep1 --> deep2
+        end
+    end
+    subgraph box2
+        direction LR
+        p1 --> p2
+    end
+    box1 --> box2
+    deep2 --> p1
+    p2 --> outside
+""",
+    "flow-styles.mmd": """flowchart TD
+    a:::warm --> b --> c
+    classDef warm fill:#fc9,stroke:#963,stroke-width:3px
+    classDef cool,calm fill:rgb(200, 220, 255),color:#123
+    classDef default stroke-dasharray: 4 2
+    class b cool
+    style c fill:#efe,stroke:#393,stroke-width:2px,color:#030
+    linkStyle 0 stroke:#f00
+    click a callback
+    accTitle: Styles
+    accDescr { two
+    lines }
+""",
+    "flow-front-matter.mmd": """---
+title: Ignored title
+---
+%%{init: {"theme": "forest"}}%%
+flowchart LR
+    left --> right
+""",
+    "seq-basic.mmd": """sequenceDiagram
+    title Checkout
+    autonumber
+    participant B as Browser
+    actor U as Shopper
+    participant API
+    U->>B: Click buy
+    B->>+API: POST /orders
+    API-->>-B: 201 Created
+    B-)U: Thank you
+    B->API: plain
+    B-->API: dotted
+    B-xAPI: cross
+    B--xAPI: dotted cross
+    API--)B: async
+    API->>API: self check
+    activate API
+    deactivate API
+""",
+    "seq-frames.mmd": """sequenceDiagram
+    loop Each retry
+        A->>B: try
+        alt Accepted
+            B-->>A: ok
+        else Rejected
+            B-->>A: no
+        end
+    end
+    opt Cache
+        A->>C: store
+    end
+    par First
+        A->>B: one
+    and Second
+        A->>C: two
+    end
+    critical Lock
+        B->>C: hold
+    option Timeout
+        B-xC: drop
+    end
+    break Shutdown
+        C->>A: bye
+    end
+    rect rgba(255, 200, 0, 0.2)
+        Note over A,C: Shared note
+    end
+    Note left of A: left
+    Note right of C: right<br>side
+    Note over B: over
+    autonumber 10 5
+    A->>B: numbered
+    autonumber off
+""",
+    "pie-basic.mmd": """pie showData title Weekly hours
+    "Meetings" : 12.5
+    "Coding" : 22
+    "Review" : 6
+    "Idle" : 0
+""",
+    "pie-statements.mmd": """pie
+    title Single source
+    "Everything" : 1
+""",
+    "refused-class.mmd": """classDiagram
+    class Widget
+""",
+    "refused-open.mmd": """flowchart TD
+    subgraph never closed
+    a --> b
+""",
+}
+
+
+def make_mermaid_seeds():
+    for name, text in MERMAID.items():
+        write(SEEDS / "mermaid" / name, text)
+
+
 def make_pdfs(rayomd):
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
@@ -570,6 +728,7 @@ def generate(args):
     write(SEEDS / "font" / "tiny.otf", make_opentype(cff, count))
     write(SEEDS / "cff" / "tiny.cff", struct.pack(">H", count) + cff)
     make_text_seeds(images)
+    make_mermaid_seeds()
     if args.rayomd:
         make_pdfs(args.rayomd)
 

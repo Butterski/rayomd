@@ -31,6 +31,9 @@ int Cff(const uint8_t* data, size_t size);
 int Image(const uint8_t* data, size_t size);
 // SVG markup through ConvertSvg with both of the engine's hosts (standard and TrueType fonts).
 int Svg(const uint8_t* data, size_t size);
+// A Mermaid diagram through Mermaid::ToSvg with a host of fixed-width text, then the SVG it gives
+// through ConvertSvg, which must draw it.
+int Mermaid(const uint8_t* data, size_t size);
 
 struct NamedTarget {
     const char* name;

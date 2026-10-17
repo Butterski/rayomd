@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The targets on the engine's own interfaces: BuildPdf, PdfSource::Inspect, ParseTheme and the
-// CFF reader. Each aborts when an invariant the engine promises does not hold, so the fuzzer
-// reports it as it reports a sanitizer's finding.
+// The targets on the engine's own interfaces: BuildPdf, PdfSource::Inspect, ParseTheme, the
+// CFF reader and Mermaid diagrams. Each aborts when an invariant the engine promises does not
+// hold, so the fuzzer reports it as it reports a sanitizer's finding.
 
 #include "fuzz_targets.h"
 
 #include "rayomd/tiny_pdf.h"
 #include "core/cff.h"
 #include "core/export_options.h"
+#include "core/mermaid.h"
 #include "core/rayomd_pdf_source.h"
+#include "core/svg.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -188,6 +190,43 @@ int Cff(const uint8_t* data, size_t size) {
             Fail("the engine cannot read the CFF subset it wrote");
         }
     }
+    return 0;
+}
+
+namespace {
+
+// Text 0.6 em a character: the layout's measure without a font.
+class FixedWidthHost : public TinyPdf::Internal::SvgHost {
+public:
+    double TextWidth(std::string_view text, double size, bool) override {
+        size_t characters = 0;
+        for (char ch : text) characters += (static_cast<unsigned char>(ch) & 0xC0) != 0x80;
+        return 0.6 * size * static_cast<double>(characters);
+    }
+    void AppendText(std::string& out, std::string_view text, bool) override {
+        out += '(';
+        for (char ch : text) {
+            if (ch == '(' || ch == ')' || ch == '\\') out += '\\';
+            out += ch;
+        }
+        out += ')';
+    }
+    bool HasBoldFace() const override { return false; }
+    int AddImage(std::string_view, int&, int&) override { return -1; }
+};
+
+} // namespace
+
+int Mermaid(const uint8_t* data, size_t size) {
+    const std::string_view source(reinterpret_cast<const char*>(data), size);
+    FixedWidthHost host;
+    std::string svg;
+    if (!TinyPdf::Internal::Mermaid::ToSvg(source, host, TinyPdf::Internal::Mermaid::kDefaultPalette, svg)) {
+        if (!svg.empty()) Fail("a refused Mermaid diagram left an SVG");
+        return 0;
+    }
+    TinyPdf::Internal::SvgForm form;
+    if (!TinyPdf::Internal::ConvertSvg(svg, host, form) || form.content.empty()) Fail("the SVG of a Mermaid diagram does not convert");
     return 0;
 }
 

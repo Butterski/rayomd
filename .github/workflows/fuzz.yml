@@ -29,6 +29,7 @@ jobs:
         run: >
           cmake --build build/fuzz -j"$(nproc)" --target rayomd-fuzz-replay rayomd-fuzz-buildpdf
           rayomd-fuzz-pdfsource rayomd-fuzz-theme rayomd-fuzz-font rayomd-fuzz-cff rayomd-fuzz-image rayomd-fuzz-svg
+          rayomd-fuzz-mermaid
       - name: Regressions and seeds under ASan and UBSan
         run: build/fuzz/tests/fuzz/rayomd-fuzz-replay tests/fuzz/regressions tests/fuzz/seeds
       - name: Fuzz

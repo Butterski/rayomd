@@ -24,6 +24,7 @@
 #include "../src/core/cff.h"
 #include "../src/core/html.h"
 #include "../src/core/svg.h"
+#include "../src/core/mermaid.h"
 #include "../src/core/theme.h"
 
 #include <algorithm>
@@ -968,6 +969,7 @@ size_t PeakRssBytes() {
 #include "html_tests.inc"
 #include "hardening_tests.inc"
 #include "dialect_tests.inc"
+#include "mermaid_tests.inc"
 
 // Heights of the filled rectangles drawn with the given fill colour ("r g b").
 std::vector<double> FillRectHeights(const std::string& pdf, std::string_view color) {
@@ -3910,6 +3912,7 @@ int main() {
     if (!CheckSourceMap()) return 124;
     if (!CheckHeadingNumbers()) return 125;
     if (!dialect_tests::CheckObsidian()) return 126;
+    if (!mermaid_tests::CheckMermaid()) return 127;
 #ifdef _WIN32
     if (!CheckDirectImageLinks()) return 123;
 #endif

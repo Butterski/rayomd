@@ -339,6 +339,14 @@ Important image/link details:
   host (`SvgHost`, implemented by `tiny_pdf.cpp` for each renderer). Built at `-Os`;
   every input-size, depth, work and output limit makes `ConvertSvg` return false.
 
+- `src/core/mermaid.h` and `src/core/mermaid.cpp`
+  Mermaid diagrams (flowcharts with subgraphs and styles, sequence diagrams, pie charts; contract:
+  `docs/development/native_mermaid.md`): read, laid out (a layered layout per subgraph level with
+  fixed sweep counts, lanes and rows) and written as an SVG that `ConvertSvg` draws without libm,
+  labels measured with the converter's own `SvgHost::TextWidth`. Built at `-Os`; an unsupported,
+  malformed or over-limit diagram makes `Mermaid::ToSvg` return false, and the caller draws the
+  code block. Pie arcs are Béziers from the module's own sine; keep transcendental calls out.
+
 - `src/core/cff.h` and `src/core/cff.cpp`
   OpenType fonts with PostScript outlines: the 'CFF ' table checked once when the font
   loads (INDEXes, DICTs, FDSelect, private DICTs and subroutines), each glyph's Type 2
@@ -532,14 +540,15 @@ Important image/link details:
   `tests/hardening_tests.inc` those of hostile and abandoned builds (cancellation, files that
   are no regular files, fonts changed after loading, image containment, cache permissions, the
   decode budget and the SVG `data:` image cache); `tests/dialect_tests.inc` checks Obsidian's
-  dialect.
+  dialect, and `tests/mermaid_tests.inc` the Mermaid diagrams (syntax, refusals, layout
+  invariants, golden SVG digests, conversion, limits).
 
 - `tests/fuzz/`
   libFuzzer targets of the engine's untrusted-input entry points (`fuzz_targets.h`): Markdown
   through `BuildPdf` (the first two bytes choose the options), `PdfSource::Inspect`, `ParseTheme`
   and a build with its theme, TrueType and OpenType fonts loaded and subset as a theme's font,
-  bare CFF, image decoding, and SVG through both hosts. `fuzz_internal.cpp` compiles
-  `tiny_pdf.cpp` inside itself to reach its internal names (and reads fonts into memory instead of
+  bare CFF, image decoding, SVG through both hosts, and Mermaid diagrams through `Mermaid::ToSvg`
+  and `ConvertSvg`. `fuzz_internal.cpp` compiles `tiny_pdf.cpp` inside itself to reach its internal names (and reads fonts into memory instead of
   mapping them, so ASan sees overreads); each target runs on a 2 MiB stack. `-DRAYOMD_FUZZ=ON` with
   clang builds `rayomd-fuzz-<target>` (ASan, UBSan); `tests/fuzz/run.sh BUILD SECONDS` runs them on
   the corpus `seeds.py collect` makes (-timeout=10, -rss_limit_mb=2048). Every test build on Linux
@@ -560,8 +569,8 @@ Important image/link details:
   Project branding sources and demo media, kept separate.
 
 - `docs/development/`
-  Source-coupled performance workflow, format profiles, the native math contract, and
-  architecture decisions.
+  Source-coupled performance workflow, format profiles, the native math and Mermaid contracts,
+  and architecture decisions.
 
 - [GitHub wiki](https://github.com/Butterski/rayomd/wiki)
   User guides, dated benchmark reports, and optimization research. Wiki history
