@@ -62,4 +62,9 @@ struct Geometry {
 // ToSvg that also fills `geometry`.
 bool ToSvg(std::string_view source, SvgHost& host, const Palette& palette, std::string& svg, Geometry* geometry);
 
+// How many diagrams the process has laid out for documents (tiny_pdf.cpp, ImageRegistry::AddDiagram),
+// not counting those taken from its cache of drawn diagrams, and that cache dropped: for its tests.
+uint64_t Layouts();
+void ForgetDiagrams();
+
 } // namespace TinyPdf::Internal::Mermaid

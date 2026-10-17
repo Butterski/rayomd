@@ -733,6 +733,29 @@ bool CheckDiagramBlocks() {
         std::cerr << "Mermaid in a Latin document mismatch" << std::endl;
         return false;
     }
+    // A diagram drawn before comes from the process's cache: no layout, and the bytes of an
+    // uncached build, in both renderers, also when another document drew it first and the text
+    // around it has none of its letters (the cache replays its glyphs into the font's subset).
+    for (const std::string prefix : { "", "\xC5\xBC\n\n" }) {
+        using TinyPdf::Internal::Mermaid::Layouts;
+        const std::string diagram = "```mermaid\nflowchart LR\n  Q[\xC3\x9Cnique quokka] --> X[Xylophone]\n```\n";
+        const std::string alpha = prefix + "Alpha text.\n\n" + diagram;
+        const std::string beta = prefix + "Beta words.\n\n" + diagram;
+        std::string alphaFresh, betaFresh, alphaCached, betaCached;
+        TinyPdf::Internal::Mermaid::ForgetDiagrams();
+        const uint64_t start = Layouts();
+        const TinyPdf::BuildResult fresh = TinyPdf::BuildPdf(beta, TinyPdf::PdfOptions(), betaFresh);
+        TinyPdf::Internal::Mermaid::ForgetDiagrams();
+        const bool built = fresh.Ok() && TinyPdf::BuildPdf(alpha, TinyPdf::PdfOptions(), alphaFresh).Ok();
+        const uint64_t laidOut = Layouts() - start;
+        const TinyPdf::BuildResult cached = TinyPdf::BuildPdf(beta, TinyPdf::PdfOptions(), betaCached);
+        if (!built || !cached.Ok() || !TinyPdf::BuildPdf(alpha, TinyPdf::PdfOptions(), alphaCached).Ok() || laidOut != 2 ||
+            Layouts() - start != 2 || betaCached != betaFresh || alphaCached != alphaFresh ||
+            cached.missingCharacters != fresh.missingCharacters || !Contains(betaCached, "/Subtype /Form")) {
+            std::cerr << "Mermaid diagram cache mismatch" << (prefix.empty() ? "" : " (Unicode)") << std::endl;
+            return false;
+        }
+    }
     for (const std::string prefix : { "", "\xC5\xBC\n\n" }) {   // the standard and the Unicode renderer
         std::string drawn, quoted, disabled, plain, unsupported, plainChart;
         const bool built = TinyPdf::BuildPdf(prefix + "```mermaid\n" + flow, TinyPdf::PdfOptions(), drawn).Ok() &&

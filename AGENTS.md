@@ -90,7 +90,12 @@ through `ImageRegistry::AddDiagram` (`Mermaid::ToSvg` with the renderer's `SvgHo
 accent colour, then `ConvertSvgImage`) and draws the form centred as an image, a Figure under
 PDF/UA with the source as its alt text. With `--no-diagrams` (`PdfOptions::diagrams`), or for a
 type, syntax or size the module refuses, the block takes the one-colour code path with the bytes
-of a fence without a language; documents without such fences are unchanged.
+of a fence without a language; documents without such fences are unchanged. A drawn diagram is
+kept for the process (`ImageRegistry::Diagrams`, at most 16 MiB) by its renderer's fonts (their
+`TtfFont::loadId`), palette and source, with the text runs its form shows: a later build, such as
+the GUI's preview on every edit, takes the form and replays the runs into its own glyph sets
+(`WriteCidText`), so the PDF is the one an uncached build makes (`Mermaid::Layouts` counts the
+layouts for the tests).
 A table of contents comes at the first paragraph `[TOC]` or `[[_TOC_]]` (later ones draw
 nothing), or with `--toc` (`PdfOptions::toc`) first or after a title heading; it lists
 the top-level headings to `--toc-depth` levels, without a document's only level-1 heading
