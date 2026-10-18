@@ -187,23 +187,25 @@ bool CheckBuilds(const fs::path& root) {
     return true;
 }
 
-// The name index past its entries finds no note by name, while paths still resolve.
+// The name index past its entries finds no note by name, while paths still resolve; with a cap of
+// 64 entries, as 20,000 files took a minute to make on Windows.
 bool CheckIndexCap(const fs::path& root) {
+    constexpr size_t kCap = 64;
     const fs::path vault = root / "crowded";
     WriteNote(vault / "deep" / "target.md", "target\n");
     WriteNote(vault / "near.md", "near\n");
     fs::create_directories(vault / "many");
-    for (size_t index = 0; index <= TinyPdf::Internal::Vault::kMaxIndexEntries; index++) {
+    for (size_t index = 0; index < kCap; index++) {
         std::ofstream(vault / "many" / ("f" + std::to_string(index)), std::ios::binary);
     }
-    TinyPdf::Internal::Vault crowded(RayoMd::File::PathToUtf8(vault), std::string());
+    TinyPdf::Internal::Vault crowded(RayoMd::File::PathToUtf8(vault), std::string(), kCap);
     const fs::path base = TinyPdf::Internal::ResolvedPath(vault);
     if (!crowded.Find(base, "target", true).empty() || crowded.Find(base, "near", true).empty() ||
         crowded.Find(base, "deep/target", false).empty()) {
         return Fail("the name index's cap");
     }
     fs::remove_all(vault / "many");
-    TinyPdf::Internal::Vault spacious(RayoMd::File::PathToUtf8(vault), std::string());
+    TinyPdf::Internal::Vault spacious(RayoMd::File::PathToUtf8(vault), std::string(), kCap);
     return !spacious.Find(base, "TARGET", true).empty() || Fail("a note by name, letter case aside");
 }
 

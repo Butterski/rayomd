@@ -139,7 +139,8 @@ bool DirectPathHasLink(const fs::path& root, const fs::path& path) {
 }
 #endif
 
-Vault::Vault(const std::string& vaultRoot, const std::string& notePath) {
+Vault::Vault(const std::string& vaultRoot, const std::string& notePath, size_t maxIndexEntries)
+    : indexLimit(maxIndexEntries) {
     fs::path folder;
     if (!vaultRoot.empty()) {
         folder = PathFromUtf8(vaultRoot);
@@ -330,7 +331,7 @@ void Vault::BuildIndex() {
     size_t entries = 0;
     fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
     for (const fs::recursive_directory_iterator end; !ec && it != end; it.increment(ec)) {
-        if (++entries > kMaxIndexEntries) {
+        if (++entries > indexLimit) {
             index.clear();
             return;
         }

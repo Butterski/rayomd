@@ -43,7 +43,9 @@ public:
     static constexpr int kMaxIndexDepth = 32;
 
     // The root: `vaultRoot` (UTF-8) when it is set, else the folder of the note at `notePath`.
-    Vault(const std::string& vaultRoot, const std::string& notePath);
+    // `maxIndexEntries`: kMaxIndexEntries, lower in tests (20,000 files took a minute to make on
+    // Windows).
+    Vault(const std::string& vaultRoot, const std::string& notePath, size_t maxIndexEntries = kMaxIndexEntries);
     ~Vault();
     Vault(const Vault&) = delete;
     Vault& operator=(const Vault&) = delete;
@@ -77,6 +79,7 @@ private:
 
     std::filesystem::path root;
     std::vector<Named> index;   // by name, then depth, then relative path
+    size_t indexLimit;
     bool indexed = false;
     bool indexValid = false;
 #ifndef _WIN32
