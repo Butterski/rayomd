@@ -206,6 +206,14 @@ struct PdfOptions {
     // Footnotes after the text (End) or at the foot of the page of their first reference (Page);
     // a note too tall for a page with its line stays after the text.
     FootnotePlacement footnotes = FootnotePlacement::End;
+    // Obsidian's dialect: the vault (UTF-8), the folder the notes a document embeds or links to
+    // must lie in and are found in by name; also local images then. Empty: the document's folder.
+    std::string vaultRoot;
+    // Obsidian's dialect: "![[note]]" alone on a line stays a link to the note instead of printing
+    // it (as without sourcePath).
+    bool embedsAsLinks = false;
+    // BuildBookPdf: each file ends with "Linked from:" and links to the files that link to it.
+    bool backlinks = false;
 };
 
 // Legacy error reporting is retained for the bool-returning compatibility

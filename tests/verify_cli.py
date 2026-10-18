@@ -218,6 +218,35 @@ def verify_book(binary: Path, root: Path) -> None:
     run(binary, "--book", str(book / "one.md"), str(root / "book-embed.pdf"), "--embed-source", expect=2)
 
 
+def verify_notes(binary: Path, root: Path) -> None:
+    """Obsidian note embeds (--embeds, --vault) and books of linked notes (--follow-links,
+    --backlinks): an embedded note is printed, a link with --embeds=link; a note above the input's
+    folder only with --vault; linked notes each on a page of their own with their backlinks."""
+    vault = root / "vault"
+    (vault / "sub").mkdir(parents=True)
+    (vault / "Shared.md").write_text("# Shared\n\nShared text.\n", encoding="utf-8")
+    (vault / "sub" / "Note.md").write_text("# Note\n\n![[Shared]]\n\nSee [[Other]].\n", encoding="utf-8")
+    (vault / "sub" / "Other.md").write_text("# Other\n\nBack to [[Note]].\n", encoding="utf-8")
+    note = vault / "sub" / "Note.md"
+    pdf = root / "note.pdf"
+    run(binary, "--export", str(note), str(pdf), "--dialect=obsidian")
+    if b"(Shared text.) Tj" in require_pdf(pdf):
+        raise AssertionError("a note outside the input's folder was embedded without --vault")
+    run(binary, "--export", str(note), str(pdf), "--dialect=obsidian", f"--vault={vault}")
+    if b"(Shared text.) Tj" not in require_pdf(pdf):
+        raise AssertionError("--vault: the embedded note is missing")
+    run(binary, "--export", str(note), str(pdf), "--dialect=obsidian", f"--vault={vault}", "--embeds=link")
+    data = require_pdf(pdf)
+    if b"(Shared text.) Tj" in data or b"/URI (Shared.md)" not in data:
+        raise AssertionError("--embeds=link: the embed is not a link")
+    run(binary, "--export", str(note), str(pdf), "--dialect=obsidian", "--follow-links=1", "--backlinks")
+    data = require_pdf(pdf, b"(Other) Tj", b"(Linked from:) Tj")
+    if data.count(b"/Type /Page ") != 2 or b"/URI (Other.md)" in data or b"/URI (Note.md)" in data:
+        raise AssertionError("--follow-links: unexpected pages or links")
+    run(binary, "--stdin", str(pdf), "--follow-links", expect=2)
+    run(binary, "--export", str(note), str(pdf), "--follow-links=7", expect=2)
+
+
 def verify_svg(binary: Path, root: Path) -> None:
     """An SVG image is drawn as a form XObject, its text in the document's font."""
     (root / "chart.svg").write_text(
@@ -533,6 +562,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_highlight(binary, root)
         verify_contents(binary, root)
         verify_book(binary, root)
+        verify_notes(binary, root)
         verify_svg(binary, root)
         verify_pdfua(binary, root)
         verify_batch(binary, root)

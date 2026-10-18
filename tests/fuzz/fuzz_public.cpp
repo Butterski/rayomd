@@ -105,7 +105,8 @@ void Build(const std::string& markdown, const TinyPdf::PdfOptions& options) {
 // 0-2: the page-break level (mod 7); bits 3-5: the heading numbers' depth (mod 7); bit 6:
 // Obsidian's dialect; bit 7: diagrams off (```mermaid blocks as code). Byte 2, the document's
 // first byte (read, not taken from it, so earlier seeds keep their text): bit 2 a long page
-// (PdfPageSize::autoHeight) of byte 0's width, bit 3 footnotes at the foot of the page.
+// (PdfPageSize::autoHeight) of byte 0's width, bit 3 footnotes at the foot of the page, bit 4
+// note embeds as links, bit 5 backlinks, bit 6 the scratch directory as the vault.
 int BuildPdf(const uint8_t* data, size_t size) {
     if (size < 2) return 0;
     const std::string markdown(reinterpret_cast<const char*>(data) + 2, size - 2);
@@ -113,6 +114,9 @@ int BuildPdf(const uint8_t* data, size_t size) {
     const uint8_t extra = size > 2 ? data[2] : 0;
     options.pageSize.autoHeight = (extra & 4) != 0;
     if ((extra & 8) != 0) options.footnotes = TinyPdf::FootnotePlacement::Page;
+    options.embedsAsLinks = (extra & 0x10) != 0;
+    options.backlinks = (extra & 0x20) != 0;
+    if ((extra & 0x40) != 0) options.vaultRoot = ScratchDir();
     const uint8_t last = data[size - 1];
     options.pageBreakBeforeLevel = (last & 7) % 7;
     options.numberHeadings = ((last >> 3) & 7) % 7;

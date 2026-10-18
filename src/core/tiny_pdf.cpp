@@ -18,6 +18,7 @@
 #include "inflate.h"
 #include "contents.h"
 #include "dialect.h"
+#include "embeds.h"
 #include "diagram_cache.h"
 #include "mermaid.h"
 #include "markdown_parser.h"
@@ -31,6 +32,7 @@
 #include "svg.h"
 #include "tagged.h"
 #include "theme.h"
+#include "vault.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -2353,34 +2355,6 @@ static bool TryApprovedNtRootForPolicy(
     return true;
 }
 
-// Whether a directory between `root` and the file `path` names, which lies in it by name, is a
-// symbolic link, junction or mount point (name surrogates): they may lead off the root, to a
-// share even, and are checked here, never followed. Other reparse points, such as cloud-file
-// placeholders, are plain folders to this test. A missing directory counts as one.
-// One attribute query a folder (GetFileAttributesW reports a link's own attributes, not its
-// target's, and opens nothing beyond it); only a reparse point has its tag read from its entry.
-// FindFirstFileExW for every folder made each image of a document in a subfolder cost about
-// 20 µs a level and build on Windows (tester.md, three levels: +18 % a build).
-static bool DirectPathHasLink(const std::filesystem::path& root, const std::filesystem::path& path) {
-    auto part = path.begin();
-    for (auto rootPart = root.begin(); rootPart != root.end() && part != path.end(); ++rootPart) ++part;
-    std::filesystem::path current = root;
-    for (; part != path.end() && std::next(part) != path.end(); ++part) {
-        current /= *part;
-        const DWORD attributes = GetFileAttributesW(current.c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES) return true;
-        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) continue;
-        WIN32_FIND_DATAW entry{};
-        HANDLE find = FindFirstFileExW(current.c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch, nullptr, 0);
-        if (find == INVALID_HANDLE_VALUE) return true;
-        FindClose(find);
-        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 && IsReparseTagNameSurrogate(entry.dwReserved0)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Opens `path`, in the approved root by name, without following a link: a file that is a
 // symbolic link (or another name surrogate) is rejected, so nothing outside the root, a share
 // least of all, is opened before the final-path check. One GetFileInformationByHandle gives the
@@ -2608,7 +2582,8 @@ public:
     explicit LocalImagePolicy(const PdfOptions& options)
         : allowUnsafe(options.allowUnsafeLocalImages),
           hasSourcePath(!options.sourcePath.empty()),
-          sourcePath(options.sourcePath) {}
+          sourcePath(options.sourcePath),
+          vaultRoot(options.dialect == MarkdownDialect::Obsidian ? &options.vaultRoot : nullptr) {}
 
     // A book's file (BuildBookPdf): its relative images resolve from its own directory, and must
     // still lie in the book's.
@@ -2620,11 +2595,13 @@ public:
 
 #ifdef _WIN32
     DirectLocalImageResult TryOpenDirect(
-        const std::string& src, std::string& key, WinLocalImageFile& file) {
+        const std::string& src, std::string& key, WinLocalImageFile& file, uint32_t base) {
         if (src.empty() || IsHttpUrl(src)) return DirectLocalImageResult::Rejected;
         if (allowUnsafe) return DirectLocalImageResult::NotApplicable;
         if (!hasSourcePath || IsUnsafeLocalImageSource(src)) return DirectLocalImageResult::Rejected;
-        if (!chapterBase.empty()) return DirectLocalImageResult::NotApplicable;
+        if (!chapterBase.empty() || base != 0 || (vaultRoot != nullptr && !vaultRoot->empty())) {
+            return DirectLocalImageResult::NotApplicable;
+        }
 
         const std::filesystem::path& root = SafeRoot();
         if (!safeRootValid) return DirectLocalImageResult::Rejected;
@@ -2633,15 +2610,17 @@ public:
         std::filesystem::path path = (root / PathFromUtf8(src)).lexically_normal();
         // In the root by name before anything is opened ("..", wildcards), and through no link.
         if (path == root || !IsPathContainedInRoot(path, root, false) ||
-            path.native().find_first_of(L"*?") != std::wstring::npos || DirectPathHasLink(root, path)) {
+            path.native().find_first_of(L"*?") != std::wstring::npos || Internal::DirectPathHasLink(root, path)) {
             return DirectLocalImageResult::Rejected;
         }
         return TryOpenDirectLocalImage(path, safeRootNt, key, file);
     }
 #endif
 
-    bool Resolve(const std::string& src, std::string& key, std::string& pathUtf8) {
+    // `embedBase`: ImageSource::base, the folder of a note the document embeds that the image is of.
+    bool Resolve(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t embedBase) {
         if (src.empty() || IsHttpUrl(src)) return false;
+        if (embedBase != 0) return ResolveEmbedded(src, key, pathUtf8, embedBase);
         if (allowUnsafe) return ResolveUnsafe(src, key, pathUtf8);
         if (!hasSourcePath || IsUnsafeLocalImageSource(src)) return false;
 
@@ -2666,7 +2645,9 @@ public:
     }
 
 private:
-    // The source's directory, and the one images must lie in: "." for a source path without one.
+    // The source's directory, and the one images must lie in: "." for a source path without one;
+    // with a vault (Obsidian's dialect, PdfOptions::vaultRoot), the vault, the images resolving
+    // from the source's directory as a book's from its file's.
     RAYOMD_COLD void PrepareBases() {
         if (basesReady) return;
         basesReady = true;
@@ -2675,6 +2656,25 @@ private:
         if (sourceBase.has_filename()) sourceBase = sourceBase.parent_path();
         safeBase = sourceBase;
         if (safeBase.empty()) safeBase = ".";
+        if (vaultRoot != nullptr && !vaultRoot->empty()) {
+            if (chapterBase.empty()) chapterBase = safeBase;
+            safeBase = PathFromUtf8(*vaultRoot);
+        }
+    }
+
+    // An image of a note the document embeds: from that note's folder, inside the root.
+    RAYOMD_COLD bool ResolveEmbedded(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t base) {
+        const std::filesystem::path* folder = Internal::EmbedFolder(base);
+        if (folder == nullptr || !hasSourcePath || (!allowUnsafe && IsUnsafeLocalImageSource(src))) return false;
+        std::filesystem::path normalized;
+        if (!TryCanonicalForPolicy(*folder / PathFromUtf8(src), normalized)) return false;
+        if (!allowUnsafe) {
+            const std::filesystem::path& root = SafeRoot();
+            if (!safeRootValid || !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
+        }
+        pathUtf8 = PathToUtf8(normalized);
+        key = "file:" + pathUtf8;
+        return true;
     }
 
     const std::filesystem::path& SafeRoot() {
@@ -2710,6 +2710,7 @@ private:
     bool chapterRootReady = false;
     bool chapterRootValid = false;
     const std::string& sourcePath;       // PdfOptions::sourcePath, which outlives the export
+    const std::string* vaultRoot;        // PdfOptions::vaultRoot under Obsidian's dialect, else null
     std::filesystem::path sourceBase;
     std::filesystem::path safeBase;
     std::filesystem::path safeRoot;
@@ -3769,9 +3770,15 @@ uint64_t Internal::SvgImageDecodes() {
     return g_svgImageDecodes.load(std::memory_order_relaxed);
 }
 
+// The registry's key for the sources of a note's images (ImageSource::base `base`), which resolve
+// from that note's folder: apart from the document's "source:" keys.
+RAYOMD_COLD static void EmbeddedSourceKey(std::string& key, uint32_t base) {
+    key = "embed:" + std::to_string(base) + ':';
+}
+
 class ImageRegistry {
 public:
-    explicit ImageRegistry(const PdfOptions& opts) : options(opts), localPolicy(opts) {}
+    explicit ImageRegistry(const PdfOptions& opts) : options(opts), localPolicy(opts), embedImages(Internal::EmbedsActive()) {}
 
     // The book's file whose images follow (BuildBookPdf).
     void SetChapter(const std::string& pathUtf8) { localPolicy.SetChapter(pathUtf8); }
@@ -3822,8 +3829,9 @@ public:
 
     // An image the document shows, by its source: false, and one more failed image, when the
     // policy rejects it or it cannot be loaded or decoded; RenderImage then shows its alt text.
-    bool Resolve(const std::string& src, const std::string& alt, int& index) {
-        const bool resolved = ResolveSource(src, alt, index);
+    // `image` is the image's source: of the document, or of a note it embeds (EmbedImageBase).
+    bool Resolve(const std::string& src, const std::string& alt, int& index, const Internal::ImageSource& image) {
+        const bool resolved = ResolveSource(src, alt, index, embedImages ? Internal::EmbedImageBase(image) : 0);
         failed += !resolved;
         return resolved;
     }
@@ -3901,11 +3909,12 @@ public:
     }
 
 private:
-    bool ResolveSource(const std::string& src, const std::string& alt, int& index) {
+    bool ResolveSource(const std::string& src, const std::string& alt, int& index, uint32_t base) {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Image);
         // Reuse raw sources only after this registry has accepted them through
         // its immutable policy; cross-build caches stay canonical-keyed.
         std::string sourceKey = "source:";
+        if (base != 0) EmbeddedSourceKey(sourceKey, base);
         sourceKey += src;
         auto source = indexByKey.find(sourceKey);
         if (source != indexByKey.end()) {
@@ -3925,12 +3934,12 @@ private:
             key = "url:" + src;
         } else {
 #ifdef _WIN32
-            DirectLocalImageResult direct = localPolicy.TryOpenDirect(src, key, localFile);
+            DirectLocalImageResult direct = localPolicy.TryOpenDirect(src, key, localFile, base);
             if (direct == DirectLocalImageResult::Rejected) return false;
             directLocal = direct == DirectLocalImageResult::Opened;
-            if (!directLocal && !localPolicy.Resolve(src, key, localPathUtf8)) return false;
+            if (!directLocal && !localPolicy.Resolve(src, key, localPathUtf8, base)) return false;
 #else
-            if (!localPolicy.Resolve(src, key, localPathUtf8)) return false;
+            if (!localPolicy.Resolve(src, key, localPathUtf8, base)) return false;
 #endif
         }
 
@@ -4023,6 +4032,7 @@ private:
 
     const PdfOptions& options;
     LocalImagePolicy localPolicy;
+    const bool embedImages;   // the build embeds notes (Internal::EmbedsActive), whose images resolve from their folders
     std::vector<SharedPdfImage> images;
     std::unordered_map<std::string, int> indexByKey;
     uint32_t failed = 0;
@@ -6443,7 +6453,7 @@ public:
     RAYOMD_COLD BookTargets(const std::vector<HeadingMark>& headings, const std::vector<HeadingMark>& ids, const Book& book,
         const BookParse& bookParse, bool winAnsiText, double pageHeight, const std::vector<size_t>* contentsHeadings)
         : marks(headings), chapters(book.chapters), parse(bookParse), winAnsi(winAnsiText), pageTop(pageHeight),
-          contents(contentsHeadings), files(book.chapters.size()) {
+          contents(contentsHeadings), files(book.chapters.size()), paths(book.chapters.size()) {
         size_t mark = 0;
         size_t id = 0;
         for (size_t index = 0; index < files.size(); index++) {
@@ -6455,7 +6465,7 @@ public:
             while (id < ids.size() && ids[id].page < parse.firstPages[index]) id++;
             while (id < ids.size() && ids[id].page < end) file.ids.push_back(ids[id++]);
             file.targets = std::make_unique<HeadingTargets>(file.marks, winAnsi, pageTop, parse.noteMarks[index], &file.ids);
-            if (!chapters[index].part) file.path = PathToUtf8(PathFromUtf8(chapters[index].path).lexically_normal());
+            if (!chapters[index].part) paths[index] = PathToUtf8(PathFromUtf8(chapters[index].path).lexically_normal());
         }
     }
 
@@ -6483,10 +6493,9 @@ public:
 private:
     static constexpr size_t kNone = std::string::npos;
 
-    // A file's path, normalized (none for a part), its headings and HTML ids, and the targets of
-    // its links (HeadingTargets keeps references to the headings and ids).
+    // A file's headings and HTML ids, and the targets of its links (HeadingTargets keeps references
+    // to the headings and ids).
     struct File {
-        std::string path;
         std::vector<HeadingMark> marks;
         std::vector<HeadingMark> ids;
         std::unique_ptr<HeadingTargets> targets;
@@ -6507,37 +6516,10 @@ private:
         return after == parse.firstPages.begin() ? kNone : (size_t)(after - parse.firstPages.begin()) - 1;
     }
 
-    // The file of the book a link of file `from` names, kNone for one outside it: a relative path,
-    // percent-encoded as a URL is, or a directory, whose README.md or index.md it names. A book
-    // has tens or hundreds of files, so they are looked through in turn.
+    // The file of the book a link of file `from` names, kNone for one outside it (BookFileOfLink).
     RAYOMD_COLD size_t FileOfLink(size_t from, std::string_view written) const {
-        if (written.empty() || written[0] == '/' || written[0] == '\\' || HasUriScheme(written)) return kNone;
-        std::string path(written);
-        if (winAnsi && !IsAllAscii(path)) path = RayoMd::Text::WinAnsiToUtf8(path);
-        path = PercentDecoded(path);
-        const std::filesystem::path named = (PathFromUtf8(chapters[from].path).parent_path() / PathFromUtf8(path)).lexically_normal();
-        for (const char* index : { "", "README.md", "index.md" }) {
-            const std::string key = PathToUtf8(*index == '\0' ? named : (named / index).lexically_normal());
-            for (size_t file = 0; file < files.size(); file++) {
-                if (!files[file].path.empty() && files[file].path == key) return file;
-            }
-        }
-        return Internal::ObsidianDialect() ? FileByName(PathToUtf8(PathFromUtf8(path).lexically_normal())) : kNone;
-    }
-
-    // In Obsidian's dialect a wiki link names a note by its name, or the end of its path, wherever
-    // in the book it is: the first file whose path ends in `name`, in any case.
-    RAYOMD_COLD size_t FileByName(std::string_view name) const {
-        for (size_t file = 0; file < files.size(); file++) {
-            const std::string& path = files[file].path;
-            if (name.empty() || path.size() < name.size()) continue;
-            const size_t at = path.size() - name.size();
-            if (at > 0 && path[at - 1] != '/' && path[at - 1] != '\\') continue;
-            size_t index = 0;
-            while (index < name.size() && std::tolower((unsigned char)path[at + index]) == std::tolower((unsigned char)name[index])) index++;
-            if (index == name.size()) return file;
-        }
-        return kNone;
+        if (!winAnsi || IsAllAscii(written)) return Internal::BookFileOfLink(chapters, paths, from, written);
+        return Internal::BookFileOfLink(chapters, paths, from, RayoMd::Text::WinAnsiToUtf8(std::string(written)));
     }
 
     const std::vector<HeadingMark>& marks;
@@ -6547,6 +6529,7 @@ private:
     double pageTop = 0.0;
     const std::vector<size_t>* contents = nullptr;   // the heading of each entry of the table of contents
     std::vector<File> files;                         // each file's; sized once, as HeadingTargets refers to it
+    std::vector<std::string> paths;                  // each file's path, normalized; none for a part
 };
 
 // The bar beside quoted text, by Block::alert: a plain quote's, then those of the GitHub alerts
@@ -8371,7 +8354,7 @@ private:
         }
 
         int index = -1;
-        if (!images->Resolve(block.image->src, block.text, index)) {
+        if (!images->Resolve(block.image->src, block.text, index, *block.image)) {
             RenderImageFallback(block);
             return;
         }
@@ -8424,7 +8407,7 @@ private:
         std::vector<Placed> placed;
         const auto add = [&](const Internal::ImageSource& source, const std::string& alt) {
             int index = -1;
-            if (!images || !images->Resolve(source.src, alt, index)) return false;
+            if (!images || !images->Resolve(source.src, alt, index, source)) return false;
             const PdfImage& image = images->Get(index);
             double w = (double)image.width * 72.0 / 96.0;
             double h = (double)image.height * 72.0 / 96.0;
@@ -11577,7 +11560,7 @@ private:
         std::string utf8Source;
         const std::string& source = block.image->src;
         if (winAnsiText && !IsAllAscii(source)) utf8Source = RayoMd::Text::WinAnsiToUtf8(source);
-        if (!images->Resolve(utf8Source.empty() ? source : utf8Source, block.text, index)) {
+        if (!images->Resolve(utf8Source.empty() ? source : utf8Source, block.text, index, *block.image)) {
             RenderImageFallback(block);
             return;
         }
@@ -11623,7 +11606,7 @@ private:
             std::string utf8Source;
             if (winAnsiText && !IsAllAscii(source.src)) utf8Source = RayoMd::Text::WinAnsiToUtf8(source.src);
             int index = -1;
-            if (!images || !images->Resolve(utf8Source.empty() ? source.src : utf8Source, alt, index)) return false;
+            if (!images || !images->Resolve(utf8Source.empty() ? source.src : utf8Source, alt, index, source)) return false;
             const PdfImage& image = images->Get(index);
             double w = (double)image.width * 72.0 / 96.0;
             double h = (double)image.height * 72.0 / 96.0;
@@ -13335,10 +13318,12 @@ static bool FallbackGuessAllowed(const PdfOptions& options) {
 }
 
 // The fallback font for a document whose text has characters the primary font lacks, chosen from
-// the characters of its source, so that it is laid out in that font at once; null when the source
-// has a formula or names an SVG, which draw text in the document's font, or when the choice could
-// depend on what layout adds (FallbackChoice::stable). The build checks the guess (NeedsRebuild).
+// the characters of its source (with the notes it embeds), so that it is laid out in that font at
+// once; null when the source has a formula or names an SVG, which draw text in the document's
+// font, or when the choice could depend on what layout adds (FallbackChoice::stable). The build
+// checks the guess (NeedsRebuild).
 RAYOMD_COLD static const TtfFont* GuessFallbackFont(const TtfFont& primary, std::string_view markdown) {
+    if (const Internal::EmbedSet* embeds = Internal::CurrentEmbeds()) markdown = embeds->all;
     if (markdown.find('$') != std::string_view::npos || markdown.find("\\(") != std::string_view::npos ||
         markdown.find("\\[") != std::string_view::npos || markdown.find("math") != std::string_view::npos ||
         ContainsSvgNoCase(markdown)) {
@@ -13932,6 +13917,49 @@ static bool BuildDocument(const std::string& markdown, const PdfOptions& options
         });
 }
 
+// A document of Obsidian's dialect whose standalone embeds name notes (ResolveEmbeds), built as
+// BuildDocument builds one: its fonts chosen for its text and the notes', which the parser splices
+// in (EmbedScope), transcoded with it for the standard fonts. -1 when it embeds no note, and the
+// caller builds it as any other document; else whether it was built.
+RAYOMD_COLD static int BuildWithEmbeds(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes,
+    BuildResult& stats, uint32_t& missingCharacters) {
+    Internal::EmbedSet embeds;
+    if (!Internal::ResolveEmbeds(markdown, options, embeds)) return -1;
+    const Internal::EmbedScope scope(embeds);
+    // The notes' text for the standard fonts; with `lossy`, how many characters they cannot show.
+    const auto transcode = [&embeds](bool lossy) {
+        size_t missing = 0;
+        for (Internal::EmbedEntry& entry : embeds.entries) {
+            if (IsAllAscii(entry.text)) continue;
+            std::string latin;
+            if (lossy) missing += RayoMd::Text::TranscodeToWinAnsiLossy(entry.text, latin);
+            else RayoMd::Text::TranscodeToWinAnsi(entry.text, &latin);
+            entry.text = std::move(latin);
+        }
+        return missing;
+    };
+    std::string winAnsi;
+    switch (ChooseFonts(embeds.all, options, winAnsi)) {
+    case TextFonts::Ascii:
+        return BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes, stats);
+    case TextFonts::WinAnsi:
+        transcode(false);
+        winAnsi.clear();
+        RayoMd::Text::TranscodeToWinAnsi(markdown, &winAnsi);
+        return BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats);
+    case TextFonts::TrueType:
+        break;
+    }
+    return BuildInTrueType(options, missingCharacters,
+        [&](const TtfFont& font, FallbackCheck* check, size_t& missing, const ThemeFaces* faces) {
+            return BuildUnicodePdfBytes(markdown, font, options, pdfBytes, check, missing, stats, nullptr, faces);
+        },
+        [&](size_t& missing) {
+            missing = RayoMd::Text::TranscodeToWinAnsiLossy(markdown, winAnsi) + transcode(true);
+            return BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats);
+        });
+}
+
 BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes) {
     if (&markdown == &pdfBytes) {
         // Pages are rendered straight into pdfBytes, so the source needs storage of its own.
@@ -13954,7 +13982,11 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
     const Internal::DialectScope dialectScope(options.dialect);
     uint32_t missingCharacters = 0;
     BuildResult stats;
-    bool built = !BuildCancelled() && BuildDocument(markdown, options, pdfBytes, stats, missingCharacters, nullptr);
+    // Obsidian's note embeds: nothing for any other document.
+    const int embedded = options.dialect == MarkdownDialect::Obsidian && Internal::MayEmbedNotes(markdown, options) &&
+        !BuildCancelled() ? BuildWithEmbeds(markdown, options, pdfBytes, stats, missingCharacters) : -1;
+    bool built = embedded >= 0 ? embedded != 0
+        : !BuildCancelled() && BuildDocument(markdown, options, pdfBytes, stats, missingCharacters, nullptr);
     if (BuildCancelled()) {
         pdfBytes.clear();
         built = CancelBuild();
@@ -13980,19 +14012,24 @@ BuildResult BuildBookPdf(const Book& book, const PdfOptions& options, std::strin
     bookOptions.sourceMap = nullptr;
     bookOptions.embedSource = false;
     bookOptions.sourcePath = book.directory.empty() ? std::string() : book.directory + '/';
+    // A book's images lie in its folder, which is the vault of linked notes (ReadLinkedBook).
+    bookOptions.vaultRoot.clear();
     // Its text as the renderer reads it, and all of it, for the choice of its fonts and the output
     // buffer's first size.
     BookSource source;
     source.book = &book;
     source.title = book.title;
     std::string all = book.title;
-    for (const BookChapter& chapter : book.chapters) {
-        source.texts.push_back(chapter.markdown);
+    for (const BookChapter& chapter : book.chapters) source.texts.push_back(chapter.markdown);
+    // --backlinks: each file ends with the files that link to it, as links.
+    if (options.backlinks) Internal::AddBacklinks(book, source.texts);
+    for (size_t index = 0; index < book.chapters.size(); index++) {
+        const BookChapter& chapter = book.chapters[index];
         source.titles.push_back(chapter.title);
         all += '\n';
         all += chapter.title;
         all += '\n';
-        all += chapter.markdown;
+        all += source.texts[index];
     }
     uint32_t missingCharacters = 0;
     BuildResult stats;

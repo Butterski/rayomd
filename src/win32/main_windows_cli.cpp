@@ -66,6 +66,10 @@ struct WinExportOptions {
     int numberHeadings = 0;
     TinyPdf::MarkdownDialect dialect = TinyPdf::MarkdownDialect::GitHub;
     TinyPdf::FootnotePlacement footnotes = TinyPdf::FootnotePlacement::End;
+    std::string vaultRoot;       // --vault=DIR, UTF-8
+    bool embedsAsLinks = false;  // --embeds=link
+    bool backlinks = false;      // --backlinks
+    int followLinks = 0;         // --follow-links[=N]: 0 for none
     TinyPdf::PdfTheme theme;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
@@ -291,6 +295,9 @@ TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const s
     options.numberHeadings = exportOptions.numberHeadings;
     options.dialect = exportOptions.dialect;
     options.footnotes = exportOptions.footnotes;
+    options.vaultRoot = exportOptions.vaultRoot;
+    options.embedsAsLinks = exportOptions.embedsAsLinks;
+    options.backlinks = exportOptions.backlinks;
     options.theme = exportOptions.theme;
     return options;
 }
@@ -391,6 +398,30 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
         } else if (_wcsnicmp(argv[i], L"--footnotes=", 12) == 0) {
             error = L"--footnotes must be end or page";
             return false;
+        } else if (_wcsnicmp(argv[i], L"--vault=", 8) == 0) {
+            options.vaultRoot = WideToUtf8(argv[i] + 8);
+            if (options.vaultRoot.empty()) {
+                error = L"--vault needs a folder";
+                return false;
+            }
+        } else if (lstrcmpiW(argv[i], L"--embeds=link") == 0) {
+            options.embedsAsLinks = true;
+        } else if (lstrcmpiW(argv[i], L"--embeds=content") == 0) {
+            options.embedsAsLinks = false;
+        } else if (_wcsnicmp(argv[i], L"--embeds=", 9) == 0) {
+            error = L"--embeds must be link or content";
+            return false;
+        } else if (lstrcmpiW(argv[i], L"--backlinks") == 0) {
+            options.backlinks = true;
+        } else if (lstrcmpiW(argv[i], L"--follow-links") == 0) {
+            options.followLinks = 1;
+        } else if (_wcsnicmp(argv[i], L"--follow-links=", 15) == 0) {
+            const wchar_t* depth = argv[i] + 15;
+            if (depth[0] < L'1' || depth[0] > L'6' || depth[1] != L'\0') {
+                error = L"--follow-links must be 1 to 6";
+                return false;
+            }
+            options.followLinks = depth[0] - L'0';
         } else if (_wcsnicmp(argv[i], L"--theme=", 8) == 0) {
             const std::wstring themePath = argv[i] + 8;
             const size_t slash = themePath.find_last_of(L"\\/");
@@ -459,16 +490,10 @@ bool EnsureDirectoryRecursive(const std::wstring& path) {
 }
 
 void WriteStdoutLine(const std::string& line);
+void WriteStderr(const std::string& text);
 
-// --book: the files of a SUMMARY.md, a folder or the command line (RayoMd::Book::ReadBook) as one PDF.
-int RunBookExport(const std::vector<std::filesystem::path>& inputs, const std::wstring& outputPath,
-    const WinExportOptions& exportOptions) {
-    TinyPdf::Book book;
-    std::string error;
-    if (!RayoMd::Book::ReadBook(inputs, book, error)) {
-        WriteStdoutLine("Error: " + error);
-        return 3;
-    }
+// A book (--book, --follow-links) as one PDF.
+int WriteBookPdf(const TinyPdf::Book& book, const std::wstring& outputPath, const WinExportOptions& exportOptions) {
     std::string pdfBytes;
     const TinyPdf::BuildResult result = TinyPdf::BuildBookPdf(book, PdfOptionsFor(exportOptions, L""), pdfBytes);
     if (!result) {
@@ -480,6 +505,36 @@ int RunBookExport(const std::vector<std::filesystem::path>& inputs, const std::w
         return 12;
     }
     return 0;
+}
+
+// --book: the files of a SUMMARY.md, a folder or the command line (RayoMd::Book::ReadBook) as one PDF.
+int RunBookExport(const std::vector<std::filesystem::path>& inputs, const std::wstring& outputPath,
+    const WinExportOptions& exportOptions) {
+    TinyPdf::Book book;
+    std::string error;
+    if (!RayoMd::Book::ReadBook(inputs, book, error)) {
+        WriteStdoutLine("Error: " + error);
+        return 3;
+    }
+    return WriteBookPdf(book, outputPath, exportOptions);
+}
+
+// --export with --follow-links: the note and the notes it links to (RayoMd::Book::ReadLinkedBook)
+// as one PDF; past the book's limits a warning says how many notes it left out.
+int RunLinkedExport(const std::wstring& inputPath, const std::wstring& outputPath, const WinExportOptions& exportOptions) {
+    TinyPdf::Book book;
+    std::string error;
+    size_t leftOut = 0;
+    if (!RayoMd::Book::ReadLinkedBook(std::filesystem::path(inputPath), PdfOptionsFor(exportOptions, L""),
+            exportOptions.followLinks, book, leftOut, error)) {
+        WriteStdoutLine("Error: " + error);
+        return 3;
+    }
+    if (leftOut != 0) {
+        WriteStderr("Warning: " + std::to_string(leftOut) + " linked note(s) left out: a book of linked notes holds at most " +
+            std::to_string(RayoMd::Book::kMaxLinkedNotes) + " notes of 128 MiB in all.\n");
+    }
+    return WriteBookPdf(book, outputPath, exportOptions);
 }
 
 bool CanParseCommandLineLocally(LPCWSTR commandLine) {
@@ -1062,9 +1117,13 @@ void PrintUsage() {
         "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
         "  --toc-depth=N (heading levels it lists, 1-6; default 3), --number-headings[=N] (1, 1.1, 1.1.1\n"
         "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks),\n"
-        "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]] and\n"
-        "  ![[images]]; default github), --footnotes=page (each footnote at the foot of the page of its\n"
-        "  first reference; default end, after the text).\n"
+        "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]],\n"
+        "  ![[images]], ^block ids left out, and ![[note]] alone on a line printing that note, its\n"
+        "  #heading section or #^id block, read from the vault; default github), --vault=DIR (the\n"
+        "  folder embedded and linked notes must lie in and are found in by name, local images too;\n"
+        "  default the input's folder), --embeds=link (embedded notes stay links; default content),\n"
+        "  --footnotes=page (each footnote at the foot of the page of its first reference; default\n"
+        "  end, after the text).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4;\n"
         "  or WIDTHxauto, such as 210mmxauto: one long page cut below its text, a new one only at page\n"
@@ -1075,7 +1134,10 @@ void PrintUsage() {
         "  line per document; - for standard output).\n"
         "Books: --book makes one PDF of the files a SUMMARY.md lists (mdBook, GitBook), of a folder's\n"
         "  Markdown files by name with README.md first, or of the files given: each from a new page, the\n"
-        "  links between them kept, one outline, and with --toc one table of contents for all of them.\n");
+        "  links between them kept, one outline, and with --toc one table of contents for all of them.\n"
+        "  --follow-links[=N] (with --export) makes a book of the note and the notes it links to, N links\n"
+        "  deep (1-6, default 1; at most 1000 notes); --backlinks ends each file of a book with links to\n"
+        "  the files that link to it.\n");
 }
 
 int RunCommandLine() {
@@ -1138,11 +1200,22 @@ int RunCommandLine() {
 
     WinExportOptions options;
     std::wstring error;
+    const bool exportCommand = lstrcmpiW(argv[1], L"--export") == 0;
     auto parseOrReport = [&](int start) -> bool {
         error.clear();
-        if (ParseExportOptions(argc, argv, start, options, error)) return true;
-        WriteStdoutLine("Error: " + WideToUtf8(error));
-        return false;
+        if (!ParseExportOptions(argc, argv, start, options, error)) {
+            WriteStdoutLine("Error: " + WideToUtf8(error));
+            return false;
+        }
+        if (options.followLinks != 0 && !exportCommand) {
+            WriteStdoutLine("Error: --follow-links applies to --export only.");
+            return false;
+        }
+        if (options.followLinks != 0 && options.embedSource) {
+            WriteStdoutLine("Error: --embed-source does not apply to --follow-links: a book is not reversible.");
+            return false;
+        }
+        return true;
     };
 
     if (lstrcmpiW(argv[1], L"--stdin") == 0) {
@@ -1252,6 +1325,11 @@ int RunCommandLine() {
     std::wstring outputPath = argv[3];
     if (outputPath.size() < 4 || _wcsicmp(outputPath.c_str() + outputPath.size() - 4, L".pdf") != 0) {
         outputPath += L".pdf";
+    }
+    if (options.followLinks != 0) {
+        const int result = RunLinkedExport(inputPath, outputPath, options);
+        LocalFree(argv);
+        return result;
     }
 
     std::string markdown;

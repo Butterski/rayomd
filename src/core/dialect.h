@@ -37,7 +37,8 @@ bool ObsidianDialect();
 std::string ObsidianToCommonMark(std::string_view markdown);
 
 // ObsidianToCommonMark into `out` when `markdown` has any of what it rewrites ("[[", "==",
-// "%%"); false, `out` untouched, without: the parser reads the document itself.
+// "%%", a '^' after a blank or at a line's start, which may begin a block id, " ^id" ending a
+// line, which is left out); false, `out` untouched, without: the parser reads the document itself.
 bool RewriteObsidian(std::string_view markdown, std::string& out);
 
 // A callout: the first line of a quote "[!type]", with "+" or "-" (folded or not: both show

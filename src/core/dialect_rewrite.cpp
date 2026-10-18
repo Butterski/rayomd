@@ -59,29 +59,59 @@ size_t NextSyntaxByte(const char* text, size_t from, size_t stop) {
     return at;
 }
 
-// The first "[[", "==" or "%%" at or after `from`, the only syntax Converter::Convert changes,
-// else kNone: a line without any is copied as it is. In SSE2 16 positions a step, each byte
-// compared with the next; a pair never spans a line end.
+// The first "[[", "==" or "%%" at or after `from`, or a '^' after white space or at a line's start
+// (a block id, " ^id" or "^id" ending a line), the only syntax Converter::Convert and
+// ObsidianToCommonMark change, else kNone: a line without any is copied as it is. In SSE2 16
+// positions a step, each byte compared with the next; a pair never spans a line end.
 size_t FindSyntaxPair(std::string_view text, size_t from) {
     const char* const data = text.data();
     const size_t size = text.size();
     size_t at = from;
+    if (at < size && data[at] == '^' && (at == 0 || data[at - 1] == '\n' || data[at - 1] == ' ' || data[at - 1] == '\t')) {
+        return at;
+    }
 #if RAYOMD_DIALECT_SSE2
-    const __m128i bracket = _mm_set1_epi8('['), equals = _mm_set1_epi8('='), percent = _mm_set1_epi8('%');
+    const __m128i bracket = _mm_set1_epi8('['), equals = _mm_set1_epi8('='), percent = _mm_set1_epi8('%'),
+                  caret = _mm_set1_epi8('^'), space = _mm_set1_epi8(' '), tab = _mm_set1_epi8('\t'),
+                  newline = _mm_set1_epi8('\n');
     for (; at + 17 <= size; at += 16) {
         const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + at));
         const __m128i next = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + at + 1));
         const __m128i opener = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(chunk, bracket), _mm_cmpeq_epi8(chunk, equals)),
                                             _mm_cmpeq_epi8(chunk, percent));
-        const unsigned bits = static_cast<unsigned>(_mm_movemask_epi8(_mm_and_si128(opener, _mm_cmpeq_epi8(chunk, next))));
+        const __m128i blank = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(chunk, space), _mm_cmpeq_epi8(chunk, tab)),
+                                           _mm_cmpeq_epi8(chunk, newline));
+        const unsigned pairs = static_cast<unsigned>(_mm_movemask_epi8(_mm_and_si128(opener, _mm_cmpeq_epi8(chunk, next))));
+        // A block id's caret is the byte after the blank: one position later.
+        const unsigned carets = static_cast<unsigned>(_mm_movemask_epi8(_mm_and_si128(blank, _mm_cmpeq_epi8(next, caret))));
+        const unsigned bits = pairs | (carets << 1);
         if (bits != 0) return at + RayoMd::Text::Detail::LowestBit(bits);
     }
 #endif
     for (; at + 1 < size; at++) {
         const char c = data[at];
         if ((c == '[' || c == '=' || c == '%') && data[at + 1] == c) return at;
+        if ((c == ' ' || c == '\t' || c == '\n') && data[at + 1] == '^') return at + 1;
     }
     return kNone;
+}
+
+bool IsBlockIdByte(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+}
+
+// Where a line's Obsidian block id begins ("text ^id" or "^id" alone, white space after it), with
+// the white space before it: what the PDF leaves out. kNone when the line ends in none.
+size_t BlockIdStart(std::string_view line) {
+    size_t end = line.size();
+    while (end > 0 && IsBlank(line[end - 1])) end--;
+    size_t caret = end;
+    while (caret > 0 && IsBlockIdByte(line[caret - 1])) caret--;
+    if (caret == end || caret == 0 || line[caret - 1] != '^') return kNone;
+    caret--;
+    if (caret > 0 && line[caret - 1] != ' ' && line[caret - 1] != '\t') return kNone;
+    while (caret > 0 && IsBlank(line[caret - 1])) caret--;
+    return caret;
 }
 
 char Lower(char c) {
@@ -557,7 +587,9 @@ std::string ObsidianToCommonMark(std::string_view markdown) {
         }
         if (convert) {
             out.append(markdown.substr(copied, start - copied));
-            converter.Convert(line);
+            // A block id is no text: Obsidian shows none.
+            const size_t id = BlockIdStart(line);
+            converter.Convert(id == kNone ? line : line.substr(0, id));
             copied = end;
         }
         if (end == markdown.size()) break;

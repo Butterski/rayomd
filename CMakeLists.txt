@@ -171,9 +171,9 @@ endfunction()
 # Recovery is cold, opt-in code, the math parser and layout run only for documents with
 # formulas, options and themes are parsed once per run, a theme's header, footer and cover,
 # PDF/A's metadata and the footnotes' numbering are made once per document, page footnotes keep
-# their account once per note, an OpenType font's
-# CFF table is read once and subset once per document, an HTML block is mapped once, and the
-# image encoder's threads only hand out segments that flate.cpp compresses. Optimize these
+# their account once per note, an OpenType font's CFF table is read once and subset once per
+# document, an HTML block is mapped once, the notes a document embeds or links to are read once,
+# and the image encoder's threads only hand out segments that flate.cpp compresses. Optimize these
 # translation units for package size while leaving the performance-critical renderer and parser
 # on the normal release flags.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -199,6 +199,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/diagram_cache.cpp
         src/core/long_page.cpp
         src/core/page_notes.cpp
+        src/core/vault.cpp
+        src/core/embeds.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
     # RayoMD's streams at half the code; the inflater, 1.5 % slower than -O3 at 8.9 KB of code
@@ -261,7 +263,9 @@ set(RAYOMD_CORE_SOURCES
     src/core/diagram_cache.cpp
     src/core/dialect_rewrite.cpp
     src/core/long_page.cpp
-    src/core/page_notes.cpp)
+    src/core/page_notes.cpp
+    src/core/vault.cpp
+    src/core/embeds.cpp)
 
 if(NOT WIN32)
     if(RAYOMD_USE_CURL)

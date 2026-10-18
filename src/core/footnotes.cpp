@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "footnotes.h"
+#include "embeds.h"
 
 #include "../common/text_utils.h"
 
@@ -257,11 +258,19 @@ void AppendPendingHeading(std::vector<Block>& blocks, int level, std::string_vie
 }
 
 std::vector<Block> ParseWithFootnotes(const std::string& markdown, Footnotes& footnotes) {
+    // A build that embeds notes (BuildPdf's EmbedScope) splices them in here, after the parse: a
+    // test for them in markdown_parser.cpp moved what GCC inlined into ParseMarkdownImpl.
+    if (EmbedsActive()) return ParseWithEmbeds(markdown, footnotes);
+    return ParseWithFootnotes(markdown, footnotes, nullptr);
+}
+
+std::vector<Block> ParseWithFootnotes(const std::string& markdown, Footnotes& footnotes, const EmbedEntry* embeds) {
     footnotes.notes.clear();
     footnotes.numbers.clear();
     footnotes.referenced = 0;
     FootnoteParse notes(footnotes);
     std::vector<Block> blocks = ParseMarkdownLevel(markdown, 0, &notes);
+    if (embeds != nullptr) SpliceEmbeds(blocks, *embeds, &notes);
     if (!notes.pending && footnotes.numbers.empty()) return blocks;
     FootnoteNumbering(notes).Run(blocks);
     for (auto it = footnotes.numbers.begin(); it != footnotes.numbers.end();) {
