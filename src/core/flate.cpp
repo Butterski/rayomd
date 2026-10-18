@@ -13,6 +13,8 @@
 // AVX2 where GCC or Clang can compile it for one function: the build stays baseline x86-64 and
 // the CPU is asked once.
 #if RAYOMD_FLATE_SSE2 && (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+#include "../common/cpu_features.h"
+
 #include <immintrin.h>
 #define RAYOMD_FLATE_AVX2 1
 #define RAYOMD_FLATE_AVX2_FUNCTION __attribute__((target("avx2")))
@@ -450,7 +452,7 @@ RAYOMD_FLATE_AVX2_FUNCTION uint32_t Adler32Avx2(const uint8_t* data, size_t size
 
 uint32_t Adler32(const uint8_t* data, size_t size, uint32_t adler) {
 #if RAYOMD_FLATE_AVX2
-    static const bool avx2 = __builtin_cpu_supports("avx2");
+    static const bool avx2 = RayoMd::Cpu::HasAvx2();
     if (avx2 && size >= 32) {
         adler = Adler32Avx2(data, size & ~size_t(31), adler);
         data += size & ~size_t(31);

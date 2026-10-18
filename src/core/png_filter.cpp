@@ -12,6 +12,8 @@
 // AVX2 where GCC or Clang can compile it for one function: the build stays baseline x86-64 and
 // the CPU is asked once (UseAvx2).
 #if RAYOMD_PNG_SSE2 && (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+#include "../common/cpu_features.h"
+
 #include <immintrin.h>
 #define RAYOMD_PNG_AVX2 1
 #define RAYOMD_AVX2 __attribute__((target("avx2")))
@@ -157,7 +159,7 @@ RAYOMD_AVX2 inline uint64_t LaneSum32(__m256i sums) {
 }
 
 bool UseAvx2() {
-    static const bool avx2 = __builtin_cpu_supports("avx2");
+    static const bool avx2 = RayoMd::Cpu::HasAvx2();
     return avx2;
 }
 #endif
