@@ -46,12 +46,15 @@ and character references, document metadata from the front matter (`/Info` title
 author, subject and keywords, the catalog's `/Lang`; `FrontMatterMetadata` reads
 the YAML subset), opt-in page numbers, page sizes (A4 by default, presets,
 landscape and custom sizes; the renderers' `pageW`/`pageH`, never constants; one long page,
-`--page-size=WIDTHxauto`, `PdfPageSize::autoHeight`: `pageH` is `kMaxPageSide` and what sizes
-content to a page (image, diagram and formula fits, `MaxMathHeight`, title pages, the cover) reads
-`fitH`, the nominal height width × √2, which is `pageH` for fixed sizes, so their bytes stay; what
-tests for page room keeps `pageH`. `NewPage` notes each finished long page's box bottom (cold
-`EndLongPage`, a margin below the cursor; `PageBottoms` is nullptr otherwise), and its MediaBox,
-page number and footer band move up to it while every coordinate stays),
+`--page-size=WIDTHxauto`, `PdfPageSize::autoHeight`: `ResolvePageSize` gives the nominal height,
+width × √2, and what sizes content to a page (image, diagram and formula fits, `MaxMathHeight`,
+title pages, the cover) reads it as `fitH`; a page lays out on `fullH`, `kMaxPageSide`, from its
+top `pageH`, `kLongPageTop` (9,900), down to −4,500, so every coordinate stays under 10,000 and
+takes `WriteFixed2`'s fast branch; what tests for room on a fresh page reads `fullH`, and the
+bottom limit `textBottom` starts a margin above the page's bottom (`margin + (pageH - fullH)`,
+so `margin` bit for bit on fixed sizes, where `fitH` and `fullH` are `pageH`). `NewPage` notes
+each finished long page's box bottom (cold `EndLongPage`, a margin below the cursor; `PageBottoms`
+is nullptr otherwise): its MediaBox, page number and footer band start there),
 standalone local images (PNG, JPEG, and SVG drawn as vectors), and HTTP/HTTPS
 images on Windows or curl-enabled Linux builds with fallback text.
 Inline HTML (`WriteHtmlTag` in `inline_markdown.cpp`, on `html.h`'s `ScanTag`): emphasis,
@@ -89,7 +92,8 @@ breaks, the content, links, marks, images and glyph counts it made taken back) f
 the notes it refers to; the cold paths that paint references (`RenderMathLines`,
 `RenderMathTextLines` with `EnsureNotes`, `RenderMathTable` rows) keep room below the line for its
 notes not placed yet (and the 18-point rule), which then wait at the foot (`textBottom`, what
-`Ensure` and the tables' bottom tests compare with: `margin` bit for bit outside this mode, nested
+`Ensure` and the tables' bottom tests compare with: `margin` bit for bit outside this mode on fixed
+sizes, a margin above a long page's bottom; nested
 blocks move both with `Indent`/`RestoreMargin`, so `Ensure` keeps its size); `NewPage` (through the
 `PageNotes::pageEnds` pointer: a direct call put it in a cycle with the paint paths and moved GCC's
 inlining of `MarkHeading`), the end of
@@ -587,10 +591,12 @@ Important image/link details:
   search over its character ends, not a character at a time.
 
 - `src/core/long_page.h` and `src/core/long_page.cpp`
-  One long page (`PdfPageSize::autoHeight`): the box bottoms of a build's pages, kept for the
-  thread so a renderer holds only a pointer (null for fixed sizes), each a margin below where its
-  layout ended, and the MediaBox that starts there. Built at `-Os`; inside `tiny_pdf.cpp`, the
-  vector's code moved the renderers' constructors out of line and widened `ResolvePageSize`.
+  One long page (`PdfPageSize::autoHeight`): `kLongPageTop`, the box bottoms of a build's pages,
+  kept for the thread so a renderer holds only a pointer (null for fixed sizes), each a margin
+  below where its layout ended, and the MediaBox from there to the top. Built at `-Os`; inside
+  `tiny_pdf.cpp`, the vector's code moved the renderers' constructors out of line and widened
+  `ResolvePageSize`. The renderers' `fitH` and `fullH` have no default value: one store more in
+  `StandardRenderer`'s constructor took it out of `BuildStandardPdfBytes` (+3.3 KB).
 
 - `src/core/pdfa.h` and `src/core/pdfa.cpp`
   What PDF/A-3b adds: the 480-byte sRGB ICC profile (a v4.2 display profile written

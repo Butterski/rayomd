@@ -151,15 +151,21 @@ Obsidian `#tags` print as text: the dialect pass does not know them (`IsSyntaxBy
 
   The cover keeps the nominal size.
 - Each page records its lowest point, the cursor when the page ends. Its MediaBox becomes
-  `[0 y0 W 14400]` with `y0 = max(0, lowest − margin)`, at least 144 pt tall. No coordinate
-  moves.
+  `[0 y0 W top]` with `y0 = max(top − 14,400, lowest − margin)`, at least 144 pt tall. The top,
+  `kLongPageTop` (`long_page.h`), is 9,900 rather than 14,400: the layout runs from there to
+  −4,500, so every coordinate stays under 10,000 in magnitude, which `WriteFixed2` writes without
+  `std::to_chars` (instructions of a long page against A4 with the top at 14,400 and at 9,900:
+  README +0.6 → −2.0 %, tester-noimg +2.7 → −0.6 %, notes +3.5 → −1.9 %, polish +2.3 → +0.1 %,
+  native_math +3.9 → −1.9 %). The renderers' `pageH` is that top; room tests read
+  `fullH`, the 14,400 pt a page lays out on, and the bottom limit `textBottom` is a margin above
+  `top − 14,400`.
 - Page numbers and theme bands sit at `y0 + margin × 0.5`: `AddPageNumber` (12031-12048) and a
   bottom offset in `ThemePage` (`theme.cpp:203-228`).
 - The source map stays as it is: it measures from the page's top edge, which does not move, and
   the GUI divides by each page's own box height (`buildworker.cpp:243-244`).
 
 **Decision.** Move the box's origin instead of laying out again with the measured height. That
-keeps one layout pass and every coordinate.
+keeps one layout pass; a box's coordinates are those of its page, from the top down.
 
 **Tests.**
 - `CheckPageSize` parse cases: `xauto` with each unit; `-landscape`, preset and out-of-range

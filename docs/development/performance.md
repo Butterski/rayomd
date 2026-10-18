@@ -883,6 +883,11 @@ Text and layout:
   kept between exports: notes +0.4 % in malloc.
 - The CFF flattener's tokens copied with `memcpy`: at `-Os` that is `rep movsb`, 25 % fewer
   instructions and 8 % more time than the `std::string` it replaced; a byte loop is kept.
+- Long pages (2026-10-18): a five-digit fast path in `WriteFixed2` for their coordinates up to
+  14,400 moved GCC's inlining (+0.2 to +0.4 % instructions on fixed pages); their top is at 9,900
+  instead (`kLongPageTop`). The renderers' page setup out of line (`SetPageSize`, the long-page
+  branch in it): 5.3 KB less text, but `Renderer`'s constructor went into `BuildUnicodePdfBytes`
+  and its `KeptBuffer::Take`s out of line (polish +0.06 %, notes +0.02 % instructions).
 
 Images and compression:
 

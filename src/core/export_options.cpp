@@ -171,7 +171,8 @@ double ResolveMarginPoints(const PdfMargin& margin) {
 PdfPageSize ResolvePageSize(const PdfPageSize& size) {
     // Not ">=" fails for NaN too, which then gets the smallest side.
     const auto side = [](double points) { return points >= kMinPageSide ? std::min(points, kMaxPageSide) : kMinPageSide; };
-    return { side(size.width), side(size.height) };
+    const double width = side(size.width);
+    return { width, size.autoHeight ? NominalPageHeight(width) : side(size.height), size.autoHeight };
 }
 
 double NominalPageHeight(double width) {
