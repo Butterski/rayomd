@@ -65,6 +65,7 @@ struct WinExportOptions {
     int pageBreakBeforeLevel = 0;
     int numberHeadings = 0;
     TinyPdf::MarkdownDialect dialect = TinyPdf::MarkdownDialect::GitHub;
+    TinyPdf::FootnotePlacement footnotes = TinyPdf::FootnotePlacement::End;
     TinyPdf::PdfTheme theme;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
@@ -289,6 +290,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const s
     options.pageBreakBeforeLevel = exportOptions.pageBreakBeforeLevel;
     options.numberHeadings = exportOptions.numberHeadings;
     options.dialect = exportOptions.dialect;
+    options.footnotes = exportOptions.footnotes;
     options.theme = exportOptions.theme;
     return options;
 }
@@ -381,6 +383,13 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.dialect = TinyPdf::MarkdownDialect::Obsidian;
         } else if (_wcsnicmp(argv[i], L"--dialect=", 10) == 0) {
             error = L"--dialect must be github or obsidian";
+            return false;
+        } else if (lstrcmpiW(argv[i], L"--footnotes=end") == 0) {
+            options.footnotes = TinyPdf::FootnotePlacement::End;
+        } else if (lstrcmpiW(argv[i], L"--footnotes=page") == 0) {
+            options.footnotes = TinyPdf::FootnotePlacement::Page;
+        } else if (_wcsnicmp(argv[i], L"--footnotes=", 12) == 0) {
+            error = L"--footnotes must be end or page";
             return false;
         } else if (_wcsnicmp(argv[i], L"--theme=", 8) == 0) {
             const std::wstring themePath = argv[i] + 8;
@@ -1054,7 +1063,8 @@ void PrintUsage() {
         "  --toc-depth=N (heading levels it lists, 1-6; default 3), --number-headings[=N] (1, 1.1, 1.1.1\n"
         "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks),\n"
         "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]] and\n"
-        "  ![[images]]; default github).\n"
+        "  ![[images]]; default github), --footnotes=page (each footnote at the foot of the page of its\n"
+        "  first reference; default end, after the text).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4;\n"
         "  or WIDTHxauto, such as 210mmxauto: one long page cut below its text, a new one only at page\n"

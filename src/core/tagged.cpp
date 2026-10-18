@@ -216,6 +216,35 @@ void StructTree::End(int element) {
     }
 }
 
+int StructTree::BeginUnder(int parent, StructType type) {
+    flow = { labelCharacters, label, artifacts, table, tableSection, tableRow, tableHead };
+    flowCells.swap(tableCells);
+    labelCharacters = 0;
+    label = -1;
+    artifacts = false;
+    table = tableSection = tableRow = -1;
+    tableHead = false;
+    const int index = static_cast<int>(elements.size());
+    Element& element = elements.emplace_back();
+    element.type = type;
+    element.parent = parent;
+    AddKid(parent, Kid::Element, index, 0);
+    stack.push_back(index);
+    return index;
+}
+
+void StructTree::EndUnder(int element) {
+    End(element);
+    labelCharacters = flow.labelCharacters;
+    label = flow.label;
+    artifacts = flow.artifacts;
+    table = flow.table;
+    tableSection = flow.tableSection;
+    tableRow = flow.tableRow;
+    tableHead = flow.tableHead;
+    tableCells.swap(flowCells);
+}
+
 StructType StructTree::TypeOf(int element) const {
     return elements[static_cast<size_t>(element)].type;
 }

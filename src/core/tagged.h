@@ -44,6 +44,12 @@ public:
     void Resume(int element);
     // Closes `element` and the elements open in it, and their marked content.
     void End(int element);
+    // An element as the last child of `parent` (0, the Document), opened over the elements open
+    // now, which stay open: a footnote set at the foot of a page while a paragraph, a list item or
+    // a table row goes on (PdfOptions::footnotes). The flow's list label, table and artifact state
+    // wait until EndUnder closes it and what opened in it.
+    int BeginUnder(int parent, StructType type);
+    void EndUnder(int element);
 
     // /Alt of a figure, /ActualText, the Layout attributes of a figure's box on its page, a table
     // header cell's scope, a code block's placement, and a note's /ID, which the IDTree lists.
@@ -190,6 +196,17 @@ private:
     int tableRow = -1;
     bool tableHead = false;
     std::vector<int> tableCells;
+    // The flow's state while an element opened by BeginUnder is open.
+    struct Flow {
+        size_t labelCharacters = 0;
+        int label = -1;
+        bool artifacts = false;
+        int table = -1;
+        int tableSection = -1;
+        int tableRow = -1;
+        bool tableHead = false;
+    } flow;
+    std::vector<int> flowCells;
 };
 
 } // namespace TinyPdf::Internal

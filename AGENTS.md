@@ -82,6 +82,29 @@ them; `footnotes.cpp` holds their numbering, kept out of the parser's translatio
 unit, where it moved GCC's inlining of the line classifier. A table with a reference
 shows its cells as plain text, as one with a formula does. Without definitions the
 PDF bytes stay as they are.
+`--footnotes=page` (`PdfOptions::footnotes`, `FootnotePlacement::Page`) sets each note at the foot
+of the page of its first reference (`PageNoteLayout` in `tiny_pdf.cpp`, its account in
+`page_notes.cpp`): every note is laid out once before the text (`Measure`, in `footMode`: no page
+breaks, the content, links, marks, images and glyph counts it made taken back) for its height and
+the notes it refers to; the cold paths that paint references (`RenderMathLines`,
+`RenderMathTextLines` with `EnsureNotes`, `RenderMathTable` rows) keep room below the line for its
+notes not placed yet (and the 18-point rule), which then wait at the foot (`textBottom`, what
+`Ensure` and the tables' bottom tests compare with: `margin` bit for bit outside this mode, nested
+blocks move both with `Indent`/`RestoreMargin`, so `Ensure` keeps its size); `NewPage` (through the
+`PageNotes::pageEnds` pointer: a direct call put it in a cycle with the paint paths and moved GCC's
+inlining of `MarkHeading`), the end of
+a document and of each book file paint them (`Paint`, the renderer's shared buffers swapped by
+`FootScope`/`SwapFootBuffers`, so a paragraph or table row broken by the page goes on). The
+measuring layout writes into a `FootStash` (swapped for the renderer's content, links, headings and
+anchors while it runs), and `Paint` replays a note from it under one `cm` translation, its links,
+marks and references moved by as much, instead of laying it out again; only under PDF/UA and for a
+note whose layout changed the images is it laid out a second time (`FootStash::replay`). A note
+only notes refer to (`Footnotes::referenced`) goes with the first that does, at most 8 deep; a
+cluster too tall for a page with its line stays in the end section, which then holds only such
+notes. Under PDF/UA a foot note is a Note of the Document opened over the open elements
+(`StructTree::BeginUnder`/`EndUnder`, which keep the flow's label, table and artifact state),
+painted before `PageBreak`, so its MCIDs are its page's. End placement keeps the code path and the
+bytes it had.
 Fenced code whose info string names a language GitHub knows (29 lexers: shell and
 console, PowerShell, batch, JavaScript and TypeScript, Python, C, C++, C#, Java, Kotlin,
 Go, Rust, Swift, PHP, Ruby, SQL, HTML and XML, CSS and SCSS, JSON, YAML, TOML, INI,
@@ -311,6 +334,12 @@ Important image/link details:
   Footnotes in the parser: reading a definition's lines, the numbering by first
   reference once the document is read, and the plain text with reference markers of
   headings and tables that waited for it (`Block::notesPending`). Built at `-Os`.
+
+- `src/core/page_notes.h` and `src/core/page_notes.cpp`
+  Footnotes at the foot of the page (`--footnotes=page`): the account the renderers keep, each
+  note's height and the notes it refers to, the clusters a line's references bring, which notes
+  wait at the foot of the page and which go after the text. Layout and paint stay in
+  `tiny_pdf.cpp` (`PageNoteLayout`); every walk meets a note once. Built at `-Os`.
 
 - `src/core/highlight.h` and `src/core/highlight.cpp`
   Syntax highlighting: the language an info string names (a table made at compile
@@ -580,8 +609,10 @@ Important image/link details:
   are no regular files, fonts changed after loading, image containment, cache permissions, the
   decode budget and the SVG `data:` image cache); `tests/dialect_tests.inc` checks Obsidian's
   dialect, `tests/mermaid_tests.inc` the Mermaid diagrams (syntax, refusals, layout
-  invariants, golden SVG digests, conversion, limits), and `tests/long_page_tests.inc` the long
-  pages of `--page-size=WIDTHxauto` (boxes, fits, page numbers and bands, books, the source map).
+  invariants, golden SVG digests, conversion, limits), `tests/long_page_tests.inc` the long
+  pages of `--page-size=WIDTHxauto` (boxes, fits, page numbers and bands, books, the source map),
+  and `tests/page_notes_tests.inc` footnotes at the foot of the page in both renderers (each note
+  on its reference's page, by the links' destinations; tables, books, PDF/UA, the source map).
 
 - `tests/fuzz/`
   libFuzzer targets of the engine's untrusted-input entry points (`fuzz_targets.h`): Markdown
