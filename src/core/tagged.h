@@ -196,15 +196,15 @@ private:
     int tableRow = -1;
     bool tableHead = false;
     std::vector<int> tableCells;
-    // The flow's state while an element opened by BeginUnder is open.
+    // The flow's state while an element opened by BeginUnder is open (set there, read by EndUnder).
     struct Flow {
-        size_t labelCharacters = 0;
-        int label = -1;
-        bool artifacts = false;
-        int table = -1;
-        int tableSection = -1;
-        int tableRow = -1;
-        bool tableHead = false;
+        size_t labelCharacters;
+        int label;
+        bool artifacts;
+        int table;
+        int tableSection;
+        int tableRow;
+        bool tableHead;
     } flow;
     std::vector<int> flowCells;
 };

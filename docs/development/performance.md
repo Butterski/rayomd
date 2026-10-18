@@ -883,6 +883,10 @@ Text and layout:
   kept between exports: notes +0.4 % in malloc.
 - The CFF flattener's tokens copied with `memcpy`: at `-Os` that is `rep movsb`, 25 % fewer
   instructions and 8 % more time than the `std::string` it replaced; a byte loop is kept.
+- Page footnotes' `ReplayNote` growing the content once (`resize`, then `memcpy`) instead of three
+  appends (2026-10-18): perf -0.14 % instructions on 306 notes, but the note's copy of unknown
+  length in a cold function became `rep movsb` (callgrind 2.8 times the function's cost). The
+  appends are kept.
 
 Images and compression:
 
