@@ -216,6 +216,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(src/core/flate.cpp src/core/inflate.cpp src/core/highlight.cpp src/core/html.cpp
         src/core/dialect_rewrite.cpp src/core/print_colors.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
+    # The command lines' terminate handler rethrows the exception it reports.
+    set_source_files_properties(src/cli/terminate.cpp PROPERTIES COMPILE_OPTIONS "-fexceptions;$<$<CONFIG:Release>:-Os>")
 endif()
 
 # libdeflate's decompressor (third_party/libdeflate, v1.26, the files it needs and unchanged) is
@@ -319,6 +321,7 @@ if(RAYOMD_BUILD_CLI)
                 src/win32/delay_image_load.cpp
                 src/win32/delay_image_import_pointers.cpp)
             target_link_options(rayomd PRIVATE -Wl,--wrap=CommandLineToArgvW)
+            target_sources(rayomd PRIVATE src/cli/terminate.cpp)
         endif()
         target_compile_definitions(rayomd PRIVATE UNICODE _UNICODE)
         target_include_directories(rayomd PRIVATE include)
@@ -334,6 +337,9 @@ if(RAYOMD_BUILD_CLI)
         rayomd_experiments(rayomd)
     else()
         add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
+            target_sources(rayomd PRIVATE src/cli/terminate.cpp)
+        endif()
         if(RAYOMD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
             # No .eh_frame registration at startup: the unwinder reads PT_GNU_EH_FRAME (static_frames.cpp).
             target_sources(rayomd PRIVATE src/cli/static_frames.cpp)

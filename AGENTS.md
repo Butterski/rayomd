@@ -637,6 +637,11 @@ Important image/link details:
   export, stdin Markdown export, folder batch, stdin batch, warm serve mode,
   books, and benchmarks.
 
+- `src/cli/terminate.cpp`
+  Both command lines' terminate handler in place of libstdc++'s (whose demangler is 61 KB):
+  the same message with the exception's type as the ABI names it (`St9bad_alloc`), then
+  `abort()`. Not part of the engine library.
+
 - `src/win32/main_windows_cli.cpp`
   The Windows CLI: wide paths, `CommandLineToArgvW`, a console program. Its modes mirror
   `main_cli.cpp`; change both. A MinGW cross-build runs under Wine for local checks of the
@@ -846,9 +851,10 @@ GitHub CI entry points:
 - Release builds compile without exceptions and RTTI on Windows and Linux, on Linux also without
   unwind tables (221 KB of the 1.74 MB binary): never write `try`, `catch`, `throw`,
   `dynamic_cast` or `typeid`, and call the `std::error_code` overloads of `std::filesystem`. An
-  exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before. A
-  call-graph profile with `perf --call-graph=dwarf` needs a build with
-  `-fasynchronous-unwind-tables`.
+  exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before, through
+  the command lines' own terminate handler (`src/cli/terminate.cpp`, the only `-fexceptions`
+  file): libstdc++'s links the C++ demangler, 61 KB. A call-graph profile with
+  `perf --call-graph=dwarf` needs a build with `-fasynchronous-unwind-tables`.
 - Fonts are mapped read-only (`FileBytes`); read font data in place instead of copying
   the file.
 - `TtfFont` is allocated by its own `operator new` (calloc) or lives in static storage:
