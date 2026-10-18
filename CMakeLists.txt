@@ -57,9 +57,15 @@ function(rayomd_release_flags target)
             # The C++ runtime is linked in, its unused sections dropped: a process starts 0.6 ms
             # sooner without loading and relocating libstdc++.so, and calls into it skip the PLT
             # (warm builds 5 % faster) for about 180 KB. The code uses no iostreams, which would
-            # pull in some 460 KB of locale and stream code here.
+            # pull in some 460 KB of locale and stream code here. No exceptions and no RTTI, as on
+            # Windows (the code catches nothing: an exception the runtime throws ends the process
+            # either way), and no unwind tables, which only that propagation read: 221 KB less.
             target_compile_options(${target} PRIVATE
                 $<$<CONFIG:Release>:-O3>
+                $<$<CONFIG:Release>:-fno-exceptions>
+                $<$<CONFIG:Release>:-fno-rtti>
+                $<$<CONFIG:Release>:-fno-asynchronous-unwind-tables>
+                $<$<CONFIG:Release>:-fno-unwind-tables>
                 $<$<CONFIG:Release>:-ffunction-sections>
                 $<$<CONFIG:Release>:-fdata-sections>)
             if(RAYOMD_STATIC)

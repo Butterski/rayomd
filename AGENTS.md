@@ -843,6 +843,12 @@ GitHub CI entry points:
   iostreams (`<iostream>`, `<fstream>`, `<sstream>`) out of the CLI and the core: they
   pull about 460 KB of locale and stream code into that build. Use `RayoMd::File` and
   C stdio.
+- Release builds compile without exceptions and RTTI on Windows and Linux, on Linux also without
+  unwind tables (221 KB of the 1.74 MB binary): never write `try`, `catch`, `throw`,
+  `dynamic_cast` or `typeid`, and call the `std::error_code` overloads of `std::filesystem`. An
+  exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before. A
+  call-graph profile with `perf --call-graph=dwarf` needs a build with
+  `-fasynchronous-unwind-tables`.
 - Fonts are mapped read-only (`FileBytes`); read font data in place instead of copying
   the file.
 - `TtfFont` is allocated by its own `operator new` (calloc) or lives in static storage:
