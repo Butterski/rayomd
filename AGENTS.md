@@ -183,10 +183,14 @@ breadth first through the same `Vault`, at most 1,000 notes and `kMaxBookBytes`;
 whose links resolve as any book link (`BookFileOfLink`, shared with `BookTargets`).
 `PdfOptions::hideTags` (`--hide-tags`, Obsidian's dialect only; `DialectScope` keeps it for the
 thread, `HiddenTags()`) drops Obsidian's `#tags` before that pass (`HideTags`, `TagHider` in
-`dialect_rewrite.cpp`: lines read up to the last '#', only those with a '#' or "%%" scanned, fences,
-display formulas, indented code, code spans, formulas, comments, wiki links and the front matter
-left alone; a tag goes with one space next to it and a line keeps its place). Without the flag
-`RewriteObsidian` only asks `HiddenTags()`, and the pair-gated pass is as it was.
+`dialect_rewrite.cpp`: a note with no possible tag, a '#' at a line's start or after a blank with
+a tag's bytes after it (`NextTag`), is read once by `memchr` and left as it is; else lines read up
+to the last possible tag, a line of text from the first column without further reading, only those
+with a possible tag or "%%" scanned, fences, display formulas, indented code, code spans, formulas,
+comments, wiki links and the front matter left alone; a tag goes with one space next to it and a
+line keeps its place; the text without tags is written into `RewriteObsidian`'s `out`, which the
+pair-gated pass then reads). Without the flag `RewriteObsidian` only asks `HiddenTags()`, and the
+pair-gated pass is as it was.
 Print output (`--black-text`, `PdfOptions::blackText`): after layout and before
 `CompressPageContents`, both builders hand the page content, a theme's bands and cover and the
 table of contents' overlays to `Internal::PrintColors` (`print_colors.cpp`), as `AddPageNumber`

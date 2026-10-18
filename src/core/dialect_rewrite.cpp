@@ -592,21 +592,50 @@ size_t Indentation(std::string_view line) {
     return columns;
 }
 
-// --hide-tags (HideTags): the lines up to the last '#' read one by one for the fences, display
-// formulas, indented code and comments they open and close; only a line with a '#' or "%%" is
-// scanned, from one byte that can start syntax to the next (FindAny). The text between the tags
-// is copied in runs.
+// Whether `at` (kNone too) is a possible tag: a '#' at a line's start or after a blank, with a
+// tag's bytes after it, one of them no digit.
+RAYOMD_HOT_INLINE bool IsTag(std::string_view text, size_t at) {
+    if (at == kNone || (at > 0 && text[at - 1] != '\n' && !IsBlank(text[at - 1]))) return false;
+    while (++at < text.size() && IsTagByte(static_cast<unsigned char>(text[at]))) {
+        if (text[at] < '0' || text[at] > '9') return true;
+    }
+    return false;
+}
+
+// The next possible tag at or after `from`, else kNone. Asked with growing positions, each byte is
+// read once: a document with no tag is read here only.
+size_t NextTag(std::string_view text, size_t from) {
+    size_t hash = text.find('#', from);
+    while (hash != kNone && !IsTag(text, hash)) hash = text.find('#', hash + 1);
+    return hash;
+}
+
+// A line's first byte that opens neither a fence, a formula, a quote nor indentation, and is no
+// white space: the line is text from the first column.
+bool IsPlainLead(char c) {
+    switch (c) {
+    case ' ': case '\t': case '\r': case '>': case '`': case '~': case '$': return false;
+    default: return true;
+    }
+}
+
+// --hide-tags (HideTags): the lines up to the last possible tag (NextTag) read one by one for the
+// fences, display formulas, indented code and comments they open and close; a line that begins
+// with none of their bytes or white space only ends indented code. Only a line with a possible tag
+// or "%%" is scanned, from one byte that can start syntax to the next (FindAny). The text between
+// the tags is copied in runs.
 class TagHider {
 public:
     TagHider(std::string_view text, std::string& output) : markdown(text), out(output) {}
     bool Run();
 
 private:
-    void Scan(size_t lineStart, size_t lineEnd, size_t from);
+    RAYOMD_NOINLINE void Scan(size_t lineStart, size_t lineEnd, size_t from);
 
     std::string_view markdown;
     std::string& out;
-    size_t copied = 0;
+    size_t copied = 0;    // the text before this is in `out` but its tags
+    size_t written = 0;   // the bytes of `out` written
     bool changed = false;
     bool inComment = false;
     NextOf closeBrackets{ "]]" };
@@ -617,59 +646,66 @@ private:
 };
 
 bool TagHider::Run() {
-    size_t hash = markdown.find('#');
-    if (hash == kNone) return false;
+    size_t tag = NextTag(markdown, 0);
+    if (tag == kNone) return false;
     const size_t frontMatterEnd = FrontMatterEnd(markdown);
     if (frontMatterEnd == markdown.size()) return false;
     size_t start = frontMatterEnd > 0 ? frontMatterEnd + 1 : 0;
-    if (hash < start) hash = markdown.find('#', start);
+    if (tag < start) tag = NextTag(markdown, start);
     size_t percent = markdown.find("%%", start);
     Fence fence;
     bool displayMath = false;
     bool blank = true;      // the line before is blank
     bool indented = false;  // or indented code
-    while (hash != kNone) {
+    while (tag != kNone) {
         size_t end = markdown.find('\n', start);
         if (end == kNone) end = markdown.size();
-        const std::string_view line = markdown.substr(start, end - start);
-        // The line's first byte past its white space, and past its quote markers: only a line
-        // whose lead is '`', '~' or '$' can open or close a fence or a display formula.
-        size_t text = 0;
-        while (text < line.size() && IsBlank(line[text])) text++;
-        size_t first = text;
-        while (first < line.size() && (IsBlank(line[first]) || line[first] == '>')) first++;
-        const char lead = first < line.size() ? line[first] : '\0';
-        const bool lineBlank = text == line.size();
-        bool code = false;
-        if (inComment) {
-            if (percent < end) {
-                inComment = false;
-                Scan(start, end, percent - start + 2);
-            }
-        } else if (fence.marker != 0) {
-            if (lead == fence.marker) {
-                const Fence closing = FenceOf(line);
-                if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
-            }
-        } else if (displayMath) {
-            if (lineBlank || line.find("$$") != kNone) displayMath = false;
-        } else if (const Fence opening = lead == '`' || lead == '~' ? FenceOf(line) : Fence(); opening.marker != 0) {
-            fence = opening;
-        } else if (lead == '$' && OpensDisplayMath(line)) {
-            displayMath = true;
+        if (start < end && IsPlainLead(markdown[start]) && !inComment && fence.marker == 0 && !displayMath) {
+            // Text from the first column: no fence, formula or indented code.
+            if (tag < end || percent < end) Scan(start, end, 0);
+            blank = indented = false;
         } else {
-            code = !lineBlank && (blank || indented) && Indentation(line) >= 4;
-            if (!code && (hash < end || percent < end)) Scan(start, end, 0);
+            const std::string_view line = markdown.substr(start, end - start);
+            // The line's first byte past its white space, and past its quote markers: only a line
+            // whose lead is '`', '~' or '$' can open or close a fence or a display formula.
+            size_t text = 0;
+            while (text < line.size() && IsBlank(line[text])) text++;
+            size_t first = text;
+            while (first < line.size() && (IsBlank(line[first]) || line[first] == '>')) first++;
+            const char marker = first < line.size() ? line[first] : '\0';
+            const bool lineBlank = text == line.size();
+            bool code = false;
+            if (inComment) {
+                if (percent < end) {
+                    inComment = false;
+                    Scan(start, end, percent - start + 2);
+                }
+            } else if (fence.marker != 0) {
+                if (marker == fence.marker) {
+                    const Fence closing = FenceOf(line);
+                    if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
+                }
+            } else if (displayMath) {
+                if (lineBlank || line.find("$$") != kNone) displayMath = false;
+            } else if (const Fence opening = marker == '`' || marker == '~' ? FenceOf(line) : Fence(); opening.marker != 0) {
+                fence = opening;
+            } else if (marker == '$' && OpensDisplayMath(line)) {
+                displayMath = true;
+            } else {
+                code = !lineBlank && (blank || indented) && Indentation(line) >= 4;
+                if (!code && (tag < end || percent < end)) Scan(start, end, 0);
+            }
+            blank = lineBlank;
+            indented = code;
         }
-        blank = lineBlank;
-        indented = code;
         if (end == markdown.size()) break;
         start = end + 1;
-        if (hash < start) hash = markdown.find('#', start);
+        if (tag < start) tag = NextTag(markdown, start);
         if (percent < start) percent = markdown.find("%%", start);
     }
     if (!changed) return false;
-    out.append(markdown.substr(copied));
+    memcpy(&out[written], markdown.data() + copied, markdown.size() - copied);
+    out.resize(written + markdown.size() - copied);
     return true;
 }
 
@@ -701,12 +737,12 @@ void TagHider::Scan(size_t lineStart, size_t lineEnd, size_t from) {
                 size_t dropTo = lineStart + end;
                 if (end < size && text[end] == ' ') dropTo++;
                 else if (i > 0 && text[i - 1] == ' ' && dropFrom - 1 >= copied) dropFrom--;
-                if (!changed) {
+                if (!changed) {   // the text without tags is no longer than with them
                     changed = true;
-                    out.clear();
-                    out.reserve(markdown.size());
+                    out.resize(markdown.size());
                 }
-                out.append(markdown.data() + copied, dropFrom - copied);
+                memcpy(&out[written], markdown.data() + copied, dropFrom - copied);
+                written += dropFrom - copied;
                 copied = dropTo;
             }
             i = end;
@@ -749,15 +785,12 @@ bool HideTags(std::string_view markdown, std::string& out) {
     return TagHider(markdown, out).Run();
 }
 
-// RewriteObsidian with HiddenTags(): the tags first, then the pairs of what is left.
+// RewriteObsidian with HiddenTags(): the tags first, into `out`, then the pairs of what is left
+// (the converted text replaces what it was read from once it is made).
 static RAYOMD_NOINLINE bool RewriteWithoutTags(std::string_view markdown, std::string& out) {
-    std::string untagged;
-    const bool hidden = HideTags(markdown, untagged);
-    const std::string_view text = hidden ? std::string_view(untagged) : markdown;
-    if (FindSyntaxPair(text, 0) == kNone) {
-        if (hidden) out = std::move(untagged);
-        return hidden;
-    }
+    const bool hidden = HideTags(markdown, out);
+    const std::string_view text = hidden ? std::string_view(out) : markdown;
+    if (FindSyntaxPair(text, 0) == kNone) return hidden;
     out = ObsidianToCommonMark(text);
     return true;
 }

@@ -900,6 +900,10 @@ README.md, 18.8 % before and 3.9 % kept):
   thread of every process. One on the heap from the first use is kept.
 - SSE2's four 16-byte compares inlined at each step of the scan: 3.4 KB of code; out of line
   they are one call a 64-byte step, on CPUs without AVX2 only.
+- `--hide-tags` (README.md with Obsidian's dialect, 95.6 K instructions a build before, 66 K kept):
+  line feeds from an SSE2 bit mask instead of a `memchr` a line, and plain lines in a loop of their
+  own (57 K, +1.2 KB of code); `NextTag` inlined (a 5 KB note dense with tags 1.2 K a build cheaper,
+  +490 bytes); the next tag taken from the next '#' found for each line (that note +0.6 %).
 
 Images and compression:
 
