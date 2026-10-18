@@ -617,7 +617,10 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
   (perf stat; callgrind, which counts every byte of a fill, 3.2 to 18 %). Nothing
   else may change the string while a writer is open on it. Numbers are formatted from
   digit-pair tables (`WriteFixed2`), not library calls. Outline entries go through a
-  scratch buffer that stays in L1.
+  scratch buffer that stays in L1. Colour operands travel as `std::string_view` (the palette,
+  `RunColors`, `CodeColor`, `CodeLineTile`, the paint functions' parameters), so no paint runs
+  `strlen` on its colour or font name (-0.1 to -1.0 % instructions; `strlen` had 1.8 % of README's
+  cycles).
 - A paragraph is asked once whether its text needs escaping in a PDF literal
   (`HasLiteralSpecial`, SSE2; the plain-text path reuses the classes
   `NeedsInlineParse` summed); its runs are then copied as they are.

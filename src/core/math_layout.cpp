@@ -1691,8 +1691,8 @@ MathFormula MathFormula::LayoutParsed(const MathParseResult& parsed, std::string
     return formula;
 }
 
-void MathFormula::Emit(std::string& content, double x, double baseline, const char* rgb, MathGlyphUse* use) const {
-    if (rgb == nullptr) rgb = "0 0 0";
+void MathFormula::Emit(std::string& content, double x, double baseline, std::string_view rgb, MathGlyphUse* use) const {
+    if (rgb.empty()) rgb = "0 0 0";
     size_t glyphs = 0, paths = 0, fallbacks = 0;
     for (const MathItem& item : items_) {
         if (item.kind == kItemGlyph) ++glyphs;

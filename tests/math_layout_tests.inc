@@ -167,7 +167,7 @@ double ProbeMeasure(void* context, std::string_view, double size) {
     ++static_cast<FallbackProbe*>(context)->measured;
     return 3.0 * size;
 }
-void ProbeEmit(void* context, std::string& content, std::string_view utf8, double x, double baseline, double size, const char*) {
+void ProbeEmit(void* context, std::string& content, std::string_view utf8, double x, double baseline, double size, std::string_view) {
     FallbackProbe& probe = *static_cast<FallbackProbe*>(context);
     ++probe.emitted;
     probe.text = std::string(utf8);
