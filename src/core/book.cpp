@@ -35,6 +35,21 @@ std::string Lower(std::string_view text) {
     return lower;
 }
 
+// Whether a path's extension(), in any case, is ".md" or ".markdown" (a name that only begins with a
+// dot has none).
+bool HasMarkdownExtension(std::string_view path) {
+#ifdef _WIN32
+    const size_t slash = path.find_last_of("/\\");
+#else
+    const size_t slash = path.rfind('/');
+#endif
+    const std::string_view name = slash == std::string_view::npos ? path : path.substr(slash + 1);
+    const size_t dot = name.rfind('.');
+    if (dot == std::string_view::npos || dot == 0) return false;
+    const std::string extension = Lower(name.substr(dot));
+    return extension == ".md" || extension == ".markdown";
+}
+
 std::string_view Trimmed(std::string_view text) {
     while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
     while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r')) text.remove_suffix(1);
@@ -259,9 +274,8 @@ bool ListDirectory(const fs::path& directory, std::vector<fs::path>& files, std:
     for (fs::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec)) {
         std::string name = PathToUtf8(it->path().filename());
         if (name.empty() || name[0] == '_' || name[0] == '.') continue;
-        const std::string extension = Lower(PathToUtf8(it->path().extension()));
         std::error_code typeError;
-        if ((extension == ".md" || extension == ".markdown") && it->is_regular_file(typeError)) {
+        if (HasMarkdownExtension(name) && it->is_regular_file(typeError)) {
             names.emplace_back(std::move(name), it->path());
         }
     }
@@ -493,10 +507,9 @@ bool ReadLinkedBook(const fs::path& note, const TinyPdf::PdfOptions& options, in
             for (const std::string& url : LinksOf(chapter.markdown)) {
                 if (url.empty() || url[0] == '#' || HasScheme(url)) continue;
                 const std::string target = Decoded(std::string_view(url).substr(0, url.find('#')));
-                const std::string extension = Lower(PathToUtf8(PathFromUtf8(target).extension()));
                 // A wiki link names a note also when its name has a dot ("v1.2 notes"): ".md" is
                 // added as for an embed, unless it names an image, a PDF, audio or video.
-                if (extension != ".md" && extension != ".markdown" && (!byName || !TinyPdf::Internal::IsNoteTarget(target))) continue;
+                if (!HasMarkdownExtension(target) && (!byName || !TinyPdf::Internal::IsNoteTarget(target))) continue;
                 std::string path = vault.Find(folder, target, byName);
                 if (!path.empty() && known.insert(path).second) found.push_back({ std::move(path), found[at].depth + 1 });
             }
