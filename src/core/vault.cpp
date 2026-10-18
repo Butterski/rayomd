@@ -87,41 +87,153 @@ size_t RootLength(std::string_view path) {
 #endif
 }
 
-// `path`, which ends in a file name, as lexically_normal() writes it, in place: the platform's
-// separators, one between components, no "." component, each ".." with the component before it
-// taken out (one at the root dropped). The text only moves forward, so one pass does.
+bool IsDotDot(const char* name, size_t length) {
+    return length == 2 && name[0] == '.' && name[1] == '.';
+}
+
+} // namespace
+
+// libstdc++'s lexically_normal step by step: a name is appended after a separator unless the text
+// ends in one; "." and a trailing empty name add a separator after a name; ".." takes out the name
+// before it (or the name before a trailing separator), is dropped at a root directory and kept
+// after another "..". Output never outruns the input, so it is written over it.
 void Normalize(std::string& path) {
+    if (path.empty()) return;
+    const size_t size = path.size();
     const size_t rootLength = RootLength(path);
     char* const text = path.data();
     for (size_t at = 0; at < rootLength; at++) {
         if (IsSeparator(text[at])) text[at] = kSeparator;
     }
+    const bool rootDirectory = rootLength > 0 && text[rootLength - 1] == kSeparator;
     size_t out = rootLength;
-    size_t kept = 0;   // components written that a ".." takes out
-    for (size_t at = rootLength; at < path.size();) {
-        size_t end = at;
-        while (end < path.size() && !IsSeparator(text[end])) end++;
-        const size_t start = at;
-        const size_t length = end - start;
-        at = end + 1;
-        if (length == 0 || (length == 1 && text[start] == '.')) continue;
-        if (length == 2 && text[start] == '.' && text[start + 1] == '.') {
-            if (kept > 0) {
-                while (out > rootLength && text[out - 1] != kSeparator) out--;
-                if (out > rootLength) out--;
-                kept--;
-                continue;
-            }
-            if (rootLength > 0) continue;
-        } else {
-            kept++;
-        }
-        if (out > rootLength) text[out++] = kSeparator;
+    const auto nameStart = [&](size_t end) {
+        while (end > rootLength && text[end - 1] != kSeparator) end--;
+        return end;
+    };
+    const auto endsInName = [&]() { return out > rootLength && text[out - 1] != kSeparator; };
+    const auto append = [&](size_t start, size_t length) {
+        if (endsInName()) text[out++] = kSeparator;
         std::memmove(text + out, text + start, length);
         out += length;
+    };
+    for (size_t at = rootLength; at < size;) {
+        const size_t start = at;
+        while (at < size && !IsSeparator(text[at])) at++;
+        const size_t length = at - start;
+        const bool separated = at < size;
+        while (at < size && IsSeparator(text[at])) at++;
+        if (length == 1 && text[start] == '.') {
+            if (endsInName()) text[out++] = kSeparator;
+        } else if (IsDotDot(text + start, length)) {
+            if (endsInName()) {
+                const size_t name = nameStart(out);
+                if (IsDotDot(text + name, out - name)) append(start, 2);
+                else out = name;
+            } else if (out == rootLength) {
+                if (!rootDirectory) append(start, 2);
+            } else {
+                const size_t name = nameStart(out - 1);
+                if (IsDotDot(text + name, out - 1 - name)) append(start, 2);
+                else out = name;
+            }
+        } else if (length > 0) {
+            append(start, length);
+        }
+        // A separator ending the path is an empty last name.
+        if (separated && at == size && endsInName()) text[out++] = kSeparator;
     }
+    if (out > rootLength && text[out - 1] == kSeparator) {
+        const size_t name = nameStart(out - 1);
+        if (IsDotDot(text + name, out - 1 - name)) out--;
+    }
+    if (out == 0) text[out++] = '.';
     path.resize(out);
 }
+
+namespace {
+
+// A path's root ("C:\", "\\server\", "/"; root name and root directory) and its names after it, as
+// std::filesystem::path's iterator gives them: each name, then an empty one when separators end the
+// path after a name.
+struct PathNames {
+    std::string_view path;
+    size_t rootLength;
+    size_t at;
+    bool afterName = false;
+
+    explicit PathNames(std::string_view text) : path(text), rootLength(RootLength(text)), at(rootLength) {}
+    bool RootDirectory() const { return rootLength > 0 && IsSeparator(path[rootLength - 1]); }
+    std::string_view RootName() const { return path.substr(0, rootLength - RootDirectory()); }
+    bool Absolute() const {
+#ifdef _WIN32
+        return RootDirectory() && rootLength > 1;
+#else
+        return RootDirectory();
+#endif
+    }
+    bool Next(std::string_view& name) {
+        name = std::string_view();
+        if (at > path.size()) return false;
+        size_t start = at;
+        while (start < path.size() && IsSeparator(path[start])) start++;
+        if (start == path.size()) {
+            const bool trailing = afterName && start > at;
+            at = path.size() + 1;
+            return trailing;
+        }
+        at = start;
+        while (at < path.size() && !IsSeparator(path[at])) at++;
+        name = path.substr(start, at - start);
+        afterName = true;
+        return true;
+    }
+};
+
+} // namespace
+
+std::string RelativePath(std::string_view path, std::string_view base) {
+    PathNames from(path);
+    PathNames to(base);
+    std::string out;
+    if (from.RootName() != to.RootName() || from.Absolute() != to.Absolute() || (!from.RootDirectory() && to.RootDirectory())) return out;
+    // A root directory only `path` has (Windows: "\a" against "b") is a mismatch there, and
+    // appending it takes back the ".." before it.
+    const bool rooted = from.RootDirectory() && !to.RootDirectory();
+    std::string_view a, b;
+    bool hasA = from.Next(a);
+    bool hasB = to.Next(b);
+    while (!rooted && hasA && hasB && a == b) {
+        hasA = from.Next(a);
+        hasB = to.Next(b);
+    }
+    int up = 0;
+    for (; hasB; hasB = to.Next(b)) up += b == ".." ? -1 : !b.empty() && b != ".";
+    if (!rooted && up == 0 && a.empty()) return ".";
+    if (up < 0) return out;
+    if (rooted) out += kSeparator;
+    for (; !rooted && up > 0; up--) out.append(out.empty() ? 0 : 1, kSeparator).append("..");
+    for (; hasA; hasA = from.Next(a)) {
+        if (!out.empty() && out.back() != kSeparator) out += kSeparator;
+        out.append(a);
+    }
+    return out;
+}
+
+std::string_view FileNameOf(std::string_view path) {
+    size_t start = path.size();
+    while (start > 0 && !IsSeparator(path[start - 1])) start--;
+    return path.substr(std::max(start, std::min(RootLength(path), path.size())));
+}
+
+std::string_view StemOf(std::string_view path) {
+    const std::string_view name = FileNameOf(path);
+    if (name == "." || name == "..") return name;
+    const size_t dot = name.rfind('.');
+    return dot == std::string_view::npos || dot == 0 ? name : name.substr(0, dot);
+}
+
+namespace {
 
 // Where `path` (normalized or resolved) continues below the resolved folder `root`: the offset of
 // its first component there; 0 when it does not lie in the root.
@@ -187,8 +299,28 @@ std::string_view ParentOf(std::string_view path) {
     const size_t rootLength = RootLength(path);
     size_t end = path.size();
     while (end > rootLength && !IsSeparator(path[end - 1])) end--;
-    if (end > rootLength) end--;
+    while (end > rootLength && IsSeparator(path[end - 1])) end--;
     return path.substr(0, end);
+}
+
+void AppendPath(std::string& base, std::string_view path) {
+    const size_t rootLength = RootLength(path);
+    const bool rootDirectory = rootLength > 0 && IsSeparator(path[rootLength - 1]);
+    const std::string_view rootName = path.substr(0, rootLength - rootDirectory);
+    const size_t baseRoot = RootLength(base);
+    const size_t baseName = baseRoot - (baseRoot > 0 && IsSeparator(base[baseRoot - 1]));
+#ifdef _WIN32
+    const bool absolute = rootDirectory && !rootName.empty();
+#else
+    const bool absolute = rootDirectory;
+#endif
+    if (absolute || (!rootName.empty() && rootName != std::string_view(base).substr(0, baseName))) {
+        base.assign(path);
+        return;
+    }
+    if (rootDirectory) base.resize(baseName);
+    else if (base.size() > baseRoot && !IsSeparator(base.back())) base += kSeparator;
+    base.append(path.substr(rootName.size()));
 }
 
 bool IsWithinRoot(std::string_view file, std::string_view root) {

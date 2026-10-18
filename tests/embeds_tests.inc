@@ -217,10 +217,145 @@ bool CheckEmbeds() {
     return ok;
 }
 
+// The string path helpers (vault.h) against std::filesystem, which book.cpp used before: the
+// links between a book's files and the backlinks' targets must not change.
+bool CheckPathHelpers() {
+    using RayoMd::File::PathFromUtf8;
+    using RayoMd::File::PathToUtf8;
+    bool ok = true;
+    const auto expect = [&ok](const char* what, const std::string& input, const std::string& got, const std::string& want) {
+        if (got == want) return;
+        std::cerr << "path helpers: " << what << "(" << input << ") = \"" << got << "\", std::filesystem: \"" << want << "\"" << std::endl;
+        ok = false;
+    };
+    std::vector<std::string> normal = { "", ".", "..", "a", "a/", "a/.", "a/..", "a/../..", "./a", "../a", "a/./b", "a//b", "a/b/..",
+        "a/b/../", "a/b/../..", "a/b/../../..", "/", "/..", "/../a", "/a/./b/../c", "a/../../b/../c", "../..", ".././..", "../a/../..",
+        "a/b/c/../../d/", "x/y/.", "/a/b//", "///a/b", "a/.../b", "..a/b..", ".hidden/./x", "a/./", "./", "../", "a/../", "/a/..",
+        "/a/../..", "x/./../y", "./.././a/" };
+#ifdef _WIN32
+    for (const char* windows : { "C:\\a\\..\\b", "C:a\\..\\..", "C:\\..", "\\\\srv\\share\\x\\..", "C:/x/./y", "\\a\\b", "C:", "C:\\",
+             "c:a/b/", "\\\\srv", "\\\\srv\\", "a\\b/c" }) {
+        normal.push_back(windows);
+    }
+#endif
+    for (const std::string& path : normal) {
+        std::string got = path;
+        TinyPdf::Internal::Normalize(got);
+        expect("Normalize", path, got, PathToUtf8(PathFromUtf8(path).lexically_normal()));
+    }
+    std::vector<std::pair<std::string, std::string>> relative = { { "/v/a.md", "/v" }, { "/v/a.md", "/v/sub" }, { "/v/sub/b.md", "/v" },
+        { "/v/x/b.md", "/v/y/z" }, { "a.md", "" }, { "b/a.md", "" }, { "a.md", "b" }, { "a.md", ".." }, { "../a.md", ".." },
+        { "../a.md", "" }, { "/a.md", "/" }, { "/v/a.md", "w" }, { "a.md", "/v" }, { "a/b", "a/b" }, { "a/b", "a/b/c" }, { "a", "a/b/.." },
+        { "a/b/c", "a/./b" }, { "a/b", "a/../a" }, { "x/y.md", "x/y.md/z" }, { "a/", "a" }, { "a/b/", "a" }, { "", "" }, { "a", "" },
+        { "", "a" }, { "../../a", "../b" }, { "/v/c d.md", "/v/sub/deep" } };
+#ifdef _WIN32
+    relative.insert(relative.end(), { { "C:\\v\\a.md", "C:\\v\\s" }, { "C:\\v\\a.md", "D:\\v" }, { "\\a\\b", "c" }, { "C:\\a", "C:b" },
+        { "\\a\\b", "" }, { "c:\\v\\a.md", "C:\\v" } });
+#endif
+    for (const auto& [path, base] : relative) {
+        expect("RelativePath", path + ", " + base, TinyPdf::Internal::RelativePath(path, base),
+            PathToUtf8(PathFromUtf8(path).lexically_relative(PathFromUtf8(base))));
+    }
+    for (const char* path : { "a.md", "a", ".md", "a.b.c", "a.", "/x/y.md", "x/", "/", ".", "..", "x/..", "x/.hidden", "dir.d/file",
+             "c d.md", "", "x/.", "..md" }) {
+        expect("StemOf", path, std::string(TinyPdf::Internal::StemOf(path)), PathToUtf8(PathFromUtf8(path).stem()));
+    }
+    for (const char* path : { "a/b.md", "/b.md", "b.md", "/a/b/c.md", "a/b/c", "a//b.md", "/a//b//c.md" }) {
+        expect("ParentOf", path, std::string(TinyPdf::Internal::ParentOf(path)), PathToUtf8(PathFromUtf8(path).parent_path()));
+    }
+    std::vector<std::pair<std::string, std::string>> joined = { { "a", "b" }, { "a/", "b" }, { "", "b" }, { "/", "b" }, { "a", "/b" },
+        { "/x", "../y" }, { "a", "" }, { "a/", "" }, { ".", "b" }, { "a", "b/" } };
+#ifdef _WIN32
+    joined.insert(joined.end(), { { "C:\\a", "\\b" }, { "C:\\a", "D:b" }, { "C:\\a", "C:b" }, { "C:", "b" }, { "C:\\a", "D:\\b" },
+        { "a", "\\\\srv\\x" }, { "\\\\srv\\s", "\\x" } });
+#endif
+    for (const auto& [base, path] : joined) {
+        std::string got = base;
+        TinyPdf::Internal::AppendPath(got, path);
+        expect("AppendPath", base + ", " + path, got, PathToUtf8(PathFromUtf8(base) / PathFromUtf8(path)));
+    }
+    return ok;
+}
+
+// The files of a book that links name (BookFileOfLink): relative paths, folders by their README.md
+// or index.md, escapes, and in Obsidian's dialect names and path ends in any case; and the
+// backlinks' paragraphs (AddBacklinks): each linking file once in the book's order, its title or
+// file name escaped, its path relative to the linked file's folder and percent-encoded.
+bool CheckBookLinks() {
+    std::vector<TinyPdf::BookChapter> chapters(8);
+    const char* const files[] = { "/v/README.md", "/v/guide/intro.md", "/v/guide/index.md", "/v/guide/sub/Deep Note.md", "/v/v1.2 notes.md",
+        "", "rel/x.md", "/v/guide/./odd/../other.md" };
+    std::vector<std::string> paths(chapters.size());
+    for (size_t index = 0; index < chapters.size(); index++) {
+        chapters[index].path = files[index];
+        chapters[index].part = chapters[index].path.empty();
+        if (!chapters[index].part) {
+            paths[index] = RayoMd::File::PathToUtf8(RayoMd::File::PathFromUtf8(files[index]).lexically_normal());
+        }
+    }
+    constexpr size_t kNone = std::string::npos;
+    struct Case {
+        size_t from;
+        const char* link;
+        size_t github;
+        size_t obsidian;
+    };
+    const Case cases[] = { { 1, "../README.md", 0, 0 }, { 1, "..", 0, 0 }, { 1, "../", 0, 0 }, { 0, "guide", 2, 2 }, { 0, "guide/", 2, 2 },
+        { 0, "guide/intro.md", 1, 1 }, { 0, "./guide/./intro.md", 1, 1 }, { 0, "guide/sub/Deep%20Note.md", 3, 3 }, { 3, "../../README.md", 0, 0 },
+        { 3, "../intro.md", 1, 1 }, { 0, "/v/README.md", kNone, kNone }, { 0, "http://x/y.md", kNone, kNone }, { 0, "mailto:a@b", kNone, kNone },
+        { 6, "x.md", 6, 6 }, { 6, "../README.md", kNone, kNone }, { 0, "guide/other.md", 7, 7 }, { 1, "other.md", 7, 7 }, { 0, "Deep Note", kNone, 3 },
+        { 0, "deep note", kNone, 3 }, { 0, "sub/deep%20note", kNone, 3 }, { 0, "ub/deep note", kNone, kNone }, { 0, "v1.2 notes", kNone, 4 },
+        { 0, "intro.md", kNone, 1 }, { 0, "picture.png", kNone, kNone }, { 0, "INTRO", kNone, 1 }, { 0, "guide/../README", kNone, 0 },
+        { 0, "a%2Fb", kNone, kNone }, { 0, "", kNone, kNone }, { 1, "./", 2, 2 }, { 1, ".", 2, 2 }, { 0, "guide/odd/..", 2, 2 },
+        { 0, "%67uide/intro.md", 1, 1 }, { 2, "sub/../../guide/sub/..", 2, 2 }, { 1, "%2Fv%2FREADME.md", 0, 0 },
+        { 1, "%2Fv%2Fguide", 2, 2 } };
+    bool ok = true;
+    for (const TinyPdf::MarkdownDialect dialect : { TinyPdf::MarkdownDialect::GitHub, TinyPdf::MarkdownDialect::Obsidian }) {
+        const TinyPdf::Internal::DialectScope scope(dialect);
+        for (const Case& test : cases) {
+            const size_t want = dialect == TinyPdf::MarkdownDialect::GitHub ? test.github : test.obsidian;
+            const size_t got = TinyPdf::Internal::BookFileOfLink(chapters, paths, test.from, test.link);
+            if (got == want) continue;
+            std::cerr << "book links: \"" << test.link << "\" from " << test.from << " found " << (long long)got << ", not " << (long long)want << std::endl;
+            ok = false;
+        }
+    }
+    TinyPdf::Book book;
+    const char* const linked[][3] = { { "/v/a.md", "", "[b](sub/b.md) and [c](sub/deep/c%20d.md) and [e](other/e.md) and [b again](sub/b.md)" },
+        { "/v/sub/b.md", "Bee (2)", "[a](../a.md), [c](deep/c%20d.md)" },
+        { "/v/sub/deep/c d.md", "", "[b](../b.md) [e](../../other/e.md) [self](c%20d.md)" }, { "", "Part", "" },
+        { "/v/other/e.md", "", "[a](../a.md)" }, { "rel.md", "", "[a](/v/a.md) [x](x/y.md)" }, { "x/y.md", "", "[rel](../rel.md)" },
+        { "/w/./z/../t.md", "", "[e](../v/other/e.md) [a](/v/a.md)" } };
+    std::vector<std::string> texts;
+    for (const auto& file : linked) {
+        TinyPdf::BookChapter chapter;
+        chapter.path = file[0];
+        chapter.title = file[1];
+        chapter.part = chapter.path.empty();
+        book.chapters.push_back(chapter);
+        texts.push_back(file[2]);
+    }
+    TinyPdf::Internal::AddBacklinks(book, texts);
+    const std::vector<std::string> expected = {
+        "[b](sub/b.md) and [c](sub/deep/c%20d.md) and [e](other/e.md) and [b again](sub/b.md)\n\nLinked from: [Bee \\(2\\)](<sub/b.md>), [e](<other/e.md>)\n",
+        "[a](../a.md), [c](deep/c%20d.md)\n\nLinked from: [a](<../a.md>), [c d](<deep/c%20d.md>)\n",
+        "[b](../b.md) [e](../../other/e.md) [self](c%20d.md)\n\nLinked from: [a](<../../a.md>), [Bee \\(2\\)](<../b.md>)\n", "",
+        "[a](../a.md)\n\nLinked from: [a](<../a.md>), [c d](<../sub/deep/c%20d.md>), [t](<../../w/t.md>)\n",
+        "[a](/v/a.md) [x](x/y.md)\n\nLinked from: [y](<x/y.md>)\n", "[rel](../rel.md)\n\nLinked from: [rel](<../rel.md>)\n",
+        "[e](../v/other/e.md) [a](/v/a.md)" };
+    for (size_t index = 0; index < texts.size(); index++) {
+        if (texts[index] == expected[index]) continue;
+        std::cerr << "backlinks of " << index << ": \"" << texts[index] << "\"" << std::endl;
+        ok = false;
+    }
+    return ok;
+}
+
 // Books of linked notes: breadth first in link order to the depth, each note once (also under
 // two names), nothing missing or outside the vault, a note's name as its title, the backlinks'
 // links within the book, and the limit of notes.
 bool CheckLinkedNotes() {
+    if (!CheckPathHelpers() || !CheckBookLinks()) return false;
     const fs::path root = fs::temp_directory_path() / "rayomd-test-linked";
     fs::remove_all(root);
     const fs::path vault = root / "vault";

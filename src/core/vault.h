@@ -33,6 +33,27 @@ std::filesystem::path ResolvedWidePath(const std::filesystem::path& path);
 // a bare name. As std::filesystem::path::parent_path() gives it for a path that ends in a name.
 std::string_view ParentOf(std::string_view path);
 
+// `base` /= `path`, as std::filesystem::path::operator/= joins them: `path` alone when it is
+// absolute (or names another drive), after `base`'s root when it begins at a root directory, else
+// after a separator unless `base` is empty or ends in one.
+void AppendPath(std::string& base, std::string_view path);
+
+// `path` as std::filesystem::path::lexically_normal() writes it, in place: the platform's
+// separators, one between components, no "." component, each ".." with the component before it
+// taken out (one at the root dropped), a trailing separator kept, "." for an empty result. The
+// text only moves forward, so one pass does.
+void Normalize(std::string& path);
+
+// path.lexically_relative(base) of std::filesystem, as a string with the platform's separators:
+// empty when the two have different roots, or `base` leads above where `path` begins.
+std::string RelativePath(std::string_view path, std::string_view base);
+
+// path.filename() and path.stem() of std::filesystem: the last component (empty when `path` ends
+// in a separator or is a root), and that without its extension (a name that only begins with a
+// dot, "." and ".." have none).
+std::string_view FileNameOf(std::string_view path);
+std::string_view StemOf(std::string_view path);
+
 // Whether the resolved path `file` lies in the resolved folder `root`: `root` and then at least one
 // component more (so "/a/bc" is not in "/a/b"); on Windows with ASCII letters folded.
 bool IsWithinRoot(std::string_view file, std::string_view root);
