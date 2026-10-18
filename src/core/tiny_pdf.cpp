@@ -23,6 +23,7 @@
 #include "markdown_parser.h"
 #include "highlight.h"
 #include "math_layout.h"
+#include "page_notes.h"
 #include "pdfa.h"
 #include "png_filter.h"
 #include "shared_url.h"
@@ -2196,6 +2197,14 @@ static uint64_t NextRunsParse() {
     return parses.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
+// Page footnotes: one paragraph's parse traded for another's (the renderers' SwapFootBuffers).
+RAYOMD_COLD static void SwapInlineRuns(Internal::InlineRuns& a, Internal::InlineRuns& b) {
+    a.text.swap(b.text);
+    a.urls.swap(b.urls);
+    a.runs.swap(b.runs);
+    std::swap(a.scripts, b.scripts);
+}
+
 // The targets of the links the runs of a paragraph draw, each copied once into a SharedUrl that
 // all its rectangles share: a run's target is a view into its paragraph's parse, and a link over
 // many lines draws one rectangle a line. Copied for each, a long target over long link text took
@@ -3818,6 +3827,25 @@ public:
         return resolved;
     }
     uint32_t FailedImages() const { return failed; }
+    // What a layout that is thrown away (the measuring of page footnotes, PageNoteLayout) changed:
+    // its images, failures and decode budget go back to a snapshot, so the layout that is kept
+    // finds them as if the other had not run.
+    struct Snapshot {
+        size_t images = 0;
+        uint32_t failed = 0;
+        DecodeBudget budget;
+    };
+    Snapshot Save() const { return { images.size(), failed, budget }; }
+    RAYOMD_COLD void Restore(const Snapshot& snapshot) {
+        if (images.size() != snapshot.images) {
+            for (auto it = indexByKey.begin(); it != indexByKey.end();) {
+                it = (size_t)it->second >= snapshot.images ? indexByKey.erase(it) : std::next(it);
+            }
+            images.resize(snapshot.images);
+        }
+        failed = snapshot.failed;
+        budget = snapshot.budget;
+    }
     // Whether the document had an SVG image (ConvertSvgImage), whose text takes its font.
     bool SvgAttempted() const { return svgAttempted; }
     // A ```mermaid block's diagram (Internal::Mermaid::ToSvg) as an SVG form among the document's
@@ -5441,6 +5469,12 @@ public:
     }
 
     void MarkUsed() { used = true; }
+    // Page footnotes (PageNoteLayout): the boxes of the text being laid out set aside while notes
+    // are laid out at the foot of the page, and back; the glyphs used and the flags stay.
+    void SwapItems(MathPool& other) {
+        items.swap(other.items);
+        std::swap(sourceShown, other.sourceShown);
+    }
 
 private:
     struct Item {
@@ -5637,6 +5671,10 @@ RAYOMD_MATH_COLD static void AppendMathFontResources(std::string& page, const st
     }
 }
 
+// Footnotes at the foot of the page (FootnotePlacement::Page), defined after the block loop.
+template <typename RendererType>
+struct PageNoteLayout;
+
 // A table that contains formulas. Rows are as tall as their tallest cell; cells
 // without a formula wrap exactly as they do in RenderTable.
 template <typename RendererType>
@@ -5701,13 +5739,15 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
         double rowHeight = contentHeight + pad * 2.0;
         if (rowHeight + 5.0 > renderer.pageH - renderer.margin * 2.0) {
             // Taller than a page: every page gets as many lines of each cell as fit, inside
-            // cell borders of its own. A fresh page takes at least one line of every cell.
+            // cell borders of its own. A fresh page takes at least one line of every cell. Page
+            // footnotes go to the foot of the page the row starts on.
+            if (renderer.pageNotes != nullptr) PageNoteLayout<RendererType>::ReserveRow(renderer, cells, columns, lh + pad * 2.0 + 5.0);
             std::vector<size_t> next(columns, 0);
             std::vector<size_t> end(columns, 0);
             bool freshPage = false;
             renderer.TagTableRowStart(r, columns, false);
             for (;;) {
-                const double room = renderer.y - renderer.margin - 5.0 - pad * 2.0;
+                const double room = renderer.y - renderer.textBottom - 5.0 - pad * 2.0;
                 double sliceHeight = 0.0;
                 bool any = false;
                 for (size_t c = 0; c < columns; c++) {
@@ -5754,14 +5794,22 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
         if (r == 0) {
             // The header row keeps a line of the next row with it.
             headerHeight = rowHeight;
-            renderer.Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
-        } else if (renderer.y - rowHeight - 5.0 < renderer.margin) {
-            renderer.NewPage();
-            if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= renderer.pageH - renderer.margin * 2.0) {
-                resumeRow = r;
-                r = static_cast<size_t>(-1);
-                continue;
+            const double keep = rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0);
+            if (renderer.pageNotes != nullptr) PageNoteLayout<RendererType>::ReserveRow(renderer, cells, columns, keep);
+            else renderer.Ensure(keep);
+        } else {
+            // Page footnotes: the room the row's notes not placed yet take below it.
+            const double rowNotes = renderer.pageNotes != nullptr
+                ? PageNoteLayout<RendererType>::RowNeed(renderer, cells, columns, rowHeight + 5.0) : 0.0;
+            if (renderer.y - rowHeight - 5.0 - rowNotes < renderer.textBottom) {
+                renderer.NewPage();
+                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= renderer.pageH - renderer.margin * 2.0) {
+                    resumeRow = r;
+                    r = static_cast<size_t>(-1);
+                    continue;
+                }
             }
+            if (rowNotes > 0.0) PageNoteLayout<RendererType>::PlaceRow(renderer, rowHeight + 5.0);
         }
         renderer.TagTableRowStart(r, columns, r == 0 && resumeRow != 0);
         double top = renderer.y;
@@ -5915,16 +5963,21 @@ struct SourceStart {
 
 // Notes a top-level block's place in PdfOptions::sourceMap. A block that drew nothing on the
 // page it started on (its first line or a kept heading went to the next page) starts at the
-// top of the next. PDF/UA writes bytes at a page break before the next page starts, so there
-// such a block keeps the old page's bottom as its start.
+// top of the next; with page footnotes (`notes`), a page's text ends before its notes. PDF/UA
+// writes bytes at a page break before the next page starts, so there such a block keeps the old
+// page's bottom as its start.
 RAYOMD_COLD static void NoteSourceBlock(std::vector<SourceBlock>& map, const Block& block, SourceStart start,
-    const std::vector<size_t>& pageStarts, double endY, double pageH, double margin) {
+    const std::vector<size_t>& pageStarts, double endY, double pageH, double margin, const Internal::PageNotes* notes) {
     SourceBlock entry;
     entry.firstLine = block.sourceLine;
     entry.endLine = block.sourceLine + block.sourceLines;
-    if (start.page + 1 < pageStarts.size() && pageStarts[start.page + 1] == start.content) {
-        start.page++;
-        start.y = pageH - margin;
+    if (start.page + 1 < pageStarts.size()) {
+        size_t textEnd = pageStarts[start.page + 1];
+        if (notes != nullptr && notes->TextEnd(start.page) != Internal::PageNotes::kNoTextEnd) textEnd = notes->TextEnd(start.page);
+        if (textEnd == start.content) {
+            start.page++;
+            start.y = pageH - margin;
+        }
     }
     entry.page = static_cast<uint32_t>(start.page);
     entry.top = static_cast<float>(pageH - start.y);
@@ -5975,16 +6028,20 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         case BlockType::Contents: renderer.RenderContents(); break;
         case BlockType::Anchor: renderer.MarkAnchor(block.text); break;
         }
-        if (mapped) NoteSourceBlock(*renderer.sourceMap, block, start, renderer.pageStarts, renderer.y, renderer.pageH, renderer.margin);
+        if (mapped) {
+            NoteSourceBlock(*renderer.sourceMap, block, start, renderer.pageStarts, renderer.y, renderer.pageH, renderer.margin,
+                renderer.pageNotes);
+        }
     }
     renderer.TagLeaveBlocks();
 }
 
 // The footnotes after the text, as GitHub shows them: a short rule, then each note at
 // kNoteTextFactor of the body size, its number in front and its other blocks indented
-// (Footnotes). Notes where each starts.
+// (Footnotes). Notes where each starts. With page footnotes, only those `only` sets at the end.
 template <typename RendererType>
-RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Internal::Footnotes& footnotes) {
+RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Internal::Footnotes& footnotes,
+    const Internal::PageNotes* only = nullptr) {
     renderer.Ensure(renderer.lineHeight * 2.0 + 18.0);
     renderer.y -= 8.0;
     renderer.TagArtifact();
@@ -5995,8 +6052,9 @@ RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Inte
     const double lineHeight = renderer.lineHeight;
     renderer.bodySize = bodySize * kNoteTextFactor;
     renderer.lineHeight = renderer.bodySize * 1.35;
-    renderer.noteMarks.notes.assign(footnotes.notes.size(), NoteMarks::Point{});
+    if (only == nullptr) renderer.noteMarks.notes.assign(footnotes.notes.size(), NoteMarks::Point{});
     for (size_t index = 0; index < footnotes.notes.size(); index++) {
+        if (only != nullptr && !only->AtEnd(static_cast<int>(index) + 1)) continue;
         renderer.Ensure(renderer.lineHeight);
         renderer.noteMarks.notes[index] = { renderer.pageStarts.size() - 1, renderer.y };
         const Block& note = footnotes.notes[index];
@@ -6004,9 +6062,9 @@ RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Inte
         renderer.RenderParagraph(note.text);
         if (!note.children.empty()) {
             const double margin = renderer.margin;
-            renderer.margin = margin + kNoteIndent;
+            renderer.Indent(kNoteIndent);
             RenderBlocks(renderer, note.children);
-            renderer.margin = margin;
+            renderer.RestoreMargin(margin);
         }
         renderer.TagEnd(tagged);
     }
@@ -6014,12 +6072,228 @@ RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Inte
     renderer.lineHeight = lineHeight;
 }
 
-// The blocks, then their footnotes, with the inline parser reading references to them.
+// Footnotes at the foot of the page (FootnotePlacement::Page; page_notes.h keeps the account),
+// for both renderers. Every note is laid out once before the text, where nothing breaks a page,
+// for its height and the notes it refers to (Measure); a line of the cold paths with references
+// to notes not placed yet keeps room for them below it (Reserve, ReserveRow); and the page's
+// notes are painted at its foot when it ends (Paint: from NewPage, at the end of a document and
+// of each book file), down to the page margin, with the renderer's state set aside (FootScope),
+// so that a paragraph or table row the page broke goes on as it was. Nothing here runs without
+// page footnotes: the renderers test `pageNotes` first.
+template <typename RendererType>
+struct PageNoteLayout {
+    // What the bottom tests compare with while notes are laid out: far below any page, so that
+    // nothing breaks one.
+    static constexpr double kNoBottom = 1e15;
+
+    // The renderer set for laying out notes: the page's margin and the notes' size, no page
+    // breaks or reservations (footMode), no source map, the buffers its paint paths share
+    // swapped for the notes' own (SwapFootBuffers); all of it back when it ends.
+    class FootScope {
+    public:
+        FootScope(RendererType& renderer, double top)
+            : r(renderer), y(renderer.y), margin(renderer.margin), bottom(renderer.textBottom), bodySize(renderer.bodySize),
+              lineHeight(renderer.lineHeight), listDepth(renderer.listDepth), quoteBar(renderer.quoteBar),
+              sourceMap(renderer.sourceMap) {
+            Internal::PageNotes& notes = *r.pageNotes;
+            r.SwapFootBuffers();
+            notes.footMode = true;
+            r.textBottom = -kNoBottom;
+            r.margin = notes.margin;
+            r.y = top;
+            r.bodySize = notes.bodySize * kNoteTextFactor;
+            r.lineHeight = r.bodySize * 1.35;
+            r.listDepth = 0;
+            r.quoteBar = r.plainQuoteBar;
+            r.sourceMap = nullptr;
+        }
+        ~FootScope() {
+            r.SwapFootBuffers();
+            r.pageNotes->footMode = false;
+            r.y = y;
+            r.margin = margin;
+            r.textBottom = bottom;
+            r.bodySize = bodySize;
+            r.lineHeight = lineHeight;
+            r.listDepth = listDepth;
+            r.quoteBar = quoteBar;
+            r.sourceMap = sourceMap;
+        }
+        FootScope(const FootScope&) = delete;
+        FootScope& operator=(const FootScope&) = delete;
+
+    private:
+        RendererType& r;
+        const double y, margin, bottom, bodySize, lineHeight;
+        const int listDepth;
+        const char* const quoteBar;
+        std::vector<SourceBlock>* const sourceMap;
+    };
+
+    // Note `index` as the end section sets it, without its page test: where it starts (`mark`),
+    // its first paragraph, its other blocks indented; a Note of the Document under PDF/UA.
+    static void Note(RendererType& r, size_t index, bool mark) {
+        if (mark) r.noteMarks.notes[index] = { r.pageStarts.size() - 1, r.y };
+        const Block& note = r.footnotes->notes[index];
+        const int tagged = r.TagBeginFootNote();
+        r.RenderParagraph(note.text);
+        if (!note.children.empty()) {
+            const double margin = r.margin;
+            r.Indent(kNoteIndent);
+            RenderBlocks(r, note.children);
+            r.RestoreMargin(margin);
+        }
+        r.TagEndFootNote(tagged);
+    }
+
+    // Each note's height and the notes it refers to, from a layout that is then taken back: its
+    // content, links, marks and images, and (BeginMeasure) its tags, glyph counts and fallback probe.
+    // The glyphs it marks used are those the notes paint later, as each is painted once.
+    RAYOMD_COLD static void Measure(RendererType& r) {
+        Internal::PageNotes& notes = *r.pageNotes;
+        const size_t content = r.content.size();
+        const size_t links = r.pageLinks.back().size();
+        const size_t headings = r.headings.size();
+        const size_t ids = r.ids.size();
+        const size_t contentsLines = r.contentsLines.size();
+        const ImageRegistry::Snapshot images = r.images != nullptr ? r.images->Save() : ImageRegistry::Snapshot{};
+        const auto state = r.BeginMeasure();
+        {
+            // Anywhere below the top of a page: a note's layout does not depend on where it starts.
+            const double top = r.pageH * 0.5;
+            FootScope scope(r, top);
+            for (size_t index = 0; index < r.footnotes->notes.size() && !BuildCancelled(); index++) {
+                notes.BeginMeasure(static_cast<int>(index) + 1);
+                r.y = top;
+                Note(r, index, false);
+                notes.EndMeasure(top - r.y);
+            }
+        }
+        r.EndMeasure(state);
+        if (r.images != nullptr) r.images->Restore(images);
+        r.content.resize(content);
+        r.pageLinks.back().erase(r.pageLinks.back().begin() + static_cast<std::ptrdiff_t>(links), r.pageLinks.back().end());
+        r.headings.erase(r.headings.begin() + static_cast<std::ptrdiff_t>(headings), r.headings.end());
+        r.ids.erase(r.ids.begin() + static_cast<std::ptrdiff_t>(ids), r.ids.end());
+        r.contentsLines.erase(r.contentsLines.begin() + static_cast<std::ptrdiff_t>(contentsLines), r.contentsLines.end());
+        notes.Settle(r.pageH - r.margin * 2.0 - r.lineHeight);
+    }
+
+    // The notes waiting at the foot of the page that ends: a rule at the top of the room kept for
+    // them, then each, down to the page margin. The page's text ends where they begin.
+    RAYOMD_COLD static void Paint(RendererType& r) {
+        Internal::PageNotes& notes = *r.pageNotes;
+        if (!notes.Pending().empty()) {
+            notes.SetTextEnd(r.pageStarts.size() - 1, r.content.size());
+            {
+                FootScope scope(r, notes.margin + (r.textBottom - r.margin));
+                r.y -= 8.0;
+                r.TagArtifact();
+                AppendFootnoteRule(r.content, r.ruleColor, r.margin, r.y, (r.pageW - r.margin * 2.0) / 3.0);
+                r.y -= 10.0;
+                for (const int note : notes.Pending()) Note(r, static_cast<size_t>(note) - 1, true);
+            }
+            notes.ClearPending();
+        }
+        r.textBottom = r.margin;
+    }
+
+    // NewPage, through PageNotes::pageEnds: true where no page may end (the notes' own layout),
+    // else the page's notes painted. Called through a pointer: a direct call made NewPage part of a
+    // cycle with the paint paths the notes take, and GCC then inlined MarkHeading and a line lambda
+    // of RenderParagraph differently (+0.14 % instructions on notes.md without page footnotes).
+    RAYOMD_COLD static bool Break(void* renderer) {
+        RendererType& r = *static_cast<RendererType*>(renderer);
+        if (r.pageNotes->footMode) return true;
+        Paint(r);
+        return false;
+    }
+
+    // PaintNote: a reference to `note`, its number's top at `top`. While measuring, an edge of the
+    // notes' graph; in a note at the foot, the first reference of a note only notes refer to, as a
+    // note the text refers to links back to the text.
+    RAYOMD_COLD static void Referenced(RendererType& r, int note, double top) {
+        Internal::PageNotes& notes = *r.pageNotes;
+        if (notes.Measuring()) notes.Refer(note);
+        else if (!notes.footMode || !notes.Body(note)) r.noteMarks.MarkReference(note, r.pageStarts.size() - 1, top);
+    }
+
+    // Ensure for a line of the cold paths (`needed` high): room below it for the notes its
+    // references bring, which then wait at the foot of the page it lands on.
+    template <typename Line>
+    RAYOMD_COLD static void Reserve(RendererType& r, const Line& line, double needed) {
+        Internal::PageNotes& notes = *r.pageNotes;
+        if (notes.footMode) {
+            r.Ensure(needed);
+            return;
+        }
+        notes.ClearLine();
+        for (const auto& span : line) {
+            if (span.math >= 0) notes.AddLine(r.math.Note(span.math));
+        }
+        if (!notes.Collect()) {
+            r.Ensure(needed);
+            return;
+        }
+        notes.Fit(r.pageH - r.margin * 2.0 - needed);
+        r.Ensure(needed + notes.Need());
+        r.textBottom += notes.Place(r.y - needed - r.textBottom);
+    }
+
+    // RenderMathTable: the room the notes of a row's references take below it (`needed` high), 0
+    // when none waits; PlaceRow then puts them at the foot of the page the row is drawn on.
+    template <typename Cells>
+    RAYOMD_COLD static double RowNeed(RendererType& r, const Cells& cells, size_t columns, double needed) {
+        Internal::PageNotes& notes = *r.pageNotes;
+        if (notes.footMode) return 0.0;
+        notes.ClearLine();
+        for (size_t c = 0; c < columns; c++) {
+            if (!cells[c].formula) continue;
+            for (const auto& line : cells[c].formulaLines) {
+                for (const auto& span : line) {
+                    if (span.math >= 0) notes.AddLine(r.math.Note(span.math));
+                }
+            }
+        }
+        if (!notes.Collect()) return 0.0;
+        notes.Fit(r.pageH - r.margin * 2.0 - needed);
+        return notes.Need();
+    }
+    RAYOMD_COLD static void PlaceRow(RendererType& r, double needed) {
+        r.textBottom += r.pageNotes->Place(r.y - needed - r.textBottom);
+    }
+    template <typename Cells>
+    RAYOMD_COLD static void ReserveRow(RendererType& r, const Cells& cells, size_t columns, double needed) {
+        const double need = RowNeed(r, cells, columns, needed);
+        r.Ensure(needed + need);
+        if (need > 0.0) PlaceRow(r, needed);
+    }
+
+    // The blocks with their notes at the foot of the pages, those too tall for a page after them.
+    RAYOMD_COLD static void Render(RendererType& r, const std::vector<Block>& blocks, const Internal::Footnotes& footnotes) {
+        typename RendererType::PageNoteState state(footnotes.notes.size(), footnotes.referenced, r.margin, r.bodySize);
+        state.pageEnds = &Break;
+        r.pageNotes = &state;
+        r.noteMarks.notes.assign(footnotes.notes.size(), NoteMarks::Point{});
+        Measure(r);
+        r.Render(blocks);
+        if (state.SettleRest()) RenderFootnoteSection(r, footnotes, &state);
+        Paint(r);
+        r.pageNotes = nullptr;
+    }
+};
+
+// The blocks, then their footnotes, with the inline parser reading references to them: after
+// the text, or with `atFoot` at the foot of the pages (PageNoteLayout).
 template <typename RendererType>
 RAYOMD_COLD static void RenderWithFootnotes(RendererType& renderer, const std::vector<Block>& blocks,
-    const Internal::Footnotes& footnotes) {
+    const Internal::Footnotes& footnotes, bool atFoot) {
     const Internal::FootnoteLabels labels(footnotes.numbers);
     renderer.SetFootnotes(&footnotes);
+    if (atFoot) {
+        PageNoteLayout<RendererType>::Render(renderer, blocks, footnotes);
+        return;
+    }
     renderer.Render(blocks);
     renderer.RenderFootnotes();
 }
@@ -6043,9 +6317,10 @@ struct BookParse {
 
 // A book: its title page and with --toc its table of contents, then each part's title page and
 // each file from a new page, the bookmarks of its headings as many levels down as its depth.
+// With `notesAtFoot`, each file's footnotes at the foot of its pages, flushed at its end.
 template <typename RendererType>
 RAYOMD_COLD static void RenderBook(RendererType& renderer, ImageRegistry& images, const BookSource& source,
-    BookParse& parse, bool titlePage) {
+    BookParse& parse, bool titlePage, bool notesAtFoot) {
     const std::vector<BookChapter>& chapters = source.book->chapters;
     if (titlePage) renderer.RenderTitlePage(source.title, false);
     if (parse.contentsFirst) {
@@ -6068,7 +6343,7 @@ RAYOMD_COLD static void RenderBook(RendererType& renderer, ImageRegistry& images
         if (footnotes.notes.empty()) {
             renderer.Render(parse.files.blocks[index]);
         } else {
-            RenderWithFootnotes(renderer, parse.files.blocks[index], footnotes);
+            RenderWithFootnotes(renderer, parse.files.blocks[index], footnotes, notesAtFoot);
             renderer.SetFootnotes(nullptr);
         }
         const int depth = std::max(0, chapter.depth);
@@ -6258,6 +6533,7 @@ public:
         pageW = page.width;
         pageH = page.height;
         margin = ResolveMarginPoints(marginValue, page);
+        textBottom = margin;
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
         mathFallback = { this, &Renderer::MeasureMathFallback, &Renderer::EmitMathFallback,
@@ -6392,9 +6668,11 @@ private:
     template <typename RendererType>
     friend void RenderMathTable(RendererType&, const Block&);
     template <typename RendererType>
-    friend void RenderFootnoteSection(RendererType&, const Internal::Footnotes&);
+    friend void RenderFootnoteSection(RendererType&, const Internal::Footnotes&, const Internal::PageNotes*);
     template <typename RendererType>
-    friend void RenderBook(RendererType&, ImageRegistry&, const BookSource&, BookParse&, bool);
+    friend void RenderBook(RendererType&, ImageRegistry&, const BookSource&, BookParse&, bool, bool);
+    template <typename RendererType>
+    friend struct PageNoteLayout;
 
     const TtfFont& font;
     int fontId = 0;
@@ -6563,14 +6841,25 @@ private:
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
 
+    // Nested blocks move the margin, and the bottom limit with it; RestoreMargin keeps the room
+    // page footnotes took meanwhile (none without them, so `textBottom` is `margin` bit for bit).
+    void Indent(double inset) {
+        margin += inset;
+        textBottom += inset;
+    }
+    void RestoreMargin(double saved) {
+        textBottom = saved + (textBottom - margin);
+        margin = saved;
+    }
+
     // Blocks nested in a list item: one list level deeper.
     void RenderIndentedBlocks(const std::vector<Block>& blocks, double inset) {
         double savedMargin = margin;
-        margin += inset;
+        Indent(inset);
         listDepth++;
         RenderBlocks(*this, blocks);
         listDepth--;
-        margin = savedMargin;
+        RestoreMargin(savedMargin);
     }
 
     struct StyledSpan {
@@ -6681,7 +6970,8 @@ private:
         PaintText(x, raised, size * kNoteSizeFactor, std::wstring(number.begin(), number.end()), linkColor);
         AddLink(x, raised, width, size * kNoteSizeFactor, SharedUrl("#^" + number));
         if (tags != nullptr) tags->End(reference);
-        noteMarks.MarkReference(note, pageStarts.size() - 1, baseline + size);
+        if (pageNotes == nullptr) noteMarks.MarkReference(note, pageStarts.size() - 1, baseline + size);
+        else PageNoteLayout<Renderer>::Referenced(*this, note, baseline + size);
         return width;
     }
 
@@ -6998,6 +7288,17 @@ private:
         size_t Bytes() const {
             return KeptBytes(parsed) + KeptBytes(wide) + KeptBytes(wideEnds) + KeptBytes(text) + KeptBytes(runs) +
                 KeptBytes(lineEnds);
+        }
+        // Page footnotes (SwapFootBuffers), member by member: std::swap of the whole struct got a
+        // second caller and went out of line in the destructor's KeptBuffer::Give.
+        RAYOMD_COLD void Swap(StyledRuns& other) {
+            SwapInlineRuns(parsed, other.parsed);
+            std::swap(parse, other.parse);
+            wide.swap(other.wide);
+            wideEnds.swap(other.wideEnds);
+            text.swap(other.text);
+            runs.swap(other.runs);
+            lineEnds.swap(other.lineEnds);
         }
     };
     StyledRuns paragraphRuns;
@@ -7497,6 +7798,8 @@ private:
     }
 
     void NewPage() {
+        // Page footnotes: the page's notes go at its foot first; none ends inside their own layout.
+        if (pageNotes != nullptr && pageNotes->pageEnds(this)) return;
         if (tags != nullptr) tags->PageBreak();
         pageStarts.push_back(content.size());
         pageLinks.push_back({});
@@ -7508,7 +7811,15 @@ private:
     }
 
     void Ensure(double needed) {
-        if (y - needed < margin) NewPage();
+        if (y - needed < textBottom) NewPage();
+    }
+
+    // Ensure for a line of the cold paths, whose footnote references keep room below it for their
+    // notes with page footnotes (PageNoteLayout::Reserve).
+    template <typename Line>
+    void EnsureNotes(const Line& line, double needed) {
+        if (pageNotes != nullptr) PageNoteLayout<Renderer>::Reserve(*this, line, needed);
+        else Ensure(needed);
     }
 
     void PaintText(double x, double baseline, double size, std::wstring_view line, const char* color,
@@ -8147,10 +8458,10 @@ private:
             MathLineExtent extent = MeasureMathLine(math, line, size, lh);
             double extra = extent.above + extent.below;
             if (quote) {
-                Ensure(lh + 2.0 + extra);
+                EnsureNotes(line, lh + 2.0 + extra);
                 QuoteStrip(lh + 3.0 + extra);
             } else {
-                Ensure(lh + extra);
+                EnsureNotes(line, lh + extra);
             }
             if (!marked) {
                 MarkHeading(level, markText != nullptr ? *markText : text, 0.0);
@@ -8174,10 +8485,10 @@ private:
             MathLineExtent extent = MeasureMathLine(math, line, bodySize, lineHeight);
             double extra = extent.above + extent.below;
             if (quote) {
-                Ensure(lineHeight + 2.0 + extra);
+                EnsureNotes(line, lineHeight + 2.0 + extra);
                 QuoteStrip(lineHeight + 3.0 + extra);
             } else {
-                Ensure(lineHeight + extra);
+                EnsureNotes(line, lineHeight + extra);
             }
             y -= extent.above;
             double cursor = x;
@@ -8376,9 +8687,9 @@ private:
                 RenderQuote((child.task == 0 ? "- " : child.task == 2 ? "- [x] " : "- [ ] ") + child.text);
                 if (!child.children.empty()) {
                     double savedMargin = margin;
-                    margin += 14.0;
+                    Indent(14.0);
                     RenderQuoteChildren(child.children);
-                    margin = savedMargin;
+                    RestoreMargin(savedMargin);
                 }
                 break;
             case BlockType::Numbered: {
@@ -8389,9 +8700,9 @@ private:
                 RenderQuote(item);
                 if (!child.children.empty()) {
                     double savedMargin = margin;
-                    margin += 14.0;
+                    Indent(14.0);
                     RenderQuoteChildren(child.children);
-                    margin = savedMargin;
+                    RestoreMargin(savedMargin);
                 }
                 break;
             }
@@ -8399,10 +8710,10 @@ private:
                 // A quote in an alert has a plain quote's bar, as on GitHub.
                 double savedMargin = margin;
                 const char* savedBar = quoteBar;
-                margin += 10.0;
+                Indent(10.0);
                 quoteBar = plainQuoteBar;
                 RenderQuote(child);
-                margin = savedMargin;
+                RestoreMargin(savedMargin);
                 quoteBar = savedBar;
                 break;
             }
@@ -8412,13 +8723,13 @@ private:
             case BlockType::Rule:
             case BlockType::Image: {
                 double savedMargin = margin;
-                margin += 14.0;
+                Indent(14.0);
                 if (child.type == BlockType::Code) RenderCode(child);
                 else if (child.type == BlockType::Table && child.hasMath) RenderMathTable(*this, child);
                 else if (child.type == BlockType::Table) RenderTable(child.rows, child.aligns);
                 else if (child.type == BlockType::Rule) RenderRule();
                 else RenderImage(child);
-                margin = savedMargin;
+                RestoreMargin(savedMargin);
                 break;
             }
             case BlockType::PageBreak: RenderPageBreak(); break;
@@ -8822,9 +9133,9 @@ private:
         if (!math.Disabled()) math.MarkLaidOut();
         if (math.Disabled() || !LayoutMathToFit(tex, bodySize, true, false, available, maxHeight, &mathFallback, formula)) {
             double savedMargin = margin;
-            if (quoted) margin += 14.0;
+            if (quoted) Indent(14.0);
             RenderMathSource(tex);
-            margin = savedMargin;
+            RestoreMargin(savedMargin);
             TagEnd(tagged);
             return;
         }
@@ -8910,7 +9221,7 @@ private:
                 // The header row keeps a line of the next row with it.
                 headerHeight = rowHeight;
                 Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
-            } else if (y - rowHeight - 5.0 < margin) {
+            } else if (y - rowHeight - 5.0 < textBottom) {
                 NewPage();
                 if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= pageH - margin * 2.0) {
                     resumeRow = r;
@@ -8974,7 +9285,7 @@ private:
     // helpers the table loop inlines.
     RAYOMD_COLD size_t TallTableRowSlice(size_t first, size_t lineCount, double lh, double pad) {
         auto fitting = [&]() {
-            const double room = y - margin - 5.0 - pad * 2.0;
+            const double room = y - textBottom - 5.0 - pad * 2.0;
             return room >= lh ? static_cast<size_t>(room / lh) : size_t(0);
         };
         if (first > 0) NewPage();
@@ -9004,6 +9315,74 @@ private:
         c += " l S Q\n";
         y -= 13.0;
     }
+
+    // Page footnotes (PageNoteLayout): the account of the notes, with the buffers the paint paths
+    // share, which SwapFootBuffers trades for the renderer's own while notes are laid out at the
+    // foot of a page, so that the paragraph, table row or code block the page broke goes on.
+    struct PageNoteState : Internal::PageNotes {
+        using Internal::PageNotes::PageNotes;
+        StyledRuns paragraphRuns;
+        std::vector<StyledRuns> tableCells;
+        std::vector<MathCell> mathTableCells;
+        MathPool math;
+        std::string codeText;
+        std::wstring codeWide;
+        std::vector<uint8_t> codeClasses;
+        std::vector<CodeRun> codeRuns;
+        RunLinkUrls runLinkUrls;
+    };
+    RAYOMD_COLD void SwapFootBuffers() {
+        PageNoteState& spare = *pageNotes;
+        paragraphRuns.Swap(spare.paragraphRuns);
+        tableCells.swap(spare.tableCells);
+        mathTableCells.swap(spare.mathTableCells);
+        math.SwapItems(spare.math);
+        codeText.swap(spare.codeText);
+        codeWide.swap(spare.codeWide);
+        codeClasses.swap(spare.codeClasses);
+        codeRuns.swap(spare.codeRuns);
+        std::swap(runLinkUrls, spare.runLinkUrls);
+    }
+    // The notes' measuring layout (PageNoteLayout::Measure) is untagged, counts no missing glyph
+    // and starts no fallback probe: what it changes there goes back.
+    struct MeasureState {
+        Internal::StructTree* tags;
+        bool probing;
+        uint32_t missing[4];
+        uint32_t missingBmp;
+    };
+    RAYOMD_COLD MeasureState BeginMeasure() {
+        MeasureState state{ tags, probing, { usedCids.missing, 0, 0, 0 }, usedCids.missingBmp };
+        for (int face = 1; face < 4; face++) state.missing[face] = faceCids[face - 1] ? faceCids[face - 1]->missing : 0;
+        tags = nullptr;
+        probing = false;
+        return state;
+    }
+    RAYOMD_COLD void EndMeasure(const MeasureState& state) {
+        tags = state.tags;
+        probing = state.probing;
+        usedCids.missing = state.missing[0];
+        usedCids.missingBmp = state.missingBmp;
+        for (int face = 1; face < 4; face++) {
+            if (faceCids[face - 1]) faceCids[face - 1]->missing = state.missing[face];
+        }
+    }
+    // PDF/UA: a note at the foot of the page, a Note of the Document over the elements open.
+    RAYOMD_COLD int TagBeginFootNote() {
+        if (tags == nullptr) return -1;
+        const int note = tags->BeginUnder(0, Internal::StructType::Note);
+        tags->MarkNote(note);
+        return note;
+    }
+    RAYOMD_COLD void TagEndFootNote(int note) {
+        if (tags != nullptr) tags->EndUnder(note);
+    }
+    PageNoteState* pageNotes = nullptr;   // while a document's notes go at the foot of its pages
+    // The lowest y text may reach, which the bottom tests (Ensure, the tables') compare with: the
+    // margin, nested blocks' as theirs (Indent), and with page footnotes the room kept at the foot
+    // of the page for its notes above it. A member of its own, not margin + a reserve: Ensure
+    // inlines at about 60 sites and keeps its size.
+    double textBottom = 0.0;
 };
 
 // Composite glyphs nested deeper than this fail (FreeType's limit): a font may chain each of its
@@ -9818,6 +10197,7 @@ public:
         pageW = page.width;
         pageH = page.height;
         margin = ResolveMarginPoints(marginValue, page);
+        textBottom = margin;
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
         latinMathFallback = { this, &StandardRenderer::MeasureLatinMathFallback,
@@ -9914,9 +10294,11 @@ private:
     template <typename RendererType>
     friend void RenderMathTable(RendererType&, const Block&);
     template <typename RendererType>
-    friend void RenderFootnoteSection(RendererType&, const Internal::Footnotes&);
+    friend void RenderFootnoteSection(RendererType&, const Internal::Footnotes&, const Internal::PageNotes*);
     template <typename RendererType>
-    friend void RenderBook(RendererType&, ImageRegistry&, const BookSource&, BookParse&, bool);
+    friend void RenderBook(RendererType&, ImageRegistry&, const BookSource&, BookParse&, bool, bool);
+    template <typename RendererType>
+    friend struct PageNoteLayout;
 
     ImageRegistry* images = nullptr;
     PdfStyle style = PdfStyle::Elegant;
@@ -10057,14 +10439,25 @@ private:
         if (!block.children.empty()) RenderIndentedBlocks(block.children, 16.0 + block.level * 18.0);
     }
 
+    // Nested blocks move the margin, and the bottom limit with it; RestoreMargin keeps the room
+    // page footnotes took meanwhile (none without them, so `textBottom` is `margin` bit for bit).
+    void Indent(double inset) {
+        margin += inset;
+        textBottom += inset;
+    }
+    void RestoreMargin(double saved) {
+        textBottom = saved + (textBottom - margin);
+        margin = saved;
+    }
+
     // Blocks nested in a list item: one list level deeper.
     void RenderIndentedBlocks(const std::vector<Block>& blocks, double inset) {
         double savedMargin = margin;
-        margin += inset;
+        Indent(inset);
         listDepth++;
         RenderBlocks(*this, blocks);
         listDepth--;
-        margin = savedMargin;
+        RestoreMargin(savedMargin);
     }
 
     // The standard fonts are not embedded, so these documents are never tagged (PDF/UA): the
@@ -10076,6 +10469,8 @@ private:
     void TagBlock(const Block&) {}
     void TagArtifact() {}
     int TagBeginNote() { return -1; }
+    int TagBeginFootNote() { return -1; }
+    void TagEndFootNote(int) {}
     void TagEnd(int) {}
     void TagTableBegin(size_t) {}
     void TagTableRowStart(size_t, size_t, bool) {}
@@ -10084,6 +10479,8 @@ private:
     void TagTableEnd() {}
 
     void NewPage() {
+        // Page footnotes: the page's notes go at its foot first; none ends inside their own layout.
+        if (pageNotes != nullptr && pageNotes->pageEnds(this)) return;
         pageStarts.push_back(content.size());
         pageLinks.push_back({});
         y = pageH - margin;
@@ -10094,7 +10491,15 @@ private:
     }
 
     void Ensure(double needed) {
-        if (y - needed < margin) NewPage();
+        if (y - needed < textBottom) NewPage();
+    }
+
+    // Ensure for a line of the cold paths, whose footnote references keep room below it for their
+    // notes with page footnotes (PageNoteLayout::Reserve).
+    template <typename Line>
+    void EnsureNotes(const Line& line, double needed) {
+        if (pageNotes != nullptr) PageNoteLayout<StandardRenderer>::Reserve(*this, line, needed);
+        else Ensure(needed);
     }
 
     void Rect(double x, double top, double w, double h, const char* color, bool stroke = false) {
@@ -10306,7 +10711,8 @@ private:
         const std::string number = std::to_string(note);
         Text(x, raised, size * kNoteSizeFactor, number, "F1", linkColor);
         AddLink(x, raised, width, size * kNoteSizeFactor, SharedUrl("#^" + number));
-        noteMarks.MarkReference(note, pageStarts.size() - 1, baseline + size);
+        if (pageNotes == nullptr) noteMarks.MarkReference(note, pageStarts.size() - 1, baseline + size);
+        else PageNoteLayout<StandardRenderer>::Referenced(*this, note, baseline + size);
         return width;
     }
 
@@ -10611,6 +11017,17 @@ private:
         }
         size_t Bytes() const {
             return KeptBytes(parsed) + KeptBytes(segments) + KeptBytes(text) + KeptBytes(runs) + KeptBytes(lineEnds);
+        }
+        // Page footnotes (SwapFootBuffers), member by member: std::swap of the whole struct got a
+        // second caller and went out of line in the destructor's KeptBuffer::Give.
+        RAYOMD_COLD void Swap(AsciiRuns& other) {
+            SwapInlineRuns(parsed, other.parsed);
+            std::swap(parse, other.parse);
+            segments.swap(other.segments);
+            text.swap(other.text);
+            runs.swap(other.runs);
+            lineEnds.swap(other.lineEnds);
+            std::swap(plain, other.plain);
         }
     };
     AsciiRuns paragraphRuns;
@@ -11219,10 +11636,10 @@ private:
             MathLineExtent extent = MeasureMathLine(math, line, size, lh);
             double extra = extent.above + extent.below;
             if (quote) {
-                Ensure(lh + 2.0 + extra);
+                EnsureNotes(line, lh + 2.0 + extra);
                 QuoteStrip(lh + 3.0 + extra);
             } else {
-                Ensure(lh + extra);
+                EnsureNotes(line, lh + extra);
             }
             if (!marked) {
                 MarkHeading(level, markText != nullptr ? *markText : text, 0.0);
@@ -11246,10 +11663,10 @@ private:
             MathLineExtent extent = MeasureMathLine(math, line, bodySize, lineHeight);
             double extra = extent.above + extent.below;
             if (quote) {
-                Ensure(lineHeight + 2.0 + extra);
+                EnsureNotes(line, lineHeight + 2.0 + extra);
                 QuoteStrip(lineHeight + 3.0 + extra);
             } else {
-                Ensure(lineHeight + extra);
+                EnsureNotes(line, lineHeight + extra);
             }
             y -= extent.above;
             double cursor = x;
@@ -11466,9 +11883,9 @@ private:
                 RenderQuote((child.task == 0 ? "- " : child.task == 2 ? "- [x] " : "- [ ] ") + child.text);
                 if (!child.children.empty()) {
                     double savedMargin = margin;
-                    margin += 14.0;
+                    Indent(14.0);
                     RenderQuoteChildren(child.children);
-                    margin = savedMargin;
+                    RestoreMargin(savedMargin);
                 }
                 break;
             case BlockType::Numbered: {
@@ -11479,9 +11896,9 @@ private:
                 RenderQuote(item);
                 if (!child.children.empty()) {
                     double savedMargin = margin;
-                    margin += 14.0;
+                    Indent(14.0);
                     RenderQuoteChildren(child.children);
-                    margin = savedMargin;
+                    RestoreMargin(savedMargin);
                 }
                 break;
             }
@@ -11489,10 +11906,10 @@ private:
                 // A quote in an alert has a plain quote's bar, as on GitHub.
                 double savedMargin = margin;
                 const char* savedBar = quoteBar;
-                margin += 10.0;
+                Indent(10.0);
                 quoteBar = plainQuoteBar;
                 RenderQuote(child);
-                margin = savedMargin;
+                RestoreMargin(savedMargin);
                 quoteBar = savedBar;
                 break;
             }
@@ -11502,13 +11919,13 @@ private:
             case BlockType::Rule:
             case BlockType::Image: {
                 double savedMargin = margin;
-                margin += 14.0;
+                Indent(14.0);
                 if (child.type == BlockType::Code) RenderCode(child);
                 else if (child.type == BlockType::Table && child.hasMath) RenderMathTable(*this, child);
                 else if (child.type == BlockType::Table) RenderTable(child.rows, child.aligns);
                 else if (child.type == BlockType::Rule) RenderRule();
                 else RenderImage(child);
-                margin = savedMargin;
+                RestoreMargin(savedMargin);
                 break;
             }
             case BlockType::PageBreak: RenderPageBreak(); break;
@@ -11845,9 +12262,9 @@ private:
         if (!LayoutMathToFit(MathSource(tex, utf8), bodySize, true, false, available, maxHeight, MathFallback(),
             formula)) {
             double savedMargin = margin;
-            if (quoted) margin += 14.0;
+            if (quoted) Indent(14.0);
             RenderMathSource(tex);
-            margin = savedMargin;
+            RestoreMargin(savedMargin);
             return;
         }
         double total = padTop + formula.Ascent() + formula.Descent() + padBottom;
@@ -11931,7 +12348,7 @@ private:
                 // The header row keeps a line of the next row with it.
                 headerHeight = rowHeight;
                 Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
-            } else if (y - rowHeight - 5.0 < margin) {
+            } else if (y - rowHeight - 5.0 < textBottom) {
                 NewPage();
                 if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= pageH - margin * 2.0) {
                     resumeRow = r;
@@ -11994,7 +12411,7 @@ private:
     // helpers the table loop inlines.
     RAYOMD_COLD size_t TallTableRowSlice(size_t first, size_t lineCount, double lh, double pad) {
         auto fitting = [&]() {
-            const double room = y - margin - 5.0 - pad * 2.0;
+            const double room = y - textBottom - 5.0 - pad * 2.0;
             return room >= lh ? static_cast<size_t>(room / lh) : size_t(0);
         };
         if (first > 0) NewPage();
@@ -12023,6 +12440,47 @@ private:
         c += " l S Q\n";
         y -= 13.0;
     }
+
+    // Page footnotes (PageNoteLayout): the account of the notes, with the buffers the paint paths
+    // share, which SwapFootBuffers trades for the renderer's own while notes are laid out at the
+    // foot of a page, so that the paragraph, table row or code block the page broke goes on.
+    struct PageNoteState : Internal::PageNotes {
+        using Internal::PageNotes::PageNotes;
+        AsciiRuns paragraphRuns;
+        std::vector<AsciiRuns> tableCells;
+        std::vector<AsciiLines> tableLines;
+        std::vector<MathCell> mathTableCells;
+        MathPool math;
+        std::vector<uint8_t> codeClasses;
+        std::string codeLine;
+        std::vector<uint8_t> codeLineClasses;
+        std::vector<CodeRun> codeRuns;
+        RunLinkUrls runLinkUrls;
+    };
+    RAYOMD_COLD void SwapFootBuffers() {
+        PageNoteState& spare = *pageNotes;
+        paragraphRuns.Swap(spare.paragraphRuns);
+        tableCells.swap(spare.tableCells);
+        tableLines.swap(spare.tableLines);
+        mathTableCells.swap(spare.mathTableCells);
+        math.SwapItems(spare.math);
+        codeClasses.swap(spare.codeClasses);
+        codeLine.swap(spare.codeLine);
+        codeLineClasses.swap(spare.codeLineClasses);
+        codeRuns.swap(spare.codeRuns);
+        std::swap(runLinkUrls, spare.runLinkUrls);
+    }
+    // The notes' measuring layout (PageNoteLayout::Measure): nothing to set aside here, as these
+    // documents are never tagged and their fonts lack no glyph they count.
+    struct MeasureState {};
+    MeasureState BeginMeasure() { return {}; }
+    void EndMeasure(const MeasureState&) {}
+    PageNoteState* pageNotes = nullptr;   // while a document's notes go at the foot of its pages
+    // The lowest y text may reach, which the bottom tests (Ensure, the tables') compare with: the
+    // margin, nested blocks' as theirs (Indent), and with page footnotes the room kept at the foot
+    // of the page for its notes above it. A member of its own, not margin + a reserve: Ensure
+    // inlines at about 60 sites and keeps its size.
+    double textBottom = 0.0;
 };
 
 // The page number at the foot of a page: "N / M" centred in the bottom margin, small and grey,
@@ -12397,9 +12855,10 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     }
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
-        if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover);
+        const bool notesAtFoot = options.footnotes == FootnotePlacement::Page;
+        if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover, notesAtFoot);
         else if (footnotes.notes.empty()) renderer.Render(blocks);
-        else RenderWithFootnotes(renderer, blocks, footnotes);
+        else RenderWithFootnotes(renderer, blocks, footnotes, notesAtFoot);
     }
     if (BuildCancelled()) return CancelBuild();
     // The headings without their footnote references, for anchors, bookmarks and titles.
@@ -12996,9 +13455,10 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (check != nullptr && check->stopEarly) renderer.ProbeFallback(markdown);
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
-        if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover);
+        const bool notesAtFoot = options.footnotes == FootnotePlacement::Page;
+        if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover, notesAtFoot);
         else if (footnotes.notes.empty()) renderer.Render(blocks);
-        else RenderWithFootnotes(renderer, blocks, footnotes);
+        else RenderWithFootnotes(renderer, blocks, footnotes, notesAtFoot);
     }
     if (BuildCancelled()) return CancelBuild();
     // Laid out to find a fallback font to draw the document in: it was found.

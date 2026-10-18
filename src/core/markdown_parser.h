@@ -104,6 +104,7 @@ constexpr char kNoteMark = '\x03';
 struct Footnotes {
     std::vector<Block> notes;      // note N is notes[N - 1]
     std::unordered_map<std::string, int> numbers;
+    size_t referenced = 0;         // notes 1 to `referenced` the text refers to; notes alone the others
 };
 
 std::vector<std::string> SplitLines(const std::string& text);

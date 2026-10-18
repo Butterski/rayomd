@@ -3841,6 +3841,8 @@ bool CheckSourceMap() {
     return true;
 }
 
+#include "page_notes_tests.inc"
+
 } // namespace
 
 int main() {
@@ -3913,6 +3915,7 @@ int main() {
     if (!CheckHeadingNumbers()) return 125;
     if (!dialect_tests::CheckObsidian()) return 126;
     if (!mermaid_tests::CheckMermaid()) return 127;
+    if (!page_notes_tests::CheckPageNotes()) return 132;
 #ifdef _WIN32
     if (!CheckDirectImageLinks()) return 123;
 #endif

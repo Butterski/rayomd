@@ -283,6 +283,7 @@ struct CliExportOptions {
     int pageBreakBeforeLevel = 0;
     int numberHeadings = 0;
     TinyPdf::MarkdownDialect dialect = TinyPdf::MarkdownDialect::GitHub;
+    TinyPdf::FootnotePlacement footnotes = TinyPdf::FootnotePlacement::End;
     TinyPdf::PdfTheme theme;
     unsigned workers = 0;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
@@ -339,6 +340,12 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--dialect=obsidian") options.dialect = TinyPdf::MarkdownDialect::Obsidian;
         else if (value.rfind("--dialect=", 0) == 0) {
             error = "--dialect must be github or obsidian";
+            return false;
+        }
+        else if (value == "--footnotes=end") options.footnotes = TinyPdf::FootnotePlacement::End;
+        else if (value == "--footnotes=page") options.footnotes = TinyPdf::FootnotePlacement::Page;
+        else if (value.rfind("--footnotes=", 0) == 0) {
+            error = "--footnotes must be end or page";
             return false;
         }
         else if (value.rfind("--theme=", 0) == 0) {
@@ -458,6 +465,7 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     pdfOptions.pageBreakBeforeLevel = options.pageBreakBeforeLevel;
     pdfOptions.numberHeadings = options.numberHeadings;
     pdfOptions.dialect = options.dialect;
+    pdfOptions.footnotes = options.footnotes;
     pdfOptions.theme = options.theme;
     return pdfOptions;
 }
@@ -915,7 +923,8 @@ void PrintUsage() {
         "  --toc-depth=N (heading levels it lists, 1-6; default 3), --number-headings[=N] (1, 1.1, 1.1.1\n"
         "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks),\n"
         "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]] and\n"
-        "  ![[images]]; default github).\n"
+        "  ![[images]]; default github), --footnotes=page (each footnote at the foot of the page of its\n"
+        "  first reference; default end, after the text).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4),\n"
         "  --page-break-before=hN (a new page before each heading of level 1 to N; h1 for chapters).\n"

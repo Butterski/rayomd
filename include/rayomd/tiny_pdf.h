@@ -133,6 +133,10 @@ struct SourceBlock {
 // ![[embedded images]].
 enum class MarkdownDialect : uint8_t { GitHub, Obsidian };
 
+// Where footnotes are set: after the text, as GitHub shows them, or at the foot of the page of
+// their first reference, as in a book.
+enum class FootnotePlacement : uint8_t { End, Page };
+
 struct PdfOptions {
     PdfStyle style = PdfStyle::Elegant;
     PdfMargin margin = PdfMargin::Normal();
@@ -194,6 +198,9 @@ struct PdfOptions {
     // no entry of their own. Meaningful only when the build succeeds. BuildBookPdf leaves it alone.
     // The PDF bytes are the same with or without it.
     std::vector<SourceBlock>* sourceMap = nullptr;
+    // Footnotes after the text (End) or at the foot of the page of their first reference (Page);
+    // a note too tall for a page with its line stays after the text.
+    FootnotePlacement footnotes = FootnotePlacement::End;
 };
 
 // Legacy error reporting is retained for the bool-returning compatibility

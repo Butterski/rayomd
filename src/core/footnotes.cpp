@@ -74,6 +74,7 @@ public:
 
     void Run(std::vector<Block>& blocks) {
         Walk(blocks);
+        parse.out.referenced = parse.numbered.size();
         // References in a note number the notes they bring in after all those before them.
         for (size_t index = 0; index < parse.numbered.size(); index++) {
             std::vector<Block> note = std::move(parse.numbered[index]);
@@ -258,6 +259,7 @@ void AppendPendingHeading(std::vector<Block>& blocks, int level, std::string_vie
 std::vector<Block> ParseWithFootnotes(const std::string& markdown, Footnotes& footnotes) {
     footnotes.notes.clear();
     footnotes.numbers.clear();
+    footnotes.referenced = 0;
     FootnoteParse notes(footnotes);
     std::vector<Block> blocks = ParseMarkdownLevel(markdown, 0, &notes);
     if (!notes.pending && footnotes.numbers.empty()) return blocks;

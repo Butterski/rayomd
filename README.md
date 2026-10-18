@@ -258,7 +258,7 @@ A bare URL like https://example.com and an address like team@example.com are cli
 
 A sentence with a footnote.[^1]
 
-[^1]: Set after the text, linked both ways.
+[^1]: Set after the text, linked both ways, or with --footnotes=page at the foot of the page.
 ```
 
 Also reference links (full, collapsed and shortcut), `<…>` autolinks, rules, page breaks
@@ -269,6 +269,16 @@ clickable, in Markdown as in HTML. Unicode text uses an embedded subset of a sys
 the one `RAYOMD_FONT` names, TrueType or OpenType: `.ttf`, `.otf`, `.ttc`) with fallback fonts
 for other scripts, Noto Sans CJK first for Chinese, Japanese and Korean; Latin text stays on the
 PDF standard fonts, which keeps those files small.
+
+Footnotes are set after the text, as GitHub shows them. With `--footnotes=page` each note goes to
+the foot of the page of its first reference, as in a book: a line that does not leave room for
+its notes moves to the next page with them, a note only other notes refer to goes with the first
+of them, and a note too tall for a page stays after the text. In a book, each file's notes stay
+on its own pages.
+
+```sh
+rayomd --export thesis.md thesis.pdf --footnotes=page
+```
 
 ### HTML in Markdown
 
