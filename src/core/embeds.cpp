@@ -9,15 +9,15 @@
 
 #include <algorithm>
 #include <iterator>
-#include <map>
+#include <memory>
 #include <string_view>
-#include <unordered_set>
+#include <unordered_map>
 
 namespace TinyPdf::Internal {
 
-namespace fs = std::filesystem;
-
 namespace {
+
+using namespace std::string_view_literals;   // per-line tests: no strlen a literal at -Os
 
 constexpr size_t kNone = std::string_view::npos;
 
@@ -83,61 +83,61 @@ Fence FenceOf(std::string_view line) {
     return { marker, end - at, Trim(rest).empty() };
 }
 
-// Reads lines in turn, as the rewrite and the parser see them: which are fenced code, display
-// math, an Obsidian or HTML comment, or the front matter, none of which holds an embed.
+// Fenced code, read a line at a time.
+struct FenceState {
+    Fence fence;
+
+    // Whether `line` opens, closes or is in fenced code.
+    bool Skip(std::string_view line) {
+        const Fence found = FenceOf(line);
+        if (fence.marker != 0) {
+            if (found.marker == fence.marker && found.length >= fence.length && found.bare) fence = {};
+            return true;
+        }
+        if (found.marker == 0) return false;
+        fence = found;
+        return true;
+    }
+};
+
+// Reads lines in turn after the front matter, as the rewrite and the parser see them: which are
+// fenced code, display math or an Obsidian or HTML comment, none of which holds an embed.
 class LineState {
 public:
-    // Whether `line` (number `index`) is ordinary Markdown outside all of those.
-    bool Outside(const std::vector<std::string_view>& lines, size_t index) {
-        const std::string_view line = lines[index];
-        if (index == 0 && Trim(line) == "---") {
-            for (size_t next = 1; next < lines.size(); next++) {
-                const std::string_view trimmed = Trim(lines[next]);
-                if (trimmed == "---" || trimmed == "...") {
-                    frontMatterEnd = next;
-                    return false;
-                }
-            }
-        }
-        if (index <= frontMatterEnd && frontMatterEnd != kNone) return false;
+    // Whether `line` is ordinary Markdown outside all of those.
+    bool Outside(std::string_view line) {
         if (htmlComment) {
-            htmlComment = line.find("-->") == kNone;
+            htmlComment = line.find("-->"sv) == kNone;
             return false;
         }
         if (comment) {
             comment = (Pairs(line) & 1) == 0;
             return false;
         }
-        if (fence.marker != 0) {
-            const Fence closing = FenceOf(line);
-            if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
-            return false;
-        }
+        // While a fence is open no formula is (each opens only outside the other), so fences are
+        // read after the formulas.
         if (displayMath) {
-            if (line.find("$$") != kNone || Trim(line).empty()) displayMath = false;
+            if (line.find("$$"sv) != kNone || Trim(line).empty()) displayMath = false;
             return false;
         }
         if (bracketMath) {
             const std::string_view text = Trim(line);
-            if (text.empty() || (text.size() >= 2 && text.substr(text.size() - 2) == "\\]")) bracketMath = false;
+            if (text.empty() || (text.size() >= 2 && text.substr(text.size() - 2) == "\\]"sv)) bracketMath = false;
             return false;
         }
-        if (const Fence opening = FenceOf(line); opening.marker != 0) {
-            fence = opening;
-            return false;
-        }
+        if (fences.Skip(line)) return false;
         size_t at = 0;
         while (at < line.size() && (IsBlank(line[at]) || line[at] == '>')) at++;
-        if (line.substr(at, 2) == "$$" && line.find("$$", at + 2) == kNone) {
+        if (line.substr(at, 2) == "$$"sv && line.find("$$"sv, at + 2) == kNone) {
             displayMath = true;
             return false;
         }
         const std::string_view trimmed = Trim(line);
-        if (trimmed == "\\[") {
+        if (trimmed == "\\["sv) {
             bracketMath = true;
             return false;
         }
-        if (trimmed.substr(0, 4) == "<!--" && trimmed.find("-->", 4) == kNone) {
+        if (trimmed.substr(0, 4) == "<!--"sv && trimmed.find("-->"sv, 4) == kNone) {
             htmlComment = true;
             return false;
         }
@@ -152,12 +152,11 @@ private:
     // How many "%%" the line has.
     static size_t Pairs(std::string_view line) {
         size_t count = 0;
-        for (size_t at = line.find("%%"); at != kNone; at = line.find("%%", at + 2)) count++;
+        for (size_t at = line.find("%%"sv); at != kNone; at = line.find("%%"sv, at + 2)) count++;
         return count;
     }
 
-    size_t frontMatterEnd = kNone;
-    Fence fence;
+    FenceState fences;
     bool displayMath = false;
     bool bracketMath = false;
     bool comment = false;
@@ -168,11 +167,11 @@ private:
 // reads an embed (Converter::Convert): it ends at the first "]]", with no '[' before it. An
 // indented one is in a list item or a quote's lazy text, where an embed stays a link.
 std::string_view StandaloneEmbed(std::string_view line) {
-    if (line.substr(0, 3) != "![[") return {};
-    const size_t close = line.find("]]", 3);
+    if (line.substr(0, 3) != "![["sv) return {};
+    const size_t close = line.find("]]"sv, 3);
     if (close == kNone || close == 3 || !Trim(line.substr(close + 2)).empty()) return {};
     const std::string_view inner = line.substr(3, close - 3);
-    if (inner.find('[') != kNone || inner.find("%%") != kNone) return {};
+    if (inner.find('[') != kNone || inner.find("%%"sv) != kNone) return {};
     return inner;
 }
 
@@ -185,12 +184,13 @@ struct EmbedTarget {
 
 // Files an embed shows as what they are, not as notes: images, PDFs, audio and video.
 bool IsMediaName(std::string_view note) {
-    const size_t slash = note.find_last_of("/\\");
     const size_t dot = note.rfind('.');
-    if (dot == kNone || (slash != kNone && dot < slash)) return false;
+    if (dot == kNone) return false;
+    const size_t slash = note.find_last_of("/\\"sv);
+    if (slash != kNone && dot < slash) return false;
     const std::string_view extension = note.substr(dot + 1);
-    for (const std::string_view media : { "png", "jpg", "jpeg", "svg", "gif", "webp", "bmp", "tif", "tiff", "avif", "pdf",
-             "mp3", "wav", "m4a", "ogg", "3gp", "flac", "mp4", "webm", "ogv", "mov", "mkv" }) {
+    for (const std::string_view media : { "png"sv, "jpg"sv, "jpeg"sv, "svg"sv, "gif"sv, "webp"sv, "bmp"sv, "tif"sv, "tiff"sv,
+             "avif"sv, "pdf"sv, "mp3"sv, "wav"sv, "m4a"sv, "ogg"sv, "3gp"sv, "flac"sv, "mp4"sv, "webm"sv, "ogv"sv, "mov"sv, "mkv"sv }) {
         if (EqualsIgnoringCase(extension, media)) return true;
     }
     return false;
@@ -241,19 +241,11 @@ std::string Join(const std::vector<std::string_view>& lines, size_t first, size_
 // The section a heading begins: up to the next heading of its level or a higher one, outside
 // fenced code. Empty when the note has no such heading.
 std::string Section(const std::vector<std::string_view>& lines, size_t first, std::string_view heading) {
-    Fence fence;
+    FenceState fences;
     size_t start = kNone;
     int level = 0;
     for (size_t index = first; index < lines.size(); index++) {
-        if (fence.marker != 0) {
-            const Fence closing = FenceOf(lines[index]);
-            if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
-            continue;
-        }
-        if (const Fence opening = FenceOf(lines[index]); opening.marker != 0) {
-            fence = opening;
-            continue;
-        }
+        if (fences.Skip(lines[index])) continue;
         std::string_view text;
         const int found = HeadingOf(lines[index], text);
         if (found == 0) continue;
@@ -297,17 +289,9 @@ bool IsListLine(std::string_view line) {
 // The block "^id" marks (Obsidian's block reference): the paragraph or list line that ends in
 // " ^id", or the block a line of "^id" alone follows; the id left out. Empty without one.
 std::string BlockText(const std::vector<std::string_view>& lines, size_t first, std::string_view id) {
-    Fence fence;
+    FenceState fences;
     for (size_t index = first; index < lines.size(); index++) {
-        if (fence.marker != 0) {
-            const Fence closing = FenceOf(lines[index]);
-            if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
-            continue;
-        }
-        if (const Fence opening = FenceOf(lines[index]); opening.marker != 0) {
-            fence = opening;
-            continue;
-        }
+        if (fences.Skip(lines[index])) continue;
         const size_t caret = BlockIdAt(lines[index], id);
         if (caret == kNone) continue;
         if (Trim(lines[index].substr(0, caret)).empty()) {
@@ -331,14 +315,18 @@ std::string BlockText(const std::vector<std::string_view>& lines, size_t first, 
     return std::string();
 }
 
-// The first line after a note's front matter (the first line "---" up to a line "---" or "...").
-size_t BodyStart(const std::vector<std::string_view>& lines) {
-    if (lines.empty() || Trim(lines[0]) != "---") return 0;
-    for (size_t index = 1; index < lines.size(); index++) {
-        const std::string_view trimmed = Trim(lines[index]);
-        if (trimmed == "---" || trimmed == "...") return index + 1;
+// Where a note's body begins: after its byte order mark and its front matter (the first line
+// "---" up to a line "---" or "..."); past the end (text.size() + 1) when no line follows that.
+size_t BodyOffset(std::string_view text) {
+    const size_t start = text.substr(0, 3) == "\xEF\xBB\xBF" ? 3 : 0;
+    size_t end = text.find('\n', start);
+    if (end == kNone || Trim(text.substr(start, end - start)) != "---") return start;
+    for (size_t at = end + 1;; at = end + 1) {
+        end = text.find('\n', at);
+        const std::string_view line = Trim(text.substr(at, end == kNone ? kNone : end - at));
+        if (line == "---" || line == "...") return end == kNone ? text.size() + 1 : end + 1;
+        if (end == kNone) return start;
     }
-    return 0;
 }
 
 // The end of the footnote label at value[2...], as a definition "[^label]:" has it: up to ']',
@@ -352,37 +340,28 @@ size_t LabelEnd(std::string_view value, size_t from) {
     return end > from && end < value.size() ? end : kNone;
 }
 
-// `text` with the footnote labels it defines made its own: "[^label]" as "[^label~eN]" in its
-// definitions and references, outside fenced code and code spans. Another note's "[^1]" is then
-// another note.
-std::string OwnFootnotes(const std::string& text, uint32_t entry) {
-    if (text.find("[^") == std::string::npos || text.find("]:") == std::string::npos) return text;
+// `text` with the footnote labels it defines made its own, in place: "[^label]" as "[^label~eN]"
+// in its definitions and references, outside fenced code and code spans. Another note's "[^1]" is
+// then another note.
+void OwnFootnotes(std::string& text, uint32_t entry) {
+    if (text.find("[^") == std::string::npos || text.find("]:") == std::string::npos) return;
     const std::vector<std::string_view> lines = Lines(text);
-    std::unordered_set<std::string> defined;
-    Fence fence;
-    std::vector<unsigned char> code(lines.size(), 0);
-    for (size_t index = 0; index < lines.size(); index++) {
-        const std::string_view line = lines[index];
-        if (fence.marker != 0) {
-            const Fence closing = FenceOf(line);
-            if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
-            code[index] = 1;
-            continue;
-        }
-        if (const Fence opening = FenceOf(line); opening.marker != 0) {
-            fence = opening;
-            code[index] = 1;
-            continue;
-        }
+    // The labels defined (a value each, which nothing reads: this map type is the one the
+    // parser's footnotes and the image registry use, so it adds no code).
+    std::unordered_map<std::string, int> defined;
+    FenceState fences;
+    for (const std::string_view line : lines) {
+        if (fences.Skip(line)) continue;
         size_t at = 0;
         while (at < line.size() && (IsBlank(line[at]) || line[at] == '>')) at++;
         if (line.substr(at, 2) != "[^") continue;
         const size_t end = LabelEnd(line, at + 2);
         if (end != kNone && end + 1 < line.size() && line[end + 1] == ':') {
-            defined.insert(NormalizeReferenceLabel(line.substr(at + 2, end - at - 2)));
+            const std::string label = NormalizeReferenceLabel(line.substr(at + 2, end - at - 2));
+            defined[label] = 1;
         }
     }
-    if (defined.empty()) return text;
+    if (defined.empty()) return;
     const std::string suffix = "~e" + std::to_string(entry);
     std::string out;
     out.reserve(text.size() + text.size() / 16);
@@ -393,10 +372,11 @@ std::string OwnFootnotes(const std::string& text, uint32_t entry) {
     };
     std::vector<Run> runs;
     std::vector<size_t> nextOfLength;
+    fences = FenceState();
     for (size_t index = 0; index < lines.size(); index++) {
         const std::string_view line = lines[index];
         if (index > 0) out += '\n';
-        if (code[index] != 0 || line.find("[^") == kNone) {
+        if (fences.Skip(line) || line.find("[^"sv) == kNone) {
             out.append(line);
             continue;
         }
@@ -432,8 +412,8 @@ std::string OwnFootnotes(const std::string& text, uint32_t entry) {
             }
             if (line[at] == '[' && at + 1 < line.size() && line[at + 1] == '^') {
                 const size_t end = LabelEnd(line, at + 2);
-                if (end != kNone && (run >= runs.size() || runs[run].at > end) &&
-                    defined.count(NormalizeReferenceLabel(line.substr(at + 2, end - at - 2))) != 0) {
+                const std::string label = end == kNone ? std::string() : NormalizeReferenceLabel(line.substr(at + 2, end - at - 2));
+                if (end != kNone && (run >= runs.size() || runs[run].at > end) && defined.find(label) != defined.end()) {
                     out.append(line.substr(at, end - at));
                     out += suffix;
                     at = end;
@@ -443,7 +423,7 @@ std::string OwnFootnotes(const std::string& text, uint32_t entry) {
             out += line[at++];
         }
     }
-    return out;
+    text = std::move(out);
 }
 
 // The standalone embeds of a text: their lines and what they name, in line order.
@@ -451,9 +431,11 @@ std::vector<std::pair<uint32_t, std::string_view>> StandaloneEmbeds(std::string_
     std::vector<std::pair<uint32_t, std::string_view>> found;
     if (text.find("![[") == kNone) return found;
     const std::vector<std::string_view> lines = Lines(text);
+    // The front matter's lines: those before the body (BodyOffset).
+    const size_t body = BodyOffset(text);
     LineState state;
     for (size_t index = 0; index < lines.size() && index < UINT32_MAX; index++) {
-        if (!state.Outside(lines, index)) continue;
+        if ((size_t)(lines[index].data() - text.data()) < body || !state.Outside(lines[index])) continue;
         const std::string_view inner = StandaloneEmbed(lines[index]);
         if (!inner.empty()) found.emplace_back((uint32_t)index, inner);
     }
@@ -468,17 +450,21 @@ public:
 
     bool Run(const std::string& markdown) {
         if (!vault.Valid()) return false;
-        fs::path document = RayoMd::File::PathFromUtf8(options.sourcePath);
-        fs::path folder = document.parent_path();
-        if (folder.empty()) folder = ".";
-        folder = ResolvedPath(folder);
-        if (folder.empty()) return false;
-        set.root = vault.Root();
+        // The document's folder, which is the vault's root unless --vault names one.
+        std::string folder = vault.Root();
+        if (!options.vaultRoot.empty()) {
+            const std::string_view parent = ParentOf(options.sourcePath);
+            folder = ResolvedPath(parent.empty() ? std::string_view(".") : parent);
+            if (folder.empty()) return false;
+        }
+        FolderIndex(folder);
+        // Note 0 is the document, by its resolved path: never read, always on the chain.
+        NoteOf(ResolvedPath(options.sourcePath));
+        chain.push_back(0);
         // No reallocation while Expand holds an entry's text.
         set.entries.reserve(EmbedSet::kMaxEmbeds + 1);
         set.entries.emplace_back();
-        chain.push_back(ResolvedPath(document));
-        Expand(0, markdown, folder, 0);
+        Expand(0, markdown, 0, 0);
         if (set.entries.size() <= 1) return false;
         size_t total = markdown.size();
         for (const EmbedEntry& entry : set.entries) total += entry.text.size() + 1;
@@ -499,22 +485,27 @@ private:
     static constexpr size_t kMaxLookups = 4 * EmbedSet::kMaxEmbeds;
     static constexpr size_t kMaxReadBytes = 4 * EmbedSet::kMaxBytes;
     static constexpr size_t kMaxScanBytes = 8 * EmbedSet::kMaxBytes;
+    static constexpr uint32_t kNoNote = UINT32_MAX;
 
-    struct NoteFile {
+    // A note found, by its path (each path once, whatever names it), read on its first embed.
+    struct Note {
+        const std::string* path = nullptr;     // its key in `paths`
         std::string text;
         RayoMd::File::FileIdentity identity;
-        std::vector<std::string_view> lines;   // of `text`
-        size_t body = 0;                       // its first line after the front matter
-        bool read = false;
+        std::vector<std::string_view> lines;   // of `text`, made for its first section or block
+        size_t body = 0;                       // BodyOffset
+        uint32_t folder = 0;                   // EmbedSet::folders
+        uint32_t id = 0;                       // in `notes`
+        bool tried = false;
     };
 
     bool Cancelled() const {
         return options.cancel != nullptr && options.cancel->load(std::memory_order_relaxed);
     }
 
-    // The embeds of entry `index`, whose text is `text`, in the note in `folder`, `depth` embeds
-    // down from the document.
-    void Expand(uint32_t index, std::string_view text, const fs::path& folder, int depth) {
+    // The embeds of entry `index`, whose text is `text`, in the note in EmbedSet::folders[folder],
+    // `depth` embeds down from the document.
+    void Expand(uint32_t index, std::string_view text, uint32_t folder, int depth) {
         for (const auto& [line, inner] : StandaloneEmbeds(text)) {
             if (stopped || set.entries.size() > EmbedSet::kMaxEmbeds) {
                 stopped = true;
@@ -522,88 +513,117 @@ private:
             }
             EmbedTarget target;
             if (depth >= EmbedSet::kMaxDepth || !ParseTarget(inner, target)) continue;
-            const fs::path path = Find(folder, target.note);
-            if (path.empty() || std::find(chain.begin(), chain.end(), path) != chain.end()) continue;
+            const uint32_t id = Find(folder, target.note);
+            if (id == kNoNote || std::find(chain.begin(), chain.end(), id) != chain.end()) continue;
             if (Cancelled()) {
                 stopped = true;
                 return;
             }
-            const NoteFile* file = Load(path);
-            if (file == nullptr) continue;
+            Note& note = *notes[id];
+            if (!Load(note, folder)) continue;
+            // The same file under another path (a hard link) is a cycle too; the document is known
+            // by its path only.
             bool cycle = false;
-            for (const RayoMd::File::FileIdentity& identity : identities) {
-                cycle = cycle || (!(identity < file->identity) && !(file->identity < identity));
+            for (size_t at = 1; at < chain.size(); at++) {
+                const RayoMd::File::FileIdentity& other = notes[chain[at]]->identity;
+                cycle = cycle || (other.volume == note.identity.volume && other.index == note.identity.index);
             }
             if (cycle) continue;
             std::string entryText;
             if (target.anchor.empty()) {
-                if (file->text.size() > EmbedSet::kMaxBytes - bytes) continue;
-                entryText = Join(file->lines, file->body, file->lines.size());
-            } else if (file->text.size() <= kMaxScanBytes - scanned) {
-                scanned += file->text.size();
-                entryText = target.block ? BlockText(file->lines, file->body, target.anchor)
-                    : Section(file->lines, file->body, target.anchor);
+                if (note.text.size() > EmbedSet::kMaxBytes - bytes) continue;
+                // Its lines from the body on, each ended by '\n', as the parser reads them.
+                if (note.body <= note.text.size()) {
+                    entryText.reserve(note.text.size() - note.body + 1);
+                    entryText.assign(note.text, note.body, std::string::npos);
+                    entryText += '\n';
+                }
+            } else if (note.text.size() <= kMaxScanBytes - scanned) {
+                scanned += note.text.size();
+                if (note.lines.empty()) note.lines = Lines(note.text);
+                // The body's first line: as many lines before it as line ends.
+                const size_t start = note.text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+                const size_t body = note.body > note.text.size() ? note.lines.size()
+                    : (size_t)std::count(note.text.begin() + (ptrdiff_t)start, note.text.begin() + (ptrdiff_t)note.body, '\n');
+                entryText = target.block ? BlockText(note.lines, body, target.anchor) : Section(note.lines, body, target.anchor);
             }
             if (entryText.empty() || entryText.size() > EmbedSet::kMaxBytes - bytes) continue;
             const uint32_t child = (uint32_t)set.entries.size();
-            set.entries.emplace_back();
-            EmbedEntry& entry = set.entries.back();
-            entry.text = OwnFootnotes(entryText, child);
+            OwnFootnotes(entryText, child);
             // A first line "---" would begin a front matter again.
-            if (Trim(entry.text.substr(0, entry.text.find('\n'))) == "---") entry.text.insert(0, "\n");
-            const fs::path noteFolder = path.parent_path();
-            entry.folder = FolderIndex(noteFolder);
+            const std::string_view first = std::string_view(entryText).substr(0, entryText.find('\n'));
+            if (Trim(first) == "---"sv) entryText.insert(0, "\n");
+            EmbedEntry& entry = set.entries.emplace_back();
+            entry.text = std::move(entryText);
+            entry.folder = note.folder;
             bytes += entry.text.size();
             set.entries[index].embeds.emplace_back(line, child);
-            chain.push_back(path);
-            identities.push_back(file->identity);
-            Expand(child, set.entries[child].text, noteFolder, depth + 1);
+            chain.push_back(id);
+            Expand(child, entry.text, entry.folder, depth + 1);
             chain.pop_back();
-            identities.pop_back();
         }
     }
 
-    fs::path Find(const fs::path& folder, std::string_view note) {
-        auto key = std::make_pair(RayoMd::File::PathToUtf8(folder), std::string(note));
-        const auto known = found.find(key);
-        if (known != found.end()) return known->second;
-        if (lookups >= kMaxLookups) return fs::path();
+    // The note `name` names from EmbedSet::folders[folder], kNoNote for none; each folder and name
+    // looked up once.
+    uint32_t Find(uint32_t folder, std::string_view name) {
+        key.assign(reinterpret_cast<const char*>(&folder), sizeof(folder));
+        key.append(name);
+        const auto [known, added] = found.try_emplace(key, kNoNote);
+        if (!added) return known->second;
+        if (lookups >= kMaxLookups) {
+            found.erase(known);
+            return kNoNote;
+        }
         lookups++;
-        fs::path path = vault.Find(folder, note, true);
-        found.emplace(std::move(key), path);
-        return path;
+        std::string path = vault.Find(set.folders[folder], name, true);
+        if (!path.empty()) known->second = NoteOf(std::move(path));
+        return known->second;
     }
 
-    // The note at `path`, read once a build; null when it cannot be read or passes the bytes left.
-    const NoteFile* Load(const fs::path& path) {
-        NoteFile& file = files[RayoMd::File::PathToUtf8(path)];
-        if (!file.read) {
-            file.read = true;
-            if (vault.Read(path, std::min(EmbedSet::kMaxBytes, kMaxReadBytes - read), file.text, file.identity)) {
-                read += file.text.size();
-                file.lines = Lines(file.text);
-                file.body = BodyStart(file.lines);
+    uint32_t NoteOf(std::string path) {
+        const auto [at, added] = paths.try_emplace(std::move(path));
+        if (added) {
+            at->second.path = &at->first;
+            at->second.id = (uint32_t)notes.size();
+            notes.push_back(&at->second);
+        }
+        return at->second.id;
+    }
+
+    // Whether `note` could be read: once a build, within the bytes left. `from`: the folder it was
+    // found from, most often its own.
+    bool Load(Note& note, uint32_t from) {
+        if (!note.tried) {
+            note.tried = true;
+            if (vault.Read(*note.path, std::min(EmbedSet::kMaxBytes, kMaxReadBytes - read), note.text, note.identity)) {
+                read += note.text.size();
+                note.body = BodyOffset(note.text);
+                const std::string_view parent = ParentOf(*note.path);
+                note.folder = parent == set.folders[from] ? from : FolderIndex(parent);
             } else {
-                file.identity.opened = false;
+                note.identity.opened = false;
             }
         }
-        return file.identity.opened ? &file : nullptr;
+        return note.identity.opened;
     }
 
-    uint32_t FolderIndex(const fs::path& folder) {
-        const auto [at, added] = folders.emplace(RayoMd::File::PathToUtf8(folder), (uint32_t)set.folders.size());
-        if (added) set.folders.push_back(folder);
+    uint32_t FolderIndex(std::string_view folder) {
+        key.assign(folder);
+        const auto [at, added] = folders.try_emplace(key, (uint32_t)set.folders.size());
+        if (added) set.folders.emplace_back(folder);
         return at->second;
     }
 
     const PdfOptions& options;
     EmbedSet& set;
     Vault vault;
-    std::vector<fs::path> chain;                                  // the notes embedding the one being read
-    std::vector<RayoMd::File::FileIdentity> identities;           // and which files they are
-    std::map<std::pair<std::string, std::string>, fs::path> found;   // by folder and name
-    std::map<std::string, NoteFile> files;
-    std::map<std::string, uint32_t> folders;
+    std::unordered_map<std::string, Note> paths;         // the notes by path (their nodes stay put)
+    std::vector<Note*> notes;                            // and by number; [0]: the document
+    std::vector<uint32_t> chain;                         // the notes embedding the one being read
+    std::unordered_map<std::string, uint32_t> found;     // the notes by folder and name (kNoNote: none)
+    std::unordered_map<std::string, uint32_t> folders;   // EmbedSet::folders by path
+    std::string key;                                     // a lookup's key, its storage reused
     size_t bytes = 0;     // embedded text
     size_t read = 0;      // notes read
     size_t scanned = 0;   // notes looked through for a section or block
@@ -611,7 +631,7 @@ private:
     bool stopped = false;
 };
 
-// Every image of `blocks` not yet given a folder resolves from EmbedSet::folders[folder].
+// Every image of `blocks` not yet given a folder resolves from EmbedSet::folders[base - 1].
 void SetImageBase(const std::vector<Block>& blocks, uint32_t base) {
     for (const Block& block : blocks) {
         if (block.image != nullptr) {
@@ -623,47 +643,46 @@ void SetImageBase(const std::vector<Block>& blocks, uint32_t base) {
     }
 }
 
-// `markdown`, with `rewrite` rewritten from Obsidian's dialect, with the lines of its embeds as
-// empty HTML comments ("<!---->"): each ends the paragraph, list, quote or table before it as any
-// comment line does, and gives no block, so the blocks of a later line follow it. Lines stay
-// where they were.
-std::string ParseText(const std::string& markdown, const EmbedEntry& entry, bool rewrite) {
-    std::string rewritten;
-    const std::string& text = rewrite && RewriteObsidian(markdown, rewritten) ? rewritten : markdown;
+// `text` with the lines of `entry`'s embeds as empty HTML comments ("<!---->"): each ends the
+// paragraph, list, quote or table before it as any comment line does, and gives no block, so the
+// blocks of a later line follow it. Lines stay where they were. Done before the rewrite from
+// Obsidian's dialect, which leaves such a line as it is and then has no embed to turn into a link.
+std::string Blank(std::string_view text, const EmbedEntry& entry) {
     std::string out;
     out.reserve(text.size());
-    size_t start = text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
-    out.append(text, 0, start);
+    size_t start = text.substr(0, 3) == "\xEF\xBB\xBF" ? 3 : 0;
     size_t line = 0;
-    size_t next = 0;
-    while (start <= text.size()) {
-        size_t end = text.find('\n', start);
-        if (end == std::string::npos) end = text.size();
-        if (next < entry.embeds.size() && entry.embeds[next].first == line) {
-            out += "<!---->";
-            next++;
-        } else {
-            out.append(text, start, end - start);
+    size_t copied = 0;
+    for (const auto& embed : entry.embeds) {
+        for (; line < embed.first && start <= text.size(); line++) {
+            const size_t next = text.find('\n', start);
+            start = next == std::string_view::npos ? text.size() + 1 : next + 1;
         }
-        if (end == text.size()) break;
-        out += '\n';
-        start = end + 1;
-        line++;
+        if (start > text.size()) break;
+        const size_t end = std::min(text.find('\n', start), text.size());
+        out.append(text.substr(copied, start - copied));
+        out += "<!---->";
+        copied = end;
     }
+    out.append(text.substr(copied));
     return out;
 }
 
 // The blocks of entry `index` of the thread's set (see SpliceEmbeds), appended to `out`.
 void AppendEntry(std::vector<Block>& out, uint32_t index, FootnoteParse* notes) {
     const EmbedEntry& entry = tEmbeds->entries[index];
-    const std::string text = ParseText(entry.text, entry, true);
+    std::string blanked;
+    if (!entry.embeds.empty()) blanked = Blank(entry.text, entry);
+    const std::string& source = entry.embeds.empty() ? entry.text : blanked;
+    std::string rewritten;
+    const std::string& text = RewriteObsidian(source, rewritten) ? rewritten : source;
     // Its own parse at the top level reads whether it may have footnotes; the document's stays.
     const bool possible = notes != nullptr && notes->possible;
     std::vector<Block> parsed = ParseMarkdownLevel(text, 0, notes);
     if (notes != nullptr) notes->possible = possible;
     SpliceEmbeds(parsed, entry, notes);
     SetImageBase(parsed, entry.folder + 1);
-    out.insert(out.end(), std::make_move_iterator(parsed.begin()), std::make_move_iterator(parsed.end()));
+    for (Block& block : parsed) out.push_back(std::move(block));
 }
 
 } // namespace
@@ -692,7 +711,7 @@ const EmbedSet* CurrentEmbeds() {
     return tEmbeds;
 }
 
-const fs::path* EmbedFolder(uint32_t base) {
+const std::string* EmbedFolder(uint32_t base) {
     if (tEmbeds == nullptr || base == 0 || base > tEmbeds->folders.size()) return nullptr;
     return &tEmbeds->folders[base - 1];
 }
@@ -707,14 +726,19 @@ uint32_t EmbedImageBase(const ImageSource& image) {
     return found == tEmbeds->imageBases.end() ? 0 : found->second;
 }
 
+bool RewriteDocument(std::string_view markdown, std::string& out) {
+    if (tEmbeds == nullptr) return RewriteObsidian(markdown, out);
+    std::string blanked = Blank(markdown, tEmbeds->entries[0]);
+    if (!RewriteObsidian(blanked, out)) out = std::move(blanked);
+    return true;
+}
+
 std::vector<Block> ParseWithEmbeds(const std::string& markdown, Footnotes& footnotes) {
     // A build parses again (another font): the images of the last parse are gone.
     tEmbeds->imageBases.clear();
-    const EmbedEntry& document = tEmbeds->entries[0];
-    const std::string text = ParseText(markdown, document, false);
     // The document's budget covers what it embeds.
-    const ParseBudget budget(text.size() + tEmbeds->all.size());
-    return ParseWithFootnotes(text, footnotes, &document);
+    const ParseBudget budget(markdown.size() + tEmbeds->all.size());
+    return ParseWithFootnotes(markdown, footnotes, &tEmbeds->entries[0]);
 }
 
 void SpliceEmbeds(std::vector<Block>& blocks, const EmbedEntry& entry, FootnoteParse* notes) {

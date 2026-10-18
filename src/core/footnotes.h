@@ -55,8 +55,8 @@ void DefineFootnotes(size_t first, const ReferenceDefinitions& definitions, int 
 
 // ParseMarkdown with footnotes: in a build that embeds notes (embeds.h), ParseWithEmbeds.
 std::vector<Block> ParseWithFootnotes(const std::string& markdown, Footnotes& footnotes);
-// The same; with `embeds`, the blocks of the notes that entry embeds spliced in (SpliceEmbeds)
-// before the notes are numbered.
+// The same; with `embeds`, the blocks of the notes that entry embeds spliced in (SpliceEmbeds,
+// embeds.h) before the notes are numbered.
 struct EmbedEntry;
 std::vector<Block> ParseWithFootnotes(const std::string& markdown, Footnotes& footnotes, const EmbedEntry* embeds);
 

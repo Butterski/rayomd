@@ -10,11 +10,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#endif
-
-#include <cstdlib>
-#ifndef _WIN32
+#else
 #include <cerrno>
+#include <cstdlib>
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -23,6 +22,7 @@
 #endif
 #endif
 #include <algorithm>
+#include <cstring>
 #include <system_error>
 #include <tuple>
 
@@ -34,40 +34,122 @@ using RayoMd::File::PathToUtf8;
 
 namespace {
 
+#ifdef _WIN32
+constexpr char kSeparator = '\\';
+bool IsSeparator(char c) {
+    return c == '/' || c == '\\';
+}
+#else
+constexpr char kSeparator = '/';
+bool IsSeparator(char c) {
+    return c == '/';
+}
+#endif
+
 char LowerAscii(char c) {
     return c >= 'A' && c <= 'Z' ? (char)(c + 32) : c;
 }
 
-std::string LowerAscii(std::string_view text) {
-    std::string lower(text);
-    for (char& c : lower) c = LowerAscii(c);
-    return lower;
-}
-
-// A path below the root as '/'-separated UTF-8.
-std::string Generic(const fs::path& path) {
-    std::string text = PathToUtf8(path);
-#ifdef _WIN32
-    std::replace(text.begin(), text.end(), '\\', '/');
-#endif
-    return text;
+// The first eight bytes of a name, big-endian and zero-padded: ordered as the names are.
+uint64_t KeyOf(std::string_view name) {
+    uint64_t key = 0;
+    for (size_t at = 0; at < 8; at++) key = key << 8 | (at < name.size() ? (unsigned char)name[at] : 0u);
+    return key;
 }
 
 // Whether a file name ends in ".md" or ".markdown", in any case.
 bool IsMarkdownName(std::string_view name) {
     const size_t dot = name.rfind('.');
     if (dot == std::string_view::npos) return false;
-    const std::string extension = LowerAscii(name.substr(dot + 1));
-    return extension == "md" || extension == "markdown";
+    const std::string_view extension = name.substr(dot + 1);
+    const std::string_view wanted = extension.size() == 2 ? "md" : "markdown";
+    if (extension.size() != wanted.size()) return false;
+    for (size_t at = 0; at < extension.size(); at++) {
+        if (LowerAscii(extension[at]) != wanted[at]) return false;
+    }
+    return true;
+}
+
+// The bytes of `path` that ".." never takes out: "/" (POSIX); a drive "C:" or a share's server
+// "\\server" and the separator after it (Windows); none for a relative path.
+size_t RootLength(std::string_view path) {
+#ifdef _WIN32
+    size_t length = 0;
+    if (path.size() >= 2 && IsSeparator(path[0]) && IsSeparator(path[1])) {
+        length = 2;
+        while (length < path.size() && !IsSeparator(path[length])) length++;
+    } else if (path.size() >= 2 && path[1] == ':') {
+        length = 2;
+    }
+    return length < path.size() && IsSeparator(path[length]) ? length + 1 : length;
+#else
+    return !path.empty() && path[0] == '/' ? 1 : 0;
+#endif
+}
+
+// `path`, which ends in a file name, as lexically_normal() writes it, in place: the platform's
+// separators, one between components, no "." component, each ".." with the component before it
+// taken out (one at the root dropped). The text only moves forward, so one pass does.
+void Normalize(std::string& path) {
+    const size_t rootLength = RootLength(path);
+    char* const text = path.data();
+    for (size_t at = 0; at < rootLength; at++) {
+        if (IsSeparator(text[at])) text[at] = kSeparator;
+    }
+    size_t out = rootLength;
+    size_t kept = 0;   // components written that a ".." takes out
+    for (size_t at = rootLength; at < path.size();) {
+        size_t end = at;
+        while (end < path.size() && !IsSeparator(text[end])) end++;
+        const size_t start = at;
+        const size_t length = end - start;
+        at = end + 1;
+        if (length == 0 || (length == 1 && text[start] == '.')) continue;
+        if (length == 2 && text[start] == '.' && text[start + 1] == '.') {
+            if (kept > 0) {
+                while (out > rootLength && text[out - 1] != kSeparator) out--;
+                if (out > rootLength) out--;
+                kept--;
+                continue;
+            }
+            if (rootLength > 0) continue;
+        } else {
+            kept++;
+        }
+        if (out > rootLength) text[out++] = kSeparator;
+        std::memmove(text + out, text + start, length);
+        out += length;
+    }
+    path.resize(out);
+}
+
+// Where `path` (normalized or resolved) continues below the resolved folder `root`: the offset of
+// its first component there; 0 when it does not lie in the root.
+size_t BelowRoot(std::string_view path, std::string_view root) {
+    if (root.empty() || path.size() <= root.size()) return 0;
+#ifdef _WIN32
+    for (size_t at = 0; at < root.size(); at++) {
+        if (LowerAscii(path[at]) != LowerAscii(root[at])) return 0;
+    }
+#else
+    if (std::memcmp(path.data(), root.data(), root.size()) != 0) return 0;
+#endif
+    if (IsSeparator(root.back())) return root.size();
+    return IsSeparator(path[root.size()]) && path.size() > root.size() + 1 ? root.size() + 1 : 0;
+}
+
+bool IsRegularFile(const std::string& path) {
+    std::error_code ec;
+    return fs::is_regular_file(PathFromUtf8(path), ec);
 }
 
 } // namespace
 
-fs::path ResolvedPath(const fs::path& path) {
+std::string ResolvedPath(std::string_view path) {
 #ifdef _WIN32
-    const HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+    const HANDLE handle = CreateFileW(PathFromUtf8(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return fs::path();
+    if (handle == INVALID_HANDLE_VALUE) return std::string();
     std::wstring name(MAX_PATH, L'\0');
     DWORD length = GetFinalPathNameByHandleW(handle, name.data(), (DWORD)name.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     if (length >= name.size()) {
@@ -75,42 +157,35 @@ fs::path ResolvedPath(const fs::path& path) {
         length = GetFinalPathNameByHandleW(handle, name.data(), (DWORD)name.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     }
     CloseHandle(handle);
-    if (length == 0 || length >= name.size()) return fs::path();
+    if (length == 0 || length >= name.size()) return std::string();
     name.resize(length);
-    // The answer begins "\\?\C:\" or "\\?\UNC\server\share\". std::filesystem reads "\\?" as a
-    // root name, and lexically_normal makes it "\?\", which no call opens: the path as the
-    // other Windows calls write it.
+    // The answer begins "\\?\C:\" or "\\?\UNC\server\share\", which std::filesystem reads as a root
+    // name "\\?" and no call opens once lexically_normal made it "\?\": the path as the other
+    // Windows calls write it.
     if (name.compare(0, 8, L"\\\\?\\UNC\\") == 0) name.replace(0, 8, L"\\\\");
     else if (name.compare(0, 4, L"\\\\?\\") == 0) name.erase(0, 4);
-    return fs::path(name);
+    return PathToUtf8(fs::path(std::move(name)));
 #else
     // realpath(3): one call; std::filesystem::canonical splits and rebuilds the path a component at
-    // a time (most of an embed's cost).
-    char* resolved = ::realpath(path.c_str(), nullptr);
-    if (resolved == nullptr) return fs::path();
-    fs::path canonical(resolved);
+    // a time.
+    char* resolved = ::realpath(std::string(path).c_str(), nullptr);
+    if (resolved == nullptr) return std::string();
+    std::string canonical(resolved);
     std::free(resolved);
     return canonical;
 #endif
 }
 
-bool IsWithinRoot(const fs::path& file, const fs::path& root) {
-    auto at = file.begin();
-    for (const fs::path& part : root) {
-        if (at == file.end()) return false;
-#ifdef _WIN32
-        const std::wstring& a = at->native();
-        const std::wstring& b = part.native();
-        const auto fold = [](wchar_t c) { return c >= L'A' && c <= L'Z' ? (wchar_t)(c - L'A' + L'a') : c; };
-        if (a.size() != b.size() || !std::equal(a.begin(), a.end(), b.begin(), [&](wchar_t x, wchar_t y) { return fold(x) == fold(y); })) {
-            return false;
-        }
-#else
-        if (at->native() != part.native()) return false;
-#endif
-        ++at;
-    }
-    return at != file.end();
+std::string_view ParentOf(std::string_view path) {
+    const size_t rootLength = RootLength(path);
+    size_t end = path.size();
+    while (end > rootLength && !IsSeparator(path[end - 1])) end--;
+    if (end > rootLength) end--;
+    return path.substr(0, end);
+}
+
+bool IsWithinRoot(std::string_view file, std::string_view root) {
+    return BelowRoot(file, root) != 0;
 }
 
 #ifdef _WIN32
@@ -141,18 +216,19 @@ bool DirectPathHasLink(const fs::path& root, const fs::path& path) {
 
 Vault::Vault(const std::string& vaultRoot, const std::string& notePath, size_t maxIndexEntries)
     : indexLimit(maxIndexEntries) {
-    fs::path folder;
-    if (!vaultRoot.empty()) {
-        folder = PathFromUtf8(vaultRoot);
-    } else {
-        folder = PathFromUtf8(notePath).parent_path();
-        if (folder.empty()) folder = ".";
-    }
-    root = ResolvedPath(folder);
-    std::error_code ec;
-    if (!root.empty() && !fs::is_directory(root, ec)) root.clear();
+    std::string_view folder = vaultRoot;
+    if (folder.empty()) folder = ParentOf(notePath);
+    root = ResolvedPath(folder.empty() ? std::string_view(".") : folder);
+    if (root.empty()) return;
 #if defined(__linux__) && defined(SYS_openat2)
-    if (!root.empty()) rootFd = ::open(root.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
+    // O_DIRECTORY: a root that opens is a folder, and the stat below is not needed.
+    rootFd = ::open(root.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (rootFd >= 0) return;
+#endif
+    std::error_code ec;
+    if (!fs::is_directory(PathFromUtf8(root), ec)) root.clear();
+#ifdef _WIN32
+    else rootPath = PathFromUtf8(root);
 #endif
 }
 
@@ -166,15 +242,12 @@ Vault::~Vault() {
 #ifndef _WIN32
 namespace {
 
-// The file at `fd` whole, at most `maximum` bytes, as RayoMd::File::ReadAll reads one; closes it.
-bool ReadOpen(int fd, size_t maximum, std::string& text, RayoMd::File::FileIdentity& identity) {
-    struct stat status {};
-    const bool regular = ::fstat(fd, &status) == 0 && S_ISREG(status.st_mode);
-    identity.opened = regular;
-    identity.volume = (uint64_t)status.st_dev;
-    identity.index = (uint64_t)status.st_ino;
-    identity.size = (uint64_t)status.st_size;
-    bool whole = regular && identity.size <= maximum;
+// The regular file open at `fd`, of `identity` (its fstat), whole, at most `maximum` bytes, as
+// RayoMd::File::ReadAll reads one: its size, one read; closes it.
+bool ReadOpen(int fd, const RayoMd::File::FileIdentity& opened, size_t maximum, std::string& text,
+    RayoMd::File::FileIdentity& identity) {
+    identity = opened;
+    const bool whole = identity.size <= maximum;
     if (whole) {
         text.resize((size_t)identity.size);
         size_t got = 0;
@@ -189,19 +262,30 @@ bool ReadOpen(int fd, size_t maximum, std::string& text, RayoMd::File::FileIdent
     return whole;
 }
 
+// What fstat says of the file open at `fd`; `opened` false when it is no regular file.
+RayoMd::File::FileIdentity IdentityOf(int fd) {
+    struct stat status {};
+    RayoMd::File::FileIdentity identity;
+    identity.opened = ::fstat(fd, &status) == 0 && S_ISREG(status.st_mode);
+    identity.volume = (uint64_t)status.st_dev;
+    identity.index = (uint64_t)status.st_ino;
+    identity.size = (uint64_t)status.st_size;
+    return identity;
+}
+
 } // namespace
 
 // `relative` (below the root) opened beneath the root: a descriptor, -1 when it names no file
 // there (or leaves the root, by "..", a symbolic link or a magic link), -2 when openat2 itself is
 // refused (an old kernel, a seccomp filter), the root's descriptor then given up.
-int Vault::OpenBeneath(const fs::path& relative) {
+int Vault::OpenBeneath(const char* relative) {
 #if defined(__linux__) && defined(SYS_openat2)
     struct {
         uint64_t flags;
         uint64_t mode;
         uint64_t resolve;
     } how{ (uint64_t)(O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK), 0, 0x08 /* RESOLVE_BENEATH */ | 0x02 /* RESOLVE_NO_MAGICLINKS */ };
-    const long fd = ::syscall(SYS_openat2, rootFd, relative.c_str(), &how, sizeof(how));
+    const long fd = ::syscall(SYS_openat2, rootFd, relative, &how, sizeof(how));
     if (fd >= 0) return (int)fd;
     if (errno == ENOSYS || errno == EPERM || errno == EINVAL || errno == E2BIG) {
         ::close(rootFd);
@@ -216,18 +300,24 @@ int Vault::OpenBeneath(const fs::path& relative) {
 }
 #endif
 
-bool Vault::Read(const fs::path& path, size_t maximum, std::string& text, RayoMd::File::FileIdentity& identity) {
+bool Vault::Read(const std::string& path, size_t maximum, std::string& text, RayoMd::File::FileIdentity& identity) {
 #ifndef _WIN32
     if (openFd >= 0 && openPath == path) {
         const int fd = openFd;
         openFd = -1;
-        return ReadOpen(fd, maximum, text, identity);
+        return ReadOpen(fd, openIdentity, maximum, text, identity);
     }
     if (rootFd >= 0) {
-        const fs::path relative = path.lexically_normal().lexically_relative(root);
-        if (!relative.empty() && *relative.begin() != ".." && relative != ".") {
-            const int fd = OpenBeneath(relative);
-            if (fd >= 0) return ReadOpen(fd, maximum, text, identity);
+        const size_t below = BelowRoot(path, root);
+        if (below != 0) {
+            const int fd = OpenBeneath(path.c_str() + below);
+            if (fd >= 0) {
+                const RayoMd::File::FileIdentity opened = IdentityOf(fd);
+                if (opened.opened) return ReadOpen(fd, opened, maximum, text, identity);
+                ::close(fd);
+                identity = opened;
+                return false;
+            }
             if (fd == -1) {
                 identity = RayoMd::File::FileIdentity();
                 return false;
@@ -235,106 +325,187 @@ bool Vault::Read(const fs::path& path, size_t maximum, std::string& text, RayoMd
         }
     }
 #endif
-    return RayoMd::File::ReadAll(path, maximum, text, identity);
+    return RayoMd::File::ReadAll(PathFromUtf8(path), maximum, text, identity);
 }
 
-// `candidate` once checked, when it is a regular file inside the root; else empty. Through the
-// root's descriptor (Linux), the path below the root as written, the file left open for Read;
-// else resolved.
-fs::path Vault::Check(const fs::path& candidate) {
-    const fs::path lexical = candidate.lexically_normal();
+// Whether `path` (normalized) is a regular file inside the root: through the root's descriptor
+// (Linux) as written, the file left open for Read; else resolved, and `path` then the resolved path.
+bool Vault::Check(std::string& path) {
 #ifndef _WIN32
     if (rootFd >= 0) {
-        const fs::path relative = lexical.lexically_relative(root);
-        if (relative.empty() || *relative.begin() == ".." || relative == ".") return fs::path();
-        const int fd = OpenBeneath(relative);
+        const size_t below = BelowRoot(path, root);
+        if (below == 0) return false;
+        const int fd = OpenBeneath(path.c_str() + below);
         if (fd >= 0) {
-            struct stat status {};
-            if (::fstat(fd, &status) != 0 || !S_ISREG(status.st_mode)) {
+            const RayoMd::File::FileIdentity opened = IdentityOf(fd);
+            if (!opened.opened) {
                 ::close(fd);
-                return fs::path();
+                return false;
             }
             if (openFd >= 0) ::close(openFd);
             openFd = fd;
-            openPath = lexical;
-            return lexical;
+            openIdentity = opened;
+            openPath.assign(path);
+            return true;
         }
-        if (fd == -1) return fs::path();
+        if (fd == -1) return false;
     }
-#endif
-#ifdef _WIN32
+#else
     // In the root by name before anything is opened, and through no link below it (TryOpenDirect's
     // rule for images); the file itself no link either.
-    if (!IsWithinRoot(lexical, root) || lexical.native().find_first_of(L"*?") != std::wstring::npos ||
-        DirectPathHasLink(root, lexical)) {
-        return fs::path();
-    }
-    const DWORD attributes = GetFileAttributesW(lexical.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return fs::path();
+    if (BelowRoot(path, root) == 0 || path.find_first_of("*?") != std::string::npos) return false;
+    const fs::path file = PathFromUtf8(path);
+    if (DirectPathHasLink(rootPath, file)) return false;
+    const DWORD attributes = GetFileAttributesW(file.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
         WIN32_FIND_DATAW entry{};
-        HANDLE find = FindFirstFileExW(lexical.c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch, nullptr, 0);
-        if (find == INVALID_HANDLE_VALUE) return fs::path();
+        HANDLE find = FindFirstFileExW(file.c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch, nullptr, 0);
+        if (find == INVALID_HANDLE_VALUE) return false;
         FindClose(find);
-        if (IsReparseTagNameSurrogate(entry.dwReserved0)) return fs::path();
+        if (IsReparseTagNameSurrogate(entry.dwReserved0)) return false;
     }
 #endif
-    fs::path resolved = ResolvedPath(lexical);
-    std::error_code ec;
-    if (resolved.empty() || !IsWithinRoot(resolved, root) || !fs::is_regular_file(resolved, ec)) return fs::path();
-    return resolved;
+    std::string resolved = ResolvedPath(path);
+    if (resolved.empty() || !IsWithinRoot(resolved, root) || !IsRegularFile(resolved)) return false;
+    path = std::move(resolved);
+    return true;
 }
 
-fs::path Vault::Find(const fs::path& from, std::string_view target, bool byName) {
+std::string Vault::Find(std::string_view from, std::string_view target, bool byName) {
     while (!target.empty() && (target.front() == ' ' || target.front() == '\t')) target.remove_prefix(1);
     while (!target.empty() && (target.back() == ' ' || target.back() == '\t' || target.back() == '\r')) target.remove_suffix(1);
-    if (root.empty() || target.empty() || target.find('\0') != std::string_view::npos) return fs::path();
-    std::string name(target);
-    const size_t slash = name.find_last_of("/\\");
-    if (!IsMarkdownName(slash == std::string::npos ? std::string_view(name) : std::string_view(name).substr(slash + 1))) {
-        name += ".md";
+    if (root.empty() || target.empty() || target.find('\0') != std::string_view::npos) return std::string();
+    // No absolute path, nor one of a drive (std::filesystem's root name "C:" on Windows).
+    if (target[0] == '/' || target[0] == '\\') return std::string();
+#ifdef _WIN32
+    if (target.size() >= 2 && target[1] == ':') return std::string();
+#endif
+    const size_t slash = target.find_last_of("/\\");
+    const bool addExtension = !IsMarkdownName(slash == std::string_view::npos ? target : target.substr(slash + 1));
+    // A name without a "." or empty component below a resolved folder is a normal path as it is.
+#ifdef _WIN32
+    const bool plain = false;   // its '/' become '\'
+#else
+    bool plain = target[0] != '.';
+    for (size_t at = 0; plain && at + 1 < target.size(); at++) plain = target[at] != '/' || (target[at + 1] != '.' && target[at + 1] != '/');
+#endif
+    std::string path;
+    path.reserve(std::max(from.size(), root.size()) + target.size() + 4);
+    for (const std::string_view base : { from, std::string_view(root) }) {
+        if (base.empty()) continue;
+        path.assign(base);
+        if (!IsSeparator(base.back())) path += kSeparator;   // "/" or "C:\" ends in one
+        path.append(target);
+        if (addExtension) path += ".md";
+        if (!plain) Normalize(path);
+        if (Check(path)) return path;
     }
-    const fs::path relative = PathFromUtf8(name);
-    if (relative.has_root_path() || name[0] == '/' || name[0] == '\\') return fs::path();
-    for (const fs::path* base : { &from, static_cast<const fs::path*>(&root) }) {
-        if (base->empty()) continue;
-        fs::path found = Check(*base / relative);
-        if (!found.empty()) return found;
-    }
-    if (!byName) return fs::path();
+    if (!byName) return std::string();
     if (!indexed) BuildIndex();
-    if (!indexValid) return fs::path();
+    if (!indexValid) return std::string();
     // The wanted path's last components, as the index keeps them.
-    std::string wanted = LowerAscii(Generic(relative.lexically_normal()));
-    while (wanted.compare(0, 2, "./") == 0) wanted.erase(0, 2);
-    if (wanted.empty() || wanted.compare(0, 3, "../") == 0) return fs::path();
+    std::string wanted(target);
+    if (addExtension) wanted += ".md";
+    Normalize(wanted);
+    for (char& c : wanted) c = IsSeparator(c) ? '/' : LowerAscii(c);
+    if (wanted.empty() || wanted.compare(0, 3, "../") == 0) return std::string();
     const size_t last = wanted.rfind('/');
-    const std::string file = last == std::string::npos ? wanted : wanted.substr(last + 1);
-    auto at = std::lower_bound(index.begin(), index.end(), file, [](const Named& named, const std::string& key) { return named.name < key; });
-    for (; at != index.end() && at->name == file; ++at) {
+    const std::string_view file = last == std::string::npos ? std::string_view(wanted) : std::string_view(wanted).substr(last + 1);
+    const uint64_t key = KeyOf(file);
+    auto at = std::lower_bound(index.begin(), index.end(), file, [this, key](const Named& named, std::string_view name) {
+        return named.key != key ? named.key < key : Name(named) < name;
+    });
+    for (; at != index.end() && Name(*at) == file; ++at) {
         if (last != std::string::npos) {
-            const std::string lower = LowerAscii(at->relative);
-            if (lower.size() < wanted.size() || lower.compare(lower.size() - wanted.size(), wanted.size(), wanted) != 0 ||
+            // Its path ends in the wanted components, letter case aside.
+            const std::string_view lower = Lower(*at);
+            if (lower.size() < wanted.size() || lower.substr(lower.size() - wanted.size()) != wanted ||
                 (lower.size() > wanted.size() && lower[lower.size() - wanted.size() - 1] != '/')) {
                 continue;
             }
         }
-        fs::path found = Check(root / PathFromUtf8(at->relative));
-        if (!found.empty()) return found;
+        path.assign(root);
+        if (!IsSeparator(root.back())) path += kSeparator;
+        path.append(Relative(*at));
+#ifdef _WIN32
+        Normalize(path);
+#endif
+        if (Check(path)) return path;
     }
-    return fs::path();
+    return std::string();
+}
+
+#ifndef _WIN32
+// The entries of the folder open at `folder` (its path below the root `relative`, '/'-ended, or
+// empty for the root; `depth` folders down), as std::filesystem::recursive_directory_iterator with
+// skip_permission_denied visits them (a folder's type from its entry, links to folders neither
+// indexed nor entered), without a path object a name; closes `folder`. `entries` counts them: past
+// indexLimit the index is cleared and the walk ends.
+void Vault::Walk(int folder, std::string& relative, int depth, size_t& entries) {
+    DIR* const directory = ::fdopendir(folder);
+    if (directory == nullptr) {
+        ::close(folder);
+        return;
+    }
+    const size_t length = relative.size();
+    while (const dirent* entry = ::readdir(directory)) {
+        const char* const name = entry->d_name;
+        if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) continue;
+        if (++entries > indexLimit) break;
+        unsigned char type = entry->d_type;
+        struct stat status {};
+        if (type == DT_UNKNOWN && ::fstatat(::dirfd(directory), name, &status, AT_SYMLINK_NOFOLLOW) == 0) {
+            type = S_ISDIR(status.st_mode) ? DT_DIR : S_ISLNK(status.st_mode) ? DT_LNK : DT_REG;
+        }
+        // A link to a folder is a folder to the index (is_directory follows it), never entered.
+        const bool isFolder = type == DT_DIR ||
+            (type == DT_LNK && ::fstatat(::dirfd(directory), name, &status, 0) == 0 && S_ISDIR(status.st_mode));
+        if (isFolder) {
+            // Obsidian's settings, its trash, a repository's history: hidden folders hold no notes.
+            if (type != DT_DIR || name[0] == '.' || depth + 1 >= kMaxIndexDepth) continue;
+            const int inner = ::openat(::dirfd(directory), name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (inner < 0) continue;
+            relative.append(name);
+            relative += '/';
+            Walk(inner, relative, depth + 1, entries);
+            relative.resize(length);
+            if (entries > indexLimit) break;
+            continue;
+        }
+        const size_t nameSize = std::strlen(name);
+        if (name[0] == '.' || !IsMarkdownName(std::string_view(name, nameSize))) continue;
+        relative.append(name, nameSize);
+        AddNamed(relative, nameSize, (size_t)depth);
+        relative.resize(length);
+    }
+    ::closedir(directory);
+}
+#endif
+
+void Vault::AddNamed(std::string_view relative, size_t nameSize, size_t depth) {
+    const size_t at = names.size();
+    names.append(relative);
+    names.append(relative);
+    for (size_t lower = at + relative.size(); lower < names.size(); lower++) names[lower] = LowerAscii(names[lower]);
+    index.push_back({ KeyOf(std::string_view(names).substr(names.size() - nameSize)), (uint32_t)at, (uint32_t)relative.size(),
+        (uint32_t)nameSize, (uint32_t)depth });
 }
 
 void Vault::BuildIndex() {
     indexed = true;
-    std::error_code ec;
     size_t entries = 0;
-    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
+#ifndef _WIN32
+    const int folder = ::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (folder >= 0) {
+        std::string relative;
+        Walk(folder, relative, 0, entries);
+    }
+#else
+    std::error_code ec;
+    fs::recursive_directory_iterator it(rootPath, fs::directory_options::skip_permission_denied, ec);
     for (const fs::recursive_directory_iterator end; !ec && it != end; it.increment(ec)) {
-        if (++entries > indexLimit) {
-            index.clear();
-            return;
-        }
+        if (++entries > indexLimit) break;
         const std::string name = PathToUtf8(it->path().filename());
         std::error_code typeError;
         if (it->is_directory(typeError)) {
@@ -343,10 +514,23 @@ void Vault::BuildIndex() {
             continue;
         }
         if (name.empty() || name[0] == '.' || !IsMarkdownName(name)) continue;
-        index.push_back({ LowerAscii(name), Generic(it->path().lexically_relative(root)), (size_t)it.depth() });
+        const std::string path = PathToUtf8(it->path());
+        std::string relative = path.substr(BelowRoot(path, root));
+        std::replace(relative.begin(), relative.end(), '\\', '/');
+        AddNamed(relative, name.size(), (size_t)it.depth());
     }
-    std::sort(index.begin(), index.end(), [](const Named& a, const Named& b) {
-        return std::tie(a.name, a.depth, a.relative) < std::tie(b.name, b.depth, b.relative);
+#endif
+    if (entries > indexLimit) {
+        index.clear();
+        names.clear();
+        return;
+    }
+    std::sort(index.begin(), index.end(), [this](const Named& a, const Named& b) {
+        if (a.key != b.key) return a.key < b.key;
+        const std::string_view x = Name(a);
+        const std::string_view y = Name(b);
+        if (x != y) return x < y;
+        return a.depth != b.depth ? a.depth < b.depth : Relative(a) < Relative(b);
     });
     indexValid = true;
 }

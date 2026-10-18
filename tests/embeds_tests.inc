@@ -199,7 +199,7 @@ bool CheckIndexCap(const fs::path& root) {
         std::ofstream(vault / "many" / ("f" + std::to_string(index)), std::ios::binary);
     }
     TinyPdf::Internal::Vault crowded(RayoMd::File::PathToUtf8(vault), std::string(), kCap);
-    const fs::path base = TinyPdf::Internal::ResolvedPath(vault);
+    const std::string base = TinyPdf::Internal::ResolvedPath(RayoMd::File::PathToUtf8(vault));
     if (!crowded.Find(base, "target", true).empty() || crowded.Find(base, "near", true).empty() ||
         crowded.Find(base, "deep/target", false).empty()) {
         return Fail("the name index's cap");
