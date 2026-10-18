@@ -136,12 +136,12 @@ cmake --build build --config Release
 
 </details>
 
-| Package | Size, 5.1.0 | For |
+| Package | Size, 5.2.1 | For |
 |---|---:|---|
-| `rayomd-<version>-linux-x64-static.tar.gz` | 1,299 KB | Linux, recommended: no dependency, the fastest start |
-| `rayomd-<version>-windows-x64.zip` | 1,234 KB | Windows: every CLI mode in one `rayomd.exe` |
-| `rayomd-<version>-linux-x64.tar.gz` | 869 KB | Linux: needs only glibc |
-| `rayomd-<version>-linux-x64-curl.tar.gz` | 871 KB | Linux with HTTP/HTTPS images through libcurl |
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,347 KB | Linux, recommended: no dependency, the fastest start |
+| `rayomd-<version>-windows-x64.zip` | 1,277 KB | Windows: every CLI mode in one `rayomd.exe` |
+| `rayomd-<version>-linux-x64.tar.gz` | 917 KB | Linux: needs only glibc |
+| `rayomd-<version>-linux-x64-curl.tar.gz` | 920 KB | Linux with HTTP/HTTPS images through libcurl |
 
 Every feature below works the same from both command lines and the
 [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
