@@ -1184,39 +1184,55 @@ public:
     T value;
 };
 
-// Lets one drawing operation write its operators through a raw pointer, then appends them to a
-// content stream in one piece. The per-span paint functions used a dozen small appends each;
-// this is one growth and no temporaries. An operation whose upper bound fits writes into a
-// buffer of the thread's own, which stays in L1, and only the bytes it wrote are appended:
-// growing the string by the bound zero-filled all of it first (std::string has no growth
-// without filling before C++23). A larger bound, a writer opened while another holds the
-// buffer, and Windows (where MinGW's thread_local is a call) grow the string by the bound and
-// trim what was not written. The buffer is not a member: a pointer into the writer itself kept
-// GCC from holding `cursor` in a register across calls. Constructor and destructor are always
-// inlined: left to GCC, the destructor went out of line and `Text` out of `PaintAsciiRuns`.
+// Growth of a std::string without filling it (C++23's resize_and_overwrite, which C++17 lacks):
+// with libstdc++ the length is set through its private `_M_set_length`, named in an explicit
+// instantiation, where access is not checked; the bytes between the old and the new size are left
+// as they are for the caller to write. Other libraries fill them (`resize`).
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
+#define RAYOMD_STRING_SET_LENGTH 1
+namespace {
+void SetStringLength(std::string& text, size_t size);
+template <void (std::string::*SetLength)(std::string::size_type)>
+struct StringLengthAccess {
+    friend void SetStringLength(std::string& text, size_t size) { (text.*SetLength)(size); }
+};
+template struct StringLengthAccess<&std::string::_M_set_length>;
+} // namespace
+#endif
+
+// Makes `text` `size` bytes long; what lies past its old size is the caller's to write.
+static RAYOMD_HOT_INLINE void ResizeForOverwrite(std::string& text, size_t size) {
+#ifdef RAYOMD_STRING_SET_LENGTH
+    if (size > text.capacity()) text.reserve(size);
+    SetStringLength(text, size);
+#else
+    text.resize(size);
+#endif
+}
+
+// Lets one drawing operation write its operators through a raw pointer straight into the end of
+// a content stream: room for `maxBytes` is made once (no fill, see ResizeForOverwrite), and the
+// destructor sets the string's size to where the writing ended. The per-span paint functions used
+// a dozen small appends each; this is one capacity test and no copy. Until it ends, nothing else
+// may change the string. Constructor and destructor are always inlined: left to GCC, the
+// destructor went out of line and `Text` out of `PaintAsciiRuns`.
 class TailWriter {
 public:
     RAYOMD_HOT_INLINE TailWriter(std::string& target, size_t maxBytes) : out(target) {
-#ifndef _WIN32
-        if (maxBytes <= sizeof(scratch) && !scratchBusy) {
-            scratchBusy = true;
-            start = scratch;
-            cursor = start;
-            return;
-        }
+        const size_t base = target.size();
+#ifdef RAYOMD_STRING_SET_LENGTH
+        if (target.capacity() - base < maxBytes) target.reserve(base + maxBytes);
+#else
+        target.resize(base + maxBytes);
 #endif
-        start = Grow(target, maxBytes);
-        cursor = start;
+        cursor = &target[0] + base;
     }
     RAYOMD_HOT_INLINE ~TailWriter() {
-#ifndef _WIN32
-        if (start == scratch) {
-            out.append(start, (size_t)(cursor - start));
-            scratchBusy = false;
-            return;
-        }
-#endif
+#ifdef RAYOMD_STRING_SET_LENGTH
+        SetStringLength(out, (size_t)(cursor - out.data()));
+#else
         out.resize((size_t)(cursor - out.data()));
+#endif
     }
     TailWriter(const TailWriter&) = delete;
     TailWriter& operator=(const TailWriter&) = delete;
@@ -1237,23 +1253,8 @@ public:
     char* cursor = nullptr;
 
 private:
-    static char* Grow(std::string& target, size_t maxBytes) {
-        const size_t base = target.size();
-        target.resize(base + maxBytes);
-        return &target[base];
-    }
-
     std::string& out;
-    char* start = nullptr;
-#ifndef _WIN32
-    static thread_local char scratch[1024];
-    static thread_local bool scratchBusy;
-#endif
 };
-#ifndef _WIN32
-thread_local char TailWriter::scratch[1024];
-thread_local bool TailWriter::scratchBusy = false;
-#endif
 
 // Room for one operand written by TailWriter::Fixed, with its separator.
 constexpr size_t kOperandBytes = RayoMd::Text::kFixed2MaxChars + 1;
@@ -1854,7 +1855,7 @@ public:
             rendered.swap(pdf);
             pdf.reserve(wanted);
         }
-        pdf.resize(total);
+        ResizeForOverwrite(pdf, total);     // every byte of it is written below
         char* const base = &pdf[0];
         const char* const payloads = relocate ? rendered.data() : base;
         const size_t payloadLimit = relocate ? rendered.size() : total;
@@ -4439,7 +4440,7 @@ static void AppendUriLiteral(std::string& out, std::string_view url, bool winAns
     }
     static const char kHex[] = "0123456789ABCDEF";
     const size_t at = out.size();
-    out.resize(at + url.size() * 3);
+    ResizeForOverwrite(out, at + url.size() * 3);
     char* cursor = &out[at];
     for (const char ch : url) {
         const unsigned char byte = static_cast<unsigned char>(ch);
@@ -4454,7 +4455,7 @@ static void AppendUriLiteral(std::string& out, std::string_view url, bool winAns
         if (ch == '(' || ch == ')' || ch == '\\') *cursor++ = '\\';
         *cursor++ = ch;
     }
-    out.resize((size_t)(cursor - out.data()));
+    ResizeForOverwrite(out, (size_t)(cursor - out.data()));
 }
 
 // ---- Headings: the outline (bookmarks) and the targets of internal links -----------------
@@ -4858,10 +4859,10 @@ RAYOMD_COLD static std::string InfoDictionary(const char* producer, const Docume
     const auto field = [&info](std::string_view key, std::string_view value, bool valueWinAnsi) {
         if (value.empty()) return;
         const size_t at = info.size();
-        info.resize(at + key.size() + value.size() * 4 + 6);
+        ResizeForOverwrite(info, at + key.size() + value.size() * 4 + 6);
         memcpy(&info[at], key.data(), key.size());
         const char* const end = WriteTextString(&info[at + key.size()], value, valueWinAnsi);
-        info.resize((size_t)(end - info.data()));
+        ResizeForOverwrite(info, (size_t)(end - info.data()));
     };
     if (!metadata.title.empty()) {
         field(" /Title ", metadata.title, false);

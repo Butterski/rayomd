@@ -900,7 +900,9 @@ GitHub CI entry points:
   translation unit of its own behind a small interface, as `theme.cpp` does: inside
   `tiny_pdf.cpp`, the theme layout moved `std::string::push_back` and appends of the
   link annotations out of line (+2.6 % instructions on `baseline.md`). Write output
-  that grows by pieces through `TailWriter`, not per-byte `push_back`.
+  that grows by pieces through `TailWriter`, not per-byte `push_back`. A `TailWriter` writes
+  past the string's size until it ends: nothing else may append to that string meanwhile. Grow
+  a string that is then written whole with `ResizeForOverwrite`, not `resize` (which fills it).
 - Keep image caches bounded. Image support can dominate memory on large or many
   remote images.
 - Linux benchmarks are much faster on native/ext4 storage than on `/mnt/*` WSL
