@@ -88,7 +88,11 @@ blocks move both with `Indent`/`RestoreMargin`, so `Ensure` keeps its size); `Ne
 `PageNotes::pageEnds` pointer: a direct call put it in a cycle with the paint paths and moved GCC's
 inlining of `MarkHeading`), the end of
 a document and of each book file paint them (`Paint`, the renderer's shared buffers swapped by
-`FootScope`/`SwapFootBuffers`, so a paragraph or table row broken by the page goes on). A note
+`FootScope`/`SwapFootBuffers`, so a paragraph or table row broken by the page goes on). The
+measuring layout writes into a `FootStash` (swapped for the renderer's content, links, headings and
+anchors while it runs), and `Paint` replays a note from it under one `cm` translation, its links,
+marks and references moved by as much, instead of laying it out again; only under PDF/UA and for a
+note whose layout changed the images is it laid out a second time (`FootStash::replay`). A note
 only notes refer to (`Footnotes::referenced`) goes with the first that does, at most 8 deep; a
 cluster too tall for a page with its line stays in the end section, which then holds only such
 notes. Under PDF/UA a foot note is a Note of the Document opened over the open elements

@@ -6072,6 +6072,24 @@ RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Inte
     renderer.lineHeight = lineHeight;
 }
 
+// Page footnotes: what measuring laid out, kept to set each note again at the foot of its page
+// by one translation instead of a second layout (PageNoteLayout::Replay). The measuring layout
+// writes straight into these buffers, which take the renderer's places while it runs; entry N's
+// ranges end at the Nth end. `replay` says where a replay gives what a layout would: not under
+// PDF/UA (marked content numbers per page) and not for a note whose layout changed the images.
+struct FootStash {
+    std::string content;
+    std::vector<size_t> contentEnds;
+    std::vector<LinkRect> links;
+    std::vector<uint32_t> linkEnds;
+    std::vector<HeadingMark> marks;     // its headings' and its anchors'
+    std::vector<uint32_t> markEnds;
+    std::vector<HeadingMark> anchors;
+    std::vector<uint32_t> anchorEnds;
+    std::vector<uint8_t> replay;
+    double top = 0.0;                   // where each note's measuring layout started
+};
+
 // Footnotes at the foot of the page (FootnotePlacement::Page; page_notes.h keeps the account),
 // for both renderers. Every note is laid out once before the text, where nothing breaks a page,
 // for its height and the notes it refers to (Measure); a line of the cold paths with references
@@ -6146,37 +6164,90 @@ struct PageNoteLayout {
         r.TagEndFootNote(tagged);
     }
 
-    // Each note's height and the notes it refers to, from a layout that is then taken back: its
-    // content, links, marks and images, and (BeginMeasure) its tags, glyph counts and fallback probe.
-    // The glyphs it marks used are those the notes paint later, as each is painted once.
+    // Each note's height and the notes it refers to, from a layout written into the stash (the
+    // renderer's content, page links, headings and anchors swapped for its buffers meanwhile, so
+    // nothing is copied or cut back): Paint replays it where it can. Taken back otherwise: its
+    // images, and (BeginMeasure) its tags, glyph counts and fallback probe. The glyphs it marks
+    // used are those the notes paint later, as each is painted once.
     RAYOMD_COLD static void Measure(RendererType& r) {
         Internal::PageNotes& notes = *r.pageNotes;
-        const size_t content = r.content.size();
-        const size_t links = r.pageLinks.back().size();
-        const size_t headings = r.headings.size();
-        const size_t ids = r.ids.size();
+        FootStash& stash = r.pageNotes->stash;
+        const size_t count = r.footnotes->notes.size();
+        stash.contentEnds.assign(count, 0);
+        stash.linkEnds.assign(count, 0);
+        stash.markEnds.assign(count, 0);
+        stash.anchorEnds.assign(count, 0);
+        stash.replay.assign(count, 0);
         const size_t contentsLines = r.contentsLines.size();
         const ImageRegistry::Snapshot images = r.images != nullptr ? r.images->Save() : ImageRegistry::Snapshot{};
         const auto state = r.BeginMeasure();
+        std::swap(r.content, stash.content);
+        r.pageLinks.back().swap(stash.links);
+        r.headings.swap(stash.marks);
+        r.ids.swap(stash.anchors);
         {
             // Anywhere below the top of a page: a note's layout does not depend on where it starts.
-            const double top = r.pageH * 0.5;
-            FootScope scope(r, top);
-            for (size_t index = 0; index < r.footnotes->notes.size() && !BuildCancelled(); index++) {
+            stash.top = r.pageH * 0.5;
+            FootScope scope(r, stash.top);
+            for (size_t index = 0; index < count && !BuildCancelled(); index++) {
+                const size_t imageCount = r.images != nullptr ? r.images->Images().size() : 0;
+                const uint32_t failed = r.images != nullptr ? r.images->FailedImages() : 0;
                 notes.BeginMeasure(static_cast<int>(index) + 1);
-                r.y = top;
+                r.y = stash.top;
                 Note(r, index, false);
-                notes.EndMeasure(top - r.y);
+                notes.EndMeasure(stash.top - r.y);
+                stash.contentEnds[index] = r.content.size();
+                stash.linkEnds[index] = static_cast<uint32_t>(r.pageLinks.back().size());
+                stash.markEnds[index] = static_cast<uint32_t>(r.headings.size());
+                stash.anchorEnds[index] = static_cast<uint32_t>(r.ids.size());
+                stash.replay[index] = state.tags == nullptr && (r.images == nullptr ||
+                    (r.images->Images().size() == imageCount && r.images->FailedImages() == failed));
             }
         }
+        std::swap(r.content, stash.content);
+        r.pageLinks.back().swap(stash.links);
+        r.headings.swap(stash.marks);
+        r.ids.swap(stash.anchors);
         r.EndMeasure(state);
         if (r.images != nullptr) r.images->Restore(images);
-        r.content.resize(content);
-        r.pageLinks.back().erase(r.pageLinks.back().begin() + static_cast<std::ptrdiff_t>(links), r.pageLinks.back().end());
-        r.headings.erase(r.headings.begin() + static_cast<std::ptrdiff_t>(headings), r.headings.end());
-        r.ids.erase(r.ids.begin() + static_cast<std::ptrdiff_t>(ids), r.ids.end());
         r.contentsLines.erase(r.contentsLines.begin() + static_cast<std::ptrdiff_t>(contentsLines), r.contentsLines.end());
         notes.Settle(r.pageH - r.margin * 2.0 - r.lineHeight);
+    }
+
+    // Note `index` from its measuring layout, its top at y: the content under one translation,
+    // its links, headings, anchors and the first references of the notes only notes refer to moved
+    // by as much. What a second layout would draw, at the cost of a copy.
+    RAYOMD_COLD static void Replay(RendererType& r, size_t index) {
+        const Internal::PageNotes& notes = *r.pageNotes;
+        const FootStash& stash = r.pageNotes->stash;
+        const int note = static_cast<int>(index) + 1;
+        const size_t page = r.pageStarts.size() - 1;
+        const double dy = r.y - stash.top;
+        r.noteMarks.notes[index] = { page, r.y };
+        const size_t begin = index != 0 ? stash.contentEnds[index - 1] : 0;
+        std::string& c = r.content;
+        c += "q 1 0 0 1 0 ";
+        AppendF(c, dy);
+        c += " cm\n";
+        c.append(stash.content, begin, stash.contentEnds[index] - begin);
+        c += "Q\n";
+        std::vector<LinkRect>& links = r.pageLinks.back();
+        for (uint32_t at = index != 0 ? stash.linkEnds[index - 1] : 0; at < stash.linkEnds[index]; at++) {
+            const LinkRect& link = stash.links[at];
+            links.push_back({ link.x1, link.y1 + dy, link.x2, link.y2 + dy, link.url });
+        }
+        for (uint32_t at = index != 0 ? stash.markEnds[index - 1] : 0; at < stash.markEnds[index]; at++) {
+            const HeadingMark& mark = stash.marks[at];
+            r.headings.push_back({ mark.level, mark.text, page, mark.top + dy });
+        }
+        for (uint32_t at = index != 0 ? stash.anchorEnds[index - 1] : 0; at < stash.anchorEnds[index]; at++) {
+            const HeadingMark& mark = stash.anchors[at];
+            r.ids.push_back({ mark.level, mark.text, page, mark.top + dy });
+        }
+        for (uint32_t at = notes.RefBegin(note); at < notes.RefEnd(note); at++) {
+            if (!notes.Body(notes.RefNote(at))) r.noteMarks.MarkReference(notes.RefNote(at), page, notes.RefTop(at) + dy);
+        }
+        r.y -= notes.Height(note);
     }
 
     // The notes waiting at the foot of the page that ends: a rule at the top of the room kept for
@@ -6191,7 +6262,11 @@ struct PageNoteLayout {
                 r.TagArtifact();
                 AppendFootnoteRule(r.content, r.ruleColor, r.margin, r.y, (r.pageW - r.margin * 2.0) / 3.0);
                 r.y -= 10.0;
-                for (const int note : notes.Pending()) Note(r, static_cast<size_t>(note) - 1, true);
+                for (const int note : notes.Pending()) {
+                    const size_t index = static_cast<size_t>(note) - 1;
+                    if (r.pageNotes->stash.replay[index] != 0) Replay(r, index);
+                    else Note(r, index, true);
+                }
             }
             notes.ClearPending();
         }
@@ -6214,7 +6289,7 @@ struct PageNoteLayout {
     // note the text refers to links back to the text.
     RAYOMD_COLD static void Referenced(RendererType& r, int note, double top) {
         Internal::PageNotes& notes = *r.pageNotes;
-        if (notes.Measuring()) notes.Refer(note);
+        if (notes.Measuring()) notes.Refer(note, top);
         else if (!notes.footMode || !notes.Body(note)) r.noteMarks.MarkReference(note, r.pageStarts.size() - 1, top);
     }
 
@@ -9330,6 +9405,7 @@ private:
         std::vector<uint8_t> codeClasses;
         std::vector<CodeRun> codeRuns;
         RunLinkUrls runLinkUrls;
+        FootStash stash;
     };
     RAYOMD_COLD void SwapFootBuffers() {
         PageNoteState& spare = *pageNotes;
@@ -9346,7 +9422,7 @@ private:
     // The notes' measuring layout (PageNoteLayout::Measure) is untagged, counts no missing glyph
     // and starts no fallback probe: what it changes there goes back.
     struct MeasureState {
-        Internal::StructTree* tags;
+        Internal::StructTree* tags;   // a tagged build: notes are laid out again, not replayed
         bool probing;
         uint32_t missing[4];
         uint32_t missingBmp;
@@ -12456,6 +12532,7 @@ private:
         std::vector<uint8_t> codeLineClasses;
         std::vector<CodeRun> codeRuns;
         RunLinkUrls runLinkUrls;
+        FootStash stash;
     };
     RAYOMD_COLD void SwapFootBuffers() {
         PageNoteState& spare = *pageNotes;
@@ -12472,7 +12549,9 @@ private:
     }
     // The notes' measuring layout (PageNoteLayout::Measure): nothing to set aside here, as these
     // documents are never tagged and their fonts lack no glyph they count.
-    struct MeasureState {};
+    struct MeasureState {
+        Internal::StructTree* tags = nullptr;   // never tagged: every note may be replayed
+    };
     MeasureState BeginMeasure() { return {}; }
     void EndMeasure(const MeasureState&) {}
     PageNoteState* pageNotes = nullptr;   // while a document's notes go at the foot of its pages

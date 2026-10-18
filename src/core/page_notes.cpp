@@ -21,11 +21,12 @@ void PageNotes::BeginMeasure(int note) {
     refBegin[static_cast<size_t>(note) - 1] = static_cast<uint32_t>(refs.size());
 }
 
-void PageNotes::Refer(int note) {
+void PageNotes::Refer(int note, double top) {
     if (note <= 0 || static_cast<size_t>(note) > states.size() || note == measuring) return;
     // A note named again right after itself (a line of references to one note) is one edge.
     if (refs.size() > refBegin[static_cast<size_t>(measuring) - 1] && refs.back() == note) return;
     refs.push_back(note);
+    refTops.push_back(top);
 }
 
 void PageNotes::EndMeasure(double height) {

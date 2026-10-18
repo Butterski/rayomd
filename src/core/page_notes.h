@@ -28,11 +28,19 @@ public:
     // the page's, which the notes are set in.
     PageNotes(size_t count, size_t referenced, double margin, double bodySize);
 
-    // Measuring, note after note from 1: the note being laid out refers to `note`; then its height.
+    // Measuring, note after note from 1: the note being laid out refers to `note`, its number's
+    // top at `top`; then its height.
     void BeginMeasure(int note);
     bool Measuring() const { return measuring != 0; }
-    void Refer(int note);
+    void Refer(int note, double top);
     void EndMeasure(double height);
+    // What measuring found, for a note set again from its measured layout (a replay): its height,
+    // and the references in it, [RefBegin, RefEnd) of RefNote and RefTop.
+    double Height(int note) const { return heights[static_cast<size_t>(note) - 1]; }
+    uint32_t RefBegin(int note) const { return refBegin[static_cast<size_t>(note) - 1]; }
+    uint32_t RefEnd(int note) const { return refBegin[static_cast<size_t>(note)]; }
+    int RefNote(uint32_t at) const { return refs[at]; }
+    double RefTop(uint32_t at) const { return refTops[at]; }
     // After measuring: the clusters taller than `room` with the rule go after the text.
     void Settle(double room);
 
@@ -86,6 +94,7 @@ private:
     uint32_t walk = 0;
     std::vector<uint32_t> refBegin;  // note N refers to refs[refBegin[N - 1], refBegin[N])
     std::vector<int> refs;
+    std::vector<double> refTops;     // where each of refs is painted while measuring
     std::vector<int> line;           // the line's references
     std::vector<int> members;        // the clusters of the line's notes, one after another
     std::vector<uint32_t> clusterEnds;
