@@ -267,6 +267,19 @@ bool CheckRewriteScans() {
         std::cerr << "PrintColors scans: only " << rewritten << " streams rewritten" << std::endl;
         return false;
     }
+    // An operator whose 32 bytes start the content, kept before after a name ("x1" is no number):
+    // the memo must not take the byte before the content for the one before its operands.
+    const std::string padding = " BT /F1 9 Tf (text to make the content longer than a step) Tj ET\n";
+    std::string kept = "Q\nx1 0.111111 0.222222 0.333333 rg" + padding;
+    TinyPdf::Internal::PrintColors(kept.data(), kept.data() + kept.size());
+    std::string first = "y1 0.111111 0.222222 0.333333 rg" + padding;
+    std::string reference = first;
+    TinyPdf::Internal::PrintColors(first.data() + 1, first.data() + first.size());
+    TinyPdf::Internal::PrintColorsScalar(reference.data() + 1, reference.data() + reference.size());
+    if (kept.find("0 g") == std::string::npos || first != reference) {
+        std::cerr << "PrintColors: an operator at the content's start taken from the memo" << std::endl;
+        return false;
+    }
     return true;
 }
 

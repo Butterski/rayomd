@@ -9,7 +9,7 @@
 
 #include "print_colors.h"
 
-#include "../common/compiler.h"
+#include "../common/text_utils.h"
 
 #include <array>
 #include <cstdint>
@@ -90,9 +90,9 @@ constexpr ptrdiff_t kWindow = 32;   // the bytes a memo entry keys: an operator'
 // Two entries for each hash of the last 8 bytes, the one met last first.
 class OperandMemo {
 public:
-    // The delta of the operator whose next byte ends at `tail`, kWindow bytes or more from the
-    // content's start, when one was met before, else nullptr. Simd::Same gives a bit for each
-    // byte of a window equal to an entry's key.
+    // The delta of the operator whose next byte ends at `tail`, more than kWindow bytes from the
+    // content's start (the window and the byte before it are read), when one was met before, else
+    // nullptr. Simd::Same gives a bit for each byte of a window equal to an entry's key.
     template <class Simd>
     RAYOMD_HOT_INLINE const char* Find(const char* tail) {
         Entry* const set = sets[Set(tail)];
@@ -251,16 +251,6 @@ RAYOMD_COLD void Reference(char* begin, char* end) {
 }
 
 #if RAYOMD_PRINT_SSE2
-unsigned LowestBit(uint64_t bits) {
-#if defined(__GNUC__) || defined(__clang__)
-    return static_cast<unsigned>(__builtin_ctzll(bits));   // never negative: no sign extension
-#else
-    unsigned bit = 0;
-    while ((bits >> bit & 1) == 0) bit++;
-    return bit;
-#endif
-}
-
 // The stops of 64 bytes, a bit each, and a window's bytes against a memo entry's (Simd::Stops,
 // Simd::Same, Simd::Apply), in SSE2 and in AVX2.
 struct Sse2 {
@@ -331,7 +321,7 @@ bool UseAvx2() {
 template <class Simd>
 RAYOMD_HOT_INLINE void Scan(char* const begin, char* const end, OperandMemo& memo) {
     char* const stop = end - 64;            // the last step's bytes
-    char* const keyed = begin + kWindow - 1;   // an operator ending here or after has a key
+    char* const keyed = begin + kWindow;    // from here an operator's window and the byte before it are read
     char* block = begin;                    // the stops' bits are of the 64 bytes from here
     uint64_t bits = Simd::Stops(block);
     const auto next = [&]() RAYOMD_HOT_LAMBDA -> char* {
@@ -346,7 +336,7 @@ RAYOMD_HOT_INLINE void Scan(char* const begin, char* const end, OperandMemo& mem
                 bits = Simd::Stops(block) & (~uint64_t(0) << (from - stop));
             }
         }
-        char* const at = block + LowestBit(bits);
+        char* const at = block + RayoMd::Text::Detail::LowestBit64(bits);
         bits &= bits - 1;
         return at;
     };
