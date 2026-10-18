@@ -53,7 +53,11 @@ void AppendPendingHeading(std::vector<Block>& blocks, int level, std::string_vie
 // as blocks of its own, its references resolved with the link definitions of that level.
 void DefineFootnotes(size_t first, const ReferenceDefinitions& definitions, int depth, FootnoteParse& notes);
 
-// ParseMarkdown with footnotes.
+// ParseMarkdown with footnotes: in a build that embeds notes (embeds.h), ParseWithEmbeds.
 std::vector<Block> ParseWithFootnotes(const std::string& markdown, Footnotes& footnotes);
+// The same; with `embeds`, the blocks of the notes that entry embeds spliced in (SpliceEmbeds)
+// before the notes are numbered.
+struct EmbedEntry;
+std::vector<Block> ParseWithFootnotes(const std::string& markdown, Footnotes& footnotes, const EmbedEntry* embeds);
 
 } // namespace TinyPdf::Internal

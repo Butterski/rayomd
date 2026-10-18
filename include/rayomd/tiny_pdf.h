@@ -194,6 +194,14 @@ struct PdfOptions {
     // no entry of their own. Meaningful only when the build succeeds. BuildBookPdf leaves it alone.
     // The PDF bytes are the same with or without it.
     std::vector<SourceBlock>* sourceMap = nullptr;
+    // Obsidian's dialect: the vault (UTF-8), the folder the notes a document embeds or links to
+    // must lie in and are found in by name; also local images then. Empty: the document's folder.
+    std::string vaultRoot;
+    // Obsidian's dialect: "![[note]]" alone on a line stays a link to the note instead of printing
+    // it (as without sourcePath).
+    bool embedsAsLinks = false;
+    // BuildBookPdf: each file ends with "Linked from:" and links to the files that link to it.
+    bool backlinks = false;
 };
 
 // Legacy error reporting is retained for the bool-returning compatibility

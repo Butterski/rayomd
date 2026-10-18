@@ -283,6 +283,10 @@ struct CliExportOptions {
     int pageBreakBeforeLevel = 0;
     int numberHeadings = 0;
     TinyPdf::MarkdownDialect dialect = TinyPdf::MarkdownDialect::GitHub;
+    std::string vaultRoot;       // --vault=DIR
+    bool embedsAsLinks = false;  // --embeds=link
+    bool backlinks = false;      // --backlinks
+    int followLinks = 0;         // --follow-links[=N]: 0 for none
     TinyPdf::PdfTheme theme;
     unsigned workers = 0;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
@@ -340,6 +344,28 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value.rfind("--dialect=", 0) == 0) {
             error = "--dialect must be github or obsidian";
             return false;
+        }
+        else if (value.rfind("--vault=", 0) == 0) {
+            options.vaultRoot = argv[i] + 8;
+            if (options.vaultRoot.empty()) {
+                error = "--vault needs a folder";
+                return false;
+            }
+        }
+        else if (value == "--embeds=link") options.embedsAsLinks = true;
+        else if (value == "--embeds=content") options.embedsAsLinks = false;
+        else if (value.rfind("--embeds=", 0) == 0) {
+            error = "--embeds must be link or content";
+            return false;
+        }
+        else if (value == "--backlinks") options.backlinks = true;
+        else if (value == "--follow-links") options.followLinks = 1;
+        else if (value.rfind("--follow-links=", 0) == 0) {
+            if (value.size() != 16 || value[15] < '1' || value[15] > '6') {
+                error = "--follow-links must be 1 to 6";
+                return false;
+            }
+            options.followLinks = value[15] - '0';
         }
         else if (value.rfind("--theme=", 0) == 0) {
             const fs::path themePath(argv[i] + 8);
@@ -458,6 +484,9 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     pdfOptions.pageBreakBeforeLevel = options.pageBreakBeforeLevel;
     pdfOptions.numberHeadings = options.numberHeadings;
     pdfOptions.dialect = options.dialect;
+    pdfOptions.vaultRoot = options.vaultRoot;
+    pdfOptions.embedsAsLinks = options.embedsAsLinks;
+    pdfOptions.backlinks = options.backlinks;
     pdfOptions.theme = options.theme;
     return pdfOptions;
 }
@@ -518,14 +547,8 @@ int BuildNativePdfFile(const fs::path& inputPath, const fs::path& outputPath, co
     return result;
 }
 
-// --book: the files of a SUMMARY.md, a folder or the command line (RayoMd::Book::ReadBook) as one PDF.
-int RunBookExport(const std::vector<fs::path>& inputs, const fs::path& outputPath, const CliExportOptions& options) {
-    TinyPdf::Book book;
-    std::string error;
-    if (!RayoMd::Book::ReadBook(inputs, book, error)) {
-        PrintError("Error: " + error);
-        return 3;
-    }
+// A book (--book, --follow-links) as one PDF.
+int WriteBookPdf(const TinyPdf::Book& book, const fs::path& outputPath, const CliExportOptions& options) {
     std::string pdf;
     const TinyPdf::BuildResult result = TinyPdf::BuildBookPdf(book, PdfOptionsFor(options, std::string()), pdf);
     if (!result) {
@@ -538,6 +561,34 @@ int RunBookExport(const std::vector<fs::path>& inputs, const fs::path& outputPat
         return 12;
     }
     return 0;
+}
+
+// --book: the files of a SUMMARY.md, a folder or the command line (RayoMd::Book::ReadBook) as one PDF.
+int RunBookExport(const std::vector<fs::path>& inputs, const fs::path& outputPath, const CliExportOptions& options) {
+    TinyPdf::Book book;
+    std::string error;
+    if (!RayoMd::Book::ReadBook(inputs, book, error)) {
+        PrintError("Error: " + error);
+        return 3;
+    }
+    return WriteBookPdf(book, outputPath, options);
+}
+
+// --export with --follow-links: the note and the notes it links to (RayoMd::Book::ReadLinkedBook)
+// as one PDF; past the book's limits a warning says how many notes it left out.
+int RunLinkedExport(const fs::path& inputPath, const fs::path& outputPath, const CliExportOptions& options) {
+    TinyPdf::Book book;
+    std::string error;
+    size_t leftOut = 0;
+    if (!RayoMd::Book::ReadLinkedBook(inputPath, PdfOptionsFor(options, std::string()), options.followLinks, book, leftOut, error)) {
+        PrintError("Error: " + error);
+        return 3;
+    }
+    if (leftOut != 0) {
+        Print(stderr, "Warning: " + std::to_string(leftOut) + " linked note(s) left out: a book of linked notes holds at most " +
+            std::to_string(RayoMd::Book::kMaxLinkedNotes) + " notes of 128 MiB in all.\n");
+    }
+    return WriteBookPdf(book, outputPath, options);
 }
 
 int RunStdinExport(const fs::path& outputPath, const CliExportOptions& options) {
@@ -914,8 +965,11 @@ void PrintUsage() {
         "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
         "  --toc-depth=N (heading levels it lists, 1-6; default 3), --number-headings[=N] (1, 1.1, 1.1.1\n"
         "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks),\n"
-        "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]] and\n"
-        "  ![[images]]; default github).\n"
+        "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]],\n"
+        "  ![[images]], ^block ids left out, and ![[note]] alone on a line printing that note, its\n"
+        "  #heading section or #^id block, read from the vault; default github), --vault=DIR (the\n"
+        "  folder embedded and linked notes must lie in and are found in by name, local images too;\n"
+        "  default the input's folder), --embeds=link (embedded notes stay links; default content).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4),\n"
         "  --page-break-before=hN (a new page before each heading of level 1 to N; h1 for chapters).\n"
@@ -924,8 +978,13 @@ void PrintUsage() {
         "  line per document; - for standard output).\n"
         "Books: --book makes one PDF of the files a SUMMARY.md lists (mdBook, GitBook), of a folder's\n"
         "  Markdown files by name with README.md first, or of the files given: each from a new page, the\n"
-        "  links between them kept, one outline, and with --toc one table of contents for all of them.\n");
+        "  links between them kept, one outline, and with --toc one table of contents for all of them.\n"
+        "  --follow-links[=N] (with --export) makes a book of the note and the notes it links to, N links\n"
+        "  deep (1-6, default 1; at most 1000 notes); --backlinks ends each file of a book with links to\n"
+        "  the files that link to it.\n");
 }
+
+constexpr const char* kFollowLinksExportOnly = "--follow-links applies to --export only.";
 
 int PrintArgumentError(const std::string& message) {
     Print(stderr, "Error: " + message + "\n\n");
@@ -972,6 +1031,7 @@ int main(int argc, char** argv) {
         if (argc < 3) return PrintArgumentError("--stdin requires <output.pdf>.");
         std::string error;
         if (!ParseExportOptions(argc, argv, 3, options, error)) return PrintArgumentError(error);
+        if (options.followLinks != 0) return PrintArgumentError(kFollowLinksExportOnly);
         fs::path outputPath(argv[2]);
         if (outputPath.extension() != ".pdf") outputPath += ".pdf";
         ExitOneShot(RunStdinExport(outputPath, options));
@@ -981,6 +1041,7 @@ int main(int argc, char** argv) {
         if (argc < 3) return PrintArgumentError("--stdin-batch requires <output-folder>.");
         std::string error;
         if (!ParseExportOptions(argc, argv, 3, options, error)) return PrintArgumentError(error);
+        if (options.followLinks != 0) return PrintArgumentError(kFollowLinksExportOnly);
         return RunStdinBatchExport(argv[2], options);
     }
 
@@ -988,6 +1049,7 @@ int main(int argc, char** argv) {
         if (argc < 3) return PrintArgumentError("--serve requires <output-folder>.");
         std::string error;
         if (!ParseExportOptions(argc, argv, 3, options, error)) return PrintArgumentError(error);
+        if (options.followLinks != 0) return PrintArgumentError(kFollowLinksExportOnly);
         return RunServeExport(argv[2], options);
     }
 
@@ -995,6 +1057,7 @@ int main(int argc, char** argv) {
         if (argc < 5) return PrintArgumentError("--bench requires <input.md> <output-folder> <iterations>.");
         std::string error;
         if (!ParseExportOptions(argc, argv, 5, options, error)) return PrintArgumentError(error);
+        if (options.followLinks != 0) return PrintArgumentError(kFollowLinksExportOnly);
         return RunNativeBench(argv[2], argv[3], std::atoi(argv[4]), options);
     }
 
@@ -1002,6 +1065,7 @@ int main(int argc, char** argv) {
         if (argc < 4) return PrintArgumentError("--batch requires <input-folder> <output-folder>.");
         std::string error;
         if (!ParseExportOptions(argc, argv, 4, options, error)) return PrintArgumentError(error);
+        if (options.followLinks != 0) return PrintArgumentError(kFollowLinksExportOnly);
         return RunBatchExport(argv[2], argv[3], options);
     }
 
@@ -1011,6 +1075,11 @@ int main(int argc, char** argv) {
         if (!ParseExportOptions(argc, argv, 4, options, error)) return PrintArgumentError(error);
         fs::path outputPath(argv[3]);
         if (outputPath.extension() != ".pdf") outputPath += ".pdf";
+        if (options.followLinks != 0) {
+            // A book: no embedded source, which a book drops with the source map.
+            if (options.embedSource) return PrintArgumentError("--embed-source does not apply to --follow-links: a book is not reversible.");
+            return RunLinkedExport(argv[2], outputPath, options);
+        }
         std::string pdfBuffer;
         pdfBuffer.reserve(1024 * 1024);
         ExitOneShot(BuildNativePdfFile(argv[2], outputPath, options, pdfBuffer));
@@ -1025,6 +1094,7 @@ int main(int argc, char** argv) {
         }
         std::string error;
         if (!ParseExportOptions(argc, argv, output + 1, options, error)) return PrintArgumentError(error);
+        if (options.followLinks != 0) return PrintArgumentError(kFollowLinksExportOnly);
         if (options.embedSource) return PrintArgumentError("--embed-source does not apply to --book: a book is not reversible.");
         return RunBookExport(std::vector<fs::path>(argv + 2, argv + output), argv[output], options);
     }

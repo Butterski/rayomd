@@ -128,7 +128,30 @@ any Markdown link, embeds Markdown images
 or a sized `<img>`. Callouts are the parser's (`TakeCallout`): `Block::alert` 1 to 7 picks the bar
 colour, `Block::text` holds the title, which the renderers draw (`RenderCallout`); GitHub alerts
 keep an empty `text`. In a book `BookTargets::FileByName` resolves a link by the note's name. The
-GitHub dialect never runs any of it: its bytes stay as they are.
+GitHub dialect never runs any of it: its bytes stay as they are. The pass also leaves out Obsidian's
+block ids (` ^id` ending a line, `^id` alone): `FindSyntaxPair` takes a `^` after a blank or a line
+start as a pair, so a note without one keeps the fast path.
+Note embeds (`embeds.cpp`, `vault.cpp`, both `-Os`): under the dialect, with a `sourcePath` and
+without `PdfOptions::embedsAsLinks` (`--embeds=link`), a line `![[note]]` from the first column at
+the top level prints the note (`#heading` its section, `#^id` its block). `BuildPdf` tests
+`MayEmbedNotes` (the dialect, then one `find("![[")`) and only then `BuildWithEmbeds` (cold):
+`ResolveEmbeds` reads the notes through a `Vault` (root `PdfOptions::vaultRoot`, else the note's
+folder, canonical; relative to the note, to the root, then by name in an index built once, at
+most 20,000 entries and 32 levels; on Windows no reparse point below the root,
+`DirectPathHasLink`), at most 1,000 embeds, 8 deep, 32 MiB, cycles by path and file identity,
+each entry's footnote labels suffixed `~eN`; the fonts are chosen on all of the text
+(`EmbedSet::all`, also for `GuessFallbackFont`). The parse does not change for any other
+document: `ParseWithFootnotes` (footnotes.cpp) hands a build in an `EmbedScope` to
+`ParseWithEmbeds`, which turns the embed lines into `<!---->` (a comment ends the block before
+it and gives none) and splices each entry's blocks after the parse at the first block past its
+line, stamped with that line (`SpliceEmbeds`). A test in `ParseMarkdownImpl`, or a field in
+`ImageSource`, moved what GCC inlined there (+0.4 % instructions on notes.md): images of an entry
+take its folder from a side table by address (`EmbedImageBase`), which `LocalImagePolicy`
+resolves inside the root; with a vault, local images may lie anywhere in it.
+Books of linked notes (`--follow-links[=N]`, `RayoMd::Book::ReadLinkedBook` in `book.cpp`):
+breadth first through the same `Vault`, at most 1,000 notes and `kMaxBookBytes`;
+`PdfOptions::backlinks` makes `BuildBookPdf` append "Linked from:" paragraphs (`AddBacklinks`),
+whose links resolve as any book link (`BookFileOfLink`, shared with `BookTargets`).
 Books (`--book`, `BuildBookPdf`) make one PDF of the files a SUMMARY.md lists (mdBook,
 GitBook), of a folder, or of the files given. Each file is parsed on its own (its link
 definitions, footnotes and heading anchors are its own) and begins on a new page, so the
@@ -347,9 +370,23 @@ Important image/link details:
   build runs from `src/hot.ld`'s group, were aligned to 16 bytes and moved every hot function after
   them 32 bytes: essay.md 2.3 % slower at equal instructions. Checked by `tests/dialect_tests.inc`.
 
+- `src/core/vault.h` and `src/core/vault.cpp`
+  The notes a document embeds or links to: a root folder (`Vault`), resolution relative to the
+  note, the root, then by name (an index built once, bounded), confinement by resolved path, and
+  on Windows `DirectPathHasLink` (shared with `tiny_pdf.cpp`'s direct image path); also
+  `ResolvedPath` and `IsWithinRoot`, which `book.cpp` uses. Built at `-Os`.
+
+- `src/core/embeds.h` and `src/core/embeds.cpp`
+  Obsidian's note embeds: reading them (`ResolveEmbeds`, bounded in count, depth, bytes read and
+  scanned, lookups), the build's `EmbedScope`, and splicing their blocks into the parse
+  (`ParseWithEmbeds`, `SpliceEmbeds`). Built at `-Os`; checked by `tests/embeds_tests.inc`
+  (core test exits 130, embeds, and 131, linked notes and backlinks).
+
 - `src/core/book.h` and `src/core/book.cpp`
   Books: reading `--book`'s inputs for both command lines (SUMMARY.md as mdBook and
-  GitBook read it, a folder, files) and parsing a book's files for `BuildBookPdf`. Built at
+  GitBook read it, a folder, files), a note and its linked notes for `--follow-links`
+  (`ReadLinkedBook`), and parsing a book's files for `BuildBookPdf` (with `--backlinks`'
+  paragraphs, `AddBacklinks`). Built at
   `-Os`, outside `tiny_pdf.cpp` and its inlining budget. A book's files total at most 128 MiB,
   what one document may have (`kMaxBookBytes`), and a SUMMARY.md that lists a file again under
   any name (a link, letter case, `x/../`) is refused: files are told apart by their identity

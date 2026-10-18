@@ -19,6 +19,8 @@
 #include "../src/core/highlight.h"
 #include "../src/core/contents.h"
 #include "../src/core/dialect.h"
+#include "../src/core/embeds.h"
+#include "../src/core/vault.h"
 #include "../src/core/book.h"
 #include "../src/core/png_filter.h"
 #include "../src/core/cff.h"
@@ -969,6 +971,7 @@ size_t PeakRssBytes() {
 #include "html_tests.inc"
 #include "hardening_tests.inc"
 #include "dialect_tests.inc"
+#include "embeds_tests.inc"
 #include "mermaid_tests.inc"
 
 // Heights of the filled rectangles drawn with the given fill colour ("r g b").
@@ -3913,6 +3916,8 @@ int main() {
     if (!CheckHeadingNumbers()) return 125;
     if (!dialect_tests::CheckObsidian()) return 126;
     if (!mermaid_tests::CheckMermaid()) return 127;
+    if (!embeds_tests::CheckEmbeds()) return 130;
+    if (!embeds_tests::CheckLinkedNotes()) return 131;
 #ifdef _WIN32
     if (!CheckDirectImageLinks()) return 123;
 #endif

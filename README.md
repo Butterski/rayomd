@@ -304,17 +304,28 @@ with their own titles, folded or not (both print unfolded) and nested; `==highli
 `%%comments%%`, also over several lines, left out; `[[wiki links]]` to a note (`note.md`), a
 heading in it or in this note; and `![[embedded images]]`, sized with `|300` or `|300x200` when
 the image has a line of its own. In a book (`--book`), a wiki link finds its note by name
-wherever it is. Embedded notes are linked, not copied in.
+wherever it is. Block ids (`^id` at a line's end) are left out.
+
+A note embedded on a line of its own, `![[Note]]`, is printed in its place: the whole note
+(without its front matter), `![[Note#Heading]]` that heading's section, `![[Note#^id]]` the
+paragraph or list item that block id marks. Embedded notes may embed others, 8 deep; their
+footnotes and images (from their own folder) come with them, their headings join the table of
+contents. A note is found next to the embedding note, then from the vault's top, then by name
+anywhere in it; `--vault=DIR` sets the vault (default: the note's folder), and nothing outside it
+is read. A cycle, a missing note, the 1,001st embed or past 32 MiB of embedded text stay links,
+as do embeds in lists and quotes, and every embed with `--embeds=link` or from stdin.
 
 ```markdown
 > [!tip]- Before you start
 > Read [[Setup#Requirements|the requirements]] and ==back up== the vault. %%draft%%
 
 ![[diagram.png|300]]
+
+![[Setup#Requirements]]
 ```
 
 ```sh
-rayomd --export note.md note.pdf --dialect=obsidian
+rayomd --export note.md note.pdf --dialect=obsidian --vault="$HOME/Notes"
 ```
 
 ### Code highlighting
@@ -474,8 +485,15 @@ files may total 128 MiB, as much as one document, and a `SUMMARY.md` lists each 
 or a book folder holds must lie in that folder, also once links and `..` are resolved, so a
 book from elsewhere cannot put your other files into its PDF.
 
+`--follow-links[=N]` makes a book of a note and the notes it links to, N links deep (1 to 6,
+default 1): breadth first, in the order of the links, each note once, at most 1,000 notes (the
+command says how many it left out). Relative `.md` links count, and with `--dialect=obsidian`
+wiki links and embeds, found as embeds are, inside the vault. `--backlinks` ends each file of
+any book with "Linked from:" and links to the files that link to it.
+
 ```sh
 rayomd --book docs/src/SUMMARY.md manual.pdf --toc --page-numbers
+rayomd --export Project.md project.pdf --dialect=obsidian --follow-links=2 --backlinks
 ```
 
 ### Batch conversion

@@ -2,19 +2,12 @@
 
 #include "book.h"
 
+#include "dialect.h"
+#include "footnotes.h"
 #include "inline_markdown.h"
 #include "markdown_parser.h"
+#include "vault.h"
 #include "../common/file_io.h"
-
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
 
 #include <algorithm>
 #include <cctype>
@@ -32,6 +25,8 @@ using RayoMd::File::PathFromUtf8;
 using RayoMd::File::PathToUtf8;
 using TinyPdf::Internal::Block;
 using TinyPdf::Internal::BlockType;
+using TinyPdf::Internal::IsWithinRoot;
+using TinyPdf::Internal::ResolvedPath;
 
 std::string Lower(std::string_view text) {
     std::string lower(text);
@@ -105,6 +100,61 @@ void AddLinks(const std::string& text, int depth, bool firstOnly, Summary& summa
     }
 }
 
+// The link targets of inline text, in order, each link once (its spans share its target).
+void AddUrls(const std::string& text, std::vector<std::string>& urls) {
+    if (text.find('(') == std::string::npos && text.find('<') == std::string::npos && text.find(':') == std::string::npos) return;
+    const std::vector<TinyPdf::Internal::InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(text, false);
+    std::string_view previous;
+    for (const TinyPdf::Internal::InlineSpan& span : spans) {
+        const std::string_view url = span.url;
+        if (url.empty() || url == previous) continue;
+        previous = url;
+        urls.emplace_back(url);
+    }
+}
+
+// The link targets of blocks: those of paragraphs, list items, quotes and tables without formulas
+// (whose cells are inline Markdown), and of linked images.
+void AddBlockUrls(const std::vector<Block>& blocks, std::vector<std::string>& urls) {
+    for (const Block& block : blocks) {
+        switch (block.type) {
+        case BlockType::Paragraph:
+        case BlockType::Bullet:
+        case BlockType::Numbered:
+        case BlockType::Quote:
+            AddUrls(block.text, urls);
+            break;
+        case BlockType::Table:
+            if (block.hasMath) break;
+            for (const std::vector<std::string>& row : block.rows) {
+                for (const std::string& cell : row) AddUrls(cell, urls);
+            }
+            break;
+        case BlockType::Image:
+            if (block.image == nullptr) break;
+            if (!block.image->link.empty()) urls.push_back(block.image->link);
+            for (const TinyPdf::Internal::ImageSource& image : block.image->row) {
+                if (!image.link.empty()) urls.push_back(image.link);
+            }
+            break;
+        default:
+            break;
+        }
+        AddBlockUrls(block.children, urls);
+    }
+}
+
+// The link targets of a document of the thread's dialect (its wiki links are links then), its
+// footnotes' too, in reading order.
+std::vector<std::string> LinksOf(const std::string& markdown) {
+    TinyPdf::Internal::Footnotes footnotes;
+    const std::vector<Block> blocks = TinyPdf::Internal::ParseMarkdown(markdown, &footnotes);
+    std::vector<std::string> urls;
+    AddBlockUrls(blocks, urls);
+    AddBlockUrls(footnotes.notes, urls);
+    return urls;
+}
+
 // List items, each the file of its first link, and the items nested in them a level deeper.
 void AddItems(const std::vector<Block>& blocks, int depth, Summary& summary) {
     for (const Block& block : blocks) {
@@ -120,52 +170,6 @@ constexpr size_t kMaxFileBytes = 128u * 1024u * 1024u;
 bool ReadFile(const fs::path& path, std::string& text) {
     std::error_code ec;
     return fs::is_regular_file(path, ec) && RayoMd::File::ReadAll(path, kMaxFileBytes, text);
-}
-
-// The path that `path` names with its links, junctions, "." and ".." resolved; empty when it
-// names nothing. On Windows the file system's own answer (GetFinalPathNameByHandleW): the
-// standard library there resolves no link.
-fs::path Resolved(const fs::path& path) {
-#ifdef _WIN32
-    const HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return fs::path();
-    std::wstring name(MAX_PATH, L'\0');
-    DWORD length = GetFinalPathNameByHandleW(handle, name.data(), (DWORD)name.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    if (length >= name.size()) {
-        name.resize(length + 1);
-        length = GetFinalPathNameByHandleW(handle, name.data(), (DWORD)name.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    }
-    CloseHandle(handle);
-    if (length == 0 || length >= name.size()) return fs::path();
-    name.resize(length);
-    return fs::path(name);
-#else
-    std::error_code ec;
-    fs::path canonical = fs::canonical(path, ec);
-    return ec ? fs::path() : canonical;
-#endif
-}
-
-// Whether the resolved path `file` lies in the resolved directory `root`, component by component
-// (so "/a/bc" is not in "/a/b"); on Windows with ASCII letters folded.
-bool IsWithin(const fs::path& file, const fs::path& root) {
-    auto at = file.begin();
-    for (const fs::path& part : root) {
-        if (at == file.end()) return false;
-#ifdef _WIN32
-        const std::wstring& a = at->native();
-        const std::wstring& b = part.native();
-        const auto fold = [](wchar_t c) { return c >= L'A' && c <= L'Z' ? (wchar_t)(c - L'A' + L'a') : c; };
-        if (a.size() != b.size() || !std::equal(a.begin(), a.end(), b.begin(), [&](wchar_t x, wchar_t y) { return fold(x) == fold(y); })) {
-            return false;
-        }
-#else
-        if (at->native() != part.native()) return false;
-#endif
-        ++at;
-    }
-    return at != file.end();
 }
 
 // What a book's files may have in all: what one document may have, so that a book takes no more
@@ -189,9 +193,9 @@ public:
         std::error_code ec;
         fs::path file = path;
         if (!root.empty()) {
-            file = Resolved(path);
+            file = ResolvedPath(path);
             if (file.empty()) return Result::Unreadable;
-            if (!IsWithin(file, root)) return Result::Outside;
+            if (!IsWithinRoot(file, root)) return Result::Outside;
         }
         RayoMd::File::FileIdentity identity;
         const bool whole = fs::is_regular_file(file, ec) &&
@@ -308,7 +312,7 @@ bool ReadSummaryBook(const fs::path& summaryPath, TinyPdf::Book& book, std::stri
     if (book.title.empty()) book.title = summary.title;
     bool listsFile = false;
     // The files must lie in SUMMARY.md's folder (for mdBook, its src/).
-    fs::path root = Resolved(directory);
+    fs::path root = ResolvedPath(directory);
     if (root.empty()) {
         error = "could not read the folder of " + PathToUtf8(summaryPath);
         return false;
@@ -396,7 +400,7 @@ bool ReadBook(const std::vector<fs::path>& inputs, TinyPdf::Book& book, std::str
                 return false;
             }
             book.directory = PathToUtf8(inputs[0]);
-            root = Resolved(inputs[0]);
+            root = ResolvedPath(inputs[0]);
             if (root.empty()) {
                 error = "could not read the folder " + PathToUtf8(inputs[0]);
                 return false;
@@ -428,9 +432,82 @@ bool ReadBook(const std::vector<fs::path>& inputs, TinyPdf::Book& book, std::str
     return true;
 }
 
+bool ReadLinkedBook(const fs::path& note, const TinyPdf::PdfOptions& options, int depth, TinyPdf::Book& book,
+    size_t& leftOut, std::string& error) {
+    book = TinyPdf::Book();
+    leftOut = 0;
+    const TinyPdf::Internal::DialectScope dialect(options.dialect);
+    const bool byName = options.dialect == TinyPdf::MarkdownDialect::Obsidian;
+    TinyPdf::Internal::Vault vault(options.vaultRoot, PathToUtf8(note));
+    const fs::path first = ResolvedPath(note);
+    if (first.empty()) {
+        error = "could not read input Markdown file: " + PathToUtf8(note);
+        return false;
+    }
+    if (!vault.Valid()) {
+        error = "could not read the folder " + (options.vaultRoot.empty() ? PathToUtf8(note.parent_path()) : options.vaultRoot);
+        return false;
+    }
+    book.directory = PathToUtf8(vault.Root());
+    // The notes found, each once by its resolved path, in the order the book takes them.
+    struct Found {
+        fs::path path;
+        int depth;
+    };
+    std::vector<Found> found{ { first, 0 } };
+    std::set<std::string> known{ PathToUtf8(first) };
+    std::set<RayoMd::File::FileIdentity> read;
+    size_t left = kMaxBookBytes;
+    for (size_t at = 0; at < found.size(); at++) {
+        if (options.cancel != nullptr && options.cancel->load(std::memory_order_relaxed)) {
+            error = "cancelled";
+            return false;
+        }
+        if (book.chapters.size() == kMaxLinkedNotes) {
+            leftOut = found.size() - at;
+            break;
+        }
+        TinyPdf::BookChapter chapter;
+        RayoMd::File::FileIdentity identity;
+        const bool whole = TinyPdf::Internal::Vault::Read(found[at].path, std::min(kMaxFileBytes, left), chapter.markdown, identity);
+        if (!whole && identity.opened && identity.size > left && identity.size <= kMaxFileBytes) {
+            leftOut = found.size() - at;
+            break;
+        }
+        if (!whole || !read.insert(identity).second) {
+            // A note that cannot be read, or one read before under another name, adds nothing.
+            if (at == 0) {
+                error = "could not read input Markdown file: " + PathToUtf8(note);
+                return false;
+            }
+            continue;
+        }
+        left -= chapter.markdown.size();
+        chapter.path = PathToUtf8(found[at].path);
+        if (at > 0) chapter.title = PathToUtf8(found[at].path.stem());
+        if (found[at].depth < depth) {
+            const fs::path folder = found[at].path.parent_path();
+            for (const std::string& url : LinksOf(chapter.markdown)) {
+                if (url.empty() || url[0] == '#' || HasScheme(url)) continue;
+                const std::string target = Decoded(std::string_view(url).substr(0, url.find('#')));
+                const std::string extension = Lower(PathToUtf8(PathFromUtf8(target).extension()));
+                if (extension != ".md" && extension != ".markdown") continue;
+                fs::path path = vault.Find(folder, target, byName);
+                if (!path.empty() && known.insert(PathToUtf8(path)).second) found.push_back({ std::move(path), found[at].depth + 1 });
+            }
+        }
+        book.chapters.push_back(std::move(chapter));
+    }
+    return true;
+}
+
 } // namespace RayoMd::Book
 
 namespace TinyPdf::Internal {
+
+namespace fs = std::filesystem;
+using RayoMd::File::PathFromUtf8;
+using RayoMd::File::PathToUtf8;
 
 BookFiles::BookFiles() = default;
 BookFiles::~BookFiles() = default;
@@ -464,6 +541,94 @@ void ParseBookFiles(const std::vector<BookChapter>& chapters, const std::vector<
         listed[index] = { chapter.part ? nullptr : &files.blocks[index], &titles[index], std::max(0, chapter.depth) };
     }
     files.contents = BookContents(listed, options.tocDepth);
+}
+
+size_t BookFileOfLink(const std::vector<BookChapter>& chapters, const std::vector<std::string>& paths, size_t from,
+    std::string_view link) {
+    constexpr size_t kNone = std::string::npos;
+    if (link.empty() || link[0] == '/' || link[0] == '\\' || RayoMd::Book::HasScheme(link)) return kNone;
+    const std::string path = RayoMd::Book::Decoded(link);
+    const fs::path named = (PathFromUtf8(chapters[from].path).parent_path() / PathFromUtf8(path)).lexically_normal();
+    // A book has tens or hundreds of files, so they are looked through in turn.
+    for (const char* index : { "", "README.md", "index.md" }) {
+        const std::string key = PathToUtf8(*index == '\0' ? named : (named / index).lexically_normal());
+        for (size_t file = 0; file < paths.size(); file++) {
+            if (!paths[file].empty() && paths[file] == key) return file;
+        }
+    }
+    if (!ObsidianDialect()) return kNone;
+    // A wiki link names a note by its name, or the end of its path: the first file whose path
+    // ends in it, in any case.
+    const std::string name = PathToUtf8(PathFromUtf8(path).lexically_normal());
+    for (size_t file = 0; file < paths.size(); file++) {
+        const std::string& candidate = paths[file];
+        if (name.empty() || candidate.size() < name.size()) continue;
+        const size_t at = candidate.size() - name.size();
+        if (at > 0 && candidate[at - 1] != '/' && candidate[at - 1] != '\\') continue;
+        size_t index = 0;
+        while (index < name.size() && std::tolower((unsigned char)candidate[at + index]) == std::tolower((unsigned char)name[index])) index++;
+        if (index == name.size()) return file;
+    }
+    return kNone;
+}
+
+void AddBacklinks(const Book& book, std::vector<std::string>& texts) {
+    const std::vector<BookChapter>& chapters = book.chapters;
+    std::vector<std::string> paths(chapters.size());
+    for (size_t index = 0; index < chapters.size(); index++) {
+        if (!chapters[index].part) paths[index] = PathToUtf8(PathFromUtf8(chapters[index].path).lexically_normal());
+    }
+    // The files linking to each, in the book's order.
+    std::vector<std::vector<size_t>> linking(chapters.size());
+    for (size_t from = 0; from < chapters.size(); from++) {
+        if (chapters[from].part) continue;
+        for (const std::string& url : RayoMd::Book::LinksOf(texts[from])) {
+            if (url.empty() || url[0] == '#') continue;
+            const size_t to = BookFileOfLink(chapters, paths, from, std::string_view(url).substr(0, url.find('#')));
+            if (to == std::string::npos || to == from || (!linking[to].empty() && linking[to].back() == from)) continue;
+            linking[to].push_back(from);
+        }
+    }
+    for (size_t to = 0; to < chapters.size(); to++) {
+        if (linking[to].empty()) continue;
+        const fs::path folder = PathFromUtf8(paths[to]).parent_path();
+        std::string paragraph = "\n\nLinked from: ";
+        bool first = true;
+        for (const size_t from : linking[to]) {
+            const fs::path relative = PathFromUtf8(paths[from]).lexically_relative(folder);
+            if (relative.empty()) continue;
+            if (!first) paragraph += ", ";
+            first = false;
+            // The name with every ASCII punctuation character escaped: text, whatever it holds.
+            const std::string& title = chapters[from].title;
+            const std::string name = title.empty() ? PathToUtf8(PathFromUtf8(paths[from]).stem()) : title;
+            paragraph += '[';
+            for (const char ch : name) {
+                if (std::ispunct((unsigned char)ch)) paragraph += '\\';
+                paragraph += ch;
+            }
+            // The path percent-encoded but for unreserved bytes and '/': no syntax of Markdown or
+            // Obsidian's dialect in it, and BookFileOfLink decodes it.
+            paragraph += "](<";
+            std::string target = PathToUtf8(relative);
+#ifdef _WIN32
+            std::replace(target.begin(), target.end(), '\\', '/');
+#endif
+            for (const char ch : target) {
+                const unsigned char byte = (unsigned char)ch;
+                if (byte >= 0x80 || std::isalnum(byte) || ch == '-' || ch == '.' || ch == '_' || ch == '~' || ch == '/') {
+                    paragraph += ch;
+                } else {
+                    static const char kHex[] = "0123456789ABCDEF";
+                    paragraph += '%';
+                    paragraph += kHex[byte >> 4];
+                    paragraph += kHex[byte & 15];
+                }
+            }
+            paragraph += ">)";
+        }
+        if (!first) texts[to] += paragraph + '\n';
+    }
 }
 
 } // namespace TinyPdf::Internal

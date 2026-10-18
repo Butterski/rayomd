@@ -62,6 +62,8 @@ struct Scratch {
         CopyFlat(seeds / "image", root);
         CopyFlat(seeds / "svg", root);
         CopyFlat(seeds / "font", root);
+        // Notes beside the document, which the buildpdf seeds' note embeds name.
+        CopyFlat(seeds / "notes", root);
         // tester.md's own image.
         std::error_code error;
         fs::create_directories(root / "docs" / "assets" / "branding", error);

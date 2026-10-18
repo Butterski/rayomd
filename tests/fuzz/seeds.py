@@ -523,6 +523,23 @@ graph TD
     a --
 ```
 """,
+    # Ends in "Z": Obsidian's dialect. Its embeds name the notes of NOTES, which the harness copies
+    # into the scratch folder that holds the document (fuzz_env.cpp).
+    "embeds.md": """# Embeds
+
+![[note-a]]
+
+Text before
+![[note-b#Part two]]
+![[note-b#^blk]]
+
+- item
+  ![[note-a]]
+
+![[note-cycle]]
+
+![[missing]] and [linked](note-a.md) and [[note-b]].
+Z""",
     # Ends in "Z" (0x5A): Obsidian's dialect, heading numbers 3 deep, a page before each h2 (fuzz_public.cpp).
     "obsidian.md": """---
 title: Vault
@@ -561,6 +578,15 @@ Inline ![[gray.jpg|20x10]] and ![[Other]] and `[[code]]` and $a==b$.
 Z""",
 }
 
+# Notes that embeds.md embeds (note embeds, embeds.h), copied into the buildpdf target's scratch
+# folder beside its document.
+NOTES = {
+    "note-a.md": "---\ntags: a\n---\n# Note A\n\nText[^1] with ![rgba](rgba.png).\n\n[^1]: A's note.\n",
+    "note-b.md": "# B\n\n## Part one\n\nOne.\n\n## Part two\n\nTwo ==marked==.\n\nBlock text ^blk\n\n# After\n",
+    "note-cycle.md": "Cycle\n\n![[note-cycle-2]]\n",
+    "note-cycle-2.md": "Back\n\n![[note-cycle]]\n\n![[doc]]\n",
+}
+
 OPTION_PREFIXES = [b"\x01\x00", b"\x00\x01", b"\x87\x10", b"\x25\x22", b"\x40\x04", b"\x13\x08", b"\xf2\x51", b"\x00\xc3"]
 
 
@@ -573,6 +599,8 @@ def make_text_seeds(images):
     write(SEEDS / "svg" / "image.svg", image_svg)
     for name, text in THEMES.items():
         write(SEEDS / "theme" / name, text)
+    for name, text in NOTES.items():
+        write(SEEDS / "notes" / name, text)
     for name, text in MARKDOWN.items():
         for index, prefix in enumerate(OPTION_PREFIXES[:4]):
             write(SEEDS / "buildpdf" / ("%s.%d" % (name, index)), prefix + text.encode("utf-8"))
