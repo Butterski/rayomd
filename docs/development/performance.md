@@ -621,6 +621,18 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
   `RunColors`, `CodeColor`, `CodeLineTile`, the paint functions' parameters), so no paint runs
   `strlen` on its colour or font name (-0.1 to -1.0 % instructions; `strlen` had 1.8 % of README's
   cycles).
+- Formulas (`MathFormula::Emit`, `math_layout.cpp`) write their operators through `OpWriter`, a
+  2 KB stack buffer appended when full and at the end, never piece by piece (`push_back` a glyph
+  byte, `operator+=` with a `strlen` a literal: 15.7 % of tester-noimg's instructions, now 7.9 %).
+  Its small members are always inlined even at `-Os` (-1.5 % more on tester-noimg, 850 bytes).
+- `WriteFixed2` opportunity (2026-10-19, not taken yet): one range test (`< 999999.5`
+  hundredths, the rest in a cold function with today's code), an `int` conversion instead of the
+  unsigned 64-bit one, `-` written always and the pointer advanced by the sign bit, and the
+  fraction written as one 4-byte store with its length computed: identical on 32 M test values
+  (every hundredth to ±20,000 and its neighbours, the half-way points, random bit patterns),
+  -10 % instructions and fewer cycles on 191,870 logged real inputs. A fully branch-free integer
+  part (four digits shifted by their leading zeros) took as many instructions as today's code and
+  more time.
 - A paragraph is asked once whether its text needs escaping in a PDF literal
   (`HasLiteralSpecial`, SSE2; the plain-text path reuses the classes
   `NeedsInlineParse` summed); its runs are then copied as they are.
