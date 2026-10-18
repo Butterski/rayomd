@@ -169,14 +169,20 @@ folder, canonical; relative to the note, to the root, then by name in an index b
 most 20,000 entries and 32 levels; on Windows no reparse point below the root,
 `DirectPathHasLink`), at most 1,000 embeds, 8 deep, 32 MiB, cycles by path and file identity,
 each entry's footnote labels suffixed `~eN`; the fonts are chosen on all of the text
-(`EmbedSet::all`, also for `GuessFallbackFont`). The parse does not change for any other
-document: `ParseWithFootnotes` (footnotes.cpp) hands a build in an `EmbedScope` to
-`ParseWithEmbeds`, which turns the embed lines into `<!---->` (a comment ends the block before
-it and gives none) and splices each entry's blocks after the parse at the first block past its
-line, stamped with that line (`SpliceEmbeds`). A test in `ParseMarkdownImpl`, or a field in
-`ImageSource`, moved what GCC inlined there (+0.4 % instructions on notes.md): images of an entry
-take its folder from a side table by address (`EmbedImageBase`), which `LocalImagePolicy`
-resolves inside the root; with a vault, local images may lie anywhere in it.
+(`EmbedSet::all`, also for `GuessFallbackFont`). Paths are UTF-8 strings throughout (normalized in
+place, `Normalize`, only when a name has a "." or empty component); on Linux a candidate is one
+`openat2` beneath the root's descriptor, and a note costs that, an `fstat`, one `read` and a
+`close`; each folder and name is looked up once a build, and the name index is one `readdir` walk
+(`Vault::Walk`) into a single string buffer, ordered by an 8-byte key of each name. The parse does
+not change for any other document: `ParseObsidian` takes the rewrite from `RewriteDocument`, which
+in a build in an `EmbedScope` first turns the document's embed lines into `<!---->` (a comment ends
+the block before it and gives none; the rewrite leaves it, so it turns no embed into a link), and
+`ParseWithFootnotes` (footnotes.cpp) hands that build to `ParseWithEmbeds`, which splices each
+entry's blocks after the parse at the first block past its line, stamped with that line
+(`SpliceEmbeds`). A test for embeds in `ParseObsidian` (+0.35 % instructions on notes.md) or
+`ParseMarkdownImpl`, or a field in `ImageSource`, moved what GCC inlined into `ParseMarkdownImpl`:
+images of an entry take its folder from a side table by address (`EmbedImageBase`), which
+`LocalImagePolicy` resolves inside the root; with a vault, local images may lie anywhere in it.
 Books of linked notes (`--follow-links[=N]`, `RayoMd::Book::ReadLinkedBook` in `book.cpp`):
 breadth first through the same `Vault`, at most 1,000 notes and `kMaxBookBytes`;
 `PdfOptions::backlinks` makes `BuildBookPdf` append "Linked from:" paragraphs (`AddBacklinks`),

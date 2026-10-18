@@ -12,8 +12,8 @@
 #include "markdown_parser.h"
 
 #include <cstdint>
-#include <filesystem>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <unordered_map>
 #include <vector>
@@ -38,10 +38,9 @@ struct EmbedEntry {
 
 // The notes a document embeds, all of them read before the build.
 struct EmbedSet {
-    std::vector<EmbedEntry> entries;              // [0]: the document
-    std::vector<std::filesystem::path> folders;   // the entries' notes' folders, resolved
-    std::filesystem::path root;                   // the vault, which local images must lie in
-    std::string all;                              // the document's text and every entry's, for the choice of fonts
+    std::vector<EmbedEntry> entries;     // [0]: the document
+    std::vector<std::string> folders;    // the document's folder, then the entries' notes' folders (UTF-8, resolved)
+    std::string all;                     // the document's text and every entry's, for the choice of fonts
     // The images of the entries' blocks in the build's parse, by address, and their folder plus
     // one: a side table, so that ImageSource and the parser stay as they are for every other
     // document (a field in ImageSource moved what GCC inlined into ParseMarkdownImpl).
@@ -81,14 +80,18 @@ private:
 const EmbedSet* CurrentEmbeds();
 
 // The folder an image's base (EmbedImageBase, 1 and up) names in this thread's build, null for none.
-const std::filesystem::path* EmbedFolder(uint32_t base);
+const std::string* EmbedFolder(uint32_t base);
 // 0 for an image of the document, which resolves from its folder; for one of a note it embeds,
 // that note's folder plus one.
 uint32_t EmbedImageBase(const ImageSource& image);
 
-// Whether this thread's build embeds notes (EmbedScope), and ParseWithFootnotes of its document
-// (already rewritten from Obsidian's dialect) then: its embed lines made empty HTML comments, so
-// each ends the block before it and gives none, and the notes' blocks spliced in there.
+// RewriteObsidian (dialect.h) of a document of Obsidian's dialect (ParseMarkdown): in a build that
+// embeds notes (EmbedScope; its document is the only text it parses so) the document's embed lines
+// first made empty HTML comments ("<!---->", which the rewrite leaves as they are), so each ends
+// the block before it and gives none.
+bool RewriteDocument(std::string_view markdown, std::string& out);
+// Whether this thread's build embeds notes, and ParseWithFootnotes of its document (so rewritten)
+// then: the notes' blocks spliced in at their lines.
 bool EmbedsActive();
 std::vector<Block> ParseWithEmbeds(const std::string& markdown, Footnotes& footnotes);
 

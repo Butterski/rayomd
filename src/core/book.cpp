@@ -187,16 +187,17 @@ class ChapterReader {
 public:
     enum class Result { Read, Unreadable, Again, PastBudget, Outside };
 
-    explicit ChapterReader(fs::path folder = fs::path()) : root(std::move(folder)) {}
+    explicit ChapterReader(std::string folder = std::string()) : root(std::move(folder)) {}
 
     // `path` into `text`; Again, unread, when `once` and it is a file read before.
     Result Read(const fs::path& path, std::string& text, bool once) {
         std::error_code ec;
         fs::path file = path;
         if (!root.empty()) {
-            file = ResolvedPath(path);
-            if (file.empty()) return Result::Unreadable;
-            if (!IsWithinRoot(file, root)) return Result::Outside;
+            const std::string resolved = ResolvedPath(PathToUtf8(path));
+            if (resolved.empty()) return Result::Unreadable;
+            if (!IsWithinRoot(resolved, root)) return Result::Outside;
+            file = PathFromUtf8(resolved);
         }
         RayoMd::File::FileIdentity identity;
         const bool whole = fs::is_regular_file(file, ec) &&
@@ -219,7 +220,7 @@ public:
     }
 
 private:
-    fs::path root;
+    std::string root;
     std::set<RayoMd::File::FileIdentity> read;
     size_t left = kMaxBookBytes;
 };
@@ -313,7 +314,7 @@ bool ReadSummaryBook(const fs::path& summaryPath, TinyPdf::Book& book, std::stri
     if (book.title.empty()) book.title = summary.title;
     bool listsFile = false;
     // The files must lie in SUMMARY.md's folder (for mdBook, its src/).
-    fs::path root = ResolvedPath(directory);
+    std::string root = ResolvedPath(PathToUtf8(directory));
     if (root.empty()) {
         error = "could not read the folder of " + PathToUtf8(summaryPath);
         return false;
@@ -387,7 +388,7 @@ bool ReadBook(const std::vector<fs::path>& inputs, TinyPdf::Book& book, std::str
     std::error_code ec;
     fs::path summary;
     std::vector<fs::path> files;
-    fs::path root;   // a folder's: its files (links among them) must lie in it
+    std::string root;   // a folder's: its files (links among them) must lie in it
     if (inputs.size() == 1 && fs::is_directory(inputs[0], ec)) {
         for (const fs::path& candidate : { inputs[0] / "SUMMARY.md", inputs[0] / "src" / "SUMMARY.md" }) {
             if (!fs::is_regular_file(candidate, ec)) continue;
@@ -401,7 +402,7 @@ bool ReadBook(const std::vector<fs::path>& inputs, TinyPdf::Book& book, std::str
                 return false;
             }
             book.directory = PathToUtf8(inputs[0]);
-            root = ResolvedPath(inputs[0]);
+            root = ResolvedPath(PathToUtf8(inputs[0]));
             if (root.empty()) {
                 error = "could not read the folder " + PathToUtf8(inputs[0]);
                 return false;
@@ -439,24 +440,25 @@ bool ReadLinkedBook(const fs::path& note, const TinyPdf::PdfOptions& options, in
     leftOut = 0;
     const TinyPdf::Internal::DialectScope dialect(options.dialect);
     const bool byName = options.dialect == TinyPdf::MarkdownDialect::Obsidian;
-    TinyPdf::Internal::Vault vault(options.vaultRoot, PathToUtf8(note));
-    const fs::path first = ResolvedPath(note);
+    const std::string notePath = PathToUtf8(note);
+    TinyPdf::Internal::Vault vault(options.vaultRoot, notePath);
+    std::string first = ResolvedPath(notePath);
     if (first.empty()) {
-        error = "could not read input Markdown file: " + PathToUtf8(note);
+        error = "could not read input Markdown file: " + notePath;
         return false;
     }
     if (!vault.Valid()) {
         error = "could not read the folder " + (options.vaultRoot.empty() ? PathToUtf8(note.parent_path()) : options.vaultRoot);
         return false;
     }
-    book.directory = PathToUtf8(vault.Root());
+    book.directory = vault.Root();
     // The notes found, each once by its resolved path, in the order the book takes them.
     struct Found {
-        fs::path path;
+        std::string path;
         int depth;
     };
-    std::vector<Found> found{ { first, 0 } };
-    std::set<std::string> known{ PathToUtf8(first) };
+    std::set<std::string> known{ first };
+    std::vector<Found> found{ { std::move(first), 0 } };
     std::set<RayoMd::File::FileIdentity> read;
     size_t left = kMaxBookBytes;
     for (size_t at = 0; at < found.size(); at++) {
@@ -478,16 +480,16 @@ bool ReadLinkedBook(const fs::path& note, const TinyPdf::PdfOptions& options, in
         if (!whole || !read.insert(identity).second) {
             // A note that cannot be read, or one read before under another name, adds nothing.
             if (at == 0) {
-                error = "could not read input Markdown file: " + PathToUtf8(note);
+                error = "could not read input Markdown file: " + notePath;
                 return false;
             }
             continue;
         }
         left -= chapter.markdown.size();
-        chapter.path = PathToUtf8(found[at].path);
-        if (at > 0) chapter.title = PathToUtf8(found[at].path.stem());
+        chapter.path = found[at].path;
+        if (at > 0) chapter.title = PathToUtf8(PathFromUtf8(found[at].path).stem());
         if (found[at].depth < depth) {
-            const fs::path folder = found[at].path.parent_path();
+            const std::string folder(TinyPdf::Internal::ParentOf(found[at].path));
             for (const std::string& url : LinksOf(chapter.markdown)) {
                 if (url.empty() || url[0] == '#' || HasScheme(url)) continue;
                 const std::string target = Decoded(std::string_view(url).substr(0, url.find('#')));
@@ -495,8 +497,8 @@ bool ReadLinkedBook(const fs::path& note, const TinyPdf::PdfOptions& options, in
                 // A wiki link names a note also when its name has a dot ("v1.2 notes"): ".md" is
                 // added as for an embed, unless it names an image, a PDF, audio or video.
                 if (extension != ".md" && extension != ".markdown" && (!byName || !TinyPdf::Internal::IsNoteTarget(target))) continue;
-                fs::path path = vault.Find(folder, target, byName);
-                if (!path.empty() && known.insert(PathToUtf8(path)).second) found.push_back({ std::move(path), found[at].depth + 1 });
+                std::string path = vault.Find(folder, target, byName);
+                if (!path.empty() && known.insert(path).second) found.push_back({ std::move(path), found[at].depth + 1 });
             }
         }
         book.chapters.push_back(std::move(chapter));

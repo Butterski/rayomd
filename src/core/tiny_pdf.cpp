@@ -2665,10 +2665,10 @@ private:
 
     // An image of a note the document embeds: from that note's folder, inside the root.
     RAYOMD_COLD bool ResolveEmbedded(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t base) {
-        const std::filesystem::path* folder = Internal::EmbedFolder(base);
+        const std::string* folder = Internal::EmbedFolder(base);
         if (folder == nullptr || !hasSourcePath || (!allowUnsafe && IsUnsafeLocalImageSource(src))) return false;
         std::filesystem::path normalized;
-        if (!TryCanonicalForPolicy(*folder / PathFromUtf8(src), normalized)) return false;
+        if (!TryCanonicalForPolicy(PathFromUtf8(*folder) / PathFromUtf8(src), normalized)) return false;
         if (!allowUnsafe) {
             const std::filesystem::path& root = SafeRoot();
             if (!safeRootValid || !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
