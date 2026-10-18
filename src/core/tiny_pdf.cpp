@@ -5513,6 +5513,11 @@ public:
     struct Spare {
         std::vector<Item> items;
         bool sourceShown = false;
+
+        Spare() = default;
+        Spare(const Spare&) = delete;
+        Spare& operator=(const Spare&) = delete;
+        RAYOMD_COLD ~Spare() {}   // one copy for both renderers' spares
     };
 };
 
@@ -6103,11 +6108,24 @@ RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Inte
 // notes' measuring layouts), the links, headings and anchors those layouts made, and `Spare`, the
 // renderer's buffers that SwapFootBuffers trades for its own while notes are laid out at the foot
 // of a page, so that the paragraph, table row or code block the page broke goes on. The measuring
-// layout writes straight into the stash's vectors, which take the renderer's places while it runs.
+// layout writes straight into the stash, which takes the renderer's places while it runs (Trade,
+// before and after). Destroyed out of line: one copy for both renderers.
 struct FootStash {
     std::vector<LinkRect> links;
     std::vector<HeadingMark> marks;
     std::vector<HeadingMark> anchors;
+
+    FootStash() = default;
+    FootStash(const FootStash&) = delete;
+    FootStash& operator=(const FootStash&) = delete;
+    RAYOMD_COLD ~FootStash() {}
+    RAYOMD_COLD void Trade(std::string& content, std::string& notesContent, std::vector<LinkRect>& pageLinks,
+        std::vector<HeadingMark>& headings, std::vector<HeadingMark>& ids) {
+        content.swap(notesContent);
+        pageLinks.swap(links);
+        headings.swap(marks);
+        ids.swap(anchors);
+    }
 };
 
 template <typename Spare>
@@ -6258,10 +6276,7 @@ struct PageNoteLayout {
         const size_t contentsLines = r.contentsLines.size();
         const ImageRegistry::Snapshot images = r.images != nullptr ? r.images->Save() : ImageRegistry::Snapshot{};
         const auto state = r.BeginMeasure();
-        r.content.swap(notes.content);
-        r.pageLinks.back().swap(stash.links);
-        r.headings.swap(stash.marks);
-        r.ids.swap(stash.anchors);
+        stash.Trade(r.content, notes.content, r.pageLinks.back(), r.headings, r.ids);
         {
             // Anywhere below the top of a page: a note's layout does not depend on where it starts.
             notes.measureTop = r.pageH * 0.5;
@@ -6279,10 +6294,7 @@ struct PageNoteLayout {
                         (r.images->Images().size() == imageCount && r.images->FailedImages() == failed)));
             }
         }
-        r.content.swap(notes.content);
-        r.pageLinks.back().swap(stash.links);
-        r.headings.swap(stash.marks);
-        r.ids.swap(stash.anchors);
+        stash.Trade(r.content, notes.content, r.pageLinks.back(), r.headings, r.ids);
         r.EndMeasure(state);
         if (r.images != nullptr) r.images->Restore(images);
         r.contentsLines.erase(r.contentsLines.begin() + static_cast<std::ptrdiff_t>(contentsLines), r.contentsLines.end());
