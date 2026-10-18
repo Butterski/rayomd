@@ -22,6 +22,7 @@
 #include "mermaid.h"
 #include "markdown_parser.h"
 #include "highlight.h"
+#include "long_page.h"
 #include "math_layout.h"
 #include "pdfa.h"
 #include "png_filter.h"
@@ -6257,6 +6258,7 @@ public:
         const PdfPageSize page = ResolvePageSize(pageSize);
         pageW = page.width;
         pageH = page.height;
+        fitH = page.height;
         margin = ResolveMarginPoints(marginValue, page);
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
@@ -6273,6 +6275,7 @@ public:
         KeptBuffer<std::vector<StyledRuns>>::Take(tableCells);
         KeptBuffer<std::wstring>::Take(headingText);
         NewPage();
+        if (pageSize.autoHeight) StartLongPages(marginValue);
     }
     ~Renderer() {
         KeptBuffer<std::vector<size_t>>::Give(pageStarts, KeptBytes(pageStarts));
@@ -6385,6 +6388,11 @@ public:
     double Margin() const { return margin; }
     double PageWidth() const { return pageW; }
     double PageHeight() const { return pageH; }
+    // What content is fitted to a page by: pageH, or a long page's nominal height.
+    double FitHeight() const { return fitH; }
+    // Long pages: the bottom of each page's box, the last one's where the layout ends now;
+    // nullptr on pages of a fixed size.
+    const double* PageBottoms() { return pageBottoms != nullptr ? EndLongPages() : nullptr; }
 
 private:
     template <typename RendererType>
@@ -6517,7 +6525,7 @@ private:
     }
 
     double MaxMathHeight() const {
-        return (pageH - margin * 2.0) * 0.5;
+        return (fitH - margin * 2.0) * 0.5;
     }
 
     // A bullet list item: its marker, by nesting depth, and its text indented after it.
@@ -7497,6 +7505,7 @@ private:
     }
 
     void NewPage() {
+        if (pageBottoms != nullptr) EndLongPage();
         if (tags != nullptr) tags->PageBreak();
         pageStarts.push_back(content.size());
         pageLinks.push_back({});
@@ -7977,7 +7986,7 @@ private:
 
         const PdfImage& image = images->Get(index);
         double maxW = pageW - margin * 2.0;
-        double maxH = pageH - margin * 2.0;
+        double maxH = fitH - margin * 2.0;
         double w = (double)image.width * 72.0 / 96.0;
         double h = (double)image.height * 72.0 / 96.0;
         if (w <= 0.0 || h <= 0.0) {
@@ -8019,7 +8028,7 @@ private:
             const std::string* alt;
         };
         const double maxW = pageW - margin * 2.0;
-        const double maxH = pageH - margin * 2.0;
+        const double maxH = fitH - margin * 2.0;
         std::vector<Placed> placed;
         const auto add = [&](const Internal::ImageSource& source, const std::string& alt) {
             int index = -1;
@@ -8510,7 +8519,7 @@ private:
         if (images == nullptr || !images->AddDiagram(block.text, index)) return false;
         const PdfImage& image = images->Get(index);
         const double maxW = pageW - margin * 2.0;
-        const double scale = std::min(1.0, std::min(maxW / (image.width * 0.75), (pageH - margin * 2.0) / (image.height * 0.75)));
+        const double scale = std::min(1.0, std::min(maxW / (image.width * 0.75), (fitH - margin * 2.0) / (image.height * 0.75)));
         const double w = image.width * 0.75 * scale;
         const double h = image.height * 0.75 * scale;
         Ensure(h + 10.0);
@@ -8709,13 +8718,16 @@ private:
         const double size = kHeadingSizes[1];
         const TtfFont& titleFont = SpanFont(multiFace, false);
         const std::vector<std::wstring> lines = WrapText(titleFont, Utf8ToWide(text), pageW - margin * 2.0, size);
-        y = std::min(pageH - margin, pageH * 0.6 + (double)lines.size() * size * 1.35 * 0.5);
+        // A long page puts the nominal page at its top and keeps it whole; `top` is 0 on others.
+        const double top = pageH - fitH;
+        y = top + std::min(fitH - margin, fitH * 0.6 + (double)lines.size() * size * 1.35 * 0.5);
         if (mark) MarkHeading(1, text, 0.0);
         const int tagged = tags != nullptr ? tags->BeginHeading(1) : -1;
         for (const std::wstring& line : lines) {
             DrawTextLine((pageW - TextWidth(titleFont, line, size)) * 0.5, size, line, headingColor, multiFace);
         }
         TagEnd(tagged);
+        if (pageBottoms != nullptr) y = std::min(y, top + margin);
     }
 
     // The table of contents (contents.h), once: a title, then each entry indented by its level and
@@ -8815,7 +8827,7 @@ private:
         double available = quoted ? pageW - margin * 2.0 - 22.0 : pageW - margin * 2.0;
         double padTop = quoted ? kQuoteMathPad : kDisplayMathAbove;
         double padBottom = quoted ? kQuoteMathPad : 0.0;
-        double maxHeight = pageH - margin * 2.0 - padTop - padBottom - 3.0;
+        double maxHeight = fitH - margin * 2.0 - padTop - padBottom - 3.0;
         const int tagged = TagBegin(Internal::StructType::Formula);
         if (tagged >= 0) tags->SetAlt(tagged, tex);
         MathFormula formula;
@@ -9003,6 +9015,25 @@ private:
         AppendF(c, y);
         c += " l S Q\n";
         y -= 13.0;
+    }
+
+    // PdfPageSize::autoHeight (StartLongPages, after the first page began): pages kMaxPageSide
+    // high, pageH, whose content is fitted to the nominal height, fitH (pageH for pages of a fixed
+    // size), and the bottom of each finished page's box (long_page.h; EndLongPage, from NewPage).
+    // pageBottoms is null for fixed sizes.
+    double fitH = 842.0;
+    std::vector<double>* pageBottoms = nullptr;
+    RAYOMD_COLD void StartLongPages(const PdfMargin& marginValue) {
+        fitH = Internal::NominalPageHeight(pageW);
+        pageH = Internal::kMaxPageSide;
+        margin = ResolveMarginPoints(marginValue, { pageW, fitH });
+        y = pageH - margin;
+        pageBottoms = Internal::LongPageBottoms();
+    }
+    RAYOMD_COLD void EndLongPage() { Internal::EndLongPage(*pageBottoms, y, margin, pageH); }
+    RAYOMD_COLD const double* EndLongPages() {
+        if (pageBottoms->size() < pageStarts.size()) EndLongPage();
+        return pageBottoms->data();
     }
 };
 
@@ -9817,6 +9848,7 @@ public:
         const PdfPageSize page = ResolvePageSize(pageSize);
         pageW = page.width;
         pageH = page.height;
+        fitH = page.height;
         margin = ResolveMarginPoints(marginValue, page);
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
         lineHeight = bodySize * 1.35;
@@ -9833,6 +9865,7 @@ public:
         KeptBuffer<std::vector<AsciiRuns>>::Take(tableCells);
         KeptBuffer<std::vector<AsciiLines>>::Take(tableLines);
         NewPage();
+        if (pageSize.autoHeight) StartLongPages(marginValue);
     }
     ~StandardRenderer() {
         KeptBuffer<std::vector<size_t>>::Give(pageStarts, KeptBytes(pageStarts));
@@ -9902,6 +9935,11 @@ public:
     double Margin() const { return margin; }
     double PageWidth() const { return pageW; }
     double PageHeight() const { return pageH; }
+    // What content is fitted to a page by: pageH, or a long page's nominal height.
+    double FitHeight() const { return fitH; }
+    // Long pages: the bottom of each page's box, the last one's where the layout ends now;
+    // nullptr on pages of a fixed size.
+    const double* PageBottoms() { return pageBottoms != nullptr ? EndLongPages() : nullptr; }
     // Whether text was shown in /F4 Helvetica-Oblique or /F5 Helvetica-BoldOblique.
     bool ObliqueUsed() const { return (facesUsed & (1u << kStyleItalic)) != 0; }
     bool BoldObliqueUsed() const { return (facesUsed & (1u << (kStyleBold | kStyleItalic))) != 0; }
@@ -9976,7 +10014,7 @@ private:
     std::vector<ContentsLine> contentsLines;
 
     double MaxMathHeight() const {
-        return (pageH - margin * 2.0) * 0.5;
+        return (fitH - margin * 2.0) * 0.5;
     }
 
     // Latin text in a formula (\text{café}, a degree sign) is measured and painted in
@@ -10084,6 +10122,7 @@ private:
     void TagTableEnd() {}
 
     void NewPage() {
+        if (pageBottoms != nullptr) EndLongPage();
         pageStarts.push_back(content.size());
         pageLinks.push_back({});
         y = pageH - margin;
@@ -11046,7 +11085,7 @@ private:
 
         const PdfImage& image = images->Get(index);
         double maxW = pageW - margin * 2.0;
-        double maxH = pageH - margin * 2.0;
+        double maxH = fitH - margin * 2.0;
         double w = (double)image.width * 72.0 / 96.0;
         double h = (double)image.height * 72.0 / 96.0;
         if (w <= 0.0 || h <= 0.0) {
@@ -11079,7 +11118,7 @@ private:
             const Internal::ImageSource* source;
         };
         const double maxW = pageW - margin * 2.0;
-        const double maxH = pageH - margin * 2.0;
+        const double maxH = fitH - margin * 2.0;
         std::vector<Placed> placed;
         const auto add = [&](const Internal::ImageSource& source, const std::string& alt) {
             std::string utf8Source;
@@ -11598,7 +11637,7 @@ private:
         }
         const PdfImage& image = images->Get(index);
         const double maxW = pageW - margin * 2.0;
-        const double scale = std::min(1.0, std::min(maxW / (image.width * 0.75), (pageH - margin * 2.0) / (image.height * 0.75)));
+        const double scale = std::min(1.0, std::min(maxW / (image.width * 0.75), (fitH - margin * 2.0) / (image.height * 0.75)));
         const double w = image.width * 0.75 * scale;
         const double h = image.height * 0.75 * scale;
         Ensure(h + 10.0);
@@ -11758,11 +11797,14 @@ private:
         const double size = kHeadingSizes[1];
         AsciiLines lines;
         WrapAsciiTextCold(text, pageW - margin * 2.0, size, StandardTextFont::Bold, lines);
-        y = std::min(pageH - margin, pageH * 0.6 + (double)lines.Count() * size * 1.35 * 0.5);
+        // A long page puts the nominal page at its top and keeps it whole; `top` is 0 on others.
+        const double top = pageH - fitH;
+        y = top + std::min(fitH - margin, fitH * 0.6 + (double)lines.Count() * size * 1.35 * 0.5);
         if (mark) MarkHeading(1, text, 0.0);
         for (size_t i = 0; i < lines.Count(); i++) {
             DrawTextLine((pageW - lines.Width(i)) * 0.5, size, lines.Text(i), "F2", headingColor);
         }
+        if (pageBottoms != nullptr) y = std::min(y, top + margin);
     }
 
     // The table of contents (contents.h), once: a title, then each entry indented by its level and
@@ -11839,7 +11881,7 @@ private:
         double available = quoted ? pageW - margin * 2.0 - 22.0 : pageW - margin * 2.0;
         double padTop = quoted ? kQuoteMathPad : kDisplayMathAbove;
         double padBottom = quoted ? kQuoteMathPad : 0.0;
-        double maxHeight = pageH - margin * 2.0 - padTop - padBottom - 3.0;
+        double maxHeight = fitH - margin * 2.0 - padTop - padBottom - 3.0;
         MathFormula formula;
         std::string utf8;
         if (!LayoutMathToFit(MathSource(tex, utf8), bodySize, true, false, available, maxHeight, MathFallback(),
@@ -12023,13 +12065,33 @@ private:
         c += " l S Q\n";
         y -= 13.0;
     }
+
+    // PdfPageSize::autoHeight (StartLongPages, after the first page began): pages kMaxPageSide
+    // high, pageH, whose content is fitted to the nominal height, fitH (pageH for pages of a fixed
+    // size), and the bottom of each finished page's box (long_page.h; EndLongPage, from NewPage).
+    // pageBottoms is null for fixed sizes.
+    double fitH = 842.0;
+    std::vector<double>* pageBottoms = nullptr;
+    RAYOMD_COLD void StartLongPages(const PdfMargin& marginValue) {
+        fitH = Internal::NominalPageHeight(pageW);
+        pageH = Internal::kMaxPageSide;
+        margin = ResolveMarginPoints(marginValue, { pageW, fitH });
+        y = pageH - margin;
+        pageBottoms = Internal::LongPageBottoms();
+    }
+    RAYOMD_COLD void EndLongPage() { Internal::EndLongPage(*pageBottoms, y, margin, pageH); }
+    RAYOMD_COLD const double* EndLongPages() {
+        if (pageBottoms->size() < pageStarts.size()) EndLongPage();
+        return pageBottoms->data();
+    }
 };
 
 // The page number at the foot of a page: "N / M" centred in the bottom margin, small and grey,
 // in Helvetica, which the page names `font`. A content stream of its own, after the page's,
-// which was rendered before the page count was known.
+// which was rendered before the page count was known. `bottoms`: the bottom of each long page's
+// box (Renderer::PageBottoms), nullptr for pages of a fixed size, which start at 0.
 RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t pages, double margin, double pageWidth,
-    const char* font) {
+    const char* font, const double* bottoms) {
     char label[48];
     char* end = std::to_chars(label, label + 20, page).ptr;
     memcpy(end, " / ", 3);
@@ -12041,7 +12103,7 @@ RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t pages,
     stream += " 9 Tf 1 0 0 1 ";
     AppendF(stream, (pageWidth - Internal::StandardTextWidth(text, kSize, StandardTextFont::Regular)) * 0.5);
     stream += " ";
-    AppendF(stream, margin * 0.5 - 3.0);
+    AppendF(stream, (bottoms != nullptr ? bottoms[page - 1] : 0.0) + margin * 0.5 - 3.0);
     stream += " Tm (";
     stream += text;
     stream += ") Tj ET Q";
@@ -12138,11 +12200,12 @@ RAYOMD_COLD static Internal::ThemeLogoImage ThemeLogo(const PdfTheme& theme, Ima
     return logo;
 }
 
-// The theme's header and footer streams, one per page, and its cover page's stream. {title} is
-// the front matter's title, else the first heading's text (WinAnsi with `winAnsi`).
+// The theme's header and footer streams, one per page, and its cover page's stream, `coverHeight`
+// high (a long page's nominal height). {title} is the front matter's title, else the first
+// heading's text (WinAnsi with `winAnsi`).
 RAYOMD_COLD static void LayOutTheme(const PdfOptions& options, const Internal::ThemeTextFont& font,
     const DocumentMetadata& metadata, const std::vector<HeadingMark>& headings, bool winAnsi, size_t pages,
-    const Internal::ThemePage& page, const Internal::ThemeLogoImage& logo, const ThemePalette& palette,
+    const Internal::ThemePage& page, double coverHeight, const Internal::ThemeLogoImage& logo, const ThemePalette& palette,
     std::vector<std::string>& bands, std::string& cover) {
     const std::string title = !metadata.title.empty() || headings.empty() ? metadata.title
         : winAnsi ? RayoMd::Text::WinAnsiToUtf8(headings.front().text) : std::string(headings.front().text);
@@ -12152,7 +12215,10 @@ RAYOMD_COLD static void LayOutTheme(const PdfOptions& options, const Internal::T
     if (Internal::HasThemeBands(options.theme) || ((options.pdfa || options.pdfua) && options.pageNumbers)) {
         bands = Internal::ThemeBandStreams(options.theme, options.pageNumbers, document, pages, page, logo, font);
     }
-    if (options.theme.cover) cover = Internal::ThemeCoverStream(document, page, logo, font, palette.heading, palette.rule);
+    if (options.theme.cover) {
+        const Internal::ThemePage coverPage{ page.width, coverHeight, page.margin };
+        cover = Internal::ThemeCoverStream(document, coverPage, logo, font, palette.heading, palette.rule);
+    }
 }
 
 // The cover as the first page: the fonts it names, `fonts`, and every image, as the other pages
@@ -12430,11 +12496,13 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-BoldOblique /Encoding /WinAnsiEncoding >>") : 0;
 
     const DocumentMetadata metadata = book == nullptr ? FrontMatterMetadata(source) : BookMetadata(*book->book);
+    const double* const bottoms = renderer.PageBottoms();   // long pages' boxes, or nullptr
     std::vector<std::string> bands;   // a theme's header and footer, one stream per page
     std::string cover;                // and its cover page
     if (Internal::HasThemeBands(options.theme) || options.theme.cover) {
         LayOutTheme(options, StandardThemeText(), metadata, headings, winAnsi, renderer.PageStarts().size(),
-            { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin() }, logo, palette, bands, cover);
+            { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin(), bottoms }, renderer.FitHeight(), logo,
+            palette, bands, cover);
     }
     std::vector<bool> flatePages;   // --compress: the pages whose content stream is compressed
     if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
@@ -12445,7 +12513,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
-            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "F1")
+            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "F1",
+                bottoms)
             : 0;
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
@@ -12453,10 +12522,14 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         page.reserve(192);
         AppendLit(page, "<< /Type /Page /Parent ");
         AppendInt(page, pagesId);
-        AppendLit(page, " 0 R /MediaBox [0 0 ");
-        AppendF(page, renderer.PageWidth());
-        AppendLit(page, " ");
-        AppendF(page, renderer.PageHeight());
+        if (bottoms == nullptr) {
+            AppendLit(page, " 0 R /MediaBox [0 0 ");
+            AppendF(page, renderer.PageWidth());
+            AppendLit(page, " ");
+            AppendF(page, renderer.PageHeight());
+        } else {
+            Internal::AppendLongMediaBox(page, renderer.PageWidth(), renderer.PageHeight(), bottoms[pageIndex]);
+        }
         AppendLit(page, "] /Resources << /Font << /F1 ");
         AppendInt(page, fontRegularId);
         AppendLit(page, " 0 R /F2 ");
@@ -12491,7 +12564,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         fonts += " 0 R /F2 ";
         AppendInt(fonts, fontBoldId);
         fonts += " 0 R";
-        coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.PageHeight(), fonts, imageObjectIds, cover);
+        coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.FitHeight(), fonts, imageObjectIds, cover);
         if (coverId != 0 && options.sourceMap != nullptr) ShiftSourceMapPages(*options.sourceMap);
     }
     pdf.Set(pagesId, PagesDictionary(pageIds, coverId));
@@ -13040,13 +13113,14 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     // A theme's header and footer, one stream per page, PDF/A's and PDF/UA's page numbers, and a
     // theme's cover page, before the font subset is made, which then has their glyphs.
     DocumentMetadata metadata = book == nullptr ? FrontMatterMetadata(markdown) : BookMetadata(*book->book);
+    const double* const bottoms = renderer.PageBottoms();   // long pages' boxes, or nullptr
     std::vector<std::string> bands;
     std::string cover;
     if (Internal::HasThemeBands(options.theme) || options.theme.cover || ((options.pdfa || options.pdfua) && options.pageNumbers)) {
         LayOutTheme(options, UnicodeThemeText(font, renderer.Cids(), faceFonts[1], faceFonts[1] ? renderer.FaceCidSet(1) : nullptr),
             metadata, headings, false,
-            renderer.PageStarts().size(), { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin() }, logo, palette,
-            bands, cover);
+            renderer.PageStarts().size(), { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin(), bottoms },
+            renderer.FitHeight(), logo, palette, bands, cover);
     }
     if (tags) MarkArtifacts(bands, cover, contentsOverlays);
     const CidList& used = renderer.UsedCids();
@@ -13103,7 +13177,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
-            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "FN")
+            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "FN",
+                bottoms)
             : 0;
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
@@ -13111,10 +13186,14 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         page.reserve(160);
         AppendLit(page, "<< /Type /Page /Parent ");
         AppendInt(page, pagesId);
-        AppendLit(page, " 0 R /MediaBox [0 0 ");
-        AppendF(page, renderer.PageWidth());
-        AppendLit(page, " ");
-        AppendF(page, renderer.PageHeight());
+        if (bottoms == nullptr) {
+            AppendLit(page, " 0 R /MediaBox [0 0 ");
+            AppendF(page, renderer.PageWidth());
+            AppendLit(page, " ");
+            AppendF(page, renderer.PageHeight());
+        } else {
+            Internal::AppendLongMediaBox(page, renderer.PageWidth(), renderer.PageHeight(), bottoms[pageIndex]);
+        }
         AppendLit(page, "] /Resources << /Font << /F1 ");
         AppendInt(page, type0FontId);
         AppendLit(page, " 0 R");
@@ -13141,7 +13220,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         AppendInt(fonts, type0FontId);
         fonts += " 0 R";
         fonts += faceResources;
-        coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.PageHeight(), fonts, imageObjectIds, cover);
+        coverId = AddCoverPage(pdf, pagesId, renderer.PageWidth(), renderer.FitHeight(), fonts, imageObjectIds, cover);
         if (coverId != 0 && options.sourceMap != nullptr) ShiftSourceMapPages(*options.sourceMap);
     }
     pdf.Set(pagesId, PagesDictionary(pageIds, coverId));

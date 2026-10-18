@@ -398,8 +398,8 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             }
         } else if (_wcsnicmp(argv[i], L"--page-size=", 12) == 0) {
             if (!TinyPdf::Internal::ParsePageSize(WideToUtf8(argv[i] + 12), options.pageSize)) {
-                error = L"--page-size must be a4, a3, a5, letter or legal (each also with -landscape), or "
-                    L"WIDTHxHEIGHT in mm, cm, in or pt, such as 210x297mm";
+                error = L"--page-size must be a4, a3, a5, letter or legal (each also with -landscape), "
+                    L"WIDTHxHEIGHT in mm, cm, in or pt, such as 210x297mm, or WIDTHxauto, such as 210mmxauto";
                 return false;
             }
         } else if (lstrcmpiW(argv[i], L"--recursive") == 0) {
@@ -1056,8 +1056,10 @@ void PrintUsage() {
         "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]] and\n"
         "  ![[images]]; default github).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
-        "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4),\n"
-        "  --page-break-before=hN (a new page before each heading of level 1 to N; h1 for chapters).\n"
+        "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4;\n"
+        "  or WIDTHxauto, such as 210mmxauto: one long page cut below its text, a new one only at page\n"
+        "  breaks or past 200 in), --page-break-before=hN (a new page before each heading of level 1\n"
+        "  to N; h1 for chapters).\n"
         "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
         "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
         "  line per document; - for standard output).\n"

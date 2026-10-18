@@ -45,7 +45,13 @@ references), bookmarks and `#anchor` links from headings, HTML comments, `<br>`
 and character references, document metadata from the front matter (`/Info` title,
 author, subject and keywords, the catalog's `/Lang`; `FrontMatterMetadata` reads
 the YAML subset), opt-in page numbers, page sizes (A4 by default, presets,
-landscape and custom sizes; the renderers' `pageW`/`pageH`, never constants),
+landscape and custom sizes; the renderers' `pageW`/`pageH`, never constants; one long page,
+`--page-size=WIDTHxauto`, `PdfPageSize::autoHeight`: `pageH` is `kMaxPageSide` and what sizes
+content to a page (image, diagram and formula fits, `MaxMathHeight`, title pages, the cover) reads
+`fitH`, the nominal height width × √2, which is `pageH` for fixed sizes, so their bytes stay; what
+tests for page room keeps `pageH`. `NewPage` notes each finished long page's box bottom (cold
+`EndLongPage`, a margin below the cursor; `PageBottoms` is nullptr otherwise), and its MediaBox,
+page number and footer band move up to it while every coordinate stays),
 standalone local images (PNG, JPEG, and SVG drawn as vectors), and HTTP/HTTPS
 images on Windows or curl-enabled Linux builds with fallback text.
 Inline HTML (`WriteHtmlTag` in `inline_markdown.cpp`, on `html.h`'s `ScanTag`): emphasis,
@@ -493,6 +499,12 @@ Important image/link details:
   `FieldBytes` of its line (more than normal text can show there); text too wide is cut by a
   search over its character ends, not a character at a time.
 
+- `src/core/long_page.h` and `src/core/long_page.cpp`
+  One long page (`PdfPageSize::autoHeight`): the box bottoms of a build's pages, kept for the
+  thread so a renderer holds only a pointer (null for fixed sizes), each a margin below where its
+  layout ended, and the MediaBox that starts there. Built at `-Os`; inside `tiny_pdf.cpp`, the
+  vector's code moved the renderers' constructors out of line and widened `ResolvePageSize`.
+
 - `src/core/pdfa.h` and `src/core/pdfa.cpp`
   What PDF/A-3b adds: the 480-byte sRGB ICC profile (a v4.2 display profile written
   as data, SHA-256 in the source), the XMP packet with the PDF/A identification and,
@@ -567,8 +579,9 @@ Important image/link details:
   `tests/hardening_tests.inc` those of hostile and abandoned builds (cancellation, files that
   are no regular files, fonts changed after loading, image containment, cache permissions, the
   decode budget and the SVG `data:` image cache); `tests/dialect_tests.inc` checks Obsidian's
-  dialect, and `tests/mermaid_tests.inc` the Mermaid diagrams (syntax, refusals, layout
-  invariants, golden SVG digests, conversion, limits).
+  dialect, `tests/mermaid_tests.inc` the Mermaid diagrams (syntax, refusals, layout
+  invariants, golden SVG digests, conversion, limits), and `tests/long_page_tests.inc` the long
+  pages of `--page-size=WIDTHxauto` (boxes, fits, page numbers and bands, books, the source map).
 
 - `tests/fuzz/`
   libFuzzer targets of the engine's untrusted-input entry points (`fuzz_targets.h`): Markdown

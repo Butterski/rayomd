@@ -400,9 +400,15 @@ page breaks other tools are given (`<div style="page-break-after: always"></div>
 `break-before: page`, `class="page-break"`), and with `--page-break-before=h1` before each
 chapter heading (`h2`: and each section).
 
+`--page-size=210mmxauto` (any width and unit) makes one long page for reading on screen: no
+page breaks but the explicit ones, each page cut just below its text. Images, diagrams and
+formulas are still fitted to a page of the width times √2, and a document longer than 200
+inches (about 900 lines) goes on to a second long page.
+
 ```sh
 rayomd --export report.md report.pdf modern wide --page-size=letter-landscape --page-numbers
 rayomd --export notes.md notes.pdf --page-break-before=h1
+rayomd --export notes.md notes-screen.pdf --page-size=210mmxauto
 ```
 
 ### Document metadata
