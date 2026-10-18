@@ -225,7 +225,8 @@ bool CheckLinkedNotes() {
     WriteNote(vault / "root.md", "# Root\n\nSee [[one]], [two](two.md), [[missing]], [out](../outside.md), [web](https://example.com), "
         "[[one]] again and [also](hard.md).\n");
     WriteNote(vault / "one.md", "Body one, then [[three]].\n");
-    WriteNote(vault / "two.md", "# Two\n\nBack to [[root]].\n");
+    WriteNote(vault / "two.md", "# Two\n\nBack to [[root]] and [[v1.2 notes]].\n");
+    WriteNote(vault / "v1.2 notes.md", "# Versions\n");
     WriteNote(vault / "three.md", "# Three\n");
     WriteNote(root / "outside.md", "# Outside\n");
     std::error_code error;
@@ -244,7 +245,7 @@ bool CheckLinkedNotes() {
     };
     size_t leftOut = 0;
     if (stems(0, leftOut) != "root=;" || stems(1, leftOut) != "root=;one=one;two=two;" ||
-        stems(2, leftOut) != "root=;one=one;two=two;three=three;" || leftOut != 0) {
+        stems(2, leftOut) != "root=;one=one;two=two;three=three;v1.2 notes=v1.2 notes;" || leftOut != 0) {
         std::cerr << "linked notes: " << stems(2, leftOut) << std::endl;
         return false;
     }
@@ -256,7 +257,7 @@ bool CheckLinkedNotes() {
     TinyPdf::PdfOptions withBacklinks = options;
     withBacklinks.backlinks = true;
     if (!TinyPdf::BuildBookPdf(book, options, plain).Ok() || !TinyPdf::BuildBookPdf(book, withBacklinks, backlinked).Ok() ||
-        CountOccurrences(backlinked, "(Linked from:) Tj") != 4 || CountOccurrences(backlinked, "/Dest") != CountOccurrences(plain, "/Dest") + 4 ||
+        CountOccurrences(backlinked, "(Linked from:) Tj") != 5 || CountOccurrences(backlinked, "/Dest") != CountOccurrences(plain, "/Dest") + 5 ||
         CountOccurrences(backlinked, "/URI") != CountOccurrences(plain, "/URI")) {
         return Fail("backlinks");
     }

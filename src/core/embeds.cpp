@@ -579,7 +579,7 @@ private:
         NoteFile& file = files[RayoMd::File::PathToUtf8(path)];
         if (!file.read) {
             file.read = true;
-            if (Vault::Read(path, std::min(EmbedSet::kMaxBytes, kMaxReadBytes - read), file.text, file.identity)) {
+            if (vault.Read(path, std::min(EmbedSet::kMaxBytes, kMaxReadBytes - read), file.text, file.identity)) {
                 read += file.text.size();
                 file.lines = Lines(file.text);
                 file.body = BodyStart(file.lines);
@@ -667,6 +667,10 @@ void AppendEntry(std::vector<Block>& out, uint32_t index, FootnoteParse* notes) 
 }
 
 } // namespace
+
+bool IsNoteTarget(std::string_view name) {
+    return !IsMediaName(name);
+}
 
 bool MayEmbedNotes(const std::string& markdown, const PdfOptions& options) {
     return !options.embedsAsLinks && !options.sourcePath.empty() && markdown.find("![[") != std::string::npos;

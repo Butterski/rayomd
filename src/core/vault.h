@@ -44,6 +44,9 @@ public:
 
     // The root: `vaultRoot` (UTF-8) when it is set, else the folder of the note at `notePath`.
     Vault(const std::string& vaultRoot, const std::string& notePath);
+    ~Vault();
+    Vault(const Vault&) = delete;
+    Vault& operator=(const Vault&) = delete;
 
     bool Valid() const { return !root.empty(); }
     const std::filesystem::path& Root() const { return root; }
@@ -56,8 +59,10 @@ public:
     // never is.
     std::filesystem::path Find(const std::filesystem::path& from, std::string_view target, bool byName);
 
-    // The note at `path` (from Find) whole, at most `maximum` bytes, and which file it is.
-    static bool Read(const std::filesystem::path& path, size_t maximum, std::string& text,
+    // The note at `path` (from Find, or the first note of a book) whole, at most `maximum` bytes,
+    // and which file it is. A note inside the root is read as Find opened it (on Linux through
+    // the root's descriptor, RESOLVE_BENEATH); another path as RayoMd::File::ReadAll reads it.
+    bool Read(const std::filesystem::path& path, size_t maximum, std::string& text,
         RayoMd::File::FileIdentity& identity);
 
 private:
@@ -67,13 +72,24 @@ private:
         size_t depth;           // its folders below the root
     };
 
-    std::filesystem::path Check(const std::filesystem::path& candidate) const;
+    std::filesystem::path Check(const std::filesystem::path& candidate);
     void BuildIndex();
 
     std::filesystem::path root;
     std::vector<Named> index;   // by name, then depth, then relative path
     bool indexed = false;
     bool indexValid = false;
+#ifndef _WIN32
+    // Linux 5.6+: the root open (O_PATH) once, every note opened beneath it with openat2
+    // (RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS): no escape by "..", a symbolic link or a magic link,
+    // one call a candidate instead of a realpath walk and a stat. -1 where the kernel or a seccomp
+    // filter refuses openat2: the resolved-path checks then. The file Find opened last stays open
+    // for the Read that follows.
+    int OpenBeneath(const std::filesystem::path& relative);
+    int rootFd = -1;
+    int openFd = -1;
+    std::filesystem::path openPath;
+#endif
 };
 
 } // namespace TinyPdf::Internal

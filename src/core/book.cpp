@@ -3,6 +3,7 @@
 #include "book.h"
 
 #include "dialect.h"
+#include "embeds.h"
 #include "footnotes.h"
 #include "inline_markdown.h"
 #include "markdown_parser.h"
@@ -469,7 +470,7 @@ bool ReadLinkedBook(const fs::path& note, const TinyPdf::PdfOptions& options, in
         }
         TinyPdf::BookChapter chapter;
         RayoMd::File::FileIdentity identity;
-        const bool whole = TinyPdf::Internal::Vault::Read(found[at].path, std::min(kMaxFileBytes, left), chapter.markdown, identity);
+        const bool whole = vault.Read(found[at].path, std::min(kMaxFileBytes, left), chapter.markdown, identity);
         if (!whole && identity.opened && identity.size > left && identity.size <= kMaxFileBytes) {
             leftOut = found.size() - at;
             break;
@@ -491,7 +492,9 @@ bool ReadLinkedBook(const fs::path& note, const TinyPdf::PdfOptions& options, in
                 if (url.empty() || url[0] == '#' || HasScheme(url)) continue;
                 const std::string target = Decoded(std::string_view(url).substr(0, url.find('#')));
                 const std::string extension = Lower(PathToUtf8(PathFromUtf8(target).extension()));
-                if (extension != ".md" && extension != ".markdown") continue;
+                // A wiki link names a note also when its name has a dot ("v1.2 notes"): ".md" is
+                // added as for an embed, unless it names an image, a PDF, audio or video.
+                if (extension != ".md" && extension != ".markdown" && (!byName || !TinyPdf::Internal::IsNoteTarget(target))) continue;
                 fs::path path = vault.Find(folder, target, byName);
                 if (!path.empty() && known.insert(PathToUtf8(path)).second) found.push_back({ std::move(path), found[at].depth + 1 });
             }
@@ -559,15 +562,19 @@ size_t BookFileOfLink(const std::vector<BookChapter>& chapters, const std::vecto
     if (!ObsidianDialect()) return kNone;
     // A wiki link names a note by its name, or the end of its path: the first file whose path
     // ends in it, in any case.
-    const std::string name = PathToUtf8(PathFromUtf8(path).lexically_normal());
-    for (size_t file = 0; file < paths.size(); file++) {
-        const std::string& candidate = paths[file];
-        if (name.empty() || candidate.size() < name.size()) continue;
-        const size_t at = candidate.size() - name.size();
-        if (at > 0 && candidate[at - 1] != '/' && candidate[at - 1] != '\\') continue;
-        size_t index = 0;
-        while (index < name.size() && std::tolower((unsigned char)candidate[at + index]) == std::tolower((unsigned char)name[index])) index++;
-        if (index == name.size()) return file;
+    const std::string written = PathToUtf8(PathFromUtf8(path).lexically_normal());
+    // A note's name with a dot ("v1.2 notes") is also that name with ".md", as Vault::Find takes it.
+    for (const std::string& name : { written, written + ".md" }) {
+        for (size_t file = 0; file < paths.size(); file++) {
+            const std::string& candidate = paths[file];
+            if (name.empty() || candidate.size() < name.size()) continue;
+            const size_t at = candidate.size() - name.size();
+            if (at > 0 && candidate[at - 1] != '/' && candidate[at - 1] != '\\') continue;
+            size_t index = 0;
+            while (index < name.size() && std::tolower((unsigned char)candidate[at + index]) == std::tolower((unsigned char)name[index])) index++;
+            if (index == name.size()) return file;
+        }
+        if (written.empty() || !IsNoteTarget(written)) break;
     }
     return kNone;
 }

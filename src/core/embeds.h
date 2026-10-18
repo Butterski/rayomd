@@ -57,6 +57,10 @@ struct EmbedSet {
 // Whether BuildPdf looks for note embeds in `markdown` (Obsidian's dialect): with a source path,
 // not options.embedsAsLinks, and "![[" in the text. Nothing else is read for other documents.
 bool MayEmbedNotes(const std::string& markdown, const PdfOptions& options);
+// Whether a link or embed target names a note rather than an image, a PDF, audio or video:
+// ".md" is added to one without a note's extension (Vault::Find), also "v1.2 notes".
+bool IsNoteTarget(std::string_view name);
+
 
 // Reads the notes `markdown`'s standalone embeds name, and theirs, into `set` (its `all` too);
 // false when none could be read, the document then built as it is. Stops early, with what it has,

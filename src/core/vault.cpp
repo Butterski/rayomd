@@ -13,6 +13,15 @@
 #endif
 
 #include <cstdlib>
+#ifndef _WIN32
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
+#endif
 #include <algorithm>
 #include <system_error>
 #include <tuple>
@@ -136,11 +145,117 @@ Vault::Vault(const std::string& vaultRoot, const std::string& notePath) {
     root = ResolvedPath(folder);
     std::error_code ec;
     if (!root.empty() && !fs::is_directory(root, ec)) root.clear();
+#if defined(__linux__) && defined(SYS_openat2)
+    if (!root.empty()) rootFd = ::open(root.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
+#endif
 }
 
-// `candidate` once resolved, when it is a regular file inside the root; else empty.
-fs::path Vault::Check(const fs::path& candidate) const {
+Vault::~Vault() {
+#ifndef _WIN32
+    if (openFd >= 0) ::close(openFd);
+    if (rootFd >= 0) ::close(rootFd);
+#endif
+}
+
+#ifndef _WIN32
+namespace {
+
+// The file at `fd` whole, at most `maximum` bytes, as RayoMd::File::ReadAll reads one; closes it.
+bool ReadOpen(int fd, size_t maximum, std::string& text, RayoMd::File::FileIdentity& identity) {
+    struct stat status {};
+    const bool regular = ::fstat(fd, &status) == 0 && S_ISREG(status.st_mode);
+    identity.opened = regular;
+    identity.volume = (uint64_t)status.st_dev;
+    identity.index = (uint64_t)status.st_ino;
+    identity.size = (uint64_t)status.st_size;
+    bool whole = regular && identity.size <= maximum;
+    if (whole) {
+        text.resize((size_t)identity.size);
+        size_t got = 0;
+        while (got < text.size()) {
+            const ssize_t count = ::read(fd, &text[got], text.size() - got);
+            if (count <= 0) break;
+            got += (size_t)count;
+        }
+        text.resize(got);
+    }
+    ::close(fd);
+    return whole;
+}
+
+} // namespace
+
+// `relative` (below the root) opened beneath the root: a descriptor, -1 when it names no file
+// there (or leaves the root, by "..", a symbolic link or a magic link), -2 when openat2 itself is
+// refused (an old kernel, a seccomp filter), the root's descriptor then given up.
+int Vault::OpenBeneath(const fs::path& relative) {
+#if defined(__linux__) && defined(SYS_openat2)
+    struct {
+        uint64_t flags;
+        uint64_t mode;
+        uint64_t resolve;
+    } how{ (uint64_t)(O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK), 0, 0x08 /* RESOLVE_BENEATH */ | 0x02 /* RESOLVE_NO_MAGICLINKS */ };
+    const long fd = ::syscall(SYS_openat2, rootFd, relative.c_str(), &how, sizeof(how));
+    if (fd >= 0) return (int)fd;
+    if (errno == ENOSYS || errno == EPERM || errno == EINVAL || errno == E2BIG) {
+        ::close(rootFd);
+        rootFd = -1;
+        return -2;
+    }
+    return -1;
+#else
+    (void)relative;
+    return -2;
+#endif
+}
+#endif
+
+bool Vault::Read(const fs::path& path, size_t maximum, std::string& text, RayoMd::File::FileIdentity& identity) {
+#ifndef _WIN32
+    if (openFd >= 0 && openPath == path) {
+        const int fd = openFd;
+        openFd = -1;
+        return ReadOpen(fd, maximum, text, identity);
+    }
+    if (rootFd >= 0) {
+        const fs::path relative = path.lexically_normal().lexically_relative(root);
+        if (!relative.empty() && *relative.begin() != ".." && relative != ".") {
+            const int fd = OpenBeneath(relative);
+            if (fd >= 0) return ReadOpen(fd, maximum, text, identity);
+            if (fd == -1) {
+                identity = RayoMd::File::FileIdentity();
+                return false;
+            }
+        }
+    }
+#endif
+    return RayoMd::File::ReadAll(path, maximum, text, identity);
+}
+
+// `candidate` once checked, when it is a regular file inside the root; else empty. Through the
+// root's descriptor (Linux), the path below the root as written, the file left open for Read;
+// else resolved.
+fs::path Vault::Check(const fs::path& candidate) {
     const fs::path lexical = candidate.lexically_normal();
+#ifndef _WIN32
+    if (rootFd >= 0) {
+        const fs::path relative = lexical.lexically_relative(root);
+        if (relative.empty() || *relative.begin() == ".." || relative == ".") return fs::path();
+        const int fd = OpenBeneath(relative);
+        if (fd >= 0) {
+            struct stat status {};
+            if (::fstat(fd, &status) != 0 || !S_ISREG(status.st_mode)) {
+                ::close(fd);
+                return fs::path();
+            }
+            if (openFd >= 0) ::close(openFd);
+            openFd = fd;
+            openPath = lexical;
+            return lexical;
+        }
+        if (fd == -1) return fs::path();
+    }
+#endif
 #ifdef _WIN32
     // In the root by name before anything is opened, and through no link below it (TryOpenDirect's
     // rule for images); the file itself no link either.
@@ -228,10 +343,6 @@ void Vault::BuildIndex() {
         return std::tie(a.name, a.depth, a.relative) < std::tie(b.name, b.depth, b.relative);
     });
     indexValid = true;
-}
-
-bool Vault::Read(const fs::path& path, size_t maximum, std::string& text, RayoMd::File::FileIdentity& identity) {
-    return RayoMd::File::ReadAll(path, maximum, text, identity);
 }
 
 } // namespace TinyPdf::Internal
