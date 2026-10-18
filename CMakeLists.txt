@@ -179,11 +179,15 @@ endfunction()
 # PDF/A's metadata and the footnotes' numbering are made once per document, page footnotes keep
 # their account once per note, an OpenType font's CFF table is read once and subset once per
 # document, an HTML block is mapped once, the notes a document embeds or links to are read once,
-# and the image encoder's threads only hand out segments that flate.cpp compresses. Optimize these
-# translation units for package size while leaving the performance-critical renderer and parser
-# on the normal release flags.
+# the image encoder's threads only hand out segments that flate.cpp compresses, and the command
+# lines parse their arguments, list a batch and write its report once per run (--bench and
+# --serve only call the engine in their loops). Optimize these translation units for package size
+# while leaving the performance-critical renderer and parser on the normal release flags.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
+        src/cli/main_cli.cpp
+        src/win32/main_windows_cli.cpp
+        src/common/batch_report.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/image_cache.cpp
         src/core/image_encoder.cpp

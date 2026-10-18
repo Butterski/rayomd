@@ -630,12 +630,14 @@ Important image/link details:
   What both command lines share for batch export: the JSON Lines report (one
   line per document, written by the worker that finished it), the up-to-date
   check behind `--skip-unchanged` (PDF newer than its Markdown and ending in
-  `%%EOF`) and the recursive collection behind `--recursive`.
+  `%%EOF`) and the recursive collection behind `--recursive` (sorted by name as indices: a sort
+  of the files themselves, two paths each, was 20 KB of code).
 
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single
   export, stdin Markdown export, folder batch, stdin batch, warm serve mode,
-  books, and benchmarks.
+  books, and benchmarks. Built at `-Os` with `batch_report.cpp` and the Windows CLI: the glue
+  runs once a run (`--bench` and `--serve` only call the engine in their loops).
 
 - `src/cli/terminate.cpp`
   Both command lines' terminate handler in place of libstdc++'s (whose demangler is 61 KB):
