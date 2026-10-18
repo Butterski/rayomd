@@ -145,11 +145,11 @@ bool IsRegularFile(const std::string& path) {
 
 } // namespace
 
-std::string ResolvedPath(std::string_view path) {
 #ifdef _WIN32
-    const HANDLE handle = CreateFileW(PathFromUtf8(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+fs::path ResolvedWidePath(const fs::path& path) {
+    const HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return std::string();
+    if (handle == INVALID_HANDLE_VALUE) return fs::path();
     std::wstring name(MAX_PATH, L'\0');
     DWORD length = GetFinalPathNameByHandleW(handle, name.data(), (DWORD)name.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     if (length >= name.size()) {
@@ -157,14 +157,21 @@ std::string ResolvedPath(std::string_view path) {
         length = GetFinalPathNameByHandleW(handle, name.data(), (DWORD)name.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     }
     CloseHandle(handle);
-    if (length == 0 || length >= name.size()) return std::string();
+    if (length == 0 || length >= name.size()) return fs::path();
     name.resize(length);
     // The answer begins "\\?\C:\" or "\\?\UNC\server\share\", which std::filesystem reads as a root
     // name "\\?" and no call opens once lexically_normal made it "\?\": the path as the other
     // Windows calls write it.
     if (name.compare(0, 8, L"\\\\?\\UNC\\") == 0) name.replace(0, 8, L"\\\\");
     else if (name.compare(0, 4, L"\\\\?\\") == 0) name.erase(0, 4);
-    return PathToUtf8(fs::path(std::move(name)));
+    return fs::path(std::move(name));
+}
+#endif
+
+std::string ResolvedPath(std::string_view path) {
+#ifdef _WIN32
+    const fs::path resolved = ResolvedWidePath(PathFromUtf8(path));
+    return resolved.empty() ? std::string() : PathToUtf8(resolved);
 #else
     // realpath(3): one call; std::filesystem::canonical splits and rebuilds the path a component at
     // a time.

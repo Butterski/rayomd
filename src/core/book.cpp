@@ -28,6 +28,9 @@ using TinyPdf::Internal::Block;
 using TinyPdf::Internal::BlockType;
 using TinyPdf::Internal::IsWithinRoot;
 using TinyPdf::Internal::ResolvedPath;
+#ifdef _WIN32
+using TinyPdf::Internal::ResolvedWidePath;
+#endif
 
 std::string Lower(std::string_view text) {
     std::string lower(text);
@@ -209,10 +212,19 @@ public:
         std::error_code ec;
         fs::path file = path;
         if (!root.empty()) {
+#ifdef _WIN32
+            // Resolved as the wide path it is: a file name with no UTF-8 form (an unpaired
+            // surrogate, which NTFS allows) is read under its own name, not U+FFFD's. Only the
+            // containment test reads it as UTF-8, where the root's own components are exact.
+            file = ResolvedWidePath(path);
+            if (file.empty()) return Result::Unreadable;
+            if (!IsWithinRoot(PathToUtf8(file), root)) return Result::Outside;
+#else
             const std::string resolved = ResolvedPath(PathToUtf8(path));
             if (resolved.empty()) return Result::Unreadable;
             if (!IsWithinRoot(resolved, root)) return Result::Outside;
             file = PathFromUtf8(resolved);
+#endif
         }
         RayoMd::File::FileIdentity identity;
         const bool whole = fs::is_regular_file(file, ec) &&
