@@ -173,6 +173,18 @@ inline unsigned LowestBit(unsigned bits) {
     return bit;
 #endif
 }
+inline unsigned LowestBit64(uint64_t bits) {
+#if defined(__GNUC__) || defined(__clang__)
+    return static_cast<unsigned>(__builtin_ctzll(bits));
+#else
+    unsigned bit = 0;
+    while ((bits & 1u) == 0) {
+        bits >>= 1;
+        bit++;
+    }
+    return bit;
+#endif
+}
 } // namespace Detail
 
 // The index of the first byte of `text` from `from` on with a class in `Mask`, or text.size().

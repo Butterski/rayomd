@@ -893,6 +893,27 @@ Text and layout:
   branch in it): 5.3 KB less text, but `Renderer`'s constructor went into `BuildUnicodePdfBytes`
   and its `KeptBuffer::Take`s out of line (polish +0.06 %, notes +0.02 % instructions).
 
+Print output (`--black-text`, 2026-10-18; instructions of `--bench` with the flag over without,
+README.md, 18.8 % before and 3.9 % kept):
+
+- The renderers writing greys: 27 colour writes in `tiny_pdf.cpp` besides the SVG converter,
+  the theme and the formulas, a test on each default path, and other bytes than the padded
+  rewrite.
+- Marking 16 words of stop bits, then taking them (no call in the vector loop): +22 % over the
+  fused loop, the words stored and read back. Step offsets instead of pointers: +17 % (GCC
+  recomputed the base at each stop). Broadcast constants: rebuilt in three instructions after
+  each call; two `pshufb` tables are loaded in one.
+- One memo slot for each hash of the last 8 bytes: operators sharing them ("0.05 0.30 0.08 rg",
+  "0.08 0.08 0.08 rg") evicted each other, 49 misses an export; two ways kept. The memo on the
+  stack of each build: every build misses its colours again; in static TLS: 9 KB more for every
+  thread of every process. One on the heap from the first use is kept.
+- SSE2's four 16-byte compares inlined at each step of the scan: 3.4 KB of code; out of line
+  they are one call a 64-byte step, on CPUs without AVX2 only.
+- `--hide-tags` (README.md with Obsidian's dialect, 95.6 K instructions a build before, 66 K kept):
+  line feeds from an SSE2 bit mask instead of a `memchr` a line, and plain lines in a loop of their
+  own (57 K, +1.2 KB of code); `NextTag` inlined (a 5 KB note dense with tags 1.2 K a build cheaper,
+  +490 bytes); the next tag taken from the next '#' found for each line (that note +0.6 %).
+
 Images and compression:
 
 - zlib at levels 1 to 9, zlib-ng 2.3.3, libdeflate 1.26 (levels 1 to 12) and ISA-L
