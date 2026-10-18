@@ -32,16 +32,26 @@ renderers and PDF/UA, surfaces) hold for every item, plus one for files:
 
 ## Order
 
-| Step | Item | Report # | Repo | Size | Release |
-|---:|---|---:|---|---|---|
-| 1 | Print output | 9 | engine, GUI options | S | 5.2 |
-| 2 | One long page | 6 | engine S, GUI preview M | M | 5.2 |
-| 3 | Note embeds and the vault resolver | 1 | engine, GUI options | M–L | 5.2 |
-| 4 | Linked notes and backlinks | 3 | engine and CLIs, GUI export | M | 5.2 |
-| 5 | Footnotes at the foot of the page | 5 | engine, GUI option | L | 5.3 |
+| Step | Item | Report # | Repo | Size | Release | Status (2026-10-18) |
+|---:|---|---:|---|---|---|---|
+| 1 | Print output | 9 | engine, GUI options | S | 5.2 | done, 714a5f6 |
+| 2 | One long page | 6 | engine S, GUI preview M | M | 5.2 | done, f25dbc4; GUI strips |
+| 3 | Note embeds and the vault resolver | 1 | engine, GUI options | M–L | 5.2 | done, 4e3e792, ea31d0c |
+| 4 | Linked notes and backlinks | 3 | engine and CLIs, GUI export | M | 5.2 | done, with step 3 |
+| 5 | Footnotes at the foot of the page | 5 | engine, GUI option | L | 5.2 | done, fefe395, c4f6013 |
 
 Small, isolated items first. Step 4 reuses step 3's resolver. Step 5 changes page breaking in
-both renderers and the structure tree, and ships on its own.
+both renderers and the structure tree; planned for 5.3, it was ready with the rest and ships in
+5.2.
+
+**Deviations, as built.** Embeds turn their lines into `<!---->` and splice each note's blocks
+after the parse (`ParseWithEmbeds`), and images take their folder from a side table: a test in
+`ParseMarkdownImpl` or a field in `ImageSource` moved GCC's inlining there (+0.4 % instructions on
+notes.md). Embeds must start in the first column. Notes are opened with `openat2(RESOLVE_BENEATH)`
+on Linux. Long pages keep their bottoms in `long_page.cpp` (a renderer member moved inlining).
+Page footnotes measure each note once and replay its bytes under a translation (a second layout
+cost +13 to +19 %); PDF/UA builds and notes with images lay out again. With a long page, the
+notes follow the page's text. Print colours also run over a diagram's own form.
 
 ## 1. Print output (`--black-text`, `--hide-tags`)
 
@@ -389,11 +399,10 @@ keeps one layout pass and every coordinate.
 
 ## Releases
 
-- **Engine 5.2.0, after steps 1–4.** `VERSION`, the README badge, *New in 5.2* and the download
-  commands. The release workflow does the Arch PKGBUILDs.
+- **Engine 5.2.0, with all five steps** (step 5 was planned for 5.3). `VERSION`, the README
+  badge, *New in 5.2* and the download commands. The release workflow does the Arch PKGBUILDs.
 - **GUI 1.3.0.** `VERSION`, the PKGBUILD's `pkgver`, the README badge and download commands, and
   the submodule at the engine's bump commit.
-- **Engine 5.3.0 and GUI 1.4.0** after step 5.
 - Each step updates `README.md` *Features*, AGENTS.md *Current Feature Surface*, the wiki pages
   (*CLI Reference*, *Native Markdown Support*, *Obsidian Notes*) and its GUI options in the same
   change.
