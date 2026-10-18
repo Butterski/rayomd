@@ -208,7 +208,9 @@ Fence FenceOf(std::string_view line) {
 }
 
 // Past its indentation and quote markers, a line that opens display math: "$$" and no "$$" after.
-bool OpensDisplayMath(std::string_view line) {
+// Always inlined: TagHider calls it too, and as a call it cost ObsidianToCommonMark 0.2 % of
+// README.md's build.
+RAYOMD_HOT_INLINE bool OpensDisplayMath(std::string_view line) {
     size_t at = 0;
     while (at < line.size() && (IsBlank(line[at]) || line[at] == '>')) at++;
     return line.substr(at, 2) == "$$" && line.find("$$", at + 2) == kNone;
@@ -246,13 +248,14 @@ private:
     bool searched = false;
 };
 
-// One line after another outside fenced code and display math, Obsidian's syntax turned into
-// RayoMD's (ObsidianToCommonMark).
-class Converter {
+// The code spans of one line: the end of the span whose backticks start at a position, after its
+// closing run of as many backticks, or after its own run when none closes it. The runs are found
+// once a line, and each run's closing one in one pass back over them, so a line of unmatched runs
+// stays linear. Positions asked must grow within a line.
+class CodeSpans {
 public:
-    explicit Converter(std::string& output) : out(output) {}
-    void Convert(std::string_view line);
-    bool inComment = false;   // in a %% comment that a line before opened
+    void Reset() { found = false; }
+    size_t End(std::string_view line, size_t at);
 
 private:
     struct Run {
@@ -260,32 +263,17 @@ private:
         size_t length;
         size_t close;   // the next run of the same length, the code span's end; kNone for none
     };
-    size_t CodeSpanEnd(size_t at);
-    void Embed(std::string_view inner, bool alone);
-    void WikiLink(std::string_view inner);
-
-    std::string& out;
-    std::string_view line;
-    NextOf closeBrackets{ "]]" };
-    NextOf openBracket{ "[" };
-    NextOf closeMark{ "==" };
-    NextOf closeComment{ "%%" };
-    NextOf dollar{ "$" };
-    NextOf dollars{ "$$" };
     std::vector<Run> runs;   // the line's backtick runs, once one is met
-    bool runsFound = false;
-    size_t runCursor = 0;
+    bool found = false;
+    size_t cursor = 0;
     std::vector<size_t> nextOfLength;   // by run length, the run after the current one; reused
 };
 
-// The end of the code span whose backticks start at `at`: after its closing run of as many
-// backticks, or after its own run when none closes it. The runs are found once a line, and each
-// run's closing one in one pass back over them, so a line of unmatched runs stays linear.
-size_t Converter::CodeSpanEnd(size_t at) {
-    if (!runsFound) {
-        runsFound = true;
+RAYOMD_HOT_INLINE size_t CodeSpans::End(std::string_view line, size_t at) {
+    if (!found) {
+        found = true;
         runs.clear();
-        runCursor = 0;
+        cursor = 0;
         size_t longest = 0;
         for (size_t index = at; index < line.size();) {
             if (line[index] != '`') {
@@ -304,14 +292,37 @@ size_t Converter::CodeSpanEnd(size_t at) {
             nextOfLength[runs[index].length] = index;
         }
     }
-    while (runCursor < runs.size() && runs[runCursor].at + runs[runCursor].length <= at) runCursor++;
-    if (runCursor == runs.size()) return at + 1;
-    const Run& run = runs[runCursor];
+    while (cursor < runs.size() && runs[cursor].at + runs[cursor].length <= at) cursor++;
+    if (cursor == runs.size()) return at + 1;
+    const Run& run = runs[cursor];
     if (run.at != at || run.close == kNone) return run.at + run.length;   // escaped into, or unclosed
     const Run& close = runs[run.close];
-    runCursor = run.close + 1;
+    cursor = run.close + 1;
     return close.at + close.length;
 }
+
+// One line after another outside fenced code and display math, Obsidian's syntax turned into
+// RayoMD's (ObsidianToCommonMark).
+class Converter {
+public:
+    explicit Converter(std::string& output) : out(output) {}
+    void Convert(std::string_view line);
+    bool inComment = false;   // in a %% comment that a line before opened
+
+private:
+    void Embed(std::string_view inner, bool alone);
+    void WikiLink(std::string_view inner);
+
+    std::string& out;
+    std::string_view line;
+    NextOf closeBrackets{ "]]" };
+    NextOf openBracket{ "[" };
+    NextOf closeMark{ "==" };
+    NextOf closeComment{ "%%" };
+    NextOf dollar{ "$" };
+    NextOf dollars{ "$$" };
+    CodeSpans spans;
+};
 
 void Converter::Convert(std::string_view text) {
     line = text;
@@ -321,7 +332,7 @@ void Converter::Convert(std::string_view text) {
     closeComment.Reset(text);
     dollar.Reset(text);
     dollars.Reset(text);
-    runsFound = false;
+    spans.Reset();
     size_t i = 0;
     if (inComment) {
         const size_t end = closeComment.From(0);
@@ -349,7 +360,7 @@ void Converter::Convert(std::string_view text) {
             continue;
         }
         if (c == '`') {
-            const size_t end = CodeSpanEnd(i);
+            const size_t end = spans.End(text, i);
             out.append(text.substr(i, end - i));
             i = end;
             continue;
@@ -535,9 +546,224 @@ constexpr CalloutKind kCalloutKinds[] = {
     { "quote", 7 }, { "cite", 7 },
 };
 
+// The end of the front matter, the line feed after the line "---" or "..." that closes a first
+// line "---" (the text's size when that line ends the text), else 0.
+size_t FrontMatterEnd(std::string_view markdown) {
+    if (Trim(markdown.substr(0, markdown.find('\n'))) != "---") return 0;
+    for (size_t start = markdown.find('\n'); start != kNone;) {
+        const size_t end = markdown.find('\n', start + 1);
+        const std::string_view line = Trim(markdown.substr(start + 1, end == kNone ? kNone : end - start - 1));
+        if (line == "---" || line == "...") return end == kNone ? markdown.size() : end;
+        start = end;
+    }
+    return 0;
+}
+
+// The first byte of [at, end) that is one of `Bytes`, else `end`: 16 bytes a step in SSE2.
+template <char... Bytes>
+size_t FindAny(const char* text, size_t at, size_t end) {
+#if RAYOMD_DIALECT_SSE2
+    for (; at + 16 <= end; at += 16) {
+        const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(text + at));
+        __m128i hit = _mm_setzero_si128();
+        ((hit = _mm_or_si128(hit, _mm_cmpeq_epi8(chunk, _mm_set1_epi8(Bytes)))), ...);
+        const unsigned bits = static_cast<unsigned>(_mm_movemask_epi8(hit));
+        if (bits != 0) return at + RayoMd::Text::Detail::LowestBit(bits);
+    }
+#endif
+    while (at < end && ((text[at] != Bytes) && ...)) at++;
+    return at;
+}
+
+// A byte of a tag's name: a letter (any non-ASCII byte), a digit, '_', '-' or '/'.
+bool IsTagByte(unsigned char c) {
+    return c >= 0x80 || ((c | 0x20) >= 'a' && (c | 0x20) <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' ||
+        c == '/';
+}
+
+// The columns of a line's indentation, counted up to 4.
+size_t Indentation(std::string_view line) {
+    size_t columns = 0;
+    for (size_t at = 0; at < line.size() && columns < 4; at++) {
+        if (line[at] == ' ') columns++;
+        else if (line[at] == '\t') columns = 4;
+        else break;
+    }
+    return columns;
+}
+
+// --hide-tags (HideTags): the lines up to the last '#' read one by one for the fences, display
+// formulas, indented code and comments they open and close; only a line with a '#' or "%%" is
+// scanned, from one byte that can start syntax to the next (FindAny). The text between the tags
+// is copied in runs.
+class TagHider {
+public:
+    TagHider(std::string_view text, std::string& output) : markdown(text), out(output) {}
+    bool Run();
+
+private:
+    void Scan(size_t lineStart, size_t lineEnd, size_t from);
+
+    std::string_view markdown;
+    std::string& out;
+    size_t copied = 0;
+    bool changed = false;
+    bool inComment = false;
+    NextOf closeBrackets{ "]]" };
+    NextOf closeComment{ "%%" };
+    NextOf dollar{ "$" };
+    NextOf dollars{ "$$" };
+    CodeSpans spans;
+};
+
+bool TagHider::Run() {
+    size_t hash = markdown.find('#');
+    if (hash == kNone) return false;
+    const size_t frontMatterEnd = FrontMatterEnd(markdown);
+    if (frontMatterEnd == markdown.size()) return false;
+    size_t start = frontMatterEnd > 0 ? frontMatterEnd + 1 : 0;
+    if (hash < start) hash = markdown.find('#', start);
+    size_t percent = markdown.find("%%", start);
+    Fence fence;
+    bool displayMath = false;
+    bool blank = true;      // the line before is blank
+    bool indented = false;  // or indented code
+    while (hash != kNone) {
+        size_t end = markdown.find('\n', start);
+        if (end == kNone) end = markdown.size();
+        const std::string_view line = markdown.substr(start, end - start);
+        // The line's first byte past its white space, and past its quote markers: only a line
+        // whose lead is '`', '~' or '$' can open or close a fence or a display formula.
+        size_t text = 0;
+        while (text < line.size() && IsBlank(line[text])) text++;
+        size_t first = text;
+        while (first < line.size() && (IsBlank(line[first]) || line[first] == '>')) first++;
+        const char lead = first < line.size() ? line[first] : '\0';
+        const bool lineBlank = text == line.size();
+        bool code = false;
+        if (inComment) {
+            if (percent < end) {
+                inComment = false;
+                Scan(start, end, percent - start + 2);
+            }
+        } else if (fence.marker != 0) {
+            if (lead == fence.marker) {
+                const Fence closing = FenceOf(line);
+                if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
+            }
+        } else if (displayMath) {
+            if (lineBlank || line.find("$$") != kNone) displayMath = false;
+        } else if (const Fence opening = lead == '`' || lead == '~' ? FenceOf(line) : Fence(); opening.marker != 0) {
+            fence = opening;
+        } else if (lead == '$' && OpensDisplayMath(line)) {
+            displayMath = true;
+        } else {
+            code = !lineBlank && (blank || indented) && Indentation(line) >= 4;
+            if (!code && (hash < end || percent < end)) Scan(start, end, 0);
+        }
+        blank = lineBlank;
+        indented = code;
+        if (end == markdown.size()) break;
+        start = end + 1;
+        if (hash < start) hash = markdown.find('#', start);
+        if (percent < start) percent = markdown.find("%%", start);
+    }
+    if (!changed) return false;
+    out.append(markdown.substr(copied));
+    return true;
+}
+
+// The line [lineStart, lineEnd) from `from` on: escapes, code spans, formulas, comments and wiki
+// links skipped as Converter::Convert reads them, the tags in the text dropped.
+void TagHider::Scan(size_t lineStart, size_t lineEnd, size_t from) {
+    const std::string_view text = markdown.substr(lineStart, lineEnd - lineStart);
+    closeBrackets.Reset(text);
+    closeComment.Reset(text);
+    dollar.Reset(text);
+    dollars.Reset(text);
+    spans.Reset();
+    const size_t size = text.size();
+    for (size_t i = FindAny<'#', '\\', '`', '$', '%', '['>(text.data(), from, size); i < size;
+         i = FindAny<'#', '\\', '`', '$', '%', '['>(text.data(), i, size)) {
+        const char c = text[i];
+        const char next = i + 1 < size ? text[i + 1] : '\0';
+        if (c == '#') {
+            size_t end = i + 1;
+            bool word = false;
+            if (i == 0 || IsBlank(text[i - 1])) {
+                for (; end < size && IsTagByte(static_cast<unsigned char>(text[end])); end++) {
+                    word |= text[end] < '0' || text[end] > '9';
+                }
+            }
+            if (word) {
+                // The tag and the space after it, else the space before it.
+                size_t dropFrom = lineStart + i;
+                size_t dropTo = lineStart + end;
+                if (end < size && text[end] == ' ') dropTo++;
+                else if (i > 0 && text[i - 1] == ' ' && dropFrom - 1 >= copied) dropFrom--;
+                if (!changed) {
+                    changed = true;
+                    out.clear();
+                    out.reserve(markdown.size());
+                }
+                out.append(markdown.data() + copied, dropFrom - copied);
+                copied = dropTo;
+            }
+            i = end;
+        } else if (c == '\\') {
+            i += next != '\0' ? 2 : 1;
+        } else if (c == '`') {
+            i = spans.End(text, i);
+        } else if (c == '$') {
+            size_t end = i + 1;
+            if (next == '$') {
+                const size_t close = dollars.From(i + 2);
+                end = close == kNone ? i + 2 : close + 2;
+            } else if (next != '\0' && !IsBlank(next)) {
+                const size_t close = dollar.From(i + 1);
+                if (close != kNone && !IsBlank(text[close - 1]) &&
+                    (close + 1 == size || text[close + 1] < '0' || text[close + 1] > '9')) {
+                    end = close + 1;
+                }
+            }
+            i = end;
+        } else if (c == '%' && next == '%') {
+            const size_t close = closeComment.From(i + 2);
+            if (close == kNone) {
+                inComment = true;
+                return;
+            }
+            i = close + 2;
+        } else if (c == '[' && next == '[') {
+            const size_t close = closeBrackets.From(i + 2);
+            i = close == kNone ? i + 2 : close + 2;
+        } else {
+            i++;
+        }
+    }
+}
+
 } // namespace
 
+bool HideTags(std::string_view markdown, std::string& out) {
+    return TagHider(markdown, out).Run();
+}
+
+// RewriteObsidian with HiddenTags(): the tags first, then the pairs of what is left.
+static RAYOMD_NOINLINE bool RewriteWithoutTags(std::string_view markdown, std::string& out) {
+    std::string untagged;
+    const bool hidden = HideTags(markdown, untagged);
+    const std::string_view text = hidden ? std::string_view(untagged) : markdown;
+    if (FindSyntaxPair(text, 0) == kNone) {
+        if (hidden) out = std::move(untagged);
+        return hidden;
+    }
+    out = ObsidianToCommonMark(text);
+    return true;
+}
+
 bool RewriteObsidian(std::string_view markdown, std::string& out) {
+    if (HiddenTags()) return RewriteWithoutTags(markdown, out);
     if (FindSyntaxPair(markdown, 0) == kNone) return false;
     out = ObsidianToCommonMark(markdown);
     return true;
@@ -547,16 +773,7 @@ std::string ObsidianToCommonMark(std::string_view markdown) {
     std::string out;
     out.reserve(markdown.size() + markdown.size() / 8);
     Converter converter(out);
-    // The front matter, when a line "---" or "..." closes the first line "---".
-    size_t frontMatterEnd = 0;
-    if (Trim(markdown.substr(0, markdown.find('\n'))) == "---") {
-        for (size_t start = markdown.find('\n'); start != kNone && frontMatterEnd == 0;) {
-            const size_t end = markdown.find('\n', start + 1);
-            const std::string_view line = Trim(markdown.substr(start + 1, end == kNone ? kNone : end - start - 1));
-            if (line == "---" || line == "...") frontMatterEnd = end == kNone ? markdown.size() : end;
-            start = end;
-        }
-    }
+    const size_t frontMatterEnd = FrontMatterEnd(markdown);
     if (frontMatterEnd == markdown.size()) return std::string(markdown);
     // Unchanged text is copied in runs from `copied` on; only a line with a pair outside code and
     // formulas, or in a comment, is converted. Lines are still read one by one up to the last pair,

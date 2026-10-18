@@ -288,6 +288,8 @@ struct CliExportOptions {
     bool embedsAsLinks = false;  // --embeds=link
     bool backlinks = false;      // --backlinks
     int followLinks = 0;         // --follow-links[=N]: 0 for none
+    bool blackText = false;
+    bool hideTags = false;
     TinyPdf::PdfTheme theme;
     unsigned workers = 0;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
@@ -317,6 +319,8 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--pdfua") options.pdfua = true;
         else if (value == "--no-highlight") options.highlightCode = false;
         else if (value == "--no-diagrams") options.diagrams = false;
+        else if (value == "--black-text") options.blackText = true;
+        else if (value == "--hide-tags") options.hideTags = true;
         else if (value == "--toc") options.toc = true;
         else if (value.rfind("--toc-depth=", 0) == 0) {
             if (value.size() != 13 || value[12] < '1' || value[12] > '6') {
@@ -495,6 +499,8 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     pdfOptions.vaultRoot = options.vaultRoot;
     pdfOptions.embedsAsLinks = options.embedsAsLinks;
     pdfOptions.backlinks = options.backlinks;
+    pdfOptions.blackText = options.blackText;
+    pdfOptions.hideTags = options.hideTags;
     pdfOptions.theme = options.theme;
     return pdfOptions;
 }
@@ -978,8 +984,10 @@ void PrintUsage() {
         "  #heading section or #^id block, read from the vault; default github), --vault=DIR (the\n"
         "  folder embedded and linked notes must lie in and are found in by name, local images too;\n"
         "  default the input's folder), --embeds=link (embedded notes stay links; default content),\n"
-        "  --footnotes=page (each footnote at the foot of the page of its first reference; default\n"
-        "  end, after the text).\n"
+        "  --hide-tags (with --dialect=obsidian: #tags left out), --footnotes=page (each footnote at\n"
+        "  the foot of the page of its first reference; default end, after the text), --black-text\n"
+        "  (for black-and-white printers: text, links and code black, fills and diagrams light grey;\n"
+        "  images keep their colours).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4;\n"
         "  or WIDTHxauto, such as 210mmxauto: one long page cut below its text, a new one only at page\n"

@@ -214,6 +214,12 @@ struct PdfOptions {
     bool embedsAsLinks = false;
     // BuildBookPdf: each file ends with "Linked from:" and links to the files that link to it.
     bool backlinks = false;
+    // For a black-and-white printer: text, links, bars and code in black, fills and diagrams in
+    // light greys (the luminance of their colours). Images keep their colours.
+    bool blackText = false;
+    // Obsidian's dialect only: its #tags (outside code, formulas and comments) are left out, each
+    // with a space next to it; a line of tags alone becomes a blank line.
+    bool hideTags = false;
 };
 
 // Legacy error reporting is retained for the bool-returning compatibility

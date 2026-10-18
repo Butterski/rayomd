@@ -15,18 +15,28 @@
 namespace TinyPdf::Internal {
 
 // The dialect of the document built on this thread, kept by BuildPdf and BuildBookPdf while they
-// run (as ParseBudget is by ParseMarkdown); GitHub's outside one.
+// run (as ParseBudget is by ParseMarkdown); GitHub's outside one. With it PdfOptions::hideTags,
+// which only Obsidian's dialect reads.
 class DialectScope {
 public:
-    explicit DialectScope(MarkdownDialect dialect);
+    explicit DialectScope(MarkdownDialect dialect, bool hideTags = false);
     ~DialectScope();
     DialectScope(const DialectScope&) = delete;
     DialectScope& operator=(const DialectScope&) = delete;
 
 private:
     MarkdownDialect previous;
+    bool previousHideTags;
 };
 bool ObsidianDialect();
+bool HiddenTags();
+
+// Obsidian's tags ("#tag": '#' at a line start or after white space, then letters, any non-ASCII
+// byte, digits, '_', '-' or '/', at least one of them no digit) taken out of `markdown` into
+// `out`, each with one space next to it, outside fenced and indented code, code spans, formulas,
+// "%%comments%%", wiki links and the front matter; a line of tags alone stays as a blank line.
+// False, `out` untouched, when there is none.
+bool HideTags(std::string_view markdown, std::string& out);
 
 // Obsidian's syntax as the CommonMark and HTML RayoMD reads, in one pass, every line where it was
 // (so a source map's lines stay): "%%comments%%" (also over lines) removed, "==text==" as
@@ -38,7 +48,8 @@ std::string ObsidianToCommonMark(std::string_view markdown);
 
 // ObsidianToCommonMark into `out` when `markdown` has any of what it rewrites ("[[", "==",
 // "%%", a '^' after a blank or at a line's start, which may begin a block id, " ^id" ending a
-// line, which is left out); false, `out` untouched, without: the parser reads the document itself.
+// line, which is left out), or tags with HiddenTags(); false, `out` untouched, without: the parser
+// reads the document itself.
 bool RewriteObsidian(std::string_view markdown, std::string& out);
 
 // A callout: the first line of a quote "[!type]", with "+" or "-" (folded or not: both show

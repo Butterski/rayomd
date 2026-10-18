@@ -70,6 +70,8 @@ struct WinExportOptions {
     bool embedsAsLinks = false;  // --embeds=link
     bool backlinks = false;      // --backlinks
     int followLinks = 0;         // --follow-links[=N]: 0 for none
+    bool blackText = false;
+    bool hideTags = false;
     TinyPdf::PdfTheme theme;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
@@ -298,6 +300,8 @@ TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const s
     options.vaultRoot = exportOptions.vaultRoot;
     options.embedsAsLinks = exportOptions.embedsAsLinks;
     options.backlinks = exportOptions.backlinks;
+    options.blackText = exportOptions.blackText;
+    options.hideTags = exportOptions.hideTags;
     options.theme = exportOptions.theme;
     return options;
 }
@@ -359,6 +363,10 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.highlightCode = false;
         } else if (lstrcmpiW(argv[i], L"--no-diagrams") == 0) {
             options.diagrams = false;
+        } else if (lstrcmpiW(argv[i], L"--black-text") == 0) {
+            options.blackText = true;
+        } else if (lstrcmpiW(argv[i], L"--hide-tags") == 0) {
+            options.hideTags = true;
         } else if (lstrcmpiW(argv[i], L"--toc") == 0) {
             options.toc = true;
         } else if (_wcsnicmp(argv[i], L"--toc-depth=", 12) == 0) {
@@ -1122,8 +1130,10 @@ void PrintUsage() {
         "  #heading section or #^id block, read from the vault; default github), --vault=DIR (the\n"
         "  folder embedded and linked notes must lie in and are found in by name, local images too;\n"
         "  default the input's folder), --embeds=link (embedded notes stay links; default content),\n"
-        "  --footnotes=page (each footnote at the foot of the page of its first reference; default\n"
-        "  end, after the text).\n"
+        "  --hide-tags (with --dialect=obsidian: #tags left out), --footnotes=page (each footnote at\n"
+        "  the foot of the page of its first reference; default end, after the text), --black-text\n"
+        "  (for black-and-white printers: text, links and code black, fills and diagrams light grey;\n"
+        "  images keep their colours).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4;\n"
         "  or WIDTHxauto, such as 210mmxauto: one long page cut below its text, a new one only at page\n"
