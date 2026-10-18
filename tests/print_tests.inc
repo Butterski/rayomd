@@ -41,7 +41,8 @@ std::string StripContent(std::string_view s, std::vector<ColorOp>& ops) {
             i++;
             numbers.clear();
         } else if (c == '<') {
-            i = i + 1 < s.size() && s[i + 1] == '<' ? i + 2 : s.find('>', i) + 1;
+            const size_t close = s.find('>', i);
+            i = i + 1 < s.size() && s[i + 1] == '<' ? i + 2 : close == std::string_view::npos ? s.size() : close + 1;
             numbers.clear();
         } else if (c == '/') {
             for (i++; i < s.size() && IsPdfRegular(s[i]); i++) {}
@@ -84,8 +85,17 @@ std::string StripContent(std::string_view s, std::vector<ColorOp>& ops) {
 }
 
 // The PDF with StripContent applied to each stream of plain content (no /Subtype, /Filter, /Type
-// or font lengths: pages, overlays, the cover); other streams, images among them, as they are.
+// or font lengths: pages, overlays, the cover); other streams, images among them, as they are,
+// and so is each CIDToGIDMap: its dictionary has only its length, and its bytes, the font's glyph
+// numbers, may hold a '<' and no '>' after it.
 std::string StripColors(const std::string& pdf, std::vector<ColorOp>& ops) {
+    std::vector<size_t> maps;   // where the CIDToGIDMaps' bytes begin
+    for (size_t at = pdf.find("/CIDToGIDMap "); at != std::string::npos; at = pdf.find("/CIDToGIDMap ", at + 1)) {
+        const size_t number = at + 13;
+        const std::string head = "\n" + pdf.substr(number, pdf.find(' ', number) - number) + " 0 obj\n";
+        const size_t object = pdf.find(head);
+        if (object != std::string::npos) maps.push_back(pdf.find("stream\n", object) + 7);
+    }
     std::string out;
     size_t copied = 0;
     for (size_t at = pdf.find("stream\n"); at != std::string::npos; at = pdf.find("stream\n", at)) {
@@ -95,7 +105,8 @@ std::string StripColors(const std::string& pdf, std::vector<ColorOp>& ops) {
         const size_t dataEnd = pdf.find("endstream", dataStart);
         if (dataEnd == std::string::npos) break;
         if (dict.find("/Subtype") == std::string_view::npos && dict.find("/Filter") == std::string_view::npos &&
-            dict.find("/Type") == std::string_view::npos && dict.find("/Length1") == std::string_view::npos) {
+            dict.find("/Type") == std::string_view::npos && dict.find("/Length1") == std::string_view::npos &&
+            std::find(maps.begin(), maps.end(), dataStart) == maps.end()) {
             out.append(pdf, copied, dataStart - copied);
             out += StripContent(std::string_view(pdf).substr(dataStart, dataEnd - dataStart), ops);
             copied = dataEnd;
