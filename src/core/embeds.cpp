@@ -12,7 +12,6 @@
 #include <memory>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace TinyPdf::Internal {
 
@@ -84,23 +83,29 @@ Fence FenceOf(std::string_view line) {
     return { marker, end - at, Trim(rest).empty() };
 }
 
-// Reads lines in turn, as the rewrite and the parser see them: which are fenced code, display
-// math, an Obsidian or HTML comment, or the front matter, none of which holds an embed.
+// Fenced code, read a line at a time.
+struct FenceState {
+    Fence fence;
+
+    // Whether `line` opens, closes or is in fenced code.
+    bool Skip(std::string_view line) {
+        const Fence found = FenceOf(line);
+        if (fence.marker != 0) {
+            if (found.marker == fence.marker && found.length >= fence.length && found.bare) fence = {};
+            return true;
+        }
+        if (found.marker == 0) return false;
+        fence = found;
+        return true;
+    }
+};
+
+// Reads lines in turn after the front matter, as the rewrite and the parser see them: which are
+// fenced code, display math or an Obsidian or HTML comment, none of which holds an embed.
 class LineState {
 public:
-    // Whether `line` (number `index`) is ordinary Markdown outside all of those.
-    bool Outside(const std::vector<std::string_view>& lines, size_t index) {
-        const std::string_view line = lines[index];
-        if (index == 0 && Trim(line) == "---") {
-            for (size_t next = 1; next < lines.size(); next++) {
-                const std::string_view trimmed = Trim(lines[next]);
-                if (trimmed == "---" || trimmed == "...") {
-                    frontMatterEnd = next;
-                    return false;
-                }
-            }
-        }
-        if (index <= frontMatterEnd && frontMatterEnd != kNone) return false;
+    // Whether `line` is ordinary Markdown outside all of those.
+    bool Outside(std::string_view line) {
         if (htmlComment) {
             htmlComment = line.find("-->"sv) == kNone;
             return false;
@@ -109,11 +114,8 @@ public:
             comment = (Pairs(line) & 1) == 0;
             return false;
         }
-        if (fence.marker != 0) {
-            const Fence closing = FenceOf(line);
-            if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
-            return false;
-        }
+        // While a fence is open no formula is (each opens only outside the other), so fences are
+        // read after the formulas.
         if (displayMath) {
             if (line.find("$$"sv) != kNone || Trim(line).empty()) displayMath = false;
             return false;
@@ -123,10 +125,7 @@ public:
             if (text.empty() || (text.size() >= 2 && text.substr(text.size() - 2) == "\\]"sv)) bracketMath = false;
             return false;
         }
-        if (const Fence opening = FenceOf(line); opening.marker != 0) {
-            fence = opening;
-            return false;
-        }
+        if (fences.Skip(line)) return false;
         size_t at = 0;
         while (at < line.size() && (IsBlank(line[at]) || line[at] == '>')) at++;
         if (line.substr(at, 2) == "$$"sv && line.find("$$"sv, at + 2) == kNone) {
@@ -157,8 +156,7 @@ private:
         return count;
     }
 
-    size_t frontMatterEnd = kNone;
-    Fence fence;
+    FenceState fences;
     bool displayMath = false;
     bool bracketMath = false;
     bool comment = false;
@@ -243,19 +241,11 @@ std::string Join(const std::vector<std::string_view>& lines, size_t first, size_
 // The section a heading begins: up to the next heading of its level or a higher one, outside
 // fenced code. Empty when the note has no such heading.
 std::string Section(const std::vector<std::string_view>& lines, size_t first, std::string_view heading) {
-    Fence fence;
+    FenceState fences;
     size_t start = kNone;
     int level = 0;
     for (size_t index = first; index < lines.size(); index++) {
-        if (fence.marker != 0) {
-            const Fence closing = FenceOf(lines[index]);
-            if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
-            continue;
-        }
-        if (const Fence opening = FenceOf(lines[index]); opening.marker != 0) {
-            fence = opening;
-            continue;
-        }
+        if (fences.Skip(lines[index])) continue;
         std::string_view text;
         const int found = HeadingOf(lines[index], text);
         if (found == 0) continue;
@@ -299,17 +289,9 @@ bool IsListLine(std::string_view line) {
 // The block "^id" marks (Obsidian's block reference): the paragraph or list line that ends in
 // " ^id", or the block a line of "^id" alone follows; the id left out. Empty without one.
 std::string BlockText(const std::vector<std::string_view>& lines, size_t first, std::string_view id) {
-    Fence fence;
+    FenceState fences;
     for (size_t index = first; index < lines.size(); index++) {
-        if (fence.marker != 0) {
-            const Fence closing = FenceOf(lines[index]);
-            if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
-            continue;
-        }
-        if (const Fence opening = FenceOf(lines[index]); opening.marker != 0) {
-            fence = opening;
-            continue;
-        }
+        if (fences.Skip(lines[index])) continue;
         const size_t caret = BlockIdAt(lines[index], id);
         if (caret == kNone) continue;
         if (Trim(lines[index].substr(0, caret)).empty()) {
@@ -364,28 +346,19 @@ size_t LabelEnd(std::string_view value, size_t from) {
 void OwnFootnotes(std::string& text, uint32_t entry) {
     if (text.find("[^") == std::string::npos || text.find("]:") == std::string::npos) return;
     const std::vector<std::string_view> lines = Lines(text);
-    std::unordered_set<std::string> defined;
-    Fence fence;
-    std::vector<unsigned char> code(lines.size(), 0);
-    for (size_t index = 0; index < lines.size(); index++) {
-        const std::string_view line = lines[index];
-        if (fence.marker != 0) {
-            const Fence closing = FenceOf(line);
-            if (closing.marker == fence.marker && closing.length >= fence.length && closing.bare) fence = {};
-            code[index] = 1;
-            continue;
-        }
-        if (const Fence opening = FenceOf(line); opening.marker != 0) {
-            fence = opening;
-            code[index] = 1;
-            continue;
-        }
+    // The labels defined (a value each, which nothing reads: this map type is the one the
+    // parser's footnotes and the image registry use, so it adds no code).
+    std::unordered_map<std::string, int> defined;
+    FenceState fences;
+    for (const std::string_view line : lines) {
+        if (fences.Skip(line)) continue;
         size_t at = 0;
         while (at < line.size() && (IsBlank(line[at]) || line[at] == '>')) at++;
         if (line.substr(at, 2) != "[^") continue;
         const size_t end = LabelEnd(line, at + 2);
         if (end != kNone && end + 1 < line.size() && line[end + 1] == ':') {
-            defined.insert(NormalizeReferenceLabel(line.substr(at + 2, end - at - 2)));
+            const std::string label = NormalizeReferenceLabel(line.substr(at + 2, end - at - 2));
+            defined[label] = 1;
         }
     }
     if (defined.empty()) return;
@@ -399,10 +372,11 @@ void OwnFootnotes(std::string& text, uint32_t entry) {
     };
     std::vector<Run> runs;
     std::vector<size_t> nextOfLength;
+    fences = FenceState();
     for (size_t index = 0; index < lines.size(); index++) {
         const std::string_view line = lines[index];
         if (index > 0) out += '\n';
-        if (code[index] != 0 || line.find("[^") == kNone) {
+        if (fences.Skip(line) || line.find("[^"sv) == kNone) {
             out.append(line);
             continue;
         }
@@ -438,8 +412,8 @@ void OwnFootnotes(std::string& text, uint32_t entry) {
             }
             if (line[at] == '[' && at + 1 < line.size() && line[at + 1] == '^') {
                 const size_t end = LabelEnd(line, at + 2);
-                if (end != kNone && (run >= runs.size() || runs[run].at > end) &&
-                    defined.count(NormalizeReferenceLabel(line.substr(at + 2, end - at - 2))) != 0) {
+                const std::string label = end == kNone ? std::string() : NormalizeReferenceLabel(line.substr(at + 2, end - at - 2));
+                if (end != kNone && (run >= runs.size() || runs[run].at > end) && defined.find(label) != defined.end()) {
                     out.append(line.substr(at, end - at));
                     out += suffix;
                     at = end;
@@ -457,9 +431,11 @@ std::vector<std::pair<uint32_t, std::string_view>> StandaloneEmbeds(std::string_
     std::vector<std::pair<uint32_t, std::string_view>> found;
     if (text.find("![[") == kNone) return found;
     const std::vector<std::string_view> lines = Lines(text);
+    // The front matter's lines: those before the body (BodyOffset).
+    const size_t body = BodyOffset(text);
     LineState state;
     for (size_t index = 0; index < lines.size() && index < UINT32_MAX; index++) {
-        if (!state.Outside(lines, index)) continue;
+        if ((size_t)(lines[index].data() - text.data()) < body || !state.Outside(lines[index])) continue;
         const std::string_view inner = StandaloneEmbed(lines[index]);
         if (!inner.empty()) found.emplace_back((uint32_t)index, inner);
     }
@@ -706,7 +682,7 @@ void AppendEntry(std::vector<Block>& out, uint32_t index, FootnoteParse* notes) 
     if (notes != nullptr) notes->possible = possible;
     SpliceEmbeds(parsed, entry, notes);
     SetImageBase(parsed, entry.folder + 1);
-    out.insert(out.end(), std::make_move_iterator(parsed.begin()), std::make_move_iterator(parsed.end()));
+    for (Block& block : parsed) out.push_back(std::move(block));
 }
 
 } // namespace
