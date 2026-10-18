@@ -9,7 +9,7 @@
 **Markdown to PDF in milliseconds, from a single small executable.**<br>
 No browser. No LaTeX. No Pandoc. No runtime.
 
-<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 5.1.0 MathTex" src="https://img.shields.io/badge/version-5.1.0%20MathTex-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 5.2.0 MathTex" src="https://img.shields.io/badge/version-5.2.0%20MathTex-informational?style=for-the-badge"></a>
 <a href="https://github.com/Butterski/rayomd/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Butterski/rayomd/total?style=for-the-badge&color=2ea44f"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 
@@ -31,11 +31,11 @@ No browser. No LaTeX. No Pandoc. No runtime.
 </div>
 
 > [!TIP]
-> **New in 5.1:** native Mermaid diagrams (flowcharts, sequence diagrams and pie charts drawn as
-> vector graphics, no browser), Obsidian notes (`--dialect=obsidian`: callouts, `==highlights==`,
-> `%%comments%%`, `[[wiki links]]`, `![[images]]`), numbered headings (`--number-headings`), and
-> the page breaks other tools write (`<div style="page-break-after: always">`,
-> `--page-break-before=h1`). Documents without them keep their PDF bytes.
+> **New in 5.2:** Obsidian notes embedded with `![[Note]]` printed in place (sections and blocks
+> too, found in the vault: `--vault`), a note with the notes it links to (`--follow-links=N`,
+> `--backlinks`), footnotes at the foot of the page (`--footnotes=page`), one long page for
+> screens (`--page-size=210mmxauto`), and print output (`--black-text`, `--hide-tags`).
+> Documents without them keep their PDF bytes.
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code: a small
 command-line tool for Linux and Windows, and an exporter you can embed through the
@@ -98,9 +98,9 @@ veraPDF.
 <summary><b>Linux</b>: download and run</summary>
 
 ```sh
-curl -LO https://github.com/Butterski/rayomd/releases/download/v5.1.0/rayomd-5.1.0-linux-x64-static.tar.gz
-tar -xzf rayomd-5.1.0-linux-x64-static.tar.gz
-./rayomd-5.1.0-linux-x64-static/rayomd --export input.md output.pdf
+curl -LO https://github.com/Butterski/rayomd/releases/download/v5.2.0/rayomd-5.2.0-linux-x64-static.tar.gz
+tar -xzf rayomd-5.2.0-linux-x64-static.tar.gz
+./rayomd-5.2.0-linux-x64-static/rayomd --export input.md output.pdf
 ```
 
 </details>
@@ -108,7 +108,7 @@ tar -xzf rayomd-5.1.0-linux-x64-static.tar.gz
 <details>
 <summary><b>Windows</b>: the command-line tool, <code>rayomd.exe</code></summary>
 
-Download `rayomd-5.1.0-windows-x64.zip` from
+Download `rayomd-5.2.0-windows-x64.zip` from
 [Releases](https://github.com/Butterski/rayomd/releases/latest) and unpack it. `rayomd.exe`
 is the same CLI as on Linux:
 
