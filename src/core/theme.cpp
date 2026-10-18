@@ -221,7 +221,7 @@ std::vector<std::string> ThemeBandStreams(const PdfTheme& theme, bool pageNumber
         std::string& stream = streams[number - 1];
         stream = "q 0.45 0.45 0.45 rg\n";
         AppendBand(stream, font, header, page, page.height - page.margin * 0.5, logo);
-        AppendBand(stream, font, footer, page, page.margin * 0.5, logo);
+        AppendBand(stream, font, footer, page, (page.bottoms != nullptr ? page.bottoms[number - 1] : 0.0) + page.margin * 0.5, logo);
         stream += "Q";
     }
     return streams;

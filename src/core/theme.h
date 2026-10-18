@@ -37,8 +37,11 @@ struct ThemeDocument {
 
 struct ThemePage {
     double width = 0.0;
-    double height = 0.0;
+    double height = 0.0;   // the top edge, where the header goes
     double margin = 0.0;
+    // Long pages (PdfPageSize::autoHeight): the bottom of each page's box, above which the footer
+    // goes; nullptr for pages from 0 up.
+    const double* bottoms = nullptr;
 };
 
 // The theme's logo among the document's images, /Im(index + 1); index -1 when there is none.

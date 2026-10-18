@@ -518,6 +518,12 @@ def verify(binary: Path, keep: Path | None) -> None:
         bad_size = run(binary, "--export", str(ascii_md), str(bad_size_pdf), "--page-size=b5", expect=2)
         if b"--page-size must be" not in bad_size.stdout or bad_size_pdf.exists():
             raise AssertionError("an invalid --page-size was not rejected")
+        long_pdf = root / "long.pdf"
+        run(binary, "--export", str(ascii_md), str(long_pdf), "--page-size=210mmxauto")
+        require_pdf(long_pdf, b" 595.28 14400] ")
+        bad_long = run(binary, "--export", str(ascii_md), str(bad_size_pdf), "--page-size=a4xauto", expect=2)
+        if b"--page-size must be" not in bad_long.stdout or bad_size_pdf.exists():
+            raise AssertionError("--page-size=a4xauto was not rejected")
         verify_compression(binary, root)
         verify_png_lossless(binary, root)
         verify_image_cache(binary, root)

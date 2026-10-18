@@ -16,8 +16,9 @@ constexpr double kMaxPageSide = 14400.0;
 bool ParsePdfStyle(std::string_view value, PdfStyle& style);
 bool ParsePdfMargin(std::string_view value, PdfMargin& margin);
 // "a4", "a3", "a5", "letter" or "legal", each also with "-landscape", or "WIDTHxHEIGHT" with a
-// unit, mm, cm, in or pt ("210x297mm", "8.5x11in"), in any case. False for anything else or a
-// side outside [kMinPageSide, kMaxPageSide].
+// unit, mm, cm, in or pt ("210x297mm", "8.5x11in"), or "WIDTHxauto" with the width's unit
+// ("210mmxauto": PdfPageSize::autoHeight), in any case. False for anything else or a side
+// outside [kMinPageSide, kMaxPageSide].
 bool ParsePageSize(std::string_view value, PdfPageSize& size);
 // "#RRGGBB" or "#RGB", as 0xRRGGBB.
 bool ParseColor(std::string_view value, int32_t& rgb);
@@ -35,6 +36,9 @@ const char* PdfMarginName(const PdfMargin& margin);
 double ResolveMarginPoints(const PdfMargin& margin);
 // The page size with each side kept within [kMinPageSide, kMaxPageSide].
 PdfPageSize ResolvePageSize(const PdfPageSize& size);
+// A long page's nominal height (PdfPageSize::autoHeight), what is fitted to a page: the width,
+// a resolved one, times the square root of 2, at most kMaxPageSide.
+double NominalPageHeight(double width);
 // The margin on a page of the resolved size `page`, narrowed to leave 72 points of text.
 double ResolveMarginPoints(const PdfMargin& margin, const PdfPageSize& page);
 

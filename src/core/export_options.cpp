@@ -36,6 +36,19 @@ PdfMargin MarginFromLegacy(int margin) {
     }
 }
 
+// Points per "mm", "cm", "in" or "pt"; 0 for anything else.
+double UnitPoints(std::string_view unit) {
+    if (unit == "mm") return 72.0 / 25.4;
+    if (unit == "cm") return 72.0 / 2.54;
+    if (unit == "in") return 72.0;
+    if (unit == "pt") return 1.0;
+    return 0.0;
+}
+
+bool InPageRange(double side) {
+    return side >= kMinPageSide && side <= kMaxPageSide;
+}
+
 } // namespace
 
 bool ParsePdfStyle(std::string_view value, PdfStyle& style) {
@@ -99,19 +112,26 @@ bool ParsePageSize(std::string_view value, PdfPageSize& size) {
         const char* widthStart = normalized.c_str();
         char* end = nullptr;
         const double width = std::strtod(widthStart, &end);
-        if (end == widthStart || *end != 'x') return false;
-        const char* heightStart = end + 1;
-        const double height = std::strtod(heightStart, &end);
-        if (end == heightStart) return false;
-        double unit = 0.0;
-        if (std::strcmp(end, "mm") == 0) unit = 72.0 / 25.4;
-        else if (std::strcmp(end, "cm") == 0) unit = 72.0 / 2.54;
-        else if (std::strcmp(end, "in") == 0) unit = 72.0;
-        else if (std::strcmp(end, "pt") == 0) unit = 1.0;
-        else return false;
-        parsed = { width * unit, height * unit };
-        const auto inRange = [](double side) { return side >= kMinPageSide && side <= kMaxPageSide; };
-        if (!inRange(parsed.width) || !inRange(parsed.height)) return false;
+        if (end == widthStart) return false;
+        constexpr std::string_view kAuto = "xauto";
+        const std::string_view rest(end);
+        if (rest.size() > kAuto.size() && rest.substr(rest.size() - kAuto.size()) == kAuto) {
+            // WIDTHxauto: the unit goes with the width.
+            const double unit = UnitPoints(rest.substr(0, rest.size() - kAuto.size()));
+            parsed.width = width * unit;
+            parsed.autoHeight = true;
+            if (unit == 0.0 || !InPageRange(parsed.width)) return false;
+            parsed.height = NominalPageHeight(parsed.width);
+        } else {
+            if (*end != 'x') return false;
+            const char* heightStart = end + 1;
+            const double height = std::strtod(heightStart, &end);
+            if (end == heightStart) return false;
+            const double unit = UnitPoints(end);
+            if (unit == 0.0) return false;
+            parsed = { width * unit, height * unit };
+            if (!InPageRange(parsed.width) || !InPageRange(parsed.height)) return false;
+        }
     }
     if (landscape) std::swap(parsed.width, parsed.height);
     size = parsed;
@@ -152,6 +172,10 @@ PdfPageSize ResolvePageSize(const PdfPageSize& size) {
     // Not ">=" fails for NaN too, which then gets the smallest side.
     const auto side = [](double points) { return points >= kMinPageSide ? std::min(points, kMaxPageSide) : kMinPageSide; };
     return { side(size.width), side(size.height) };
+}
+
+double NominalPageHeight(double width) {
+    return std::min(width * 1.4142135623730951, kMaxPageSide);
 }
 
 double ResolveMarginPoints(const PdfMargin& margin, const PdfPageSize& page) {

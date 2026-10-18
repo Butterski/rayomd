@@ -37,6 +37,11 @@ struct PdfMargin {
 struct PdfPageSize {
     double width = 595.0;
     double height = 842.0;
+    // One long page for screens (`--page-size=210mmxauto`): pages 14,400 points high, each cut
+    // just below what is drawn on it, so only explicit breaks and that height start a new one.
+    // `height` is not read then: what is fitted to a page (images, diagrams, title pages, a
+    // theme's cover) fits width * sqrt(2), which ParsePageSize puts there.
+    bool autoHeight = false;
 
     static PdfPageSize A4() { return { 595.0, 842.0 }; }
     static PdfPageSize A3() { return { 842.0, 1191.0 }; }
