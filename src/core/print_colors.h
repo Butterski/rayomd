@@ -17,8 +17,16 @@
 
 namespace TinyPdf::Internal {
 
-// The colour operators of the content in [begin, end) as greys.
+// The colour operators of the content in [begin, end) as greys: in AVX2 where the CPU has it,
+// else in SSE2 where the target has it, with the operators met before taken from a memo.
 void PrintColors(char* begin, char* end);
+
+// The same, byte by byte and without the memo: the reference the others must match byte for byte
+// (the tests compare them, and the SSE2 scan too).
+void PrintColorsScalar(char* begin, char* end);
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+void PrintColorsSse2(char* begin, char* end);
+#endif
 
 inline void PrintColors(std::string& stream) {
     if (!stream.empty()) PrintColors(&stream[0], &stream[0] + stream.size());

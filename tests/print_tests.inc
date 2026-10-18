@@ -129,7 +129,9 @@ std::string FormStreams(const std::string& pdf) {
 }
 
 // PrintColors on the content syntax RayoMD writes: strings and property lists pass through,
-// every colour operator becomes grey in place (the expected text without its padding).
+// every colour operator becomes grey in place (the expected text without its padding). Each case
+// alone (the byte-by-byte scan of short streams) and after 70 bytes of other content, twice (the
+// vector scans, the second time from the memo), in every scan.
 bool CheckRewrite() {
     const auto collapse = [](const std::string& text) {
         std::string out;
@@ -147,14 +149,123 @@ bool CheckRewrite() {
         { "/F1 9 Tf 1 g 0 g 0.08 g\n1 1 1 rg Q", "/F1 9 Tf 1 g 0 g 0 g \n1 g Q" },
         { "/g1 gs /Fg 2 Tf 3 rgx 0.5 0.5 0.5 rg", "/g1 gs /Fg 2 Tf 3 rgx 0.5 g" },
         { "0.08 g", "0 g" },
+        { "(a\\\\) 0.05 0.30 0.68 RG (b\\(c) 0.5 G", "(a\\\\) 0 G (b\\(c) 0.5 G" },
+        { "x1 0 0 rg (y)0.2 g 0.123456789 0.5 0.5 rg 0.9 0.5 0.5 rg", "x1 0 0 rg (y)0 g 0 g 0.62 g" },
+        { "1234567890123 0 0 rg 0 0 1 rg", "1234567890123 0 0 rg 0 g" },
     };
+    const std::string prefix = "q 1 0 0 1 72 700 cm BT /F1 11.5 Tf (Text with g and G) Tj ET Q\n";
+    using Scan = void (*)(char*, char*);
+    std::vector<Scan> scans = { TinyPdf::Internal::PrintColors, TinyPdf::Internal::PrintColorsScalar };
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+    scans.push_back(TinyPdf::Internal::PrintColorsSse2);
+#endif
     for (const auto& [content, expected] : cases) {
-        std::string stream = content;
-        TinyPdf::Internal::PrintColors(stream);
-        if (stream.size() != content.size() || collapse(stream) != collapse(expected)) {
-            std::cerr << "PrintColors mismatch: " << content << " -> " << stream << std::endl;
+        for (const Scan scan : scans) {
+            for (const std::string& lead : { std::string(), prefix, prefix }) {
+                std::string stream = lead + content;
+                scan(stream.data(), stream.data() + stream.size());
+                if (stream.size() != lead.size() + content.size() || stream.compare(0, lead.size(), lead) != 0 ||
+                    collapse(stream.substr(lead.size())) != collapse(expected)) {
+                    std::cerr << "PrintColors mismatch: " << content << " -> " << stream.substr(lead.size()) << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// Content of RayoMD's syntax, and of bytes it never writes, from `seed`: numbers, colour operators
+// (their operands well formed or not), names, other operators, property lists, literal strings of
+// text and of two-byte codes holding every byte value (escaped where they must be, nested and
+// escaped parentheses too), hex strings holding every byte value but '>', and white space of
+// every kind, so that strings, escapes and operators fall on every place of a vector step.
+std::string RandomContent(uint32_t seed, size_t tokens) {
+    uint32_t state = seed * 2654435761u + 12345u;
+    const auto next = [&](uint32_t bound) {
+        state = state * 1103515245u + 12345u;
+        return (state >> 8) % bound;
+    };
+    static const char* const kNumbers[] = { "0", "1", "0.5", ".25", "-0.1", "+3", "0.08", "0.05", "0.30", "0.68", "1.",
+        "0.123456789", "1234567890123", "--1", "1.2.3", "0.96" };
+    static const char* const kWords[] = { "rg", "RG", "g", "G", "gs", "/F1", "/g1", "/Fg", "BT", "ET", "q", "Q", "Tf", "Tm",
+        "Tj", "TJ", "re", "f", "x1", "rgx", "<<", ">>", "<< /MCID 3 >>", "<</Type /Pagination>>", "[", "]", "%c" };
+    static const char kSpaces[] = { ' ', ' ', ' ', '\n', '\r', '\t', '\f', '\0' };
+    std::string out;
+    for (size_t token = 0; token < tokens; token++) {
+        switch (next(8)) {
+        case 0:
+        case 1: {   // a colour operator, mostly well formed
+            const bool rgb = next(2) == 0;
+            const uint32_t count = next(5) == 0 ? next(4) : rgb ? 3 : 1;
+            for (uint32_t index = 0; index < count; index++) {
+                out += kNumbers[next(sizeof(kNumbers) / sizeof(*kNumbers))];
+                out += ' ';
+            }
+            out += rgb ? (next(2) == 0 ? "rg" : "RG") : (next(2) == 0 ? "g" : "G");
+            break;
+        }
+        case 2:
+            out += kNumbers[next(sizeof(kNumbers) / sizeof(*kNumbers))];
+            break;
+        case 3:
+            out += kWords[next(sizeof(kWords) / sizeof(*kWords))];
+            break;
+        case 4: {   // a literal string of text or two-byte codes, every byte value
+            out += '(';
+            for (uint32_t length = next(80), index = 0; index < length; index++) {
+                const char c = static_cast<char>(next(5) == 0 ? next(256) : "abcgG gg rg 0.5 "[next(16)]);
+                if (c == '(' || c == ')' || c == '\\' || next(6) == 0) out += '\\';   // any byte escaped too
+                out += c;
+                if (next(40) == 0) out += next(2) == 0 ? "(nested g)" : "\\\\";
+            }
+            out += ')';
+            break;
+        }
+        case 5: {   // a hex string, every byte value but '>'
+            out += '<';
+            for (uint32_t length = next(40), index = 0; index < length; index++) {
+                const char c = static_cast<char>(next(4) == 0 ? next(256) : "0123456789ABCDEF"[next(16)]);
+                out += c == '>' ? 'F' : c;
+            }
+            out += '>';
+            break;
+        }
+        default:
+            break;
+        }
+        for (uint32_t spaces = next(3) + (next(6) == 0 ? 0 : 1); spaces > 0; spaces--) out += kSpaces[next(sizeof(kSpaces))];
+    }
+    return out;
+}
+
+// The vector scans and the memo against the byte-by-byte reference: the same bytes for content of
+// every kind, at every length around a vector step, the memo full of what streams before kept.
+bool CheckRewriteScans() {
+    size_t rewritten = 0;
+    for (uint32_t seed = 0; seed < 2000; seed++) {
+        const std::string content = RandomContent(seed, seed % 200);
+        std::string reference = content;
+        TinyPdf::Internal::PrintColorsScalar(reference.data(), reference.data() + reference.size());
+        rewritten += reference != content;
+        std::string dispatched = content;
+        TinyPdf::Internal::PrintColors(dispatched.data(), dispatched.data() + dispatched.size());
+        std::string again = content;   // from the memo
+        TinyPdf::Internal::PrintColors(again.data(), again.data() + again.size());
+        bool same = dispatched == reference && again == reference;
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+        std::string sse2 = content;
+        TinyPdf::Internal::PrintColorsSse2(sse2.data(), sse2.data() + sse2.size());
+        same &= sse2 == reference;
+#endif
+        if (!same) {
+            std::cerr << "PrintColors scans differ on content " << seed << " (" << content.size() << " bytes)" << std::endl;
             return false;
         }
+    }
+    if (rewritten < 1500) {
+        std::cerr << "PrintColors scans: only " << rewritten << " streams rewritten" << std::endl;
+        return false;
     }
     return true;
 }
@@ -336,7 +447,8 @@ bool CheckHideTagsBounded() {
 }
 
 bool CheckPrint() {
-    return CheckRewrite() && CheckBlackText() && CheckBlackDiagram() && CheckHideTags() && CheckHideTagsBounded();
+    return CheckRewrite() && CheckRewriteScans() && CheckBlackText() && CheckBlackDiagram() && CheckHideTags() &&
+        CheckHideTagsBounded();
 }
 
 } // namespace print_tests

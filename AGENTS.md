@@ -442,11 +442,16 @@ Important image/link details:
   (`RayoMd::File::FileIdentity`, device and inode or volume and file index), not their names.
 
 - `src/core/print_colors.h` and `src/core/print_colors.cpp`
-  `--black-text`'s rewrite of finished content (`PrintColors`): one SSE2 pass over the bytes that
-  open or close a string ('(' ')' '\\' '<' '>') or end a colour operator ('g', 'G'), each taken by
-  the string state it is in, and for an operator its operands read back from there (`RunStart`,
-  SSE2) with the last few "r g b" operands' greys kept by their bytes (`OperandMemo`). Built at
-  `-O2`: 10 % fewer instructions than at `-Os` on a page of text.
+  `--black-text`'s rewrite of finished content (`PrintColors`): 64 bytes a step in AVX2 (two
+  `pshufb` tables; with BMI, chosen once as in `png_filter.cpp`) or SSE2, a bit for each byte
+  that opens or closes a string ('(' ')' '\\' '<' '>') or ends a colour operator ('g', 'G'), taken
+  by the state of strings it is in (a loop for literal strings; an escape clears the next bit). An
+  operator whose bytes, operands and next byte were met before becomes what they became then, one
+  XOR of its last 32 bytes (`OperandMemo`: keyed by the last 8, two ways; one per thread, on the
+  heap from the first use, as an outcome depends only on those bytes); only a new one is parsed
+  (`Operator`, cold). `PrintColorsScalar`, byte by byte without the memo, is the reference the
+  tests hold the vector scans to (`CheckRewriteScans`) and the scan of streams under 64 bytes.
+  Built at `-O2`. README.md: 3.9 % more instructions with the flag (18.8 % in 5.2.1).
 
 - `src/core/svg.h` and `src/core/svg.cpp`
   SVG to a PDF form XObject: a non-recursive XML reader, the CSS cascade for

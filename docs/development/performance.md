@@ -884,6 +884,23 @@ Text and layout:
 - The CFF flattener's tokens copied with `memcpy`: at `-Os` that is `rep movsb`, 25 % fewer
   instructions and 8 % more time than the `std::string` it replaced; a byte loop is kept.
 
+Print output (`--black-text`, 2026-10-18; instructions of `--bench` with the flag over without,
+README.md, 18.8 % before and 3.9 % kept):
+
+- The renderers writing greys: 27 colour writes in `tiny_pdf.cpp` besides the SVG converter,
+  the theme and the formulas, a test on each default path, and other bytes than the padded
+  rewrite.
+- Marking 16 words of stop bits, then taking them (no call in the vector loop): +22 % over the
+  fused loop, the words stored and read back. Step offsets instead of pointers: +17 % (GCC
+  recomputed the base at each stop). Broadcast constants: rebuilt in three instructions after
+  each call; two `pshufb` tables are loaded in one.
+- One memo slot for each hash of the last 8 bytes: operators sharing them ("0.05 0.30 0.08 rg",
+  "0.08 0.08 0.08 rg") evicted each other, 49 misses an export; two ways kept. The memo on the
+  stack of each build: every build misses its colours again; in static TLS: 9 KB more for every
+  thread of every process. One on the heap from the first use is kept.
+- SSE2's four 16-byte compares inlined at each step of the scan: 3.4 KB of code; out of line
+  they are one call a 64-byte step, on CPUs without AVX2 only.
+
 Images and compression:
 
 - zlib at levels 1 to 9, zlib-ng 2.3.3, libdeflate 1.26 (levels 1 to 12) and ISA-L
