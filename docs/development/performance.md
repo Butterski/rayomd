@@ -887,6 +887,11 @@ Text and layout:
   appends (2026-10-18): perf -0.14 % instructions on 306 notes, but the note's copy of unknown
   length in a cold function became `rep movsb` (callgrind 2.8 times the function's cost). The
   appends are kept.
+- Long pages (2026-10-18): a five-digit fast path in `WriteFixed2` for their coordinates up to
+  14,400 moved GCC's inlining (+0.2 to +0.4 % instructions on fixed pages); their top is at 9,900
+  instead (`kLongPageTop`). The renderers' page setup out of line (`SetPageSize`, the long-page
+  branch in it): 5.3 KB less text, but `Renderer`'s constructor went into `BuildUnicodePdfBytes`
+  and its `KeptBuffer::Take`s out of line (polish +0.06 %, notes +0.02 % instructions).
 
 Images and compression:
 

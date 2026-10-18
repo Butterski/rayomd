@@ -34,7 +34,8 @@ bool ParseTheme(std::string_view text, std::string_view directory, PdfTheme& the
 const char* PdfStyleName(PdfStyle style);
 const char* PdfMarginName(const PdfMargin& margin);
 double ResolveMarginPoints(const PdfMargin& margin);
-// The page size with each side kept within [kMinPageSide, kMaxPageSide].
+// The page size with each side kept within [kMinPageSide, kMaxPageSide]; a long page's height
+// (PdfPageSize::autoHeight) is the nominal one of the width it got.
 PdfPageSize ResolvePageSize(const PdfPageSize& size);
 // A long page's nominal height (PdfPageSize::autoHeight), what is fitted to a page: the width,
 // a resolved one, times the square root of 2, at most kMaxPageSide.

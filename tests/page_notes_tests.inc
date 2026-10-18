@@ -288,7 +288,8 @@ bool CheckLongPage() {
         double x0 = -1.0, y0 = -1.0;
         if (!BuildPage(text, pdf, options) || CountOccurrences(pdf, "/Type /Page ") != 1 || !AtFoot(pdf, 12) ||
             pdf.find("/MediaBox [") == pdf.npos ||
-            std::sscanf(pdf.c_str() + pdf.find("/MediaBox [") + 11, "%lf %lf", &x0, &y0) != 2 || y0 <= 0.0) {
+            std::sscanf(pdf.c_str() + pdf.find("/MediaBox [") + 11, "%lf %lf", &x0, &y0) != 2 ||
+            y0 <= TinyPdf::Internal::kLongPageTop - TinyPdf::Internal::kMaxPageSide) {
             std::cerr << "page notes: long page mismatch" << std::endl;
             return false;
         }

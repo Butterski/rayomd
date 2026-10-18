@@ -5033,12 +5033,13 @@ constexpr double kScriptDropFactor = 0.18;
 // The fill behind HTML's <mark>: the yellow browsers draw.
 constexpr const char* kMarkFill = "1 0.973 0.773";
 
-// Where the footnotes are drawn: note N's text and its first reference, at [N - 1]; a negative
-// top where it is not drawn.
+// Where the footnotes are drawn: note N's text and its first reference, at [N - 1]; a top of
+// kUnplaced where it is not drawn (not a negative one: a long page reaches below 0).
 struct NoteMarks {
+    static constexpr double kUnplaced = -HUGE_VAL;
     struct Point {
         size_t page = 0;
-        double top = -1.0;
+        double top = kUnplaced;
     };
     std::vector<Point> notes;
     std::vector<Point> references;
@@ -5046,7 +5047,7 @@ struct NoteMarks {
     void MarkReference(int note, size_t page, double top) {
         if (references.size() < (size_t)note) references.resize((size_t)note);
         Point& point = references[(size_t)note - 1];
-        if (point.top < 0.0) point = { page, top };
+        if (point.top == kUnplaced) point = { page, top };
     }
 };
 
@@ -5191,7 +5192,9 @@ private:
             number = number * 10 + (size_t)(ch - '0');
         }
         const std::vector<NoteMarks::Point>& points = back ? notes.references : notes.notes;
-        if (digits.empty() || number == 0 || number > points.size() || points[number - 1].top < 0.0) return false;
+        if (digits.empty() || number == 0 || number > points.size() || points[number - 1].top == NoteMarks::kUnplaced) {
+            return false;
+        }
         out.push_back({ pdf.Reserve(), &link, points[number - 1].page, points[number - 1].top + 4.0 });
         return true;
     }
@@ -5770,7 +5773,7 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
         }
 
         double rowHeight = contentHeight + pad * 2.0;
-        if (rowHeight + 5.0 > renderer.pageH - renderer.margin * 2.0) {
+        if (rowHeight + 5.0 > renderer.fullH - renderer.margin * 2.0) {
             // Taller than a page: every page gets as many lines of each cell as fit, inside
             // cell borders of its own. A fresh page takes at least one line of every cell. Page
             // footnotes go to the foot of the page the row starts on.
@@ -5836,7 +5839,7 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
                 ? PageNoteLayout<RendererType>::RowNeed(renderer, cells, columns, rowHeight + 5.0) : 0.0;
             if (renderer.y - rowHeight - 5.0 - rowNotes < renderer.textBottom) {
                 renderer.NewPage();
-                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= renderer.pageH - renderer.margin * 2.0) {
+                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= renderer.fullH - renderer.margin * 2.0) {
                     resumeRow = r;
                     r = static_cast<size_t>(-1);
                     continue;
@@ -5872,12 +5875,13 @@ constexpr double kHeadingSizes[] = { 0, 26, 22, 18, 15, 13, 12 };
 // The room a heading keeps under its first line, so that it never ends a page: the space after
 // it, the headings right after it (each with its space before and after and its first line)
 // and two lines of what follows them, unless nothing or a page break does. Anchors draw nothing.
-// The sum stops once it passes `pageH`: then the heading breaks the page (Ensure: y never exceeds
-// pageH - margin, margin > 0) however much more follows, so the result decides the same, and a
-// run of n headings no longer costs n * n steps (200,000 of them took over a minute).
-static double HeadingKeep(const Block& heading, const Block* next, const Block* end, double lineHeight, double pageH) {
+// The sum stops once it passes `fullH`, the height a page lays out on: then the heading breaks the
+// page (Ensure: y never starts more than fullH - margin * 2 above the bottom limit, margin > 0)
+// however much more follows, so the result decides the same, and a run of n headings no longer
+// costs n * n steps (200,000 of them took over a minute).
+static double HeadingKeep(const Block& heading, const Block* next, const Block* end, double lineHeight, double fullH) {
     double keep = std::max(1, std::min(6, heading.level)) <= 2 ? 8.0 : 5.0;
-    for (; next != end && keep <= pageH && (next->type == BlockType::Heading || next->type == BlockType::Anchor); next++) {
+    for (; next != end && keep <= fullH && (next->type == BlockType::Heading || next->type == BlockType::Anchor); next++) {
         if (next->type == BlockType::Anchor) continue;
         const int level = std::max(1, std::min(6, next->level));
         keep += (level <= 2 ? 20.0 : 13.0) + kHeadingSizes[level] * 1.35;
@@ -6037,7 +6041,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         if (mapped) start = { renderer.pageStarts.size() - 1, renderer.y, renderer.content.size() };
         switch (block.type) {
         case BlockType::Heading: {
-            const double keep = HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight, renderer.pageH);
+            const double keep = HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight, renderer.fullH);
             if (block.align >= 2 || renderer.numbers != nullptr) renderer.RenderAlignedHeading(block, keep, renderer.NumberOf(block));
             else renderer.RenderHeading(block, keep);
             break;
@@ -6280,7 +6284,8 @@ struct PageNoteLayout {
         stash.Trade(r.content, notes.content, r.pageLinks.back(), r.headings, r.ids);
         {
             // Anywhere below the top of a page: a note's layout does not depend on where it starts.
-            notes.measureTop = r.pageH * 0.5;
+            // Its middle (pageH * 0.5 bit for bit on pages of a fixed size).
+            notes.measureTop = r.pageH - r.fullH * 0.5;
             FootScope scope(r, notes.measureTop);
             for (size_t index = 0; index < count && !BuildCancelled(); index++) {
                 const size_t imageCount = r.images != nullptr ? r.images->Images().size() : 0;
@@ -6299,7 +6304,7 @@ struct PageNoteLayout {
         r.EndMeasure(state);
         if (r.images != nullptr) r.images->Restore(images);
         r.contentsLines.erase(r.contentsLines.begin() + static_cast<std::ptrdiff_t>(contentsLines), r.contentsLines.end());
-        notes.Settle(r.pageH - r.margin * 2.0 - r.lineHeight);
+        notes.Settle(r.fullH - r.margin * 2.0 - r.lineHeight);
     }
 
     // The notes waiting at the foot of the page from `y` down: a rule, then each; where they end.
@@ -6346,7 +6351,7 @@ struct PageNoteLayout {
             if (longPage) r.y = end;
             notes.ClearPending();
         }
-        r.textBottom = r.margin;
+        r.textBottom = r.margin + (r.pageH - r.fullH);
     }
 
     // NewPage, through PageNotes::pageEnds: true where no page may end (the notes' own layout),
@@ -6379,7 +6384,7 @@ struct PageNoteLayout {
             r.Ensure(needed);
             return;
         }
-        r.Ensure(needed + notes.Collect(r.pageH - r.margin * 2.0 - needed));
+        r.Ensure(needed + notes.Collect(r.fullH - r.margin * 2.0 - needed));
         r.textBottom += notes.Place(r.y - needed - r.textBottom);
     }
 
@@ -6394,7 +6399,7 @@ struct PageNoteLayout {
             for (const auto& line : cells[c].formulaLines) AddLine(r, line);
         }
         if (notes.LineEmpty()) return 0.0;
-        return notes.Collect(r.pageH - r.margin * 2.0 - needed);
+        return notes.Collect(r.fullH - r.margin * 2.0 - needed);
     }
     RAYOMD_COLD static void PlaceRow(RendererType& r, double needed) {
         r.textBottom += r.pageNotes->Place(r.y - needed - r.textBottom);
@@ -6644,6 +6649,7 @@ public:
         pageW = page.width;
         pageH = page.height;
         fitH = page.height;
+        fullH = page.height;
         margin = ResolveMarginPoints(marginValue, page);
         textBottom = margin;
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
@@ -6661,7 +6667,7 @@ public:
         KeptBuffer<std::vector<StyledRuns>>::Take(tableCells);
         KeptBuffer<std::wstring>::Take(headingText);
         NewPage();
-        if (pageSize.autoHeight) StartLongPages(marginValue);
+        if (pageSize.autoHeight) StartLongPages();
     }
     ~Renderer() {
         KeptBuffer<std::vector<size_t>>::Give(pageStarts, KeptBytes(pageStarts));
@@ -6960,7 +6966,8 @@ private:
     }
 
     // Nested blocks move the margin, and the bottom limit with it; RestoreMargin keeps the room
-    // page footnotes took meanwhile (none without them, so `textBottom` is `margin` bit for bit).
+    // page footnotes took meanwhile (none without them, so `textBottom` is `margin` bit for bit on
+    // pages of a fixed size).
     void Indent(double inset) {
         margin += inset;
         textBottom += inset;
@@ -9337,7 +9344,7 @@ private:
             size_t first = 0;
             size_t count = maxLines;
             double rowHeight = maxLines * lh + pad * 2.0;
-            if (rowHeight + 5.0 > pageH - margin * 2.0) {
+            if (rowHeight + 5.0 > fullH - margin * 2.0) {
                 count = TallTableRowSlice(first, maxLines, lh, pad);
             } else if (r == 0) {
                 // The header row keeps a line of the next row with it.
@@ -9345,7 +9352,7 @@ private:
                 Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
             } else if (y - rowHeight - 5.0 < textBottom) {
                 NewPage();
-                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= pageH - margin * 2.0) {
+                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= fullH - margin * 2.0) {
                     resumeRow = r;
                     r = static_cast<size_t>(-1);
                     continue;
@@ -9439,20 +9446,23 @@ private:
     }
 
     // PdfPageSize::autoHeight (StartLongPages, after the first page began): pages kMaxPageSide
-    // high, pageH, whose content is fitted to the nominal height, fitH (pageH for pages of a fixed
-    // size), and the bottom of each finished page's box (long_page.h; EndLongPage, from NewPage).
-    // pageBottoms is null for fixed sizes.
-    double fitH = 842.0;
+    // high, fullH, from their top, pageH, at kLongPageTop to below 0 (long_page.h), so that the
+    // bottom limit is a margin above kLongPageTop - kMaxPageSide; their content fitted to the
+    // nominal height, fitH, which ResolvePageSize gave as the height; and the bottom of each
+    // finished page's box noted (EndLongPage, from NewPage). For fixed sizes fullH and fitH are
+    // pageH, and pageBottoms is null. Set by the constructor alone: a default value is one store
+    // more there, which took StandardRenderer's out of BuildStandardPdfBytes (+3.3 KB).
+    double fitH;
+    double fullH;
     std::vector<double>* pageBottoms = nullptr;
-    RAYOMD_COLD void StartLongPages(const PdfMargin& marginValue) {
-        fitH = Internal::NominalPageHeight(pageW);
-        pageH = Internal::kMaxPageSide;
-        margin = ResolveMarginPoints(marginValue, { pageW, fitH });
-        textBottom = margin;
+    RAYOMD_COLD void StartLongPages() {
+        fullH = Internal::kMaxPageSide;
+        pageH = Internal::kLongPageTop;
+        textBottom = margin + (pageH - fullH);
         y = pageH - margin;
         pageBottoms = Internal::LongPageBottoms();
     }
-    RAYOMD_COLD void EndLongPage() { Internal::EndLongPage(*pageBottoms, y, margin, pageH); }
+    RAYOMD_COLD void EndLongPage() { Internal::EndLongPage(*pageBottoms, y, margin); }
     RAYOMD_COLD const double* EndLongPages() {
         if (pageBottoms->size() < pageStarts.size()) EndLongPage();
         return pageBottoms->data();
@@ -9519,7 +9529,8 @@ private:
     }
     PageNoteState<FootBuffers>* pageNotes = nullptr;   // while a document's notes go at the foot of its pages
     // The lowest y text may reach, which the bottom tests (Ensure, the tables') compare with: the
-    // margin, nested blocks' as theirs (Indent), and with page footnotes the room kept at the foot
+    // margin (on a long page a margin above its bottom, StartLongPages), nested blocks' as theirs
+    // (Indent), and with page footnotes the room kept at the foot
     // of the page for its notes above it. A member of its own, not margin + a reserve: Ensure
     // inlines at about 60 sites and keeps its size.
     double textBottom = 0.0;
@@ -10337,6 +10348,7 @@ public:
         pageW = page.width;
         pageH = page.height;
         fitH = page.height;
+        fullH = page.height;
         margin = ResolveMarginPoints(marginValue, page);
         textBottom = margin;
         bodySize = style == PdfStyle::Tech ? 10.5 : 11.5;
@@ -10354,7 +10366,7 @@ public:
         KeptBuffer<std::vector<AsciiRuns>>::Take(tableCells);
         KeptBuffer<std::vector<AsciiLines>>::Take(tableLines);
         NewPage();
-        if (pageSize.autoHeight) StartLongPages(marginValue);
+        if (pageSize.autoHeight) StartLongPages();
     }
     ~StandardRenderer() {
         KeptBuffer<std::vector<size_t>>::Give(pageStarts, KeptBytes(pageStarts));
@@ -10587,7 +10599,8 @@ private:
     }
 
     // Nested blocks move the margin, and the bottom limit with it; RestoreMargin keeps the room
-    // page footnotes took meanwhile (none without them, so `textBottom` is `margin` bit for bit).
+    // page footnotes took meanwhile (none without them, so `textBottom` is `margin` bit for bit on
+    // pages of a fixed size).
     void Indent(double inset) {
         margin += inset;
         textBottom += inset;
@@ -12493,7 +12506,7 @@ private:
             size_t first = 0;
             size_t count = maxLines;
             double rowHeight = maxLines * lh + pad * 2.0;
-            if (rowHeight + 5.0 > pageH - margin * 2.0) {
+            if (rowHeight + 5.0 > fullH - margin * 2.0) {
                 count = TallTableRowSlice(first, maxLines, lh, pad);
             } else if (r == 0) {
                 // The header row keeps a line of the next row with it.
@@ -12501,7 +12514,7 @@ private:
                 Ensure(rowHeight + 5.0 + (rows.size() > 1 ? lh + pad * 2.0 : 0.0));
             } else if (y - rowHeight - 5.0 < textBottom) {
                 NewPage();
-                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= pageH - margin * 2.0) {
+                if (headerHeight > 0.0 && headerHeight + rowHeight + 5.0 <= fullH - margin * 2.0) {
                     resumeRow = r;
                     r = static_cast<size_t>(-1);
                     continue;
@@ -12593,20 +12606,23 @@ private:
     }
 
     // PdfPageSize::autoHeight (StartLongPages, after the first page began): pages kMaxPageSide
-    // high, pageH, whose content is fitted to the nominal height, fitH (pageH for pages of a fixed
-    // size), and the bottom of each finished page's box (long_page.h; EndLongPage, from NewPage).
-    // pageBottoms is null for fixed sizes.
-    double fitH = 842.0;
+    // high, fullH, from their top, pageH, at kLongPageTop to below 0 (long_page.h), so that the
+    // bottom limit is a margin above kLongPageTop - kMaxPageSide; their content fitted to the
+    // nominal height, fitH, which ResolvePageSize gave as the height; and the bottom of each
+    // finished page's box noted (EndLongPage, from NewPage). For fixed sizes fullH and fitH are
+    // pageH, and pageBottoms is null. Set by the constructor alone: a default value is one store
+    // more there, which took it out of BuildStandardPdfBytes (+3.3 KB).
+    double fitH;
+    double fullH;
     std::vector<double>* pageBottoms = nullptr;
-    RAYOMD_COLD void StartLongPages(const PdfMargin& marginValue) {
-        fitH = Internal::NominalPageHeight(pageW);
-        pageH = Internal::kMaxPageSide;
-        margin = ResolveMarginPoints(marginValue, { pageW, fitH });
-        textBottom = margin;
+    RAYOMD_COLD void StartLongPages() {
+        fullH = Internal::kMaxPageSide;
+        pageH = Internal::kLongPageTop;
+        textBottom = margin + (pageH - fullH);
         y = pageH - margin;
         pageBottoms = Internal::LongPageBottoms();
     }
-    RAYOMD_COLD void EndLongPage() { Internal::EndLongPage(*pageBottoms, y, margin, pageH); }
+    RAYOMD_COLD void EndLongPage() { Internal::EndLongPage(*pageBottoms, y, margin); }
     RAYOMD_COLD const double* EndLongPages() {
         if (pageBottoms->size() < pageStarts.size()) EndLongPage();
         return pageBottoms->data();
@@ -12647,7 +12663,8 @@ private:
     void EndMeasure(const MeasureState&) {}
     PageNoteState<FootBuffers>* pageNotes = nullptr;   // while a document's notes go at the foot of its pages
     // The lowest y text may reach, which the bottom tests (Ensure, the tables') compare with: the
-    // margin, nested blocks' as theirs (Indent), and with page footnotes the room kept at the foot
+    // margin (on a long page a margin above its bottom, StartLongPages), nested blocks' as theirs
+    // (Indent), and with page footnotes the room kept at the foot
     // of the page for its notes above it. A member of its own, not margin + a reserve: Ensure
     // inlines at about 60 sites and keeps its size.
     double textBottom = 0.0;
@@ -13098,7 +13115,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
             AppendLit(page, " ");
             AppendF(page, renderer.PageHeight());
         } else {
-            Internal::AppendLongMediaBox(page, renderer.PageWidth(), renderer.PageHeight(), bottoms[pageIndex]);
+            Internal::AppendLongMediaBox(page, renderer.PageWidth(), bottoms[pageIndex]);
         }
         AppendLit(page, "] /Resources << /Font << /F1 ");
         AppendInt(page, fontRegularId);
@@ -13766,7 +13783,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
             AppendLit(page, " ");
             AppendF(page, renderer.PageHeight());
         } else {
-            Internal::AppendLongMediaBox(page, renderer.PageWidth(), renderer.PageHeight(), bottoms[pageIndex]);
+            Internal::AppendLongMediaBox(page, renderer.PageWidth(), bottoms[pageIndex]);
         }
         AppendLit(page, "] /Resources << /Font << /F1 ");
         AppendInt(page, type0FontId);

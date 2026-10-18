@@ -2,14 +2,16 @@
 
 // Needs <filesystem>, <fstream>, <string>, <vector>; uses ValidPdf and CountOccurrences of
 // tests/core_tests.cpp. One long page (PdfPageSize::autoHeight, --page-size=WIDTHxauto): pages
-// 14,400 points high, each box cut a margin below its layout's end, what fits a page fitted to the
-// nominal height (width * sqrt(2)), page numbers and bands inside each box, and the source map as
-// on a page of the nominal size. In both renderers. Included inside the anonymous namespace of
+// 14,400 points high from their top at kLongPageTop, each box cut a margin below its layout's end,
+// what fits a page fitted to the nominal height (width * sqrt(2)), page numbers and bands inside
+// each box, links to the text they name, every coordinate under 10,000, and the source map as on
+// a page of the nominal size. In both renderers. Included inside the anonymous namespace of
 // tests/core_tests.cpp.
 
 namespace long_page_tests {
 
-constexpr double kTop = 14400.0;
+constexpr double kTop = TinyPdf::Internal::kLongPageTop;
+constexpr double kLowest = kTop - 14400.0;   // where the lowest box starts
 constexpr double kMargin = 54.0;   // PdfMargin::Normal
 
 struct Box {
@@ -89,8 +91,8 @@ bool CheckParse() {
         std::string pdf;
         const std::vector<Box> boxes = TinyPdf::BuildPdf("# x\n", options, pdf).Ok() ? PageBoxes(pdf) : std::vector<Box>();
         resolved = resolved && boxes.size() == 2 && boxes[0].right == width && boxes[0].top == kTop &&
-            boxes[0].bottom <= kTop - 144.0 && boxes[0].bottom > 14100.0 && boxes[1].bottom == 0.0 &&
-            Near(boxes[1].top, std::min(width * kRoot2, kTop));
+            boxes[0].bottom <= kTop - 144.0 && boxes[0].bottom > kTop - 300.0 && boxes[1].bottom == 0.0 &&
+            Near(boxes[1].top, std::min(width * kRoot2, 14400.0));
     }
     if (!parsed || !refused || !resolved) {
         std::cerr << "long page: size parsing mismatch (" << parsed << refused << resolved << ")" << std::endl;
@@ -122,12 +124,12 @@ bool CheckRenderer(const std::string& prefix, const std::filesystem::path& direc
     std::vector<Box> boxes = PageBoxes(pdf);
     if (!result.Ok() || !ValidPdf(pdf) || result.pages != 2 || boxes.size() != 2) return fail("1,000 lines are not two pages");
     for (const Box& box : boxes) {
-        if (box.left != 0.0 || box.right != 595.0 || box.top != kTop || box.bottom < 0.0 || kTop - box.bottom < 144.0) {
-            return fail("a box is not [0 y0 595 14400]");
+        if (box.left != 0.0 || box.right != 595.0 || box.top != kTop || box.bottom < kLowest || kTop - box.bottom < 144.0) {
+            return fail("a box is not [0 y0 595 kLongPageTop]");
         }
     }
     // The first page is full: its box reaches down to the bottom margin's line, about.
-    if (boxes[0].bottom > 20.0 || boxes[1].bottom < 12000.0) return fail("the boxes do not end below the text");
+    if (boxes[0].bottom > kLowest + 20.0 || boxes[1].bottom < kLowest + 12000.0) return fail("the boxes do not end below the text");
     // The page numbers sit in the middle of each box's bottom margin.
     std::vector<double> baselines = OverlayBaselines(pdf);
     if (baselines.size() != 2 || !Near(baselines[0], boxes[0].bottom + kMargin * 0.5 - 3.0) ||
@@ -138,7 +140,7 @@ bool CheckRenderer(const std::string& prefix, const std::filesystem::path& direc
     // An explicit break: two pages, each cut below its line, at least 144 points high.
     result = TinyPdf::BuildPdf(prefix + "First\n\n\\pagebreak\n\nSecond\n", options, pdf);
     boxes = PageBoxes(pdf);
-    if (!result.Ok() || result.pages != 2 || boxes.size() != 2 || boxes[0].bottom < 14100.0 ||
+    if (!result.Ok() || result.pages != 2 || boxes.size() != 2 || boxes[0].bottom < kTop - 300.0 ||
         boxes[0].bottom > kTop - 144.0 || !Near(boxes[1].bottom, kTop - 144.0)) {
         return fail("a page break does not give two short pages");
     }
@@ -160,7 +162,7 @@ bool CheckRenderer(const std::string& prefix, const std::filesystem::path& direc
         expected.push_back(boxes[page].bottom + kMargin * 0.5 - 3.0);   // footer right
     }
     bool bands = result.Ok() && boxes.size() == 3 && baselines.size() == expected.size() && boxes[0].bottom < boxes[1].bottom &&
-        boxes[0].bottom > 13000.0;
+        boxes[0].bottom > kTop - 1400.0;
     for (size_t k = 0; bands && k < expected.size(); k++) bands = Near(baselines[k], expected[k]);
     if (!bands) return fail("the theme's bands are not inside the boxes");
     // The cover keeps the nominal size.
@@ -214,7 +216,7 @@ bool CheckBook() {
         const TinyPdf::BuildResult result = TinyPdf::BuildBookPdf(book, options, pdf);
         const std::vector<Box> boxes = PageBoxes(pdf);
         if (!result.Ok() || !ValidPdf(pdf) || result.pages != 3 || boxes.size() != 3 ||
-            !Near(boxes[0].bottom, kTop - 595.0 * 1.4142135623730951) || boxes[1].bottom < 13900.0 || boxes[2].bottom < 13900.0 ||
+            !Near(boxes[0].bottom, kTop - 595.0 * 1.4142135623730951) || boxes[1].bottom < kTop - 500.0 || boxes[2].bottom < kTop - 500.0 ||
             boxes[1].bottom > kTop - 144.0 || boxes[2].bottom > kTop - 144.0) {
             std::cerr << "long page: book mismatch (" << (prefix.empty() ? "standard" : "Unicode") << " renderer)" << std::endl;
             return false;
@@ -253,6 +255,82 @@ bool CheckSourceMapTops() {
     return true;
 }
 
+// Every number of `pdf` that follows `key` (`count` of them each time) under 10,000 in magnitude.
+bool BelowTenThousand(const std::string& pdf, std::string_view key, int count) {
+    for (size_t at = pdf.find(key); at != std::string::npos; at = pdf.find(key, at + 1)) {
+        const char* text = pdf.c_str() + at + key.size();
+        for (int k = 0; k < count; k++) {
+            char* end = nullptr;
+            const double value = std::strtod(text, &end);
+            if (end == text || !(std::abs(value) < 10000.0)) return false;
+            text = end;
+        }
+    }
+    return true;
+}
+
+// A link lands on the heading it names, also below 0 on the second page, "#top" at the top, a
+// footnote reference down there links to its note and back, and the text, links, destinations and
+// boxes keep every coordinate under 10,000 in magnitude.
+bool CheckLinksAndCoordinates() {
+    std::string document = "[to target](#target) and [top](#top)\n\n";
+    for (int line = 0; line < 1700; line++) document += "Line " + std::to_string(line) + "  \n";
+    document += "\n## Target\n\nAfter.[^n]\n\n[^n]: The note.\n";
+    for (const std::string& prefix : { std::string(), std::string("Za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87\n\n") }) {
+        const auto fail = [&prefix](const char* what) {
+            std::cerr << "long page (" << (prefix.empty() ? "standard" : "Unicode") << " renderer): " << what << std::endl;
+            return false;
+        };
+        TinyPdf::PdfOptions options;
+        options.pageSize = { 595.0, 0.0, true };
+        std::vector<TinyPdf::SourceBlock> map;
+        options.sourceMap = &map;
+        std::string pdf;
+        const TinyPdf::BuildResult result = TinyPdf::BuildPdf(prefix + document, options, pdf);
+        const std::vector<Box> boxes = PageBoxes(pdf);
+        if (!result.Ok() || !ValidPdf(pdf) || boxes.size() != 2 || map.size() < 2) return fail("1,700 lines are not two pages");
+        // The pages' objects, and each link's target page and height: "/Dest [n 0 R /XYZ null y null]".
+        const size_t kids = pdf.find("/Kids [");
+        char* end = nullptr;
+        const long first = std::strtol(pdf.c_str() + kids + 7, &end, 10);
+        const long second = std::strtol(std::strstr(end, " R ") + 3, nullptr, 10);
+        std::vector<std::pair<long, double>> dests;
+        for (size_t at = pdf.find("/Subtype /Link"); at != std::string::npos; at = pdf.find("/Subtype /Link", at + 1)) {
+            const size_t dest = pdf.find("/Dest [", at);
+            const long page = std::strtol(pdf.c_str() + dest + 7, nullptr, 10);
+            dests.push_back({ page, std::strtod(pdf.c_str() + pdf.find("/XYZ null ", dest) + 10, nullptr) });
+        }
+        // The heading's block, measured down from its page's top edge.
+        const TinyPdf::SourceBlock& heading = map[map.size() - 2];
+        if (dests.size() != 4 || dests[0].first != second || dests[1].first != first || dests[1].second != kTop ||
+            heading.page != 1 || !(dests[0].second < 0.0) || !(dests[0].second > boxes[1].bottom) ||
+            !(dests[0].second <= kTop - heading.top) || !(dests[0].second >= kTop - heading.bottom)) {
+            return fail("a link does not land on its heading");
+        }
+        // The reference, below the heading, goes down to its note and the note back up to it.
+        if (dests[2].first != second || dests[3].first != second || !(dests[2].second < dests[3].second) ||
+            !(dests[3].second < dests[0].second) || !(dests[2].second > boxes[1].bottom)) {
+            return fail("a footnote below 0 does not link to its note and back");
+        }
+        if (prefix.empty()) {
+            // Its baseline, a little below where the link goes.
+            const size_t text = pdf.find("(Target) Tj");
+            const size_t matrix = text == std::string::npos ? text : pdf.rfind("1 0 0 1 ", text);
+            double baseline = 0.0;
+            if (matrix != std::string::npos) {
+                std::strtod(pdf.c_str() + matrix + 8, &end);
+                baseline = std::strtod(end, nullptr);
+            }
+            if (!(dests[0].second - baseline > 0.0) || !(dests[0].second - baseline < 30.0)) return fail("a link misses its heading's text");
+        }
+        if (!BelowTenThousand(pdf, "1 0 0 1 ", 2) || !BelowTenThousand(pdf, "/Rect [", 4) ||
+            !BelowTenThousand(pdf, "/XYZ null ", 1) || !BelowTenThousand(pdf, "/MediaBox [", 4)) {
+            return fail("a coordinate of 10,000 or more");
+        }
+    }
+    return true;
+}
+
 bool CheckLongPage() {
     if (!CheckParse()) return false;
     const std::filesystem::path directory = std::filesystem::temp_directory_path() / "rayomd-test-long-page";
@@ -262,7 +340,7 @@ bool CheckLongPage() {
         ok = ok && CheckRenderer(prefix, directory);
     }
     std::filesystem::remove_all(directory);
-    return ok && CheckBook() && CheckSourceMapTops();
+    return ok && CheckBook() && CheckSourceMapTops() && CheckLinksAndCoordinates();
 }
 
 } // namespace long_page_tests

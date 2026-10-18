@@ -10,6 +10,7 @@
 #include "../src/core/inflate.h"
 #include "../src/common/text_utils.h"
 #include "../src/core/export_options.h"
+#include "../src/core/long_page.h"
 #include "../src/core/inline_markdown.h"
 #include "../src/core/markdown_parser.h"
 #include "../src/core/math_layout.h"

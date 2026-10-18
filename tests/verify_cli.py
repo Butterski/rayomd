@@ -549,7 +549,7 @@ def verify(binary: Path, keep: Path | None) -> None:
             raise AssertionError("an invalid --page-size was not rejected")
         long_pdf = root / "long.pdf"
         run(binary, "--export", str(ascii_md), str(long_pdf), "--page-size=210mmxauto")
-        require_pdf(long_pdf, b" 595.28 14400] ")
+        require_pdf(long_pdf, b" 595.28 9900] ")
         bad_long = run(binary, "--export", str(ascii_md), str(bad_size_pdf), "--page-size=a4xauto", expect=2)
         if b"--page-size must be" not in bad_long.stdout or bad_size_pdf.exists():
             raise AssertionError("--page-size=a4xauto was not rejected")
