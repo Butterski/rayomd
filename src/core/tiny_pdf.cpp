@@ -1932,7 +1932,8 @@ private:
     size_t WriteTail(char* out, const std::vector<size_t>& offsets, size_t xref, int rootId, int infoId,
         const char* fileId = nullptr) const {
         size_t size = 0;
-        auto text = [&](std::string_view value) {
+        // Always inlined: left to GCC, how many of its calls it inlined moved with unrelated code.
+        auto text = [&](std::string_view value) RAYOMD_HOT_LAMBDA {
             if (out) memcpy(out + size, value.data(), value.size());
             size += value.size();
         };
