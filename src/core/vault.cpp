@@ -77,6 +77,11 @@ fs::path ResolvedPath(const fs::path& path) {
     CloseHandle(handle);
     if (length == 0 || length >= name.size()) return fs::path();
     name.resize(length);
+    // The answer begins "\\?\C:\" or "\\?\UNC\server\share\". std::filesystem reads "\\?" as a
+    // root name, and lexically_normal makes it "\?\", which no call opens: the path as the
+    // other Windows calls write it.
+    if (name.compare(0, 8, L"\\\\?\\UNC\\") == 0) name.replace(0, 8, L"\\\\");
+    else if (name.compare(0, 4, L"\\\\?\\") == 0) name.erase(0, 4);
     return fs::path(name);
 #else
     // realpath(3): one call; std::filesystem::canonical splits and rebuilds the path a component at
@@ -258,9 +263,8 @@ fs::path Vault::Check(const fs::path& candidate) {
 #endif
 #ifdef _WIN32
     // In the root by name before anything is opened, and through no link below it (TryOpenDirect's
-    // rule for images); the file itself no link either. Wildcards are looked for below the root
-    // only: the root, from GetFinalPathNameByHandleW, begins with "\\?\".
-    if (!IsWithinRoot(lexical, root) || lexical.lexically_relative(root).native().find_first_of(L"*?") != std::wstring::npos ||
+    // rule for images); the file itself no link either.
+    if (!IsWithinRoot(lexical, root) || lexical.native().find_first_of(L"*?") != std::wstring::npos ||
         DirectPathHasLink(root, lexical)) {
         return fs::path();
     }
