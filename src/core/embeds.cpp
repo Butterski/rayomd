@@ -481,7 +481,8 @@ public:
             folder = ResolvedPath(parent.empty() ? std::string_view(".") : parent);
             if (folder.empty()) return false;
         }
-        FolderIndex(folder);
+        Number('f', folder, {}, 0);
+        set.folders.push_back(std::move(folder));
         // Note 0 is the document, by its resolved path: never read, always on the chain.
         NoteOf(ResolvedPath(options.sourcePath));
         chain.push_back(0);
@@ -509,17 +510,15 @@ private:
     static constexpr size_t kMaxLookups = 4 * EmbedSet::kMaxEmbeds;
     static constexpr size_t kMaxReadBytes = 4 * EmbedSet::kMaxBytes;
     static constexpr size_t kMaxScanBytes = 8 * EmbedSet::kMaxBytes;
-    static constexpr uint32_t kNoNote = UINT32_MAX;
+    static constexpr int kNoNote = -1;
 
     // A note found, by its path (each path once, whatever names it), read on its first embed.
     struct Note {
-        const std::string* path = nullptr;     // its key in `paths`
+        std::string path;
         std::string text;
         RayoMd::File::FileIdentity identity;
-        std::vector<std::string_view> lines;   // of `text`, made for its first section or block
-        size_t body = 0;                       // BodyOffset
-        uint32_t folder = 0;                   // EmbedSet::folders
-        uint32_t id = 0;                       // in `notes`
+        size_t body = 0;      // BodyOffset
+        int folder = 0;       // EmbedSet::folders
         bool tried = false;
     };
 
@@ -529,7 +528,7 @@ private:
 
     // The embeds of entry `index`, whose text is `text`, in the note in EmbedSet::folders[folder],
     // `depth` embeds down from the document.
-    void Expand(uint32_t index, std::string_view text, uint32_t folder, int depth) {
+    void Expand(uint32_t index, std::string_view text, int folder, int depth) {
         for (const auto& [line, inner] : StandaloneEmbeds(text)) {
             if (stopped || set.entries.size() > EmbedSet::kMaxEmbeds) {
                 stopped = true;
@@ -537,19 +536,20 @@ private:
             }
             EmbedTarget target;
             if (depth >= EmbedSet::kMaxDepth || !ParseTarget(inner, target)) continue;
-            const uint32_t id = Find(folder, target.note);
-            if (id == kNoNote || std::find(chain.begin(), chain.end(), id) != chain.end()) continue;
+            const int id = Find(folder, target.note);
+            if (id == kNoNote || std::find(chain.begin(), chain.end(), (size_t)id) != chain.end()) continue;
             if (Cancelled()) {
                 stopped = true;
                 return;
             }
-            Note& note = *notes[id];
+            // No note is added before the recursion below, so the reference holds.
+            Note& note = notes[(size_t)id];
             if (!Load(note, folder)) continue;
             // The same file under another path (a hard link) is a cycle too; the document is known
             // by its path only.
             bool cycle = false;
             for (size_t at = 1; at < chain.size(); at++) {
-                const RayoMd::File::FileIdentity& other = notes[chain[at]]->identity;
+                const RayoMd::File::FileIdentity& other = notes[chain[at]].identity;
                 cycle = cycle || (other.volume == note.identity.volume && other.index == note.identity.index);
             }
             if (cycle) continue;
@@ -564,12 +564,12 @@ private:
                 }
             } else if (note.text.size() <= kMaxScanBytes - scanned) {
                 scanned += note.text.size();
-                if (note.lines.empty()) note.lines = Lines(note.text);
+                const std::vector<std::string_view> lines = Lines(note.text);
                 // The body's first line: as many lines before it as line ends.
                 const size_t start = note.text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
-                const size_t body = note.body > note.text.size() ? note.lines.size()
+                const size_t body = note.body > note.text.size() ? lines.size()
                     : (size_t)std::count(note.text.begin() + (ptrdiff_t)start, note.text.begin() + (ptrdiff_t)note.body, '\n');
-                entryText = target.block ? BlockText(note.lines, body, target.anchor) : Section(note.lines, body, target.anchor);
+                entryText = target.block ? BlockText(lines, body, target.anchor) : Section(lines, body, target.anchor);
             }
             if (entryText.empty() || entryText.size() > EmbedSet::kMaxBytes - bytes) continue;
             const uint32_t child = (uint32_t)set.entries.size();
@@ -579,52 +579,66 @@ private:
             if (Trim(first) == "---"sv) entryText.insert(0, "\n");
             EmbedEntry& entry = set.entries.emplace_back();
             entry.text = std::move(entryText);
-            entry.folder = note.folder;
+            entry.folder = (uint32_t)note.folder;
             bytes += entry.text.size();
             set.entries[index].embeds.emplace_back(line, child);
-            chain.push_back(id);
-            Expand(child, entry.text, entry.folder, depth + 1);
+            chain.push_back((size_t)id);
+            Expand(child, entry.text, (int)entry.folder, depth + 1);
             chain.pop_back();
         }
     }
 
-    // The note `name` names from EmbedSet::folders[folder], kNoNote for none; each folder and name
-    // looked up once.
-    uint32_t Find(uint32_t folder, std::string_view name) {
-        key.assign(reinterpret_cast<const char*>(&folder), sizeof(folder));
-        key.append(name);
-        const auto [known, added] = found.try_emplace(key, kNoNote);
-        if (!added) return known->second;
-        if (lookups >= kMaxLookups) {
-            found.erase(known);
-            return kNoNote;
-        }
-        lookups++;
-        std::string path = vault.Find(set.folders[folder], name, true);
-        if (!path.empty()) known->second = NoteOf(std::move(path));
-        return known->second;
+    // The value of `kind`, `a` and `b` in `keys` (made in `key`), kUnknown for none.
+    static constexpr int kUnknown = -2;
+    int Known(char kind, std::string_view a, std::string_view b = {}) {
+        key.assign(1, kind);
+        key.append(a);
+        key.append(b);
+        const auto found = keys.find(key);
+        return found == keys.end() ? kUnknown : found->second;
+    }
+    // `value` for `kind`, `a` and `b`, which Known did not find.
+    int Number(char kind, std::string_view a, std::string_view b, int value) {
+        key.assign(1, kind);
+        key.append(a);
+        key.append(b);
+        keys[key] = value;
+        return value;
     }
 
-    uint32_t NoteOf(std::string path) {
-        const auto [at, added] = paths.try_emplace(std::move(path));
-        if (added) {
-            at->second.path = &at->first;
-            at->second.id = (uint32_t)notes.size();
-            notes.push_back(&at->second);
-        }
-        return at->second.id;
+    // The note `name` names from EmbedSet::folders[folder], kNoNote for none; each folder and name
+    // looked up once.
+    int Find(int folder, std::string_view name) {
+        const std::string_view number(reinterpret_cast<const char*>(&folder), sizeof(folder));
+        const int known = Known('n', number, name);
+        if (known != kUnknown) return known;
+        if (lookups >= kMaxLookups) return kNoNote;
+        lookups++;
+        std::string path = vault.Find(set.folders[(size_t)folder], name, true);
+        return Number('n', number, name, path.empty() ? kNoNote : NoteOf(std::move(path)));
+    }
+
+    int NoteOf(std::string path) {
+        const int known = Known('p', path);
+        if (known != kUnknown) return known;
+        notes.emplace_back().path = std::move(path);
+        return Number('p', notes.back().path, {}, (int)notes.size() - 1);
     }
 
     // Whether `note` could be read: once a build, within the bytes left. `from`: the folder it was
     // found from, most often its own.
-    bool Load(Note& note, uint32_t from) {
+    bool Load(Note& note, int from) {
         if (!note.tried) {
             note.tried = true;
-            if (vault.Read(*note.path, std::min(EmbedSet::kMaxBytes, kMaxReadBytes - read), note.text, note.identity)) {
+            if (vault.Read(note.path, std::min(EmbedSet::kMaxBytes, kMaxReadBytes - read), note.text, note.identity)) {
                 read += note.text.size();
                 note.body = BodyOffset(note.text);
-                const std::string_view parent = ParentOf(*note.path);
-                note.folder = parent == set.folders[from] ? from : FolderIndex(parent);
+                const std::string_view parent = ParentOf(note.path);
+                note.folder = parent == set.folders[(size_t)from] ? from : Known('f', parent);
+                if (note.folder == kUnknown) {
+                    note.folder = Number('f', parent, {}, (int)set.folders.size());
+                    set.folders.emplace_back(parent);
+                }
             } else {
                 note.identity.opened = false;
             }
@@ -632,25 +646,18 @@ private:
         return note.identity.opened;
     }
 
-    uint32_t FolderIndex(std::string_view folder) {
-        key.assign(folder);
-        const auto [at, added] = folders.try_emplace(key, (uint32_t)set.folders.size());
-        if (added) set.folders.emplace_back(folder);
-        return at->second;
-    }
-
     const PdfOptions& options;
     EmbedSet& set;
     Vault vault;
-    std::unordered_map<std::string, Note> paths;         // the notes by path (their nodes stay put)
-    std::vector<Note*> notes;                            // and by number; [0]: the document
-    std::vector<uint32_t> chain;                         // the notes embedding the one being read
-    std::unordered_map<std::string, uint32_t> found;     // the notes by folder and name (kNoNote: none)
-    std::unordered_map<std::string, uint32_t> folders;   // EmbedSet::folders by path
-    std::string key;                                     // a lookup's key, its storage reused
-    size_t bytes = 0;     // embedded text
-    size_t read = 0;      // notes read
-    size_t scanned = 0;   // notes looked through for a section or block
+    std::vector<Note> notes;      // [0]: the document
+    std::vector<size_t> chain;    // the notes embedding the one being read
+    // What was looked up, in one table: 'n', a folder's number and a name: the note it names
+    // (kNoNote: none); 'p' and a path: its note; 'f' and a folder: its number in EmbedSet::folders.
+    std::unordered_map<std::string, int> keys;
+    std::string key;              // a lookup's key, its storage reused
+    size_t bytes = 0;             // embedded text
+    size_t read = 0;              // notes read
+    size_t scanned = 0;           // notes looked through for a section or block
     size_t lookups = 0;
     bool stopped = false;
 };
