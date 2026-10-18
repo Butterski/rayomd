@@ -246,7 +246,9 @@ popup (step 4).
 
 ## 6. Backlog from the report
 
-Ranked as the report ranks them; each takes the same rules.
+Ranked as the report ranks them; each takes the same rules. Note embeds, linked notes, page
+footnotes, long pages and print output, from the follow-up report, are planned in
+`notes_pages_print_plan.md`.
 
 **Engine and CLI.**
 - Export options from front matter (`rayomd:` key: page size, margins, toc, numbering, page
