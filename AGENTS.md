@@ -874,7 +874,8 @@ GitHub CI entry points:
   hot helpers `RAYOMD_HOT_INLINE` and hot lambdas `RAYOMD_HOT_LAMBDA`, and keep rare
   paths in `RAYOMD_COLD` functions that do not call small hot helpers directly.
   `TailWriter::Lit` and `Bytes` are always inlined: left to GCC, a call for each
-  one-byte separator cost 1.6 % of a warm build. A new cold feature goes into a
+  one-byte separator cost 1.6 % of a warm build; so is `PdfObjects::WriteTail`'s `text` (page
+  footnotes' code had left one more of its calls out of line). A new cold feature goes into a
   translation unit of its own behind a small interface, as `theme.cpp` does: inside
   `tiny_pdf.cpp`, the theme layout moved `std::string::push_back` and appends of the
   link annotations out of line (+2.6 % instructions on `baseline.md`). Write output
