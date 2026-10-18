@@ -3,6 +3,7 @@
 #include "page_notes.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace TinyPdf::Internal {
 namespace {
@@ -13,8 +14,9 @@ constexpr double kTolerance = 1e-6;
 } // namespace
 
 PageNotes::PageNotes(size_t count, size_t referencedNotes, double pageMargin, double pageBodySize)
-    : margin(pageMargin), bodySize(pageBodySize), info(new Info[count]()), noteCount(count), slots(new int[count * 3]),
+    : margin(pageMargin), bodySize(pageBodySize), info(new Info[count]), noteCount(count), slots(new int[count * 3]),
       clusterHeights(new double[count]), referenced(std::min(referencedNotes, count)) {
+    memset(info.get(), 0, count * sizeof(Info));   // kUnplaced, nothing measured
     members = slots.get();
     clusterEnds = members + count;
     pending = clusterEnds + count;
