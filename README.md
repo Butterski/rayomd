@@ -304,7 +304,9 @@ with their own titles, folded or not (both print unfolded) and nested; `==highli
 `%%comments%%`, also over several lines, left out; `[[wiki links]]` to a note (`note.md`), a
 heading in it or in this note; and `![[embedded images]]`, sized with `|300` or `|300x200` when
 the image has a line of its own. In a book (`--book`), a wiki link finds its note by name
-wherever it is. Embedded notes are linked, not copied in.
+wherever it is. Embedded notes are linked, not copied in. `--hide-tags` leaves `#tags` out (not
+in code, formulas or comments; `#1984` is no tag), each with a space next to it; a line of tags
+alone becomes a blank line.
 
 ```markdown
 > [!tip]- Before you start
@@ -314,7 +316,7 @@ wherever it is. Embedded notes are linked, not copied in.
 ```
 
 ```sh
-rayomd --export note.md note.pdf --dialect=obsidian
+rayomd --export note.md note.pdf --dialect=obsidian --hide-tags
 ```
 
 ### Code highlighting
@@ -507,6 +509,17 @@ source. Together the file claims both, and every test document passes veraPDF. S
 
 ```sh
 rayomd --export policy.md policy.pdf --pdfa --pdfua --compress
+```
+
+### Printing
+
+`--black-text` makes a PDF for a black-and-white printer: text, links, headings, code, quote bars
+and rules come out black, fills (code blocks, table headers, highlights) in light greys of their
+colours' luminance, and diagrams in a grey palette. Images keep their colours, and nothing moves:
+only the colours change.
+
+```sh
+rayomd --export report.md report.pdf --black-text --page-numbers
 ```
 
 ### Reversible PDFs

@@ -65,6 +65,8 @@ struct WinExportOptions {
     int pageBreakBeforeLevel = 0;
     int numberHeadings = 0;
     TinyPdf::MarkdownDialect dialect = TinyPdf::MarkdownDialect::GitHub;
+    bool blackText = false;
+    bool hideTags = false;
     TinyPdf::PdfTheme theme;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
     // newer than their Markdown left as they are; a JSON Lines report ("-" for stdout).
@@ -289,6 +291,8 @@ TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const s
     options.pageBreakBeforeLevel = exportOptions.pageBreakBeforeLevel;
     options.numberHeadings = exportOptions.numberHeadings;
     options.dialect = exportOptions.dialect;
+    options.blackText = exportOptions.blackText;
+    options.hideTags = exportOptions.hideTags;
     options.theme = exportOptions.theme;
     return options;
 }
@@ -350,6 +354,10 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
             options.highlightCode = false;
         } else if (lstrcmpiW(argv[i], L"--no-diagrams") == 0) {
             options.diagrams = false;
+        } else if (lstrcmpiW(argv[i], L"--black-text") == 0) {
+            options.blackText = true;
+        } else if (lstrcmpiW(argv[i], L"--hide-tags") == 0) {
+            options.hideTags = true;
         } else if (lstrcmpiW(argv[i], L"--toc") == 0) {
             options.toc = true;
         } else if (_wcsnicmp(argv[i], L"--toc-depth=", 12) == 0) {
@@ -1054,7 +1062,9 @@ void PrintUsage() {
         "  --toc-depth=N (heading levels it lists, 1-6; default 3), --number-headings[=N] (1, 1.1, 1.1.1\n"
         "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks),\n"
         "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]] and\n"
-        "  ![[images]]; default github).\n"
+        "  ![[images]]; default github), --hide-tags (with --dialect=obsidian: #tags left out),\n"
+        "  --black-text (for black-and-white printers: text, links and code black, fills and diagrams\n"
+        "  light grey; images keep their colours).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4),\n"
         "  --page-break-before=hN (a new page before each heading of level 1 to N; h1 for chapters).\n"

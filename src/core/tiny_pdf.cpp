@@ -25,6 +25,7 @@
 #include "math_layout.h"
 #include "pdfa.h"
 #include "png_filter.h"
+#include "print_colors.h"
 #include "shared_url.h"
 #include "svg.h"
 #include "tagged.h"
@@ -4184,8 +4185,8 @@ bool ImageRegistry::ConvertSvgImage(std::string_view svg, PdfImage& image, std::
 
 bool ImageRegistry::AddDiagram(std::string_view source, int& index) {
     if (!options.diagrams) return false;
-    Internal::Mermaid::Palette palette = Internal::Mermaid::kDefaultPalette;
-    if (options.theme.accentColor != PdfTheme::kStyleColor) {
+    Internal::Mermaid::Palette palette = options.blackText ? Internal::Mermaid::kPrintPalette : Internal::Mermaid::kDefaultPalette;
+    if (options.theme.accentColor != PdfTheme::kStyleColor && !options.blackText) {
         palette.nodeStroke = palette.accent = (uint32_t)options.theme.accentColor;
     }
     const Internal::DiagramKey key{ svgFont != nullptr, svgFont != nullptr ? svgFont->loadId : 0,
@@ -4212,6 +4213,8 @@ bool ImageRegistry::AddDiagram(std::string_view source, int& index) {
     PdfImage image;
     const std::shared_ptr<Internal::DrawnDiagram> drawn = Internal::NewDrawnDiagram();
     if (!made || !ConvertSvgImage(svg, image, svgFont != nullptr ? &drawn->runs : nullptr)) return false;
+    // Colours a diagram's `style` and `classDef` give as greys too; the form is this call's own.
+    if (options.blackText) Internal::PrintColors(const_cast<Internal::SvgForm&>(*image.svg).content);
     Internal::CountDiagramLayout();
     SharedPdfImage shared = std::make_shared<PdfImage>(std::move(image));
     const Internal::SvgForm& form = *shared->svg;
@@ -12026,10 +12029,10 @@ private:
 };
 
 // The page number at the foot of a page: "N / M" centred in the bottom margin, small and grey,
-// in Helvetica, which the page names `font`. A content stream of its own, after the page's,
-// which was rendered before the page count was known.
+// in Helvetica, which the page names `font`; black with `black`. A content stream of its own,
+// after the page's, which was rendered before the page count was known.
 RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t pages, double margin, double pageWidth,
-    const char* font) {
+    const char* font, bool black) {
     char label[48];
     char* end = std::to_chars(label, label + 20, page).ptr;
     memcpy(end, " / ", 3);
@@ -12045,6 +12048,7 @@ RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t pages,
     stream += " Tm (";
     stream += text;
     stream += ") Tj ET Q";
+    if (black) Internal::PrintColors(stream);
     return pdf.AddStream("", stream);
 }
 
@@ -12412,7 +12416,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     const Internal::ThemeLogoImage logo = ThemeLogo(options.theme, imageRegistry);
     std::vector<int> imageObjectIds = AddImageObjects(pdf, imageRegistry.Images(), fontRegularId, fontBoldId, options.compress);
     std::vector<size_t> contentsTargets;   // the heading of each entry of the table of contents
-    const std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);
+    std::vector<std::string> contentsOverlays = ContentsOverlays(renderer, contents, contentsTargets);
     HeadingTargets headingTargets(headings, winAnsi, renderer.PageHeight(), renderer.Notes(), &renderer.Ids());
     if (!contents.empty()) headingTargets.SetContents(&contentsTargets);
     std::vector<InternalLink> internalLinks;
@@ -12437,6 +12441,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
             { renderer.PageWidth(), renderer.PageHeight(), renderer.Margin() }, logo, palette, bands, cover);
     }
     std::vector<bool> flatePages;   // --compress: the pages whose content stream is compressed
+    if (options.blackText) Internal::PrintColors(pdfBytes, renderer.PageStarts(), bands, cover, contentsOverlays);
     if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
     std::vector<int> pageIds;
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
@@ -12445,7 +12450,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
-            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "F1")
+            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "F1",
+                options.blackText)
             : 0;
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
@@ -13095,6 +13101,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     const int numberFontId = options.pageNumbers && bands.empty()
         ? pdf.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>") : 0;
     std::vector<bool> flatePages;   // --compress: the pages whose content stream is compressed
+    if (options.blackText) Internal::PrintColors(pdfBytes, renderer.PageStarts(), bands, cover, contentsOverlays);
     if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
     std::vector<int> pageIds;
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
@@ -13103,7 +13110,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
-            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "FN")
+            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "FN",
+                options.blackText)
             : 0;
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
@@ -13327,7 +13335,7 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
     }
     g_lastError = 0;
     const CancelScope cancelScope(options.cancel);
-    const Internal::DialectScope dialectScope(options.dialect);
+    const Internal::DialectScope dialectScope(options.dialect, options.hideTags);
     uint32_t missingCharacters = 0;
     BuildResult stats;
     bool built = !BuildCancelled() && BuildDocument(markdown, options, pdfBytes, stats, missingCharacters, nullptr);
@@ -13351,7 +13359,7 @@ BuildResult BuildBookPdf(const Book& book, const PdfOptions& options, std::strin
     const auto profileBefore = RayoMd::Profiling::Capture();
     g_lastError = 0;
     const CancelScope cancelScope(options.cancel);
-    const Internal::DialectScope dialectScope(options.dialect);
+    const Internal::DialectScope dialectScope(options.dialect, options.hideTags);
     PdfOptions bookOptions = options;
     bookOptions.sourceMap = nullptr;
     bookOptions.embedSource = false;

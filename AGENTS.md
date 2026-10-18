@@ -129,6 +129,20 @@ or a sized `<img>`. Callouts are the parser's (`TakeCallout`): `Block::alert` 1 
 colour, `Block::text` holds the title, which the renderers draw (`RenderCallout`); GitHub alerts
 keep an empty `text`. In a book `BookTargets::FileByName` resolves a link by the note's name. The
 GitHub dialect never runs any of it: its bytes stay as they are.
+`PdfOptions::hideTags` (`--hide-tags`, Obsidian's dialect only; `DialectScope` keeps it for the
+thread, `HiddenTags()`) drops Obsidian's `#tags` before that pass (`HideTags`, `TagHider` in
+`dialect_rewrite.cpp`: lines read up to the last '#', only those with a '#' or "%%" scanned, fences,
+display formulas, indented code, code spans, formulas, comments, wiki links and the front matter
+left alone; a tag goes with one space next to it and a line keeps its place). Without the flag
+`RewriteObsidian` only asks `HiddenTags()`, and the pair-gated pass is as it was.
+Print output (`--black-text`, `PdfOptions::blackText`): after layout and before
+`CompressPageContents`, both builders hand the page content, a theme's bands and cover and the
+table of contents' overlays to `Internal::PrintColors` (`print_colors.cpp`), as `AddPageNumber`
+its stream; every `rg`/`RG`/`g`/`G` becomes the grey of its luminance (black below 0.5) over the
+same bytes, padded with spaces, so no offset or length moves. Diagrams take
+`Mermaid::kPrintPalette` (the cache keys on the palette) and their form's colours the same pass;
+images keep theirs. A new paint needs nothing: its colour operator is rewritten with the rest.
+Without the flag nothing runs and the bytes stay as they are.
 Books (`--book`, `BuildBookPdf`) make one PDF of the files a SUMMARY.md lists (mdBook,
 GitBook), of a folder, or of the files given. Each file is parsed on its own (its link
 definitions, footnotes and heading anchors are its own) and begins on a new page, so the
@@ -355,6 +369,13 @@ Important image/link details:
   any name (a link, letter case, `x/../`) is refused: files are told apart by their identity
   (`RayoMd::File::FileIdentity`, device and inode or volume and file index), not their names.
 
+- `src/core/print_colors.h` and `src/core/print_colors.cpp`
+  `--black-text`'s rewrite of finished content (`PrintColors`): one SSE2 pass over the bytes that
+  open or close a string ('(' ')' '\\' '<' '>') or end a colour operator ('g', 'G'), each taken by
+  the string state it is in, and for an operator its operands read back from there (`RunStart`,
+  SSE2) with the last few "r g b" operands' greys kept by their bytes (`OperandMemo`). Built at
+  `-O2`: 10 % fewer instructions than at `-Os` on a page of text.
+
 - `src/core/svg.h` and `src/core/svg.cpp`
   SVG to a PDF form XObject: a non-recursive XML reader, the CSS cascade for
   presentation attributes, `style` and simple selectors, paths, shapes, clips,
@@ -567,12 +588,13 @@ Important image/link details:
   `tests/hardening_tests.inc` those of hostile and abandoned builds (cancellation, files that
   are no regular files, fonts changed after loading, image containment, cache permissions, the
   decode budget and the SVG `data:` image cache); `tests/dialect_tests.inc` checks Obsidian's
-  dialect, and `tests/mermaid_tests.inc` the Mermaid diagrams (syntax, refusals, layout
-  invariants, golden SVG digests, conversion, limits).
+  dialect, `tests/mermaid_tests.inc` the Mermaid diagrams (syntax, refusals, layout
+  invariants, golden SVG digests, conversion, limits), and `tests/print_tests.inc` print output
+  (`--black-text` against the default PDF in both renderers, `--hide-tags`).
 
 - `tests/fuzz/`
   libFuzzer targets of the engine's untrusted-input entry points (`fuzz_targets.h`): Markdown
-  through `BuildPdf` (the first two bytes choose the options), `PdfSource::Inspect`, `ParseTheme`
+  through `BuildPdf` (the first two bytes choose the options, the third, the text's first, more), `PdfSource::Inspect`, `ParseTheme`
   and a build with its theme, TrueType and OpenType fonts loaded and subset as a theme's font,
   bare CFF, image decoding, SVG through both hosts, and Mermaid diagrams through `Mermaid::ToSvg`
   and `ConvertSvg`. `fuzz_internal.cpp` compiles `tiny_pdf.cpp` inside itself to reach its internal names (and reads fonts into memory instead of

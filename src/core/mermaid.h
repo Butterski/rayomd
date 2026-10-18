@@ -31,6 +31,9 @@ struct Palette {
 
 // Mermaid's default theme, for callers without a theme of their own.
 constexpr Palette kDefaultPalette = { 0x333333, 0x333333, 0xECECFF, 0x9370DB, 0xFFFFDE, 0xAAAA33, 0xFFF5AD, 0x9370DB };
+// PdfOptions::blackText: black text and lines on light grey fills; the accent is mid grey, as
+// autonumber marks show their numbers on it in the node fill and pie slices black labels.
+constexpr Palette kPrintPalette = { 0x000000, 0x000000, 0xEEEEEE, 0x000000, 0xF7F7F7, 0xAAAAAA, 0xE0E0E0, 0x777777 };
 
 // A Mermaid source (the fence's content) as an SVG document that Internal::ConvertSvg draws:
 // sizes in px user units, text measured with host.TextWidth (the converter's own measure),

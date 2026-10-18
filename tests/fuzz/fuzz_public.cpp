@@ -103,16 +103,21 @@ void Build(const std::string& markdown, const TinyPdf::PdfOptions& options) {
 // Byte 0 and 1 choose the options of OptionsFrom; the options added since are chosen by the
 // document's last byte, which stays in the document, so earlier seeds keep their text. Its bits
 // 0-2: the page-break level (mod 7); bits 3-5: the heading numbers' depth (mod 7); bit 6:
-// Obsidian's dialect; bit 7: diagrams off (```mermaid blocks as code).
+// Obsidian's dialect; bit 7: diagrams off (```mermaid blocks as code). Byte 2, the document's
+// first byte (read, not taken from it, so earlier seeds keep their text), chooses more: bit 0
+// black text, bit 1 hidden tags.
 int BuildPdf(const uint8_t* data, size_t size) {
     if (size < 2) return 0;
     const std::string markdown(reinterpret_cast<const char*>(data) + 2, size - 2);
     TinyPdf::PdfOptions options = OptionsFrom(data[0], data[1]);
+    const uint8_t extra = size > 2 ? data[2] : 0;
     const uint8_t last = data[size - 1];
     options.pageBreakBeforeLevel = (last & 7) % 7;
     options.numberHeadings = ((last >> 3) & 7) % 7;
     if ((last & 0x40) != 0) options.dialect = TinyPdf::MarkdownDialect::Obsidian;
     if ((last & 0x80) != 0) options.diagrams = false;
+    options.blackText = (extra & 1) != 0;
+    options.hideTags = (extra & 2) != 0;
     Build(markdown, options);
     return 0;
 }

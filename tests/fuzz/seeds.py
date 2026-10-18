@@ -559,6 +559,28 @@ Inline ![[gray.jpg|20x10]] and ![[Other]] and `[[code]]` and $a==b$.
 
 %%unclosed
 Z""",
+    # Starts with "#" (0x23: black text and hidden tags) and ends in "Z" (Obsidian's dialect).
+    "tags.md": """#start tags #a/b-c_d #1984 #y1984 a#b http://x/#frag
+# Heading #h
+
+- [ ] task #todo and `#code` and $#math$ and [[note|alias #in]] %% #hidden %%
+    #indented after text
+
+    #indented code
+
+```
+#fenced
+```
+
+$$
+#display
+$$
+
+#\u017Cółw #a #b
+%% #open
+#inside
+%% #after ==mark== [[link]] <span style="color:#c39">c</span>
+Z""",
 }
 
 OPTION_PREFIXES = [b"\x01\x00", b"\x00\x01", b"\x87\x10", b"\x25\x22", b"\x40\x04", b"\x13\x08", b"\xf2\x51", b"\x00\xc3"]

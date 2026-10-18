@@ -283,6 +283,8 @@ struct CliExportOptions {
     int pageBreakBeforeLevel = 0;
     int numberHeadings = 0;
     TinyPdf::MarkdownDialect dialect = TinyPdf::MarkdownDialect::GitHub;
+    bool blackText = false;
+    bool hideTags = false;
     TinyPdf::PdfTheme theme;
     unsigned workers = 0;
     // Batch modes: subfolders too, mirrored under the output folder; documents whose PDF is
@@ -312,6 +314,8 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--pdfua") options.pdfua = true;
         else if (value == "--no-highlight") options.highlightCode = false;
         else if (value == "--no-diagrams") options.diagrams = false;
+        else if (value == "--black-text") options.blackText = true;
+        else if (value == "--hide-tags") options.hideTags = true;
         else if (value == "--toc") options.toc = true;
         else if (value.rfind("--toc-depth=", 0) == 0) {
             if (value.size() != 13 || value[12] < '1' || value[12] > '6') {
@@ -458,6 +462,8 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     pdfOptions.pageBreakBeforeLevel = options.pageBreakBeforeLevel;
     pdfOptions.numberHeadings = options.numberHeadings;
     pdfOptions.dialect = options.dialect;
+    pdfOptions.blackText = options.blackText;
+    pdfOptions.hideTags = options.hideTags;
     pdfOptions.theme = options.theme;
     return pdfOptions;
 }
@@ -915,7 +921,9 @@ void PrintUsage() {
         "  --toc-depth=N (heading levels it lists, 1-6; default 3), --number-headings[=N] (1, 1.1, 1.1.1\n"
         "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks),\n"
         "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]] and\n"
-        "  ![[images]]; default github).\n"
+        "  ![[images]]; default github), --hide-tags (with --dialect=obsidian: #tags left out),\n"
+        "  --black-text (for black-and-white printers: text, links and code black, fills and diagrams\n"
+        "  light grey; images keep their colours).\n"
         "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4),\n"
         "  --page-break-before=hN (a new page before each heading of level 1 to N; h1 for chapters).\n"
