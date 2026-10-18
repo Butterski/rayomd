@@ -258,8 +258,9 @@ fs::path Vault::Check(const fs::path& candidate) {
 #endif
 #ifdef _WIN32
     // In the root by name before anything is opened, and through no link below it (TryOpenDirect's
-    // rule for images); the file itself no link either.
-    if (!IsWithinRoot(lexical, root) || lexical.native().find_first_of(L"*?") != std::wstring::npos ||
+    // rule for images); the file itself no link either. Wildcards are looked for below the root
+    // only: the root, from GetFinalPathNameByHandleW, begins with "\\?\".
+    if (!IsWithinRoot(lexical, root) || lexical.lexically_relative(root).native().find_first_of(L"*?") != std::wstring::npos ||
         DirectPathHasLink(root, lexical)) {
         return fs::path();
     }
