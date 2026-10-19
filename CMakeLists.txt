@@ -38,12 +38,14 @@ option(RAYOMD_FUZZ "Build the libFuzzer targets of tests/fuzz (clang, ASan and U
 function(rayomd_release_flags target)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         if(WIN32)
+            # No -fdata-sections: MinGW's GCC then puts zero-initialized statics into .data$name
+            # sections, written out as zeros in the file (the 256 KB font cache and the inflater's
+            # 43 KB fixed tables: 310 KB of the executable), instead of .bss.
             target_compile_options(${target} PRIVATE
                 $<$<CONFIG:Release>:-O2>
                 $<$<CONFIG:Release>:-fno-exceptions>
                 $<$<CONFIG:Release>:-fno-rtti>
-                $<$<CONFIG:Release>:-ffunction-sections>
-                $<$<CONFIG:Release>:-fdata-sections>)
+                $<$<CONFIG:Release>:-ffunction-sections>)
             target_link_options(${target} PRIVATE
                 $<$<CONFIG:Release>:-s>
                 $<$<CONFIG:Release>:-static-libgcc>
