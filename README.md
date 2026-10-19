@@ -36,7 +36,7 @@ No browser. No LaTeX. No Pandoc. No runtime.
 > `--backlinks`), footnotes at the foot of the page (`--footnotes=page`), one long page for
 > screens (`--page-size=210mmxauto`), and print output (`--black-text`, `--hide-tags`).
 > Documents without them keep their PDF bytes. 5.2.3 exports 15 % faster than 5.2.2 (essay-style
-> text 30 %) from a binary a quarter smaller.
+> text 30 %), and its Linux download is 18 % smaller.
 
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code: a small
 command-line tool for Linux and Windows, and an exporter you can embed through the
@@ -137,12 +137,12 @@ cmake --build build --config Release
 
 </details>
 
-| Package | Size, 5.2.2 | For |
+| Package | Size, 5.2.3 | For |
 |---|---:|---|
-| `rayomd-<version>-linux-x64-static.tar.gz` | 1,347 KB | Linux, recommended: no dependency, the fastest start |
-| `rayomd-<version>-windows-x64.zip` | 1,280 KB | Windows: every CLI mode in one `rayomd.exe` |
-| `rayomd-<version>-linux-x64.tar.gz` | 917 KB | Linux: needs only glibc |
-| `rayomd-<version>-linux-x64-curl.tar.gz` | 920 KB | Linux with HTTP/HTTPS images through libcurl |
+| `rayomd-<version>-linux-x64-static.tar.gz` | 1,205 KB | Linux, recommended: no dependency, the fastest start |
+| `rayomd-<version>-windows-x64.zip` | 1,227 KB | Windows: every CLI mode in one `rayomd.exe` |
+| `rayomd-<version>-linux-x64.tar.gz` | 750 KB | Linux: needs only glibc |
+| `rayomd-<version>-linux-x64-curl.tar.gz` | 752 KB | Linux with HTTP/HTTPS images through libcurl |
 
 Every feature below works the same from both command lines and the
 [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API).
