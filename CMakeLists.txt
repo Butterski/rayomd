@@ -38,12 +38,14 @@ option(RAYOMD_FUZZ "Build the libFuzzer targets of tests/fuzz (clang, ASan and U
 function(rayomd_release_flags target)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         if(WIN32)
+            # No -fdata-sections: MinGW's GCC then puts zero-initialized statics into .data$name
+            # sections, written out as zeros in the file (the 256 KB font cache and the inflater's
+            # 43 KB fixed tables: 310 KB of the executable), instead of .bss.
             target_compile_options(${target} PRIVATE
                 $<$<CONFIG:Release>:-O2>
                 $<$<CONFIG:Release>:-fno-exceptions>
                 $<$<CONFIG:Release>:-fno-rtti>
-                $<$<CONFIG:Release>:-ffunction-sections>
-                $<$<CONFIG:Release>:-fdata-sections>)
+                $<$<CONFIG:Release>:-ffunction-sections>)
             target_link_options(${target} PRIVATE
                 $<$<CONFIG:Release>:-s>
                 $<$<CONFIG:Release>:-static-libgcc>
@@ -217,8 +219,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # against 17.7. The highlighter's lexers read every byte of a code block: 1.5 times as fast at
     # -O2 as at -Os. The HTML scanner reads every byte of the tags in a document, and Obsidian's
     # rewrite every byte of a note on every build of a preview. --black-text's scan reads every page.
+    # The PNG filters are vector code of their own: -O3 only vectorized their scalar ends (36 KB).
     set_source_files_properties(src/core/flate.cpp src/core/inflate.cpp src/core/highlight.cpp src/core/html.cpp
-        src/core/dialect_rewrite.cpp src/core/print_colors.cpp
+        src/core/dialect_rewrite.cpp src/core/print_colors.cpp src/core/png_filter.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
     # The command lines' terminate handler rethrows the exception it reports.
     set_source_files_properties(src/cli/terminate.cpp PROPERTIES COMPILE_OPTIONS "-fexceptions;$<$<CONFIG:Release>:-Os>")
@@ -343,6 +346,17 @@ if(RAYOMD_BUILD_CLI)
         add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
             target_sources(rayomd PRIVATE src/cli/terminate.cpp)
+            if(NOT RAYOMD_STATIC)
+                # Release builds, compiled without exceptions: a throw aborts without unwinding, and
+                # the unwind tables nothing reads are dropped. Not static: glibc's libc.a links the
+                # unwinder for thread cancellation.
+                target_sources(rayomd PRIVATE $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.cpp>)
+                if(RAYOMD_HOT_SECTIONS)
+                    set(script "${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.ld")
+                    target_link_options(rayomd PRIVATE "$<$<CONFIG:Release>:-Wl,-T,${script}>")
+                    set_property(TARGET rayomd APPEND PROPERTY LINK_DEPENDS "${script}")
+                endif()
+            endif()
         endif()
         if(RAYOMD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
             # No .eh_frame registration at startup: the unwinder reads PT_GNU_EH_FRAME (static_frames.cpp).

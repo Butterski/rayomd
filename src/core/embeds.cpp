@@ -45,20 +45,32 @@ bool EqualsIgnoringCase(std::string_view a, std::string_view b) {
     return true;
 }
 
-// The lines of `text` as the parser counts them: each up to a '\n', the last one too when it
-// is empty. A byte order mark is no part of the first.
-std::vector<std::string_view> Lines(std::string_view text) {
-    std::vector<std::string_view> lines;
-    if (text.substr(0, 3) == "\xEF\xBB\xBF") text.remove_prefix(3);
-    for (size_t start = 0;;) {
-        const size_t end = text.find('\n', start);
-        if (end == kNone) {
-            lines.push_back(text.substr(start));
-            return lines;
-        }
-        lines.push_back(text.substr(start, end - start));
-        start = end + 1;
+// Where a text's first line begins: after a byte order mark, which is no part of it.
+size_t FirstLine(std::string_view text) {
+    return text.substr(0, 3) == "\xEF\xBB\xBF" ? 3 : 0;
+}
+
+// The lines of `text` from offset `at` (a line's start) on, as the parser counts them: each up to
+// a '\n', the last one too when it is empty; none when `at` is past the end.
+struct LineReader {
+    std::string_view text;
+    size_t at;
+
+    bool Next(std::string_view& line) {
+        if (at > text.size()) return false;
+        const size_t end = std::min(text.find('\n', at), text.size());
+        line = text.substr(at, end - at);
+        at = end + 1;
+        return true;
     }
+    // Where `line`, one this gave, begins.
+    size_t Start(std::string_view line) const { return (size_t)(line.data() - text.data()); }
+};
+
+// The start of the line before the one at `start` (> 0).
+size_t LineBefore(std::string_view text, size_t start) {
+    const size_t end = start >= 2 ? text.rfind('\n', start - 2) : kNone;
+    return end == kNone ? 0 : end + 1;
 }
 
 // The fence a line opens or closes, after blanks and quote markers, as Obsidian's rewrite reads
@@ -228,37 +240,32 @@ int HeadingOf(std::string_view line, std::string_view& text) {
     return (int)level;
 }
 
-// The lines [first, end) of `lines` joined again.
-std::string Join(const std::vector<std::string_view>& lines, size_t first, size_t end) {
-    std::string out;
-    for (size_t index = first; index < end; index++) {
-        out.append(lines[index]);
-        out += '\n';
-    }
-    return out;
-}
-
-// The section a heading begins: up to the next heading of its level or a higher one, outside
-// fenced code. Empty when the note has no such heading.
-std::string Section(const std::vector<std::string_view>& lines, size_t first, std::string_view heading) {
+// The section a heading begins, in the lines of `text` from offset `first` on: up to the next
+// heading of its level or a higher one, outside fenced code, each line ended by '\n'. Empty when
+// the note has no such heading.
+std::string Section(std::string_view text, size_t first, std::string_view heading) {
     FenceState fences;
     size_t start = kNone;
     int level = 0;
-    for (size_t index = first; index < lines.size(); index++) {
-        if (fences.Skip(lines[index])) continue;
-        std::string_view text;
-        const int found = HeadingOf(lines[index], text);
+    LineReader lines{ text, first };
+    for (std::string_view line; lines.Next(line);) {
+        if (fences.Skip(line)) continue;
+        std::string_view title;
+        const int found = HeadingOf(line, title);
         if (found == 0) continue;
         if (start == kNone) {
-            if (EqualsIgnoringCase(text, heading)) {
-                start = index;
+            if (EqualsIgnoringCase(title, heading)) {
+                start = lines.Start(line);
                 level = found;
             }
         } else if (found <= level) {
-            return Join(lines, start, index);
+            return std::string(text.substr(start, lines.Start(line) - start));
         }
     }
-    return start == kNone ? std::string() : Join(lines, start, lines.size());
+    if (start == kNone) return std::string();
+    std::string out(text.substr(start));
+    out += '\n';
+    return out;
 }
 
 // Where " ^id" ends `line` (or `line` is "^id" alone): the position of its '^', else kNone.
@@ -286,31 +293,37 @@ bool IsListLine(std::string_view line) {
         (text[digits + 1] == ' ' || text[digits + 1] == '\t');
 }
 
-// The block "^id" marks (Obsidian's block reference): the paragraph or list line that ends in
-// " ^id", or the block a line of "^id" alone follows; the id left out. Empty without one.
-std::string BlockText(const std::vector<std::string_view>& lines, size_t first, std::string_view id) {
+// The block "^id" marks (Obsidian's block reference), in the lines of `text` from offset `first`
+// on: the paragraph or list line that ends in " ^id", or the block a line of "^id" alone follows;
+// the id left out, each line ended by '\n'. Empty without one.
+std::string BlockText(std::string_view text, size_t first, std::string_view id) {
     FenceState fences;
-    for (size_t index = first; index < lines.size(); index++) {
-        if (fences.Skip(lines[index])) continue;
-        const size_t caret = BlockIdAt(lines[index], id);
+    LineReader lines{ text, first };
+    const auto lineBefore = [text](size_t start) { return text.substr(LineBefore(text, start), start - 1 - LineBefore(text, start)); };
+    for (std::string_view line; lines.Next(line);) {
+        if (fences.Skip(line)) continue;
+        const size_t caret = BlockIdAt(line, id);
         if (caret == kNone) continue;
-        if (Trim(lines[index].substr(0, caret)).empty()) {
+        const size_t at = lines.Start(line);
+        if (Trim(line.substr(0, caret)).empty()) {
             // The block before the id's line, blank lines between them skipped.
-            size_t end = index;
-            while (end > first && IsBlankLine(lines[end - 1])) end--;
+            size_t end = at;
+            while (end > first && IsBlankLine(lineBefore(end))) end = LineBefore(text, end);
             size_t start = end;
-            while (start > first && !IsBlankLine(lines[start - 1])) start--;
-            return Join(lines, start, end);
+            while (start > first && !IsBlankLine(lineBefore(start))) start = LineBefore(text, start);
+            return std::string(text.substr(start, end - start));
         }
-        std::string text(Trim(lines[index].substr(0, caret)));
-        if (IsListLine(lines[index])) return text + '\n';
-        size_t start = index;
-        while (start > first && !IsBlankLine(lines[start - 1]) && !IsListLine(lines[start - 1])) {
-            std::string_view heading;
-            if (HeadingOf(lines[start - 1], heading) != 0) break;
-            start--;
+        size_t start = at;
+        if (!IsListLine(line)) {
+            for (std::string_view heading; start > first; start = LineBefore(text, start)) {
+                const std::string_view before = lineBefore(start);
+                if (IsBlankLine(before) || IsListLine(before) || HeadingOf(before, heading) != 0) break;
+            }
         }
-        return Join(lines, start, index) + text + '\n';
+        std::string out(text.substr(start, at - start));
+        out.append(Trim(line.substr(0, caret)));
+        out += '\n';
+        return out;
     }
     return std::string();
 }
@@ -345,12 +358,13 @@ size_t LabelEnd(std::string_view value, size_t from) {
 // then another note.
 void OwnFootnotes(std::string& text, uint32_t entry) {
     if (text.find("[^") == std::string::npos || text.find("]:") == std::string::npos) return;
-    const std::vector<std::string_view> lines = Lines(text);
+    const std::string_view source = text;
     // The labels defined (a value each, which nothing reads: this map type is the one the
     // parser's footnotes and the image registry use, so it adds no code).
     std::unordered_map<std::string, int> defined;
     FenceState fences;
-    for (const std::string_view line : lines) {
+    LineReader lines{ source, FirstLine(source) };
+    for (std::string_view line; lines.Next(line);) {
         if (fences.Skip(line)) continue;
         size_t at = 0;
         while (at < line.size() && (IsBlank(line[at]) || line[at] == '>')) at++;
@@ -373,9 +387,9 @@ void OwnFootnotes(std::string& text, uint32_t entry) {
     std::vector<Run> runs;
     std::vector<size_t> nextOfLength;
     fences = FenceState();
-    for (size_t index = 0; index < lines.size(); index++) {
-        const std::string_view line = lines[index];
-        if (index > 0) out += '\n';
+    lines.at = FirstLine(source);
+    for (std::string_view line; lines.Next(line);) {
+        if (lines.Start(line) > FirstLine(source)) out += '\n';
         if (fences.Skip(line) || line.find("[^"sv) == kNone) {
             out.append(line);
             continue;
@@ -426,21 +440,33 @@ void OwnFootnotes(std::string& text, uint32_t entry) {
     text = std::move(out);
 }
 
-// The standalone embeds of a text: their lines and what they name, in line order.
-std::vector<std::pair<uint32_t, std::string_view>> StandaloneEmbeds(std::string_view text) {
-    std::vector<std::pair<uint32_t, std::string_view>> found;
-    if (text.find("![[") == kNone) return found;
-    const std::vector<std::string_view> lines = Lines(text);
-    // The front matter's lines: those before the body (BodyOffset).
-    const size_t body = BodyOffset(text);
-    LineState state;
-    for (size_t index = 0; index < lines.size() && index < UINT32_MAX; index++) {
-        if ((size_t)(lines[index].data() - text.data()) < body || !state.Outside(lines[index])) continue;
-        const std::string_view inner = StandaloneEmbed(lines[index]);
-        if (!inner.empty()) found.emplace_back((uint32_t)index, inner);
+// The standalone embeds of a text, in line order: each one's line and what it names (Next).
+class StandaloneEmbeds {
+public:
+    // No line is read of a text without "![[".
+    explicit StandaloneEmbeds(std::string_view text) : lines{ text, text.size() + 1 } {
+        if (text.find("![[") == kNone) return;
+        lines.at = FirstLine(text);
+        body = BodyOffset(text);
     }
-    return found;
-}
+
+    bool Next(uint32_t& index, std::string_view& inner) {
+        for (std::string_view line; line_ < UINT32_MAX && lines.Next(line);) {
+            index = line_++;
+            // The front matter's lines: those before the body (BodyOffset).
+            if (lines.Start(line) < body || !state.Outside(line)) continue;
+            inner = StandaloneEmbed(line);
+            if (!inner.empty()) return true;
+        }
+        return false;
+    }
+
+private:
+    LineReader lines;
+    size_t body = 0;
+    uint32_t line_ = 0;
+    LineState state;
+};
 
 // Reads the notes of a document's embeds, depth first, within EmbedSet's limits.
 class Resolver {
@@ -454,12 +480,12 @@ public:
         std::string folder = vault.Root();
         if (!options.vaultRoot.empty()) {
             const std::string_view parent = ParentOf(options.sourcePath);
-            folder = ResolvedPath(parent.empty() ? std::string_view(".") : parent);
+            folder = CachedResolvedPath(parent.empty() ? std::string_view(".") : parent);
             if (folder.empty()) return false;
         }
         FolderIndex(folder);
         // Note 0 is the document, by its resolved path: never read, always on the chain.
-        NoteOf(ResolvedPath(options.sourcePath));
+        NoteOf(ResolvedFilePath(options.sourcePath, folder));
         chain.push_back(0);
         // No reallocation while Expand holds an entry's text.
         set.entries.reserve(EmbedSet::kMaxEmbeds + 1);
@@ -489,13 +515,12 @@ private:
 
     // A note found, by its path (each path once, whatever names it), read on its first embed.
     struct Note {
-        const std::string* path = nullptr;     // its key in `paths`
-        std::string text;
+        explicit Note(const std::string* key) : path(key) {}
+        const std::string* path;                   // its key in `paths`
+        std::shared_ptr<const std::string> text;   // whole, from the vault (its process's cache)
         RayoMd::File::FileIdentity identity;
-        std::vector<std::string_view> lines;   // of `text`, made for its first section or block
-        size_t body = 0;                       // BodyOffset
-        uint32_t folder = 0;                   // EmbedSet::folders
-        uint32_t id = 0;                       // in `notes`
+        size_t body = 0;                           // BodyOffset
+        uint32_t folder = 0;                       // EmbedSet::folders
         bool tried = false;
     };
 
@@ -506,7 +531,9 @@ private:
     // The embeds of entry `index`, whose text is `text`, in the note in EmbedSet::folders[folder],
     // `depth` embeds down from the document.
     void Expand(uint32_t index, std::string_view text, uint32_t folder, int depth) {
-        for (const auto& [line, inner] : StandaloneEmbeds(text)) {
+        StandaloneEmbeds embeds(text);
+        uint32_t line = 0;
+        for (std::string_view inner; embeds.Next(line, inner);) {
             if (stopped || set.entries.size() > EmbedSet::kMaxEmbeds) {
                 stopped = true;
                 return;
@@ -519,33 +546,30 @@ private:
                 stopped = true;
                 return;
             }
-            Note& note = *notes[id];
+            // No note is added before the recursion below: the reference stays valid until then.
+            Note& note = notes[id];
             if (!Load(note, folder)) continue;
             // The same file under another path (a hard link) is a cycle too; the document is known
             // by its path only.
             bool cycle = false;
             for (size_t at = 1; at < chain.size(); at++) {
-                const RayoMd::File::FileIdentity& other = notes[chain[at]]->identity;
+                const RayoMd::File::FileIdentity& other = notes[chain[at]].identity;
                 cycle = cycle || (other.volume == note.identity.volume && other.index == note.identity.index);
             }
             if (cycle) continue;
             std::string entryText;
             if (target.anchor.empty()) {
-                if (note.text.size() > EmbedSet::kMaxBytes - bytes) continue;
+                if (note.text->size() > EmbedSet::kMaxBytes - bytes) continue;
                 // Its lines from the body on, each ended by '\n', as the parser reads them.
-                if (note.body <= note.text.size()) {
-                    entryText.reserve(note.text.size() - note.body + 1);
-                    entryText.assign(note.text, note.body, std::string::npos);
+                if (note.body <= note.text->size()) {
+                    entryText.reserve(note.text->size() - note.body + 1);
+                    entryText.assign(*note.text, note.body, std::string::npos);
                     entryText += '\n';
                 }
-            } else if (note.text.size() <= kMaxScanBytes - scanned) {
-                scanned += note.text.size();
-                if (note.lines.empty()) note.lines = Lines(note.text);
-                // The body's first line: as many lines before it as line ends.
-                const size_t start = note.text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
-                const size_t body = note.body > note.text.size() ? note.lines.size()
-                    : (size_t)std::count(note.text.begin() + (ptrdiff_t)start, note.text.begin() + (ptrdiff_t)note.body, '\n');
-                entryText = target.block ? BlockText(note.lines, body, target.anchor) : Section(note.lines, body, target.anchor);
+            } else if (note.text->size() <= kMaxScanBytes - scanned) {
+                scanned += note.text->size();
+                // From the body's first line on.
+                entryText = target.block ? BlockText(*note.text, note.body, target.anchor) : Section(*note.text, note.body, target.anchor);
             }
             if (entryText.empty() || entryText.size() > EmbedSet::kMaxBytes - bytes) continue;
             const uint32_t child = (uint32_t)set.entries.size();
@@ -569,26 +593,21 @@ private:
     uint32_t Find(uint32_t folder, std::string_view name) {
         key.assign(reinterpret_cast<const char*>(&folder), sizeof(folder));
         key.append(name);
-        const auto [known, added] = found.try_emplace(key, kNoNote);
-        if (!added) return known->second;
-        if (lookups >= kMaxLookups) {
-            found.erase(known);
-            return kNoNote;
+        // The note's number plus one, -1 for none; 0 when not looked up yet (or past the lookups).
+        int& known = found[key];
+        if (known == 0 && lookups < kMaxLookups) {
+            lookups++;
+            std::string path = vault.Find(set.folders[folder], name, true);
+            known = path.empty() ? -1 : (int)NoteOf(std::move(path)) + 1;
         }
-        lookups++;
-        std::string path = vault.Find(set.folders[folder], name, true);
-        if (!path.empty()) known->second = NoteOf(std::move(path));
-        return known->second;
+        return known > 0 ? (uint32_t)known - 1 : kNoNote;
     }
 
     uint32_t NoteOf(std::string path) {
-        const auto [at, added] = paths.try_emplace(std::move(path));
-        if (added) {
-            at->second.path = &at->first;
-            at->second.id = (uint32_t)notes.size();
-            notes.push_back(&at->second);
-        }
-        return at->second.id;
+        int next = (int)notes.size();   // an lvalue: the emplace the image registry instantiates
+        const auto added = paths.emplace(std::move(path), next);
+        if (added.second) notes.emplace_back(&added.first->first);
+        return (uint32_t)added.first->second;
     }
 
     // Whether `note` could be read: once a build, within the bytes left. `from`: the folder it was
@@ -596,9 +615,10 @@ private:
     bool Load(Note& note, uint32_t from) {
         if (!note.tried) {
             note.tried = true;
-            if (vault.Read(*note.path, std::min(EmbedSet::kMaxBytes, kMaxReadBytes - read), note.text, note.identity)) {
-                read += note.text.size();
-                note.body = BodyOffset(note.text);
+            note.text = vault.Read(*note.path, std::min(EmbedSet::kMaxBytes, kMaxReadBytes - read), note.identity);
+            if (note.text != nullptr) {
+                read += note.text->size();
+                note.body = BodyOffset(*note.text);
                 const std::string_view parent = ParentOf(*note.path);
                 note.folder = parent == set.folders[from] ? from : FolderIndex(parent);
             } else {
@@ -610,19 +630,24 @@ private:
 
     uint32_t FolderIndex(std::string_view folder) {
         key.assign(folder);
-        const auto [at, added] = folders.try_emplace(key, (uint32_t)set.folders.size());
-        if (added) set.folders.emplace_back(folder);
-        return at->second;
+        int& index = folders[key];
+        if (index == 0) {
+            set.folders.emplace_back(folder);
+            index = (int)set.folders.size();
+        }
+        return (uint32_t)index - 1;
     }
 
     const PdfOptions& options;
     EmbedSet& set;
     Vault vault;
-    std::unordered_map<std::string, Note> paths;         // the notes by path (their nodes stay put)
-    std::vector<Note*> notes;                            // and by number; [0]: the document
-    std::vector<uint32_t> chain;                         // the notes embedding the one being read
-    std::unordered_map<std::string, uint32_t> found;     // the notes by folder and name (kNoNote: none)
-    std::unordered_map<std::string, uint32_t> folders;   // EmbedSet::folders by path
+    // Every map is the unordered_map<std::string, int> the parser's footnotes and the image
+    // registry use, so it adds no code; `found` and `folders` hold numbers plus one, 0 for a key just added.
+    std::unordered_map<std::string, int> paths;     // the notes by path (keys stay put)
+    std::vector<Note> notes;                        // and by number; [0]: the document
+    std::vector<uint32_t> chain;                    // the notes embedding the one being read
+    std::unordered_map<std::string, int> found;     // the notes by folder and name (-1: none)
+    std::unordered_map<std::string, int> folders;   // EmbedSet::folders by path
     std::string key;                                     // a lookup's key, its storage reused
     size_t bytes = 0;     // embedded text
     size_t read = 0;      // notes read
