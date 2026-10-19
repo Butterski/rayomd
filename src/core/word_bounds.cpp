@@ -123,6 +123,48 @@ inline uint64_t TailSse2(const char* text, size_t base, size_t n) {
 }
 #endif
 
+// ---- wide text -----------------------------------------------------------------------------------
+
+inline bool IsWideBlank(wchar_t c) {
+    return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n';
+}
+
+inline bool IsHighSurrogate(uint32_t unit) { return unit >= 0xD800 && unit <= 0xDBFF; }
+inline bool IsLowSurrogate(uint32_t unit) { return unit >= 0xDC00 && unit <= 0xDFFF; }
+
+// The units of text[i, end) one at a time into prefix[i + 1, end + 1) from `sum`, and their white
+// space into `blank` from bit i - base: a surrogate pair's code point at its first unit, nothing
+// at its second, which may lie at `end` or past it (then `pairEnd` says so for the next call); a
+// unit the cache has no entry for from `width`. Returns the sum.
+inline uint32_t WideUnitsScalar(const wchar_t* text, size_t n, size_t i, size_t end, const uint16_t* cache,
+    WideWidth width, const void* context, uint32_t* prefix, uint32_t sum, uint64_t& blank, size_t base, bool& pairEnd) {
+    if (pairEnd && i < end) {           // the second unit of a pair the call before began
+        prefix[i + 1] = sum;
+        i++;
+        pairEnd = false;
+    }
+    for (; i < end; i++) {
+        const uint32_t unit = static_cast<uint16_t>(text[i]);
+        blank |= static_cast<uint64_t>(IsWideBlank(text[i])) << (i - base);
+        uint32_t units;
+        if (IsHighSurrogate(unit) && i + 1 < n && IsLowSurrogate(static_cast<uint16_t>(text[i + 1]))) {
+            units = width(context, 0x10000 + ((unit - 0xD800) << 10) + (static_cast<uint16_t>(text[i + 1]) - 0xDC00));
+            prefix[i + 1] = sum += units;
+            if (i + 1 == end) {
+                pairEnd = true;
+                return sum;
+            }
+            i++;
+            prefix[i + 1] = sum;
+            continue;
+        }
+        units = cache[unit];
+        if (units == 0) units = width(context, unit);
+        prefix[i + 1] = sum += units;
+    }
+    return sum;
+}
+
 #if RAYOMD_WORDS_AVX2
 // A byte is white space when it equals the entry of its low four bits: ' ' for 0, the byte
 // itself for '\t', '\n' and '\r', 0x80 (which no byte below 0x80 equals) for the others; bytes
@@ -245,6 +287,62 @@ RAYOMD_AVX2 void SumAdvancesAvx2(const char* text, size_t n, const uint16_t* adv
     SumAvx2(reinterpret_cast<const unsigned char*>(text), n, advances, prefix);
 }
 
+// Eight code units widened to 32 bits.
+RAYOMD_AVX2 inline __m256i LoadWide8(const wchar_t* at) {
+    if constexpr (sizeof(wchar_t) == 4) return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(at));
+    else return _mm256_cvtepu16_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(at)));
+}
+
+// Eight units a step: their white space as eight bits, their widths gathered from the cache, a
+// step with a surrogate or a width not cached yet one unit at a time (WideUnitsScalar), the
+// sums stored. Steps of 64 units, their edges written from the table as MeasureWords does; the
+// last units under eight one at a time.
+RAYOMD_AVX2 size_t MeasureWideAvx2(const wchar_t* text, size_t n, const uint16_t* cache, WideWidth width,
+    const void* context, uint32_t* prefix, uint32_t* bounds) {
+    const int* const table = reinterpret_cast<const int*>(cache);
+    prefix[0] = 0;
+    uint32_t sum = 0;
+    bool pairEnd = false;
+    uint64_t carry = 1;
+    size_t k = 0;
+    for (size_t base = 0; base < n; base += 64) {
+        const size_t stop = n - base < 64 ? n : base + 64;
+        uint64_t blank = 0;
+        size_t i = base;
+        for (; i + 8 <= stop; i += 8) {
+            const __m256i units = LoadWide8(text + i);
+            const __m256i spaces = _mm256_or_si256(
+                _mm256_or_si256(_mm256_cmpeq_epi32(units, _mm256_set1_epi32(' ')), _mm256_cmpeq_epi32(units, _mm256_set1_epi32('\t'))),
+                _mm256_or_si256(_mm256_cmpeq_epi32(units, _mm256_set1_epi32('\r')), _mm256_cmpeq_epi32(units, _mm256_set1_epi32('\n'))));
+            const __m256i index = _mm256_and_si256(units, _mm256_set1_epi32(0xFFFF));
+            const __m256i widths = _mm256_and_si256(_mm256_i32gather_epi32(table, index, 2), _mm256_set1_epi32(0xFFFF));
+            const __m256i surrogate =
+                _mm256_cmpeq_epi32(_mm256_and_si256(index, _mm256_set1_epi32(0xF800)), _mm256_set1_epi32(0xD800));
+            const __m256i odd = _mm256_or_si256(surrogate, _mm256_cmpeq_epi32(widths, _mm256_setzero_si256()));
+            if (pairEnd || !_mm256_testz_si256(odd, odd)) {
+                sum = WideUnitsScalar(text, n, i, i + 8, cache, width, context, prefix, sum, blank, base, pairEnd);
+                continue;
+            }
+            blank |= static_cast<uint64_t>(static_cast<uint32_t>(_mm256_movemask_ps(_mm256_castsi256_ps(spaces)))) << (i - base);
+            __m256i step = _mm256_add_epi32(widths, _mm256_slli_si256(widths, 4));
+            step = _mm256_add_epi32(step, _mm256_slli_si256(step, 8));
+            const __m256i lane = _mm256_shuffle_epi32(step, 0xFF);
+            step = _mm256_add_epi32(step, _mm256_permute2x128_si256(lane, lane, 0x08));
+            step = _mm256_add_epi32(step, _mm256_set1_epi32(static_cast<int>(sum)));
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(prefix + i + 1), step);
+            sum = static_cast<uint32_t>(_mm256_extract_epi32(step, 7));
+        }
+        if (i < stop) sum = WideUnitsScalar(text, n, i, stop, cache, width, context, prefix, sum, blank, base, pairEnd);
+        const size_t rest = stop - base;
+        if (rest < 64) blank |= ~uint64_t(0) << rest;
+        const uint64_t changes = blank ^ (blank << 1 | carry);
+        carry = blank >> 63;
+        k = FlattenTable(bounds, k, changes, static_cast<uint32_t>(base), rest < 64 ? rest + 1 : 64);
+    }
+    if (n % 64 == 0 && carry == 0) bounds[k++] = static_cast<uint32_t>(n);   // a word that ends with the text
+    return k / 2;
+}
+
 // The CPU's answer, asked once: -1 until then. Every thread that asks gets the same answer, so a
 // relaxed store and load are enough, and no guard is taken on each call.
 std::atomic<signed char> avx2State{-1};
@@ -296,6 +394,34 @@ size_t MeasureWords(const char* text, size_t n, size_t summed, const uint16_t* a
     }
 #endif
     return MeasureWordsPortable(text, n, summed, advances, prefix, bounds);
+}
+
+RAYOMD_NOINLINE size_t MeasureWideWordsPortable(const wchar_t* text, size_t n, const uint16_t* cache, WideWidth width,
+    const void* context, uint32_t* prefix, uint32_t* bounds) {
+    prefix[0] = 0;
+    uint32_t sum = 0;
+    bool pairEnd = false;
+    uint64_t carry = 1;
+    size_t k = 0;
+    for (size_t base = 0; base < n; base += 64) {
+        const size_t stop = n - base < 64 ? n : base + 64;
+        uint64_t blank = 0;
+        sum = WideUnitsScalar(text, n, base, stop, cache, width, context, prefix, sum, blank, base, pairEnd);
+        const size_t rest = stop - base;
+        if (rest < 64) blank |= ~uint64_t(0) << rest;
+        k = FlattenExact(bounds, k, blank ^ (blank << 1 | carry), static_cast<uint32_t>(base));
+        carry = blank >> 63;
+    }
+    if (n % 64 == 0 && carry == 0) bounds[k++] = static_cast<uint32_t>(n);
+    return k / 2;
+}
+
+size_t MeasureWideWords(const wchar_t* text, size_t n, const uint16_t* cache, WideWidth width, const void* context,
+    uint32_t* prefix, uint32_t* bounds) {
+#if RAYOMD_WORDS_AVX2
+    if (n >= 16 && UseAvx2()) return MeasureWideAvx2(text, n, cache, width, context, prefix, bounds);
+#endif
+    return MeasureWideWordsPortable(text, n, cache, width, context, prefix, bounds);
 }
 
 void SumAdvances(const char* text, size_t n, const uint16_t* advances, uint32_t* prefix) {

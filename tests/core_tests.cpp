@@ -3708,6 +3708,69 @@ bool CheckWordBounds() {
             }
         }
     }
+    // MeasureWideWords against a loop over code units, as ScanWideUnits reads them: widths from a
+    // cache with holes (entry 0: asked of the callback, which here does not fill it), surrogate
+    // pairs (also across 8- and 64-unit steps), lone surrogates, every white space and the
+    // characters next to it.
+    std::vector<uint16_t> cache(65537, 0);
+    for (size_t i = 0; i < cache.size(); i++) cache[i] = next() % 7 == 0 ? 0 : static_cast<uint16_t>(1 + next() % 1500);
+    struct Asked { const std::vector<uint16_t>* cache; } asked{ &cache };
+    const WideWidth width = [](const void* context, uint32_t codepoint) -> uint32_t {
+        (void)context;
+        return codepoint > 0xFFFF ? 777u : 3u + codepoint % 11u;
+    };
+    for (size_t n : lengths) {
+        if (n > 5000) continue;
+        for (int pattern = 0; pattern < 6; pattern++) {
+            std::vector<wchar_t> text(n + 64, L'x');
+            for (size_t i = 0; i < n; i++) {
+                const uint32_t r = next();
+                switch (pattern) {
+                case 0: text[i] = r % 6 == 0 ? L' ' : static_cast<wchar_t>(L'a' + r % 26); break;
+                case 1: text[i] = static_cast<wchar_t>(L" \t\r\n"[r % 4]); break;
+                case 2: text[i] = static_cast<wchar_t>(r & 0xFFFF); break;                       // any unit
+                case 3: text[i] = static_cast<wchar_t>(r % 4 == 0 ? 0xD800 + r % 0x400 : r % 4 == 1 ? 0xDC00 + r % 0x400
+                    : r % 4 == 2 ? L' ' : 0x4E00 + r % 0x100); break;                             // pairs and lone halves
+                case 4: text[i] = static_cast<wchar_t>(i % 2 == 0 ? 0xD83D : 0xDE00); break;   // a pair every two units
+                default: text[i] = i % 64 < 31 ? L'\t' : static_cast<wchar_t>(0x3042 + i % 50); break;
+                }
+            }
+            if (pattern == 4 && n > 0 && next() % 2 == 0) text[0] = L'y';                   // pairs at odd offsets
+            std::vector<uint32_t> bounds;
+            std::vector<uint32_t> sums(n + 1, 0);
+            bool inWord = false;
+            for (size_t i = 0; i < n; i++) {
+                const wchar_t c = text[i];
+                const bool white = c == L' ' || c == L'\t' || c == L'\r' || c == L'\n';
+                if (white == inWord) {
+                    bounds.push_back(static_cast<uint32_t>(i));
+                    inWord = !white;
+                }
+                const uint32_t unit = static_cast<uint16_t>(c);
+                if (unit >= 0xD800 && unit <= 0xDBFF && i + 1 < n && static_cast<uint16_t>(text[i + 1]) >= 0xDC00 &&
+                    static_cast<uint16_t>(text[i + 1]) <= 0xDFFF) {
+                    sums[i + 1] = sums[i] + width(&asked, 0x10000 + ((unit - 0xD800) << 10) + (static_cast<uint16_t>(text[i + 1]) - 0xDC00));
+                    i++;
+                    sums[i + 1] = sums[i];
+                    continue;
+                }
+                sums[i + 1] = sums[i] + (cache[unit] != 0 ? cache[unit] : width(&asked, unit));
+            }
+            if (inWord) bounds.push_back(static_cast<uint32_t>(n));
+            using MeasureWide = size_t (*)(const wchar_t*, size_t, const uint16_t*, WideWidth, const void*, uint32_t*, uint32_t*);
+            for (const auto& variant : { std::pair<const char*, MeasureWide>{ "dispatched", MeasureWideWords },
+                     std::pair<const char*, MeasureWide>{ "portable", MeasureWideWordsPortable } }) {
+                std::vector<uint32_t> gotBounds(n + 1 + kWordBoundsSlack, 0xFFFFFFFFu);
+                std::vector<uint32_t> gotSums(n + 1, 0xFFFFFFFFu);
+                const size_t words = variant.second(text.data(), n, cache.data(), width, &asked, gotSums.data(), gotBounds.data());
+                if (words * 2 != bounds.size() || !std::equal(bounds.begin(), bounds.end(), gotBounds.begin()) || gotSums != sums) {
+                    std::cerr << "MeasureWideWords (" << variant.first << ") wrong: " << n << " units, pattern " << pattern
+                              << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
     return true;
 }
 

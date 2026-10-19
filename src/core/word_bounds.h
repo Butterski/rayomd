@@ -36,4 +36,18 @@ void SumAdvances(const char* text, size_t n, const uint16_t* advances, uint32_t*
 
 constexpr size_t kPrefixWordBytes = size_t(1) << 22;
 
+// The units of a code point MeasureWideWords finds no cached width for.
+using WideWidth = uint32_t (*)(const void* context, uint32_t codepoint);
+
+// MeasureWords for wide text[0, n) (UTF-16 code units, one a wchar_t), words being runs of units
+// other than L' ', L'\t', L'\r' and L'\n', and prefix[i + 1] = prefix[i] + the units of text[i]:
+// cache[text[i] & 0xFFFF] when that is not 0 (`cache` has 65,537 entries readable: the vector code
+// reads two at a time), else width(context, unit); a surrogate pair counts width(context, its code
+// point) at its first unit and nothing at its second. `bounds` holds n + 1 + kWordBoundsSlack. n
+// is below 2^32. Returns the number of words.
+size_t MeasureWideWords(const wchar_t* text, size_t n, const uint16_t* cache, WideWidth width, const void* context,
+    uint32_t* prefix, uint32_t* bounds);
+size_t MeasureWideWordsPortable(const wchar_t* text, size_t n, const uint16_t* cache, WideWidth width,
+    const void* context, uint32_t* prefix, uint32_t* bounds);
+
 } // namespace TinyPdf::Internal

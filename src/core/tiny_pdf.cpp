@@ -76,6 +76,7 @@
 #include <thread>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -471,7 +472,8 @@ struct TtfFont {
     // a load writes only the code points the font maps and touches only their pages: assigning
     // 64K entries zeroed 128 KB, a twentieth of a short Unicode export (2026-10-13).
     std::array<uint16_t, 65536> glyphForBmp;
-    mutable std::array<std::atomic<uint16_t>, 65536> widthCache;   // zero to begin with: see above
+    // Zero to begin with: see above. One entry more than code points, which MeasureWideWords reads.
+    mutable std::array<std::atomic<uint16_t>, 65537> widthCache;
 
     // hmtx and loca are read in place from the font file, checked once when it is loaded.
     uint16_t Advance(uint16_t glyph) const {
@@ -997,94 +999,6 @@ static RAYOMD_HOT_INLINE size_t ScanWideWord(const TtfFont& font, const wchar_t*
     return at;
 }
 
-// Greedy word wrap of text without inline styles: emit(line) receives every line. A line
-// is the piece of `raw` from its first to its last word; only when two of its words are
-// not exactly one space apart is it rebuilt in a scratch string. The view passed to emit
-// is valid until emit returns.
-template <typename Emit>
-static void WrapWideWords(const TtfFont& font, std::wstring_view raw, double maxWidth, double size, Emit emit) {
-    const double spaceWidth = TextWidth(font, L" ", size);
-    std::wstring respaced;
-    size_t lineStart = 0;
-    size_t lineEnd = 0;         // the line is raw[lineStart, lineEnd); empty when they are equal
-    bool singleSpaced = true;
-    double lineWidth = 0.0;
-    bool emitted = false;
-    auto flush = [&]() {
-        std::wstring_view line = raw.substr(lineStart, lineEnd - lineStart);
-        if (!singleSpaced) {
-            respaced.clear();
-            AppendSingleSpaced(respaced, line);
-            line = respaced;
-        }
-        emit(line);
-        emitted = true;
-    };
-    auto startLine = [&](size_t start, size_t end, double width) {
-        lineStart = start;
-        lineEnd = end;
-        lineWidth = width;
-        singleSpaced = true;
-    };
-
-    const double scale = size * 0.001;
-    size_t i = 0;
-    while (i < raw.size()) {
-        while (i < raw.size() && IsWideSpace(raw[i])) i++;
-        const size_t start = i;
-        double wordWidth;
-        i = ScanWideWord(font, raw.data(), start, raw.size(), scale, wordWidth);
-        if (i == start) continue;
-        const bool lineEmpty = lineEnd == lineStart;
-
-        if (!lineEmpty && lineWidth + spaceWidth + wordWidth <= maxWidth) {
-            if (start - lineEnd != 1 || raw[lineEnd] != L' ') singleSpaced = false;
-            lineEnd = i;
-            lineWidth += spaceWidth + wordWidth;
-            continue;
-        }
-        if (lineEmpty && wordWidth <= maxWidth) {
-            startLine(start, i, wordWidth);
-            continue;
-        }
-        if (!lineEmpty) {
-            flush();
-            lineStart = lineEnd = 0;
-            lineWidth = 0.0;
-        }
-        if (wordWidth <= maxWidth) {
-            startLine(start, i, wordWidth);
-            continue;
-        }
-
-        // A word wider than the line is cut into pieces; the last piece stays open.
-        size_t partStart = start;
-        double partWidth = 0.0;
-        for (size_t at = start; at < i; at++) {
-            const double chWidth = CodepointWidth(font, (uint16_t)raw[at], scale);
-            if (at > partStart && partWidth + chWidth > maxWidth) {
-                emit(raw.substr(partStart, at - partStart));
-                emitted = true;
-                partStart = at;
-                partWidth = 0.0;
-            }
-            partWidth += chWidth;
-        }
-        startLine(partStart, i, partWidth);
-    }
-    if (lineEnd != lineStart) flush();
-    if (!emitted) emit(std::wstring_view(L""));
-}
-
-static std::vector<std::wstring> WrapText(const TtfFont& font, std::wstring_view raw, double maxWidth, double size) {
-    std::vector<std::wstring> lines;
-    lines.reserve(std::max<size_t>(1, raw.size() / 72));
-    WrapWideWords(font, raw, maxWidth, size, [&](std::wstring_view line) {
-        lines.emplace_back(line.data(), line.size());
-    });
-    return lines;
-}
-
 static std::vector<std::wstring> WrapCodeLine(const TtfFont& font, std::wstring_view line, double maxWidth, double size) {
     std::vector<std::wstring> lines;
     std::wstring part;
@@ -1184,6 +1098,286 @@ public:
 
     T value;
 };
+
+// Texts under this many bytes are wrapped without MeasureWords (WrapMeasure).
+constexpr size_t kShortAsciiText = 16;
+
+// The words of a text and the AFM units of its bytes (word_bounds.h) for the wrapping below, so
+// a word's width is prefix[end] - prefix[begin]: one buffer, kept from text to text, that only
+// grows.
+struct WrapMeasure {
+    std::vector<uint32_t> buffer;
+    struct View {
+        uint32_t* prefix;   // prefix[i]: the units of the bytes before i, modulo 2^32
+        uint32_t* bounds;   // each word's first byte and one past its last (MeasureWords)
+    };
+    // Room for a text of n bytes.
+    RAYOMD_HOT_INLINE View Size(size_t n) {
+        if (buffer.size() < n * 2 + 2 + Internal::kWordBoundsSlack) Grow(n);
+        return { buffer.data(), buffer.data() + n + 1 };
+    }
+    RAYOMD_NOINLINE void Grow(size_t n) { buffer.resize(n * 2 + 2 + Internal::kWordBoundsSlack); }
+    size_t Bytes() const { return KeptBytes(buffer) + KeptBytes(breaks); }
+
+    // The lines BreakAsciiWords made: text[start, end), `units` wide.
+    struct Break {
+        uint32_t start;
+        uint32_t end;
+        uint64_t units;
+        bool singleSpaced;      // its words exactly one space apart
+    };
+    std::vector<Break> breaks;
+
+    // MeasureWords (word_bounds.h) of text[0, n) in `advances`; a short text's bytes from `summed`
+    // on are summed too (the caller's sums overwrite them). A text under kShortAsciiText bytes, a
+    // table cell or a short list item, is read here a byte at a time: the vector pass costs more
+    // than it saves there. A byte ends a word where its advance is 0, which every table gives
+    // exactly the white space MeasureWords looks for.
+    static RAYOMD_NOINLINE size_t Words(const char* text, size_t n, size_t summed, const uint16_t* advances,
+        View view) {
+        if (n >= kShortAsciiText) return Internal::MeasureWords(text, n, summed, advances, view.prefix, view.bounds);
+        uint32_t sum = 0;
+        size_t k = 0;
+        bool inWord = false;
+        view.prefix[0] = 0;
+        for (size_t i = 0; i < n; i++) {
+            const unsigned units = advances[static_cast<unsigned char>(text[i])];
+            view.prefix[i + 1] = sum += units;
+            if ((units != 0) != inWord) {
+                view.bounds[k++] = static_cast<uint32_t>(i);
+                inWord = !inWord;
+            }
+        }
+        if (inWord) view.bounds[k++] = static_cast<uint32_t>(n);
+        return k / 2;
+    }
+};
+
+// The WrapMeasure every ASCII wrap of the thread works in: no renderer holds one, as a member made
+// the standard renderer's constructor too large to inline. Page footnotes, laid out while a
+// paragraph's lines are drawn, trade it for a spare (SwapFootBuffers); a renderer that ends gives
+// one grown past kKeptBufferBytes back to the allocator (ReleaseWrapScratch).
+static WrapMeasure& WrapScratch() {
+    static thread_local WrapMeasure scratch;
+    return scratch;
+}
+
+RAYOMD_COLD static void ReleaseWrapScratch() {
+    WrapMeasure& scratch = WrapScratch();
+    if (scratch.Bytes() <= kKeptBufferBytes) return;
+    std::vector<uint32_t>().swap(scratch.buffer);
+    std::vector<WrapMeasure::Break>().swap(scratch.breaks);
+}
+
+// The Unicode renderer lays text out on double sums: a character is its AFM units times the scale,
+// a word the sum of its characters in text order, a line its words and spaces. Every term is
+// positive and each sum takes at most 3n + 4 roundings of 2^-53 for text of n code units, so the
+// sums the double path compares lie within `slack` (relative, with room to spare) of their units
+// times the scale. Its wrapping is done in integer units instead, each comparison with a limit
+// decided by Above when the units are farther from the limit than that, which is the double
+// path's decision then; when they are closer (equal widths, or nearly), the text is laid out again
+// in doubles. The units have no chain of dependent floating-point additions.
+struct WrapUnits {
+    double scale;
+    double slack;
+    WrapUnits(double size, size_t units) : scale(size * 0.001), slack(static_cast<double>(units * 4 + 16) * 0x1p-52) {}
+    // 1 when the double path's sum of `units` is above `limit`, 0 when it is not, -1 when the units
+    // are too close to `limit` to tell.
+    RAYOMD_HOT_INLINE int Above(uint64_t units, double limit) const {
+        const double value = static_cast<double>(units) * scale;
+        const double margin = value * slack;
+        if (value - margin > limit) return 1;
+        if (value + margin <= limit) return 0;
+        return -1;
+    }
+};
+
+// ScanWideWord in integer units: the end of the word that starts at text[start], its units in
+// `units`.
+static RAYOMD_HOT_INLINE size_t ScanWideUnits(const TtfFont& font, const wchar_t* text, size_t start, size_t end,
+    uint64_t& units) {
+    uint64_t sum = 0;
+    size_t at = start;
+    while (at < end && !IsWideSpace(text[at])) {
+        uint32_t cp = (uint16_t)text[at++];
+        if (cp >= 0xD800 && cp <= 0xDBFF && at < end) {
+            const uint32_t lo = (uint16_t)text[at];
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                at++;
+            }
+        }
+        sum += font.CodepointWidth(cp);
+    }
+    units = sum;
+    return at;
+}
+
+// Wide texts under this many code units are measured a word at a time, not by MeasureWideWords.
+constexpr size_t kShortWideText = 16;
+
+static uint32_t FontCodepointWidth(const void* font, uint32_t codepoint) {
+    return static_cast<const TtfFont*>(font)->CodepointWidth(codepoint);
+}
+
+// MeasureWideWords (word_bounds.h) of `text` in `font`, into the thread's wrap scratch: the words'
+// bounds and the prefix sums of their units, as ScanWideUnits sums them.
+static RAYOMD_NOINLINE size_t MeasureWideText(const TtfFont& font, std::wstring_view text, WrapMeasure::View& view) {
+    static_assert(sizeof(std::atomic<uint16_t>) == sizeof(uint16_t), "the width cache is read as uint16_t");
+    view = WrapScratch().Size(text.size());
+    return Internal::MeasureWideWords(text.data(), text.size(), reinterpret_cast<const uint16_t*>(font.widthCache.data()),
+        FontCodepointWidth, &font, view.prefix, view.bounds);
+}
+
+// The lines WrapWideWords shows, into breaks: a line is the piece of `raw` from its first to its
+// last word, and singleSpaced when they are exactly one space apart; a word wider than the line
+// is cut into pieces by character, the last staying open. Always at least one line, an empty one
+// for text without a word. In integer units (WrapUnits) unless Exact; false when a comparison
+// was too close to tell there.
+template <bool Exact>
+static bool BreakWideWordsIn(const TtfFont& font, std::wstring_view raw, double maxWidth, double size,
+    std::vector<WrapMeasure::Break>& breaks) {
+    using Width = std::conditional_t<Exact, double, uint64_t>;
+    breaks.clear();
+    const double scale = size * 0.001;
+    const WrapUnits units(size, raw.size());
+    // `width` > `limit` and `width` <= `limit` as the double path decides them (also for a NaN
+    // limit, where neither holds); -1 when the units are too close to tell.
+    const auto above = [&](Width width, double limit) RAYOMD_HOT_LAMBDA -> int {
+        if constexpr (Exact) return width > limit;
+        else return units.Above(width, limit);
+    };
+    const auto atMost = [&](Width width, double limit) RAYOMD_HOT_LAMBDA -> int {
+        if constexpr (Exact) {
+            return width <= limit;
+        } else {
+            const int over = units.Above(width, limit);
+            return over < 0 ? -1 : 1 - over;
+        }
+    };
+    Width spaceWidth;
+    if constexpr (Exact) spaceWidth = TextWidth(font, L" ", size);
+    else spaceWidth = font.CodepointWidth(' ');
+    size_t lineStart = 0;
+    size_t lineEnd = 0;         // the line is raw[lineStart, lineEnd); empty when they are equal
+    bool singleSpaced = true;
+    Width lineWidth = 0;
+    const auto startLine = [&](size_t start, size_t end, Width width) RAYOMD_HOT_LAMBDA {
+        lineStart = start;
+        lineEnd = end;
+        lineWidth = width;
+        singleSpaced = true;
+    };
+
+    // In units, the words of text of kShortWideText units or more come from MeasureWideWords.
+    const bool measured = !Exact && raw.size() >= kShortWideText;
+    WrapMeasure::View view{};
+    size_t words = 0;
+    if (measured) words = MeasureWideText(font, raw, view);
+    size_t word = 0;
+    size_t i = 0;
+    for (;;) {
+        size_t start;
+        Width wordWidth;
+        if (measured) {
+            if (word == words) break;
+            start = view.bounds[word * 2];
+            i = view.bounds[word * 2 + 1];
+            word++;
+            if constexpr (!Exact) {
+                if (i - start < 0x10000) wordWidth = static_cast<uint32_t>(view.prefix[i] - view.prefix[start]);
+                else ScanWideUnits(font, raw.data(), start, raw.size(), wordWidth);
+            }
+        } else {
+            if (i >= raw.size()) break;
+            while (i < raw.size() && IsWideSpace(raw[i])) i++;
+            start = i;
+            if constexpr (Exact) i = ScanWideWord(font, raw.data(), start, raw.size(), scale, wordWidth);
+            else i = ScanWideUnits(font, raw.data(), start, raw.size(), wordWidth);
+            if (i == start) continue;
+        }
+        const bool lineEmpty = lineEnd == lineStart;
+        // Whether the word joins the line, then whether it fits a line of its own.
+        const int joins = lineEmpty ? 0 : atMost(lineWidth + spaceWidth + wordWidth, maxWidth);
+        if (joins < 0) return false;
+        if (joins != 0) {
+            if (start - lineEnd != 1 || raw[lineEnd] != L' ') singleSpaced = false;
+            lineEnd = i;
+            lineWidth += spaceWidth + wordWidth;
+            continue;
+        }
+        const int fits = atMost(wordWidth, maxWidth);
+        if (fits < 0) return false;
+        if (!lineEmpty) {
+            breaks.push_back({ static_cast<uint32_t>(lineStart), static_cast<uint32_t>(lineEnd), 0, singleSpaced });
+            lineStart = lineEnd = 0;
+            lineWidth = 0;
+        }
+        if (fits != 0) {
+            startLine(start, i, wordWidth);
+            continue;
+        }
+
+        // A word wider than the line is cut into pieces; the last piece stays open.
+        size_t partStart = start;
+        Width partWidth = 0;
+        for (size_t at = start; at < i; at++) {
+            Width chWidth;
+            if constexpr (Exact) chWidth = CodepointWidth(font, (uint16_t)raw[at], scale);
+            else chWidth = font.CodepointWidth((uint16_t)raw[at]);
+            if (at > partStart) {
+                const int full = above(partWidth + chWidth, maxWidth);
+                if (full < 0) return false;
+                if (full != 0) {
+                    breaks.push_back({ static_cast<uint32_t>(partStart), static_cast<uint32_t>(at), 0, true });
+                    partStart = at;
+                    partWidth = 0;
+                }
+            }
+            partWidth += chWidth;
+        }
+        startLine(partStart, i, partWidth);
+    }
+    if (lineEnd != lineStart || breaks.empty()) {
+        breaks.push_back({ static_cast<uint32_t>(lineStart), static_cast<uint32_t>(lineEnd), 0, singleSpaced });
+    }
+    return true;
+}
+
+// BreakWideWordsIn into the thread's wrap scratch, in units and, when they could not tell, in
+// doubles. Out of line: one copy for every WrapWideWords.
+static RAYOMD_NOINLINE void BreakWideWords(const TtfFont& font, std::wstring_view raw, double maxWidth, double size) {
+    std::vector<WrapMeasure::Break>& breaks = WrapScratch().breaks;
+    if (!BreakWideWordsIn<false>(font, raw, maxWidth, size, breaks)) BreakWideWordsIn<true>(font, raw, maxWidth, size, breaks);
+}
+
+// Greedy word wrap of text without inline styles (BreakWideWords): emit(line) receives every line.
+// Only when two of a line's words are not exactly one space apart is it rebuilt in a scratch
+// string. The view passed to emit is valid until emit returns; emit lays out no other text.
+template <typename Emit>
+static void WrapWideWords(const TtfFont& font, std::wstring_view raw, double maxWidth, double size, Emit emit) {
+    BreakWideWords(font, raw, maxWidth, size);
+    const std::vector<WrapMeasure::Break>& breaks = WrapScratch().breaks;
+    std::wstring respaced;
+    for (const WrapMeasure::Break& line : breaks) {
+        std::wstring_view shown = raw.substr(line.start, line.end - line.start);
+        if (!line.singleSpaced) {
+            respaced.clear();
+            AppendSingleSpaced(respaced, shown);
+            shown = respaced;
+        }
+        emit(shown);
+    }
+}
+
+static std::vector<std::wstring> WrapText(const TtfFont& font, std::wstring_view raw, double maxWidth, double size) {
+    std::vector<std::wstring> lines;
+    lines.reserve(std::max<size_t>(1, raw.size() / 72));
+    WrapWideWords(font, raw, maxWidth, size, [&](std::wstring_view line) {
+        lines.emplace_back(line.data(), line.size());
+    });
+    return lines;
+}
 
 // Lets one drawing operation write its operators through a raw pointer, then appends them to a
 // content stream in one piece. The per-span paint functions used a dozen small appends each;
@@ -7671,12 +7865,38 @@ private:
             wideEnds[index] = static_cast<uint32_t>(wideEnd - wideBegin);
         }
         out.wide.resize(static_cast<size_t>(wideEnd - wideBegin));
+        if (multiFace || !PlaceStyledWords<false>(out, width, size)) {
+            out.text.clear();
+            out.runs.clear();
+            out.lineEnds.clear();
+            PlaceStyledWords<true>(out, width, size);
+        }
+        return true;
+    }
+
+    // WrapStyledInline's words, from out.wide and out.wideEnds, into out.text, out.runs and
+    // out.lineEnds, which are empty. In integer units (WrapUnits) unless Exact, and then without a
+    // theme's faces; false when a comparison was too close to tell there, or a word was wider than
+    // a line (cut by PlaceWideStyledWord in doubles).
+    template <bool Exact>
+    bool PlaceStyledWords(StyledRuns& out, double width, double size) {
+        using Width = std::conditional_t<Exact, double, uint64_t>;
+        const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
         const std::wstring_view source = out.wide;
         PendingWide pending;        // text of out.wide that comes next in out.text, not copied yet
         size_t lineStart = 0;       // index of the first run of the line being filled
-        double lineWidth = 0.0;
-        const double spaceWidth = TextWidth(font, L" ", size);
+        Width lineWidth = 0;
+        Width spaceWidth;
+        if constexpr (Exact) spaceWidth = TextWidth(font, L" ", size);
+        else spaceWidth = font.CodepointWidth(' ');
         const double scale = size * 0.001;
+        const WrapUnits units(size, source.size());
+        // In units, the words of text of kShortWideText units or more come from MeasureWideWords.
+        const bool measured = !Exact && source.size() >= kShortWideText;
+        WrapMeasure::View view{};
+        size_t words = 0;
+        if (measured) words = MeasureWideText(font, source, view);
+        size_t word = 0;
 
         const size_t runCount = parsed.size();
         const size_t total = source.size();
@@ -7689,7 +7909,7 @@ private:
                 if (out.runs.size() != lineStart || !out.lineEnds.empty()) {
                     out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
                     lineStart = out.runs.size();
-                    lineWidth = 0.0;
+                    lineWidth = 0;
                 }
                 at = runEnd;
                 continue;
@@ -7699,19 +7919,39 @@ private:
             // it has this style and the next word goes into it without comparing styles.
             bool joinLast = false;
             while (at < runEnd) {
-                if (IsWideSpace(source[at])) {
-                    at++;
-                    continue;
-                }
-                const size_t wordStart = at;
-                double wordWidth;
-                at = ScanWideWord(font, source.data(), wordStart, total, scale, wordWidth);
-                // With a theme's faces, each piece of the word in the face of its run, and the space
-                // before it in that of the run it joins.
-                double spanSpace = spaceWidth;
-                if (multiFace) {
-                    wordWidth = FaceWordWidth(out, index, wordStart, at, size);
-                    spanSpace = FaceSpaceWidth(span, size);
+                size_t wordStart;
+                Width wordWidth;
+                Width spanSpace = spaceWidth;
+                if (measured) {
+                    // The next word, if it starts in this run.
+                    if (word == words || view.bounds[word * 2] >= runEnd) {
+                        at = runEnd;
+                        break;
+                    }
+                    wordStart = view.bounds[word * 2];
+                    at = view.bounds[word * 2 + 1];
+                    word++;
+                    if constexpr (!Exact) {
+                        if (at - wordStart < 0x10000) wordWidth = static_cast<uint32_t>(view.prefix[at] - view.prefix[wordStart]);
+                        else ScanWideUnits(font, source.data(), wordStart, total, wordWidth);
+                    }
+                } else {
+                    if (IsWideSpace(source[at])) {
+                        at++;
+                        continue;
+                    }
+                    wordStart = at;
+                    if constexpr (Exact) {
+                        at = ScanWideWord(font, source.data(), wordStart, total, scale, wordWidth);
+                        // With a theme's faces, each piece of the word in the face of its run, and
+                        // the space before it in that of the run it joins.
+                        if (multiFace) {
+                            wordWidth = FaceWordWidth(out, index, wordStart, at, size);
+                            spanSpace = FaceSpaceWidth(span, size);
+                        }
+                    } else {
+                        at = ScanWideUnits(font, source.data(), wordStart, total, wordWidth);
+                    }
                 }
                 const size_t wordEnd = at;
                 // A word that reaches the end of its run goes on in the runs after it unless
@@ -7722,19 +7962,32 @@ private:
 
                 const bool lineEmpty = out.runs.size() == lineStart;
                 bool needsSpace = !lineEmpty;
-                double addWidth = wordWidth + (needsSpace ? spanSpace : 0.0);
+                const Width addWidth = wordWidth + (needsSpace ? spanSpace : 0);
 
-                if (!lineEmpty && lineWidth + addWidth > width) {
-                    out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
-                    lineStart = out.runs.size();
-                    lineWidth = 0.0;
-                    needsSpace = false;
-                    joinLast = false;
+                if (!lineEmpty) {
+                    int full;
+                    if constexpr (Exact) full = lineWidth + addWidth > width;
+                    else full = units.Above(lineWidth + addWidth, width);
+                    if (full < 0) return false;
+                    if (full != 0) {
+                        out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+                        lineStart = out.runs.size();
+                        lineWidth = 0;
+                        needsSpace = false;
+                        joinLast = false;
+                    }
                 }
-                if (wordWidth > width) {
-                    FlushPendingWide(out, pending);
-                    PlaceWideStyledWord(out, lineStart, lineWidth, index, wordStart, wordEnd, width, size);
-                    joinLast = false;
+                int wide;
+                if constexpr (Exact) wide = wordWidth > width;
+                else wide = units.Above(wordWidth, width);
+                if (wide != 0) {
+                    if constexpr (Exact) {
+                        FlushPendingWide(out, pending);
+                        PlaceWideStyledWord(out, lineStart, lineWidth, index, wordStart, wordEnd, width, size);
+                        joinLast = false;
+                    } else {
+                        return false;
+                    }
                 } else {
                     bool spaced = false;
                     if (needsSpace) {
@@ -7768,6 +8021,34 @@ private:
                             span.italic, span.strike, url, span.code, span.decor);
                         // A struck word gets an unstyled space run before it, so it never joins.
                         joinLast = !span.strike;
+                    }
+                    if constexpr (!Exact) {
+                        // The words after it in its run one space apart join its run and the pending
+                        // text, which ends where it does, as long as they certainly fit the line: what
+                        // the steps above do for each, without them.
+                        if (measured && joinLast && lastRun == index) {
+                            size_t joinedEnd = wordEnd;
+                            Width joinedWidth = lineWidth;
+                            while (word < words) {
+                                const size_t nextStart = view.bounds[word * 2];
+                                const size_t nextEnd = view.bounds[word * 2 + 1];
+                                if (nextStart != joinedEnd + 1 || nextEnd > runEnd || source[joinedEnd] != L' ' ||
+                                    nextEnd - nextStart >= 0x10000) {
+                                    break;
+                                }
+                                const Width next = spanSpace + static_cast<uint32_t>(view.prefix[nextEnd] - view.prefix[nextStart]);
+                                if (units.Above(joinedWidth + next, width) != 0) break;
+                                joinedWidth += next;
+                                joinedEnd = nextEnd;
+                                word++;
+                            }
+                            if (joinedEnd != wordEnd) {
+                                pending.length += joinedEnd - wordEnd;
+                                out.runs.back().end = static_cast<uint32_t>(out.text.size() + pending.length);
+                                lineWidth = joinedWidth;
+                                at = joinedEnd;
+                            }
+                        }
                     }
                 }
                 if (lastRun != index) {
@@ -10170,76 +10451,6 @@ static double AsciiTextWidth(std::string_view text, double size, StandardTextFon
     return UnitsToPoints(units, size);
 }
 
-// Texts under this many bytes are wrapped without MeasureWords (AsciiMeasure).
-constexpr size_t kShortAsciiText = 16;
-
-// The words of a text and the AFM units of its bytes (word_bounds.h) for the wrapping below, so
-// a word's width is prefix[end] - prefix[begin]: one buffer, kept from text to text, that only
-// grows.
-struct AsciiMeasure {
-    std::vector<uint32_t> buffer;
-    struct View {
-        uint32_t* prefix;   // prefix[i]: the units of the bytes before i, modulo 2^32
-        uint32_t* bounds;   // each word's first byte and one past its last (MeasureWords)
-    };
-    // Room for a text of n bytes.
-    RAYOMD_HOT_INLINE View Size(size_t n) {
-        if (buffer.size() < n * 2 + 2 + Internal::kWordBoundsSlack) Grow(n);
-        return { buffer.data(), buffer.data() + n + 1 };
-    }
-    RAYOMD_NOINLINE void Grow(size_t n) { buffer.resize(n * 2 + 2 + Internal::kWordBoundsSlack); }
-    size_t Bytes() const { return KeptBytes(buffer) + KeptBytes(breaks); }
-
-    // The lines BreakAsciiWords made: text[start, end), `units` wide.
-    struct Break {
-        uint32_t start;
-        uint32_t end;
-        uint64_t units;
-        bool singleSpaced;      // its words exactly one space apart
-    };
-    std::vector<Break> breaks;
-
-    // MeasureWords (word_bounds.h) of text[0, n) in `advances`; a short text's bytes from `summed`
-    // on are summed too (the caller's sums overwrite them). A text under kShortAsciiText bytes, a
-    // table cell or a short list item, is read here a byte at a time: the vector pass costs more
-    // than it saves there. A byte ends a word where its advance is 0, which every table gives
-    // exactly the white space MeasureWords looks for.
-    static RAYOMD_NOINLINE size_t Words(const char* text, size_t n, size_t summed, const uint16_t* advances,
-        View view) {
-        if (n >= kShortAsciiText) return Internal::MeasureWords(text, n, summed, advances, view.prefix, view.bounds);
-        uint32_t sum = 0;
-        size_t k = 0;
-        bool inWord = false;
-        view.prefix[0] = 0;
-        for (size_t i = 0; i < n; i++) {
-            const unsigned units = advances[static_cast<unsigned char>(text[i])];
-            view.prefix[i + 1] = sum += units;
-            if ((units != 0) != inWord) {
-                view.bounds[k++] = static_cast<uint32_t>(i);
-                inWord = !inWord;
-            }
-        }
-        if (inWord) view.bounds[k++] = static_cast<uint32_t>(n);
-        return k / 2;
-    }
-};
-
-// The AsciiMeasure every ASCII wrap of the thread works in: no renderer holds one, as a member made
-// the standard renderer's constructor too large to inline. Page footnotes, laid out while a
-// paragraph's lines are drawn, trade it for a spare (SwapFootBuffers); a renderer that ends gives
-// one grown past kKeptBufferBytes back to the allocator (ReleaseWrapScratch).
-static AsciiMeasure& WrapScratch() {
-    static thread_local AsciiMeasure scratch;
-    return scratch;
-}
-
-RAYOMD_COLD static void ReleaseWrapScratch() {
-    AsciiMeasure& scratch = WrapScratch();
-    if (scratch.Bytes() <= kKeptBufferBytes) return;
-    std::vector<uint32_t>().swap(scratch.buffer);
-    std::vector<AsciiMeasure::Break>().swap(scratch.breaks);
-}
-
 // AFM units of text[begin, end) in `advances`, for a word too long for the prefix sums.
 RAYOMD_COLD static uint64_t LongWordUnits(const char* text, size_t begin, size_t end, const uint16_t* advances) {
     uint64_t units = 0;
@@ -10282,9 +10493,9 @@ static void AppendSingleSpaced(std::string& out, std::string_view text) {
 // list item, is read a byte at a time: the measuring pass costs more than it saves there. One copy
 // for every WrapAsciiWords.
 static RAYOMD_NOINLINE void BreakAsciiWords(std::string_view text, uint64_t maxUnits, const StandardWordAdvances& advances) {
-    AsciiMeasure& measure = WrapScratch();
+    WrapMeasure& measure = WrapScratch();
     const uint64_t spaceUnits = advances.space;
-    std::vector<AsciiMeasure::Break>& breaks = measure.breaks;
+    std::vector<WrapMeasure::Break>& breaks = measure.breaks;
     breaks.clear();
     size_t lineStart = 0;
     size_t lineEnd = 0;         // the line is text[lineStart, lineEnd); empty when they are equal
@@ -10304,7 +10515,7 @@ static RAYOMD_NOINLINE void BreakAsciiWords(std::string_view text, uint64_t maxU
     const uint32_t* bounds = nullptr;
     size_t words = 0;
     if (!small) {
-        const AsciiMeasure::View measured = measure.Size(n);
+        const WrapMeasure::View measured = measure.Size(n);
         prefix = measured.prefix;
         bounds = measured.bounds;
         words = Internal::MeasureWords(bytes, n, n, advances.byte, measured.prefix, measured.bounds);
@@ -10380,12 +10591,12 @@ static RAYOMD_NOINLINE void BreakAsciiWords(std::string_view text, uint64_t maxU
 template <typename Emit>
 static void WrapAsciiWords(std::string_view text, double maxWidth, double size, StandardTextFont font, Emit emit) {
     BreakAsciiWords(text, MaxUnits(maxWidth, size), WordAdvances(font));
-    const AsciiMeasure& measure = WrapScratch();
+    const WrapMeasure& measure = WrapScratch();
     std::string respaced;
-    const AsciiMeasure::Break* const lines = measure.breaks.data();
+    const WrapMeasure::Break* const lines = measure.breaks.data();
     const size_t count = measure.breaks.size();
     for (size_t index = 0; index < count; index++) {
-        const AsciiMeasure::Break& line = lines[index];
+        const WrapMeasure::Break& line = lines[index];
         std::string_view shown = text.substr(line.start, line.end - line.start);
         if (!line.singleSpaced) {
             respaced.clear();
@@ -11339,7 +11550,7 @@ private:
     }
 
     // AFM units of parsed text [begin, end) from segment `first` on, each byte in the font of its
-    // segment: a word too long for the prefix sums (AsciiMeasure).
+    // segment: a word too long for the prefix sums (WrapMeasure).
     RAYOMD_COLD static uint64_t LongRunUnits(const AsciiRuns& out, size_t first, size_t begin, size_t end) {
         const char* const source = out.parsed.text.data();
         uint64_t units = 0;
@@ -11497,12 +11708,12 @@ private:
         const size_t segmentCount = out.segments.size();
         const AsciiSegment* const segments = out.segments.data();
         const size_t total = segmentCount != 0 ? out.segments.back().end : 0;
-        const AsciiMeasure::View measured = WrapScratch().Size(total);
+        const WrapMeasure::View measured = WrapScratch().Size(total);
         const uint32_t* const prefix = measured.prefix;
         const size_t firstEnd = segmentCount != 0 ? std::min<size_t>(segments[0].end, total) : 0;
         uint32_t* const bounds = measured.bounds;
         const size_t words =
-            AsciiMeasure::Words(source, total, firstEnd, StyleAdvances(segmentCount != 0 ? segments[0].style : 0).byte, measured);
+            WrapMeasure::Words(source, total, firstEnd, StyleAdvances(segmentCount != 0 ? segments[0].style : 0).byte, measured);
         bounds[words * 2] = static_cast<uint32_t>(total);   // past the last word: the end
         for (size_t segment = 1, begin = firstEnd; segment < segmentCount; segment++) {
             const size_t end = segments[segment].end;
@@ -12793,11 +13004,11 @@ private:
         std::vector<uint8_t> codeLineClasses;
         std::vector<CodeRun> codeRuns;
         RunLinkUrls runLinkUrls;
-        AsciiMeasure wrap;
+        WrapMeasure wrap;
     };
     RAYOMD_COLD void SwapFootBuffers() {
         FootBuffers& spare = pageNotes->spare;
-        AsciiMeasure& wrap = WrapScratch();
+        WrapMeasure& wrap = WrapScratch();
         wrap.buffer.swap(spare.wrap.buffer);
         wrap.breaks.swap(spare.wrap.breaks);
         paragraphRuns.Swap(KeptBuffer<AsciiRuns>::Held());

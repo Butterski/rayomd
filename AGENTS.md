@@ -568,8 +568,13 @@ Important image/link details:
   it (asked once), else SSE2, else bytes; texts under 16 bytes always bytes. `BreakAsciiWords` and
   `WrapAsciiInline` in `tiny_pdf.cpp` wrap from them in the thread's `WrapScratch` (page footnotes
   trade it in `SwapFootBuffers`); texts under `kShortAsciiText` (16) bytes, most table cells, are
-  read a byte at a time there, as the pass costs more than it saves. Core check 133 compares the
-  dispatched, SSE2 and portable code with a byte loop.
+  read a byte at a time there, as the pass costs more than it saves. `MeasureWideWords` does the
+  same for the Unicode renderer's UTF-16 text (widths gathered from `TtfFont::widthCache`, which has
+  an entry more for it; a surrogate or an uncached width a unit at a time through the font), whose
+  wrapping (`BreakWideWords`, `PlaceStyledWords`) decides in integer units where they are farther
+  from the width than the double sums' rounding (`WrapUnits`) and lays a paragraph out again in
+  doubles otherwise: a change to how widths are summed or compared must keep both paths. Core check
+  133 compares the dispatched, SSE2 and portable code with byte and unit loops.
 
 - `src/common/file_io.cpp`
   Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows. On POSIX,

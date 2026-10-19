@@ -61,6 +61,26 @@ linked notes) identical.
   costs more to measure apart than to read. Instructions: essay -19.1 %, native_math -4.4 %,
   notes -0.0 %, others +0.07 to +0.15 % (README +0.15 %, `tiny_pdf.cpp`'s inlining of a
   `push_back`); time: essay -13.9 %, native_math -4.9 %. Text +6.0 KB.
+- **Line feeds by bit scans** (`SplitLineViews`): 64 bytes a step and a bit scan a line feed,
+  where a loop stepped over the mask's bits one at a time: -0.2 to -1.2 % instructions everywhere.
+- **The Unicode renderer's wrapping in integer units** (`WrapUnits`, `MeasureWideWords`): its
+  line breaks came from double sums, a character's units times the scale added in text order, a
+  chain of dependent additions. The sums are now integer AFM units, and every comparison with a
+  width is decided where the units are farther from it than the double sums' rounding can reach
+  (at most 3n + 4 roundings of 2^-53, all terms positive; `WrapUnits::Above`), which is the double
+  path's decision; a closer one (equal widths, or nearly) lays the paragraph out again in doubles,
+  the old code kept as `PlaceStyledWords<true>` and `BreakWideWordsIn<true>`, as does a word wider
+  than a line in styled text and a theme's faces. The units of a paragraph come from
+  `MeasureWideWords` (word_bounds.cpp): eight code units a step, their white space as bits and
+  their widths gathered from the font's width cache (one entry more, 65,537, for the gather), a
+  step with a surrogate or a width not cached yet a unit at a time through the font; the word
+  bounds as `MeasureWords` writes them. `PlaceStyledWords<false>` joins the words that follow in
+  a run one space apart, as `WrapAsciiInline` does. Instructions: README -4.3 %, polish -3.2 %,
+  table-heavy -2.3 %, tester-noimg -1.1 %, code-heavy -0.5 %; perf cycles README -2.3 %,
+  table-heavy -2.4 %. Text +12 KB. Checked also with the rounding margin raised to 5 % (most
+  paragraphs laid out twice, README +5 % instructions) and on 3,800 generated Unicode documents
+  (scripts, surrogate pairs, combining marks, spaces of every kind, inline styles, narrow tables,
+  page sizes; DejaVu Sans, Serif and Sans Mono): identical PDFs.
 
 ## After 4.6.1: formula fonts, tables, fallback fonts, images, code, static start
 
