@@ -58,48 +58,45 @@ static std::string Trim(std::string s) {
     return ToString(v);
 }
 
-// The lines of `text` into `lines`, which it empties first.
+// The lines of `text` into `lines`, which it empties first. Line feeds are found 64 bytes a step
+// (16 a step for the rest), each by a bit scan of the step's mask.
 static void SplitLineViews(const std::string& text, std::vector<std::string_view>& lines) {
     lines.clear();
-    size_t start = StartsWith(std::string_view(text), std::string_view("\xEF\xBB\xBF", 3)) ? 3 : 0;
+    const size_t start = StartsWith(std::string_view(text), std::string_view("\xEF\xBB\xBF", 3)) ? 3 : 0;
     lines.reserve(std::max<size_t>(8, text.size() / 48));
 
-    const char* base = text.data();
-    const char* ptr = base + start;
-    const char* end = base + text.size();
+    const char* const base = text.data();
+    const size_t size = text.size();
     size_t lineStart = start;
+    const auto addLine = [&](size_t pos) RAYOMD_HOT_LAMBDA {
+        size_t lineEnd = pos;
+        if (lineEnd > lineStart && base[lineEnd - 1] == '\r') lineEnd--;
+        lines.emplace_back(base + lineStart, lineEnd - lineStart);
+        lineStart = pos + 1;
+    };
+    size_t at = start;
 
 #ifdef FAST_MD_SSE2
     const __m128i nl = _mm_set1_epi8('\n');
-    while (ptr + 16 <= end) {
-        __m128i chunk = _mm_loadu_si128((const __m128i*)ptr);
-        int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, nl));
-        while (mask) {
-            int bit = 0;
-            while (((mask >> bit) & 1) == 0) bit++;
-            size_t pos = (size_t)(ptr - base) + (size_t)bit;
-            size_t lineEnd = pos;
-            if (lineEnd > lineStart && base[lineEnd - 1] == '\r') lineEnd--;
-            lines.emplace_back(base + lineStart, lineEnd - lineStart);
-            lineStart = pos + 1;
-            mask &= ~(1 << bit);
-        }
-        ptr += 16;
+    const auto feeds = [&](size_t from) RAYOMD_HOT_LAMBDA {
+        return static_cast<uint32_t>(_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(base + from)), nl)));
+    };
+    for (; at + 64 <= size; at += 64) {
+        uint64_t mask = feeds(at) | static_cast<uint64_t>(feeds(at + 16)) << 16 |
+            static_cast<uint64_t>(feeds(at + 32)) << 32 | static_cast<uint64_t>(feeds(at + 48)) << 48;
+        for (; mask != 0; mask &= mask - 1) addLine(at + RayoMd::Text::Detail::LowestBit64(mask));
+    }
+    for (; at + 16 <= size; at += 16) {
+        for (uint32_t mask = feeds(at); mask != 0; mask &= mask - 1) addLine(at + RayoMd::Text::Detail::LowestBit(mask));
     }
 #endif
 
-    while (ptr < end) {
-        if (*ptr == '\n') {
-            size_t pos = (size_t)(ptr - base);
-            size_t lineEnd = pos;
-            if (lineEnd > lineStart && base[lineEnd - 1] == '\r') lineEnd--;
-            lines.emplace_back(base + lineStart, lineEnd - lineStart);
-            lineStart = pos + 1;
-        }
-        ptr++;
+    for (; at < size; at++) {
+        if (base[at] == '\n') addLine(at);
     }
 
-    size_t lineEnd = text.size();
+    size_t lineEnd = size;
     if (lineEnd > lineStart && base[lineEnd - 1] == '\r') lineEnd--;
     lines.emplace_back(base + lineStart, lineEnd - lineStart);
 }
