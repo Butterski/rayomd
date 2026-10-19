@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -238,6 +239,50 @@ struct BuildOptions {
 };
 
 BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes);
+
+// Builds of one document as it is edited, as an editor's preview makes them on every change: each
+// Build gives the bytes, result and source map that BuildPdf gives for the same text and options,
+// and lays out again only the top-level blocks the edit changed and those it moved on the page; the
+// layout of the others (their page content, links, headings and source map entries) is taken from
+// the session's last build. Typing in a paragraph of a long document then lays out that paragraph,
+// where an edit that changes its height lays out what follows until the pages fall as they did
+// (often the next image, heading or code block that moves to a new page).
+//
+// Everything BuildPdf does besides the layout is done every time: the Markdown is parsed whole,
+// and the PDF is assembled whole. Builds with footnotes or PDF/UA, books, and builds with other
+// options or fonts than the last are laid out whole, as BuildPdf lays them out; images and diagrams
+// are always laid out again (a file may have changed). A session keeps its last build's page
+// content, blocks and a few dozen bytes for each block: about twice the page content of its PDF.
+//
+// One session for one document: builds of another text work, but reuse nothing. Not thread-safe:
+// a session builds on the calling thread, one Build at a time; give each thread its own. Destroy
+// it, or call Clear, to free what it keeps.
+class BuildSession {
+public:
+    BuildSession();
+    ~BuildSession();
+    BuildSession(const BuildSession&) = delete;
+    BuildSession& operator=(const BuildSession&) = delete;
+
+    // BuildPdf(markdown, options, pdfBytes), with options.sourceMap filled the same way. A cancelled
+    // or failed build leaves the session as the last successful one left it.
+    BuildResult Build(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes);
+    // Forgets the last build and frees what the session keeps.
+    void Clear();
+
+    // What the last Build reused: its top-level blocks, those laid out and those taken from the build
+    // before (for tests and diagnostics). All laid out after a full build.
+    struct Reuse {
+        uint32_t blocks = 0;
+        uint32_t laidOut = 0;
+        uint32_t replayed = 0;
+    };
+    Reuse LastReuse() const;
+
+private:
+    struct State;
+    std::unique_ptr<State> state;
+};
 
 // A file of a book, or the title of a part of it on a page of its own (BuildBookPdf).
 struct BookChapter {

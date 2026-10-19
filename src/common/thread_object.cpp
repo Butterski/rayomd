@@ -2,7 +2,9 @@
 
 #include "thread_object.h"
 
-#ifdef __MINGW32__
+#include <thread>
+
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -10,7 +12,33 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__linux__)
+#include <sched.h>
+#endif
 
+namespace RayoMd::Thread {
+
+unsigned UsableCpus() {
+#ifdef _WIN32
+    DWORD_PTR process = 0;
+    DWORD_PTR system = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process != 0) {
+        unsigned count = 0;
+        for (; process != 0; process &= process - 1) count++;
+        return count;
+    }
+#elif defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) == 0 && CPU_COUNT(&set) > 0) return (unsigned)CPU_COUNT(&set);
+#endif
+    const unsigned cpus = std::thread::hardware_concurrency();
+    return cpus == 0 ? 1 : cpus;
+}
+
+} // namespace RayoMd::Thread
+
+#ifdef __MINGW32__
 #include <new>
 
 namespace RayoMd::Thread {

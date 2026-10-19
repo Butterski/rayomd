@@ -13,6 +13,7 @@
 #include "../common/compiler.h"
 #include "../common/thread_object.h"
 #include "book.h"
+#include "build_session.h"
 #include "cff.h"
 #include "image_cache.h"
 #include "image_encoder.h"
@@ -51,7 +52,6 @@
 #else
 #include <cerrno>
 #include <fcntl.h>
-#include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1764,6 +1764,10 @@ public:
         }
         return values;
     }
+    // BuildSession (build_session.h): whether `cid` is recorded, and the CIDs in the order they were,
+    // as they stay until Values() sorts them for the font.
+    bool Has(uint16_t cid) const { return ((bits[cid >> 6] >> (cid & 63)) & 1) != 0; }
+    const CidList& Recorded() const { return values; }
 
     // Empty again: the words of the CIDs it recorded, which hold every bit set, are cleared.
     void Clear() {
@@ -2024,19 +2028,55 @@ protected:
     ~PdfPayloadWriter() = default;
 };
 
+// The bytes left before each page's content as it is rendered (StartPageContent): the gaps the
+// thread's last build had BuildInto fill (the header and the objects before the first page, between
+// pages the objects of the page before and the next stream's head). Whenever these come out as long
+// again, as on every build of a preview being edited or of --bench, the content stays where it was
+// rendered; otherwise BuildInto moves it, as it moved every page's before. Off for --black-text and
+// --compress, which read the pages' streams as one run (PdfObjects::LeaveGaps).
+static thread_local const std::vector<size_t>* g_pageGaps = nullptr;
+
+// The gap left before page `page`'s content: its start less the end of the page before.
+static size_t PageGapBefore(size_t page) {
+    constexpr size_t kMaxPageGap = 64u * 1024u * 1024u;   // a guess, not a reason to hold that much
+    const std::vector<size_t>* const gaps = g_pageGaps;
+    return gaps != nullptr && page < gaps->size() && (*gaps)[page] <= kMaxPageGap ? (*gaps)[page] : 0;
+}
+
+// A new page's content starts after its gap (NewPage). The gap's last byte is the one a page's
+// content would follow without a gap, the last of the page before, or a line feed before the first
+// page (whose content would start the empty buffer): PDF/UA's marked content starts a line after
+// a byte other than a line feed (StructTree::NewLine), and must see what it sees without gaps.
+static RAYOMD_HOT_INLINE void StartPageContent(std::string& content, std::vector<size_t>& pageStarts) {
+    const size_t gap = PageGapBefore(pageStarts.size());
+    if (gap != 0) {
+        const size_t before = content.size();
+        ResizeForOverwrite(content, before + gap);
+        content[before + gap - 1] = before != 0 ? content[before - 1] : '\n';
+    }
+    pageStarts.push_back(content.size());
+}
+
 class PdfObjects {
 public:
-    // The object table is kept from export to export (KeptBuffer), emptied.
+    // The object table is kept from export to export (KeptBuffer), emptied, and so are the gaps.
     PdfObjects() {
         KeptBuffer<std::vector<Object>>::Take(objects);
+        KeptBuffer<std::vector<size_t>, 2>::Take(gaps);
         objects.clear();
     }
     ~PdfObjects() {
         objects.clear();
         KeptBuffer<std::vector<Object>>::Give(objects, KeptBytes(objects));
+        if (g_pageGaps == &gaps) g_pageGaps = nullptr;
+        KeptBuffer<std::vector<size_t>, 2>::Give(gaps, KeptBytes(gaps));
     }
     PdfObjects(const PdfObjects&) = delete;
     PdfObjects& operator=(const PdfObjects&) = delete;
+
+    // The pages rendered from now on on this thread leave the gaps the thread's last build that did
+    // this had before their content, and BuildInto keeps this build's for the next.
+    void LeaveGaps() { g_pageGaps = &gaps; }
 
     int Reserve() {
         objects.emplace_back();
@@ -2135,14 +2175,18 @@ public:
         return Add(std::move(body));
     }
 
-    // Assembles the file in `pdf`, which holds the in-place payloads and nothing else.
+    // Assembles the file in `pdf`, which holds the in-place payloads and nothing else but the
+    // gaps left before them (LeaveGaps).
     //
-    // Every object ends up at or after the place its payload was rendered to, because the
-    // header and the objects before it only add bytes in front. Writing the objects from
-    // the last to the first therefore moves each payload once, towards the end of the
-    // buffer, without ever overwriting one that has not been moved yet. A buffer the
-    // caller reuses for the next export is assembled without any allocation.
-    // With `fileId` the trailer gets an /ID of the file's body, which PDF/A requires.
+    // The in-place payloads lie in the order of their objects and so do their places in the file.
+    // Those that go towards the front are moved first, from the first to the last; then the file
+    // is written from its last object to its first, each in-place payload that goes towards the
+    // end moved before the text in front of it: none overwrites a payload that has not been moved
+    // yet. A payload whose gap was what the file puts before it does not move. A buffer the caller
+    // reuses for the next export is assembled without any allocation.
+    // With `fileId` the trailer gets an /ID of the file's body, which PDF/A requires. After
+    // LeaveGaps, `gaps` gets the bytes the file puts before each in-place payload after the one
+    // before it (before the first: from the file's start), which would have left it in place.
     void BuildInto(int rootId, int infoId, std::string& pdf, bool pdf20 = false, bool fileId = false) const {
         constexpr size_t kHeaderBytes = 15;
         constexpr size_t kObjectOpenBytes = 7;      // " 0 obj\n"
@@ -2153,19 +2197,24 @@ public:
         std::vector<size_t> offsets;    // kept from export to export (KeptBuffer)
         KeptBuffer<std::vector<size_t>, 1>::Take(offsets);
         offsets.assign(count + 1, 0);
+        std::vector<size_t>* const next = g_pageGaps == &gaps ? &gaps : nullptr;
+        if (next != nullptr) next->clear();
         size_t position = kHeaderBytes;
         size_t unmoved = 0;         // end of the in-place payloads of the objects seen so far
+        size_t placed = 0;          // and the end of their places in the file
         bool movable = true;
+        bool towardFront = false;   // an in-place payload goes to an earlier place
         for (size_t i = 0; i < count; i++) {
             const Object& object = objects[i];
             offsets[i + 1] = position;
             const size_t payloadAt = position + DecimalDigits(i + 1) + kObjectOpenBytes + object.head.size();
             if (object.inPlace) {
                 const size_t payloadEnd = object.inPlaceOffset + object.inPlaceBytes;
-                if (object.inPlaceOffset < unmoved || payloadAt < object.inPlaceOffset || payloadEnd > pdf.size()) {
-                    movable = false;
-                }
+                if (object.inPlaceOffset < unmoved || payloadEnd > pdf.size()) movable = false;
                 unmoved = payloadEnd;
+                towardFront = towardFront || payloadAt < object.inPlaceOffset;
+                if (next != nullptr) next->push_back(payloadAt - placed);
+                placed = payloadAt + object.inPlaceBytes;
             }
             position = payloadAt + PayloadBytes(object) + (object.stream ? kStreamCloseBytes : 0) + kObjectCloseBytes;
         }
@@ -2184,11 +2233,20 @@ public:
         if (relocate) {
             rendered.swap(pdf);
             pdf.reserve(wanted);
+            ResizeForOverwrite(pdf, total);     // every byte of it is written below
+        } else if (total > pdf.size()) {
+            ResizeForOverwrite(pdf, total);     // likewise; gaps larger than needed leave it longer
         }
-        ResizeForOverwrite(pdf, total);     // every byte of it is written below
         char* const base = &pdf[0];
-        const char* const payloads = relocate ? rendered.data() : base;
-        const size_t payloadLimit = relocate ? rendered.size() : total;
+        // Payloads that move towards the front, from the first.
+        if (towardFront && !relocate) {
+            for (size_t i = 0; i < count; i++) {
+                const Object& object = objects[i];
+                if (!object.inPlace) continue;
+                char* const payload = base + offsets[i + 1] + DecimalDigits(i + 1) + kObjectOpenBytes + object.head.size();
+                if (payload < base + object.inPlaceOffset) memmove(payload, base + object.inPlaceOffset, object.inPlaceBytes);
+            }
+        }
 
         WriteTail(base + xref, offsets, xref, rootId, infoId, fileId ? id : nullptr);
         for (size_t i = count; i-- > 0;) {
@@ -2197,12 +2255,16 @@ public:
             const size_t idDigits = DecimalDigits(i + 1);
             char* const payload = at + idDigits + kObjectOpenBytes + object.head.size();
             const size_t payloadBytes = PayloadBytes(object);
-            // The payload moves first: its old place may overlap the object's opening text.
             if (object.inPlace) {
-                if (object.inPlaceOffset + payloadBytes <= payloadLimit) {
-                    memmove(payload, payloads + object.inPlaceOffset, payloadBytes);
-                } else {
-                    memset(payload, ' ', payloadBytes);
+                if (relocate) {
+                    if (object.inPlaceOffset + payloadBytes <= rendered.size()) {
+                        memcpy(payload, rendered.data() + object.inPlaceOffset, payloadBytes);
+                    } else {
+                        memset(payload, ' ', payloadBytes);
+                    }
+                } else if (payload > base + object.inPlaceOffset) {
+                    // Towards the end; its old place may overlap the object's opening text.
+                    memmove(payload, base + object.inPlaceOffset, payloadBytes);
                 }
             } else if (object.writer) {
                 object.writer->Write(payload);
@@ -2220,6 +2282,7 @@ public:
             memcpy(cursor, "\nendobj\n", kObjectCloseBytes);
         }
         memcpy(base, pdf20 ? "%PDF-2.0\n%\xE2\xE3\xCF\xD3\n" : "%PDF-1.7\n%\xE2\xE3\xCF\xD3\n", kHeaderBytes);
+        if (pdf.size() != total) ResizeForOverwrite(pdf, total);
         if (fileId) {
             // The identifier is that of everything before the cross-reference table.
             Internal::FileIdentifier(std::string_view(base, xref), id);
@@ -2311,6 +2374,7 @@ private:
     }
 
     std::vector<Object> objects;
+    mutable std::vector<size_t> gaps;   // LeaveGaps: the last build's, then this one's
 };
 
 // --compress: a thread's encoder tables and output buffer, kept from export to export so a
@@ -2432,25 +2496,6 @@ public:
 private:
     uint64_t left = kDecodeBudgetPixels;
 };
-
-// The CPUs this process may run on: its affinity mask, which taskset or a container narrows,
-// where std::thread::hardware_concurrency counts the machine's.
-RAYOMD_COLD static unsigned UsableCpus() {
-#ifdef _WIN32
-    DWORD_PTR process = 0;
-    DWORD_PTR system = 0;
-    if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process != 0) {
-        unsigned count = 0;
-        for (; process != 0; process &= process - 1) count++;
-        return count;
-    }
-#elif defined(__linux__)
-    cpu_set_t set;
-    CPU_ZERO(&set);
-    if (sched_getaffinity(0, sizeof(set), &set) == 0) return (unsigned)CPU_COUNT(&set);
-#endif
-    return std::thread::hardware_concurrency();
-}
 
 // With `metadata` false the caller writes the XMP metadata, with the reversible profile's
 // properties: a PDF/A file has one packet for both.
@@ -3209,9 +3254,13 @@ static std::wstring ResolveRedirectUrl(const std::wstring& currentUrl, const std
     if ((parts.nScheme == INTERNET_SCHEME_HTTP && parts.nPort != 80) ||
         (parts.nScheme == INTERNET_SCHEME_HTTPS && parts.nPort != 443)) {
         base += L":";
-        wchar_t port[16];
-        swprintf(port, 16, L"%u", (unsigned)parts.nPort);
-        base += port;
+        // Digits by hand: swprintf links MinGW's printf (its pformat and gdtoa, 15 KB).
+        wchar_t digits[5];
+        size_t count = 0;
+        for (unsigned value = parts.nPort; value != 0 || count == 0; value /= 10) {
+            digits[count++] = static_cast<wchar_t>(L'0' + value % 10);
+        }
+        while (count != 0) base += digits[--count];
     }
 
     if (location[0] == L'/') return base + location;
@@ -3791,7 +3840,7 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image, bool fast)
     const std::vector<uint8_t> zeros(std::max(rowBytes, colorRow), 0);
     const std::vector<uint8_t> opaqueRow(width, 255);
 
-    static const unsigned cpus = UsableCpus();
+    static const unsigned cpus = RayoMd::Thread::UsableCpus();
     static std::atomic<unsigned> decoding{ 0 };
     const unsigned decodes = ++decoding;
     struct Leave {
@@ -6330,15 +6379,6 @@ RAYOMD_COLD static std::string ImageRowText(const Block& block) {
     return text;
 }
 
-// Where an entry of the table of contents ends: the page, baseline and right end of its last line,
-// for the page number and the dots the builder adds to it (ContentsNumbers).
-struct ContentsLine {
-    size_t entry = 0;
-    size_t page = 0;
-    double baseline = 0.0;
-    double end = 0.0;
-};
-
 // A run of a line of highlighted code: where it ends, and the colour index of its characters
 // (Internal::kCodeColorOfClass).
 using CodeRun = Internal::ColorRun;
@@ -6371,7 +6411,7 @@ RAYOMD_COLD static void NoteSourceBlock(std::vector<SourceBlock>& map, const Blo
     entry.firstLine = block.sourceLine;
     entry.endLine = block.sourceLine + block.sourceLines;
     if (start.page + 1 < pageStarts.size()) {
-        size_t textEnd = pageStarts[start.page + 1];
+        size_t textEnd = pageStarts[start.page + 1] - PageGapBefore(start.page + 1);
         if (notes != nullptr && notes->TextEnd(start.page) != Internal::PageNotes::kNoTextEnd) textEnd = notes->TextEnd(start.page);
         if (textEnd == start.content) {
             start.page++;
@@ -6385,15 +6425,17 @@ RAYOMD_COLD static void NoteSourceBlock(std::vector<SourceBlock>& map, const Blo
     map.push_back(entry);
 }
 
+// BuildSession's access to a renderer's state (RenderInSession).
 template <typename RendererType>
-static void RenderBlocks(RendererType& renderer, const std::vector<Block>& blocks) {
-    if (blocks.empty()) {
-        renderer.RenderParagraph("Empty document");
-        return;
-    }
-    bool pageBreakPending = false;
-    renderer.TagEnterBlocks();
-    for (const Block& block : blocks) {
+struct SessionAccess;
+
+// Blocks [first, last) of those that end at `end`, which the headings' keep looks ahead to; a
+// PageBreak block leaves `pageBreakPending` for the next. Also one block at a time (BuildSession).
+template <typename RendererType>
+static void RenderBlockRange(RendererType& renderer, const Block* first, const Block* last, const Block* end,
+    bool& pageBreakPending) {
+    for (const Block* at = first; at != last; at++) {
+        const Block& block = *at;
         if (renderer.StopRender() || BuildCancelled()) break;
         if (block.type == BlockType::PageBreak) { pageBreakPending = true; continue; }
         if (pageBreakPending) { renderer.RenderPageBreak(); pageBreakPending = false; }
@@ -6403,7 +6445,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         if (mapped) start = { renderer.pageStarts.size() - 1, renderer.y, renderer.content.size() };
         switch (block.type) {
         case BlockType::Heading: {
-            const double keep = HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight, renderer.fullH);
+            const double keep = HeadingKeep(block, &block + 1, end, renderer.lineHeight, renderer.fullH);
             if (block.align >= 2 || renderer.numbers != nullptr) renderer.RenderAlignedHeading(block, keep, renderer.NumberOf(block));
             else renderer.RenderHeading(block, keep);
             break;
@@ -6432,6 +6474,18 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
                 renderer.pageNotes);
         }
     }
+}
+
+template <typename RendererType>
+static void RenderBlocks(RendererType& renderer, const std::vector<Block>& blocks) {
+    if (blocks.empty()) {
+        renderer.RenderParagraph("Empty document");
+        return;
+    }
+    bool pageBreakPending = false;
+    renderer.TagEnterBlocks();
+    const Block* const end = blocks.data() + blocks.size();
+    RenderBlockRange(renderer, blocks.data(), end, end, pageBreakPending);
     renderer.TagLeaveBlocks();
 }
 
@@ -7026,6 +7080,10 @@ public:
 private:
     template <typename RendererType>
     friend void RenderBlocks(RendererType&, const std::vector<Block>&);
+    template <typename RendererType>
+    friend void RenderBlockRange(RendererType&, const Block*, const Block*, const Block*, bool&);
+    template <typename RendererType>
+    friend struct SessionAccess;
     template <typename RendererType>
     friend void RenderMathTable(RendererType&, const Block&);
     template <typename RendererType>
@@ -8260,7 +8318,7 @@ private:
         if (pageNotes != nullptr && pageNotes->pageEnds(this)) return;
         if (pageBottoms != nullptr) EndLongPage();
         if (tags != nullptr) tags->PageBreak();
-        pageStarts.push_back(content.size());
+        StartPageContent(content, pageStarts);
         pageLinks.push_back({});
         y = pageH - margin;
     }
@@ -10834,6 +10892,10 @@ private:
     template <typename RendererType>
     friend void RenderBlocks(RendererType&, const std::vector<Block>&);
     template <typename RendererType>
+    friend void RenderBlockRange(RendererType&, const Block*, const Block*, const Block*, bool&);
+    template <typename RendererType>
+    friend struct SessionAccess;
+    template <typename RendererType>
     friend void RenderMathTable(RendererType&, const Block&);
     template <typename RendererType>
     friend void RenderFootnoteSection(RendererType&, const Internal::Footnotes&, const Internal::PageNotes*);
@@ -11026,7 +11088,7 @@ private:
         // Page footnotes: the page's notes go at its foot first; none ends inside their own layout.
         if (pageNotes != nullptr && pageNotes->pageEnds(this)) return;
         if (pageBottoms != nullptr) EndLongPage();
-        pageStarts.push_back(content.size());
+        StartPageContent(content, pageStarts);
         pageLinks.push_back({});
         y = pageH - margin;
     }
@@ -13374,6 +13436,177 @@ RAYOMD_COLD static std::vector<std::vector<int>> AddBookLinkAnnotations(PdfObjec
     return AddLinkAnnotationObjects(pdf, links, winAnsi, targets, internalLinks, print);
 }
 
+#ifdef RAYOMD_BUILD_SESSION
+// BuildSession (build_session.h): a document laid out a top-level block at a time, the renderer's
+// state before each noted (LayoutSession::Mark), and each run of blocks that the session's last
+// build laid out from the same state taken from its tape instead of being laid out (Replay). Cold:
+// only the builds of a session come here, and only builds with RAYOMD_BUILD_SESSION (the engine
+// library and the tests, not the command lines) compile it.
+RAYOMD_COLD static bool SessionHasCid(const void* set, uint16_t cid) {
+    return static_cast<const UsedCidSet*>(set)->Has(cid);
+}
+RAYOMD_COLD static void SessionAddCid(void* set, uint16_t cid) {
+    static_cast<UsedCidSet*>(set)->Add(cid);
+}
+RAYOMD_COLD static const CidList& SessionCids(const void* set) {
+    return static_cast<const UsedCidSet*>(set)->Recorded();
+}
+RAYOMD_COLD static Internal::LayoutCids SessionCidSet(UsedCidSet* set) {
+    Internal::LayoutCids cids;
+    if (set == nullptr) return cids;
+    cids.set = set;
+    cids.has = SessionHasCid;
+    cids.add = SessionAddCid;
+    cids.recorded = SessionCids;
+    cids.missing = &set->missing;
+    cids.missingBmp = &set->missingBmp;
+    return cids;
+}
+
+template <typename RendererType>
+struct SessionAccess {
+    static constexpr bool kUnicode = std::is_same<RendererType, Renderer>::value;
+
+    // What blocks change and set back (margins of nested blocks, note sizes, a quote's bar, a table
+    // header's bold): a run may start or end only where these are as the layout began.
+    struct Settings {
+        double margin, bodySize, lineHeight, textBottom, pageH, fullH, fitH;
+        const char* quoteBar;
+        int listDepth;
+        bool wrapBold;
+
+        bool operator==(const Settings& other) const {
+            return margin == other.margin && bodySize == other.bodySize && lineHeight == other.lineHeight &&
+                textBottom == other.textBottom && pageH == other.pageH && fullH == other.fullH && fitH == other.fitH &&
+                quoteBar == other.quoteBar && listDepth == other.listDepth && wrapBold == other.wrapBold;
+        }
+    };
+    static Settings SettingsOf(const RendererType& r) {
+        Settings settings{ r.margin, r.bodySize, r.lineHeight, r.textBottom, r.pageH, r.fullH, r.fitH, r.quoteBar.data(),
+            r.listDepth, false };
+        if constexpr (kUnicode) settings.wrapBold = r.wrapBold;
+        return settings;
+    }
+    static void Fonts(const RendererType& r, const void* fonts[Internal::kLayoutCidSets]) {
+        if constexpr (kUnicode) {
+            fonts[0] = &r.font;
+            for (int face = 1; face < 4; face++) fonts[face] = r.faces[face];
+        }
+    }
+    static Internal::LayoutTarget Target(RendererType& r) {
+        Internal::LayoutTarget target;
+        target.content = &r.content;
+        target.pageStarts = &r.pageStarts;
+        target.pageLinks = &r.pageLinks;
+        target.headings = &r.headings;
+        target.ids = &r.ids;
+        target.contentsLines = &r.contentsLines;
+        target.pageBottoms = r.pageBottoms;
+        target.glyphs = r.math.GlyphUse();
+        if constexpr (kUnicode) {
+            target.cids[0] = SessionCidSet(&r.usedCids);
+            for (int face = 0; face < 3; face++) target.cids[face + 1] = SessionCidSet(r.faceCids[face].get());
+            target.probing = r.probing;
+        }
+        return target;
+    }
+    static void Probing(const RendererType& r, Internal::LayoutTarget& target) {
+        if constexpr (kUnicode) target.probing = r.probing;
+    }
+    static Internal::LayoutMark Mark(const RendererType& r, bool pageBreakPending, const Settings& start) {
+        Internal::LayoutMark mark;
+        mark.y = r.y;
+        mark.nextNumber = static_cast<uint32_t>(r.nextNumber);
+        if constexpr (!kUnicode) mark.facesUsed = r.facesUsed;
+        mark.flags = static_cast<uint8_t>((pageBreakPending ? Internal::LayoutMark::kPending : 0) |
+            (r.math.Active() ? Internal::LayoutMark::kMathActive : 0) | (r.math.Used() ? Internal::LayoutMark::kMathUsed : 0) |
+            (r.math.LaidOut() ? Internal::LayoutMark::kMathLaidOut : 0) |
+            (SettingsOf(r) == start ? Internal::LayoutMark::kResumable : 0));
+        return mark;
+    }
+    // The state after a replayed run, as laying it out would have left it. The formulas' boxes of
+    // the block before stay; only whether there are any (MathPool::Active) is read before a block
+    // clears them.
+    static void Resume(RendererType& r, const Internal::LayoutMark& mark) {
+        r.y = mark.y;
+        r.nextNumber = mark.nextNumber;
+        if constexpr (!kUnicode) r.facesUsed = mark.facesUsed;
+        if ((mark.flags & Internal::LayoutMark::kMathUsed) != 0) r.math.MarkUsed();
+        if ((mark.flags & Internal::LayoutMark::kMathLaidOut) != 0) r.math.MarkLaidOut();
+        if ((mark.flags & Internal::LayoutMark::kMathActive) == 0) {
+            if (r.math.Active()) r.math.Clear();
+        } else if (!r.math.Active()) {
+            r.math.MarkSourceShown();
+        }
+    }
+
+    // The top-level blocks in a session (Internal::CurrentLayoutSession): each laid out with
+    // RenderBlockRange as RenderBlocks lays it out, or taken from the session's last build in runs.
+    // Footnotes are laid out with the text, which the tape does not hold: such a document is laid
+    // out whole, and the session forgets its last build.
+    RAYOMD_COLD static void Render(RendererType& renderer, const std::vector<Block>& blocks,
+        const Internal::Footnotes& footnotes, const std::vector<Internal::ContentsEntry>& contents,
+        const std::vector<Internal::HeadingNumber>& numbers, bool notesAtFoot, Internal::LayoutSession& session, uint8_t kind) {
+        if (!footnotes.notes.empty() || blocks.empty()) {
+            session.Forget();
+            if (footnotes.notes.empty()) renderer.Render(blocks);
+            else RenderWithFootnotes(renderer, blocks, footnotes, notesAtFoot);
+            return;
+        }
+        const void* fonts[Internal::kLayoutCidSets] = {};
+        Fonts(renderer, fonts);
+        session.Begin(kind, fonts, blocks, contents, numbers);
+        std::vector<SourceBlock>* const sourceMap = renderer.sourceMap;
+        renderer.sourceMap = &session.SourceMap();
+        Internal::LayoutTarget target = Target(renderer);
+        const Settings start = SettingsOf(renderer);
+        const Block* const first = blocks.data();
+        const Block* const end = first + blocks.size();
+        bool pageBreakPending = false;
+        for (size_t index = 0;;) {
+            if (index < blocks.size() && (renderer.StopRender() || BuildCancelled())) break;
+            Internal::LayoutMark mark = Mark(renderer, pageBreakPending, start);
+            session.Mark(index, mark, target);
+            if (index == blocks.size()) break;
+            Probing(renderer, target);
+            const size_t run = session.Replayable(index, target);
+            if (run > index) {
+                const Internal::LayoutMark state = session.Replay(index, run, target);
+                Resume(renderer, state);
+                pageBreakPending = (state.flags & Internal::LayoutMark::kPending) != 0;
+                index = run;
+                continue;
+            }
+            RenderBlockRange(renderer, first + index, first + index + 1, end, pageBreakPending);
+            index++;
+        }
+        renderer.sourceMap = sourceMap;
+    }
+    RAYOMD_COLD static void RenderAny(void* renderer, const std::vector<Block>& blocks, const Internal::Footnotes& footnotes,
+        const std::vector<Internal::ContentsEntry>& contents, const std::vector<Internal::HeadingNumber>& numbers,
+        bool notesAtFoot, Internal::LayoutSession& session, uint8_t kind) {
+        Render(*static_cast<RendererType*>(renderer), blocks, footnotes, contents, numbers, notesAtFoot, session, kind);
+    }
+    // The layout of a session's build is done (before the builder compresses or recolours the content).
+    RAYOMD_COLD static void EndLayout(void* renderer, Internal::LayoutSession& session, std::vector<SourceBlock>* sourceMap) {
+        session.EndLayout(Target(*static_cast<RendererType*>(renderer)), sourceMap);
+    }
+    // A session's build is made: its tape takes the layout, the blocks and their tables.
+    RAYOMD_COLD static void Commit(void* renderer, Internal::LayoutSession& session, std::vector<Block>& blocks,
+        std::vector<Internal::ContentsEntry>& contents, std::vector<Internal::HeadingNumber>& numbers) {
+        Internal::LayoutTarget target = Target(*static_cast<RendererType*>(renderer));
+        session.Commit(target, blocks, contents, numbers);
+    }
+};
+
+// Only a BuildSession asks for these (build_session.cpp).
+RAYOMD_COLD Internal::SessionCalls Internal::SessionRendererCalls() {
+    return { { SessionAccess<StandardRenderer>::RenderAny, SessionAccess<Renderer>::RenderAny },
+        { SessionAccess<StandardRenderer>::EndLayout, SessionAccess<Renderer>::EndLayout },
+        { SessionAccess<StandardRenderer>::Commit, SessionAccess<Renderer>::Commit } };
+}
+#endif
+
 // Page content is rendered straight into the output buffer. A buffer the caller reuses
 // keeps its capacity; a new one starts at the size a document of this length usually
 // needs, so it does not grow several times while the pages are rendered.
@@ -13452,6 +13685,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     std::vector<Internal::HeadingNumber> numbers;   // --number-headings
     if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
     PdfObjects pdf;
+    // No gaps for a session build: it copies the last build's page content (build_session.h).
+    if (!options.blackText && !options.compress && Internal::CurrentLayoutSession() == nullptr) pdf.LeaveGaps();
     int pagesId = pdf.Reserve();
     // WinAnsiEncoding: without it the fonts' built-in StandardEncoding shows the straight
     // quote and the backtick as curly quotes, and transcoded Latin text has no codes above
@@ -13471,14 +13706,18 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         options.sourceMap->clear();
         renderer.SetSourceMap(options.sourceMap);
     }
+    // A build of a BuildSession lays its blocks out one at a time and takes those it can from the last.
+    Internal::LayoutSession* const session = book == nullptr ? Internal::CurrentLayoutSession() : nullptr;
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         const bool notesAtFoot = options.footnotes == FootnotePlacement::Page;
         if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover, notesAtFoot);
+        else if (session != nullptr) session->calls.render[0](&renderer, blocks, footnotes, contents, numbers, notesAtFoot, *session, winAnsi ? 1 : 0);
         else if (footnotes.notes.empty()) renderer.Render(blocks);
         else RenderWithFootnotes(renderer, blocks, footnotes, notesAtFoot);
     }
     if (BuildCancelled()) return CancelBuild();
+    if (session != nullptr) session->calls.endLayout[0](&renderer, *session, options.sourceMap);
     // The headings without their footnote references, for anchors, bookmarks and titles.
     std::vector<HeadingMark> titledHeadings;
     std::vector<std::string> headingTitles;
@@ -13521,7 +13760,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     std::vector<int> pageIds;
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
-        const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
+        const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] - PageGapBefore(pageIndex + 1)
+            : pdfBytes.size();
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
@@ -13601,6 +13841,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
     stats.pages = static_cast<uint32_t>(pageStarts.size() + (coverId != 0));
     stats.failedImages = imageRegistry.FailedImages();
+    if (session != nullptr) session->calls.commit[0](&renderer, *session, blocks, contents, numbers);
     return true;
 }
 
@@ -14047,6 +14288,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
 
     PdfObjects pdf;
+    // No gaps for a session build: it copies the last build's page content (build_session.h).
+    if (!options.blackText && !options.compress && Internal::CurrentLayoutSession() == nullptr) pdf.LeaveGaps();
 
     int fontFileId = pdf.Reserve();
     int cidMapId = pdf.Reserve();
@@ -14082,10 +14325,18 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         renderer.SetSourceMap(options.sourceMap);
     }
     if (check != nullptr && check->stopEarly) renderer.ProbeFallback(markdown);
+    // A build of a BuildSession lays its blocks out one at a time and takes those it can from the last;
+    // a tagged one is laid out whole, as the tape does not hold the structure tree.
+    Internal::LayoutSession* session = book == nullptr ? Internal::CurrentLayoutSession() : nullptr;
+    if (session != nullptr && tags) {
+        session->Forget();
+        session = nullptr;
+    }
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         const bool notesAtFoot = options.footnotes == FootnotePlacement::Page;
         if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover, notesAtFoot);
+        else if (session != nullptr) session->calls.render[1](&renderer, blocks, footnotes, contents, numbers, notesAtFoot, *session, 2);
         else if (footnotes.notes.empty()) renderer.Render(blocks);
         else RenderWithFootnotes(renderer, blocks, footnotes, notesAtFoot);
     }
@@ -14095,6 +14346,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         check->guess = renderer.Guess();
         return true;
     }
+    if (session != nullptr) session->calls.endLayout[1](&renderer, *session, options.sourceMap);
     if (tags) tags->Finish();
     // The headings without their footnote references, for anchors, bookmarks and titles.
     std::vector<HeadingMark> titledHeadings;
@@ -14190,7 +14442,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     std::vector<int> pageIds;
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
-        const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
+        const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] - PageGapBefore(pageIndex + 1)
+            : pdfBytes.size();
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
@@ -14271,6 +14524,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource && !options.pdfa && !tags, options.pdfa);
     stats.pages = static_cast<uint32_t>(pageStarts.size() + (coverId != 0));
     stats.failedImages = imageRegistry.FailedImages();
+    if (session != nullptr) session->calls.commit[1](&renderer, *session, blocks, contents, numbers);
     return true;
 }
 

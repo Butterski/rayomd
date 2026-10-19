@@ -15,6 +15,14 @@
 // fiber-local storage callback (FlsAlloc) that Windows calls with the object list itself at thread
 // exit, never through emutls. Elsewhere it is the `static thread_local Type name;` it reads as.
 
+namespace RayoMd::Thread {
+
+// The CPUs this process may run on: its affinity mask, which taskset or a container narrows,
+// where std::thread::hardware_concurrency counts the machine's; at least 1.
+unsigned UsableCpus();
+
+} // namespace RayoMd::Thread
+
 #ifdef __MINGW32__
 namespace RayoMd::Thread {
 

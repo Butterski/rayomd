@@ -41,6 +41,125 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 4: package size (opt4/size2, 2026-10-19)
+
+Against 5.2.4 (`27cf8f0`): the dynamic Linux binary of GCC 13 (GCC 11, the release runners', in
+brackets) and MinGW's `rayomd.exe` (GCC 13, as the cross image builds it). Every step keeps the
+2,875 PDFs of the byte check, the 5,936 and 6,044 feature-on exports, and under Wine the 359
+documents in eight option sets of the MinGW build; `ab.sh --instructions` within +0.3 % on every
+fixture.
+
+- **libstdc++'s throws abort where they are made** (`src/cli/std_throws.cpp`): its one archive
+  member of `std::__throw_*` linked the exception classes, their copy-on-write strings and
+  `std::system_error`'s categories; the MinGW CLI also takes `no_unwind.cpp` (no SEH unwinder or
+  personality routine). Linux -12,312 (-8,216), `rayomd.exe` -51,712.
+- **MinGW's string members one by one** (`src/win32/string_instances.cpp`): GNU ld keeps every PE
+  function that has SEH unwind data (its scripts `KEEP` `.pdata`, binutils 2.47 too), so
+  `--gc-sections` drops no function of an object once one of its members is linked: the first
+  `std::string` member called linked all of `string-inst.o` and `wstring-inst.o`. Explicit
+  instantiations of the members the program calls: `rayomd.exe` -31,744. With a gc that drops
+  unreferenced functions with their unwind data, `rayomd.exe` would hold 30 KB less code, nearly
+  all of it those members (measured with `.pdata` and `.xdata` discarded).
+- **No printf on MinGW**: libstdc++ makes MinGW's `snprintf` and `swprintf` libmingwex's own
+  (`__mingw_pformat`, with gdtoa for `%f`); the batch report's numbers (an exact `%.3f`,
+  `AppendThousandths`, the same text as glibc's and MinGW's printf on 6.6 million doubles), the
+  temporary file's name and a URL's port are written by hand. `rayomd.exe` -30,208.
+- **The icon's PNG images recompressed** (zopflipng, the same pixels): `rayomd.exe` -7,168.
+
+Against 5.2.4: the dynamic Linux binary 1,276,592 -> 1,264,280 (GCC 11 1,280,624 -> 1,272,408),
+`rayomd.exe` 1,588,224 -> 1,467,392.
+
+## Round 4 against 5.2.4: hot paths (opt4/hot4, 2026-10-19)
+
+Measured against 5.2.4 (`27cf8f0`), g++ 13.3 Release, Docker; instructions by `ab.sh
+--instructions` (callgrind, which counts each byte a `rep movsb` copies), cycles by `perf stat -e
+cycles:u` in alternating runs of builds with `-falign-functions=64 -falign-loops=32` (a busy host).
+Every step keeps the 2,875 PDFs of the byte check and the 5,936 and 6,044 feature-on exports.
+
+- **Page content rendered where it ends up** (`PdfObjects::LeaveGaps`, `StartPageContent`): each
+  page's content starts after the bytes the thread's last build put before it (the header and the
+  objects before the first page; between pages the page's objects and the next stream's head),
+  and `BuildInto` moves a payload only when its gap was wrong, towards either end (those towards
+  the front first, from the first). Builds of an unchanged layout move nothing. Callgrind
+  instructions code-heavy -5.4 %, table-heavy -5.3 %, README -4.1 %, tester-noimg -2.1 %, others
+  -0.1 to -0.5 %; perf (no byte counting): -0.1 to -0.5 %; aligned cycles table-heavy -2.6 to
+  -3.5 %, code-heavy -2.1 to -2.3 %, essay -1.3 %, native_math -0.7 %, others even. A first export
+  pays for keeping the gaps: +0.8 K instructions on a 200-byte note, +3 K on 15 to 33 KB. A first
+  try that added a parameter to `BuildInto` renamed it out of `src/hot.ld`'s list: notes and polish
+  +0.7 to +1.2 % cycles, L1i misses +25 %, at fewer instructions.
+- **Math control words looked up without a `strlen` a step** (`FindCommand`, math_parser.cpp): the
+  binary search compared the word with each entry through `string_view::compare(const char*)`, a
+  `strlen` and a `memcmp` at each of its nine steps (3 % of the cycles of a 1.4 MB build of
+  `tester.md` without images, the GUI's case); the entry is now read once up to the first
+  difference, and a static_assert checks the table's order. tester-noimg -2.0 % instructions,
+  -1.4 % cycles; others unchanged.
+- **Reference links resolved in runs** (`ResolveReferenceLinks`): in a document with link
+  definitions every paragraph with a '[' was copied a `push_back` a byte; the bytes up to the next
+  one that may be syntax (`FindByteClass`) are now appended at once. tester-noimg -1.4 %
+  instructions, -1.2 % time; others unchanged.
+
+## Round 4: incremental builds for the preview (opt4/incremental, 2026-10-19)
+
+`TinyPdf::BuildSession` (design, breakdown and numbers: `incremental_builds.md`): consecutive builds
+of an edited document take the layout of unchanged top-level blocks from the last build, byte for
+byte what `BuildPdf` gives. A letter typed in 700 copies of `tester.md`: 920 M -> 278 M instructions
+a build, cycles 2.7x fewer (perf, near the start, middle and end alike); a line deleted or a
+paragraph inserted: 2.6x; 50 copies of the essay: 3.3x fewer instructions, 1.4 to 1.6x fewer cycles
+(the parse, a third of what is left, and three memory-bound passes over the page content: replay,
+the tape's copy, `BuildInto`'s move). Ordinary builds: within +0.06 % instructions on every fixture
+with the session compiled in; the command lines, built without it, +80 bytes of code. Tried and
+replaced on the way:
+
+- The session's block loop called directly by the builders: +4.7 KB in the command lines, which
+  never make a session; behind `SessionCalls`, which only `BuildSession` fetches, +0.6 KB on Linux,
+  but +24 KB in rayomd.exe (MinGW's linker kept the unused functions); now compiled only into the
+  engine library and the tests (`RAYOMD_BUILD_SESSION`).
+- Heading and anchor marks moved to the new blocks by finding their text in the old blocks: a cache
+  miss a heading on the old (cold) blocks, 3 % of an essay's session build; the tape now notes each
+  mark's block and offset while the blocks are warm.
+- All blocks after an edit compared up front: an edit that moves flowing text for the rest of the
+  document (never in step again) cost 6.4 % more instructions than `BuildPdf`; compared only where
+  the layout is in step, 4 %.
+
+## Round 4: the multi-document modes (opt4/batch, 2026-10-19)
+
+Measured against 5.2.4 (`27cf8f0`), g++ 13.3 Release, Docker on all 12 CPUs (Ryzen 5 PRO 4650GE,
+6 cores in two CCX of 3), outputs on ext4, inputs in tmpfs; a busy host, so medians of 7 to 9
+alternating runs. Corpora: the harness corpus (359 documents), 2,000 small notes in 40 folders,
+200 large documents (60 to 330 KB) in 10 folders, and both (2,200).
+
+Where a batch's time went before (perf, 2,000 notes): 16 ms on one thread before the first build
+(three stats a file: its PDF's folder made for every file, its size for the worker limits), the
+kernel 42 % of the cycles at any worker count (creating and writing the PDFs: `openat` 14 %,
+`write` 17 %, the page cache's zeroing), and, from one to six workers, user cycles +13 % at equal
+instructions (malloc and memmove, +31 to +129 % each: the two 4 MB L3s shared by three workers)
+and kernel cycles +42 %. Per-document CLI work is about 8 K instructions (read, options, write),
+1.5 to 5 % of a small note. The order of the jobs costs little: simulated from each document's
+time, largest first would save at most 1.5 % at six workers on the corpus, nothing on the others.
+
+- **Batch setup** (`RunJobs`, `batch_report.cpp`): each output folder made once a run of its files
+  instead of once a file, and the inputs' sizes taken by the workers between them before they
+  build, not at all with one worker. Time to the first build 16 -> 4.5 ms; 2,000 notes +23 %
+  documents/s at 6 workers, +30 % at 12; mixed +8 %.
+- **The automatic worker count from the affinity mask** (`RayoMd::Thread::UsableCpus`, shared
+  with the PNG decoder): six workers no longer share one or two CPUs of a container. Two CPUs:
+  -6 % time, max RSS 40 -> 21 MiB; one CPU 38 -> 17 MiB.
+- **A book's files parsed on several threads** (`ParseBookFiles`, from 256 KiB): parsing was 19 %
+  of a book's instructions. 2.5 MB book -11 %, 17 MB book -14 % wall time.
+
+Not taken (measured):
+- Files created as `O_TMPFILE` and linked into place (`linkat`), as twelve workers creating PDFs
+  in one folder spin on its lock (`osq_lock` and `rwsem_spin_on_owner` 37 % of the cycles of a
+  flat folder of 2,000 notes at 12 workers, 12 % at 6): a C prototype writing 2,000 files of 60 KB
+  was 68 -> 50 ms at 12 threads but 77 -> 82 ms at 6, the automatic count's maximum.
+- glibc tunables in batches (`trim_threshold`, `mmap_threshold`, `tcache_count=1024`): tcache
+  -3 % instructions, cycles within the host's noise (±7 %); not settable by `mallopt` anyway.
+- Largest documents first: see above; it would also reorder a one-worker report.
+
+Open: the per-document font subset (`SetTextFontObjects`, 20 % of a batch of small Unicode notes:
+`SubsetGlyphList::Get`, zero-filled strings) and malloc's share in batches (11 % of cycles on the
+mixed corpus, against about 2 % in a warm `--bench` of one document), both in `tiny_pdf.cpp`.
+
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
 Measured against 5.2.3 (`f28d74b`), g++ 13.3 Release, Docker; instructions by `ab.sh
@@ -700,6 +819,16 @@ tag names and Mermaid tables without relocations -4,096; the PNG filters' scalar
 no unwinder (`src/cli/no_unwind.cpp`, `no_unwind.ld`) -57,976: 1,292,976 (1,297,008). MinGW: no
 `-fdata-sections` (zero statics written as data) -316 KB, no string streams in the CLI -65 KB.
 
+MinGW's `src/win32/string_instances.cpp` lists the `std::string` and `std::wstring` members the
+program calls out of line. After code changes, or with another GCC, list them and compare (a
+member missing there links libstdc++'s whole `string-inst.o` again, 15 to 18 KB, without an
+error; the link map then shows it under "Archive member included"):
+
+```sh
+for f in $(find build/mingw/CMakeFiles/rayomd.dir -name '*.obj' ! -name 'string_instances*'); do
+  x86_64-w64-mingw32-nm -u -C "$f"; done | grep -E 'U std::__cxx11::basic_string<(char|wchar_t),[^(]*>::' | sort -u
+```
+
 Keep the candidate comparable to its baseline: same suite, seed, style, margin,
 image mode, worker count, compiler, build type, and storage. Linux release
 claims should use native/ext4 storage. Label WSL `/mnt/*` results explicitly.
@@ -777,8 +906,11 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
 
 - Page content is rendered straight into the caller's output buffer and the file
   is assembled in place around it in `BuildInto`: no string per page and no second
-  copy (7 to 15 % of a warm build on Windows when it was one). The move of every
-  page's content to its final place is the one copy left.
+  copy (7 to 15 % of a warm build on Windows when it was one). Each page's content is
+  rendered after the gap the thread's last build had before it (`LeaveGaps`), so a build
+  whose objects between the pages come out as long as last time (a preview being edited,
+  `--bench`, a batch of one layout) moves no content; otherwise the pages move as they all
+  did before, towards either end.
 - Operators are written through `TailWriter` straight into the end of the string: room
   for the operation's upper bound is reserved (one capacity test), the bytes are written
   through a pointer and the destructor sets the size. A std::string grows without filling
@@ -850,6 +982,16 @@ case found so far took seconds for 40,000 to 200,000 openers).
 
 Findings that could make RayoMD faster later, with the evidence and the reason
 they were not taken yet. Add to this list when a change turns one up.
+
+**Never-run functions of `tiny_pdf.cpp` at -Os (size, round 4).** 140 KB of `tiny_pdf.cpp`'s
+out-of-line functions run in none of the eight warm fixtures (callgrind, default options): books,
+embeds, themes, image decoding and caches, the font folder scan, PDF/A and PDF/UA paths, math
+tables. Compiled at `-Os` the same functions are about 83 KB (`DecodeImageBytes` 9.8 -> 5.5 KB,
+`PdfImage`'s move 4.2 -> 0.4 KB, `BuildBookPdf` 3.1 -> 1.3 KB), plus 25 KB of functions `-Os`
+inlines elsewhere: an estimated 30 to 50 KB off both platforms. Agreed form: an attribute on whole
+cold functions only (cold, noinline, `optimize("Os")`), checked for GCC 11, with `symdiff.py` on
+the hot functions and the `ab.sh` gate; not measured yet. Image decoding and math tables are per
+pixel and per cell: keep them out.
 
 **`std::filesystem` out of the build (size).** MinGW's libstdc++.a has no per-function
 sections, and its `fs_path.o` and `fs_ops.o` pull the codecvt facets, the locale's
@@ -994,9 +1136,9 @@ artifact before its TD: two marked-content sequences a cell, and the table fixtu
 takes 2.1 times its `--pdfa` time. Borders first, one artifact a row, would halve
 them, at a change of `RenderTable`'s loop that untagged documents must not pay for.
 
-**`BuildInto` moves every page's content once.** 2.6 to 4.7 % of a warm build.
-Placing content where it ends up needs another object order, which changes the
-bytes.
+**`BuildInto` moves every page's content once.** Done for repeated builds in round four
+(`LeaveGaps`, above). A first export, or one whose objects between pages changed length,
+still moves the pages after the change.
 
 **The ASCII word loop.** Done in round 2 (`MeasureWords`, above). Left: texts under 16 bytes
 keep the byte loop, and `WrapAsciiInline` still parses, builds segments and copies run text per
@@ -1021,10 +1163,14 @@ and `WrapMathCell`, the parser's 0xE2, '$' and "\("). A byte loop for the parser
 (below); one SSE2 pass a row giving its pipes as bits, and the formula byte known from the parse,
 are left.
 
-**`BuildInto`'s move of the page content (2026-10-19).** 5.4 % of README's and 5.8 % of
-code-heavy's instructions (backward 4-vector loops of `memmove`, bandwidth-bound): any layout that
-renders the content where it ends up needs the size of every object before it, which the
-annotations and images decide after layout.
+**Formulas at `-O2` (2026-10-19).** `math_parser.cpp` and `math_layout.cpp` are built at `-Os`.
+Both at `-O2`: tester-noimg -6.1 % instructions and -13.6 % time (ab.sh), other fixtures unchanged,
+for +52 KB of text (layout alone -3.4 % and -8.4 % for +33 KB, the parser alone -2.7 % and -4.2 %
+for +19 KB). Math is about a fifth of a build of `tester.md`, the GUI's test document. Not taken
+in round four: a size decision.
+
+**`BuildInto`'s move of the page content (2026-10-19).** Taken in round four for builds
+that follow one of the same layout on their thread (`LeaveGaps`).
 
 **Keeping the header row's wrapped cells.** A table that breaks wraps its header
 row again (about 0.3 % of the table fixture's 1.7 %); keeping them needs a second
@@ -1052,6 +1198,16 @@ Text and layout:
   divisions run once a table): table-heavy -0.5 % instructions, cycles even (median +0.8 %, min
   -0.2 %, 31 runs); the divisions overlap the work around them. `AsciiSegment` written in place
   instead of an aggregate copied from the stack: essay -0.02 % instructions, cycles even.
+- Round 4 (opt4/hot4, 2026-10-19): `UsedCidSet`'s plain bits as a 64 KB byte map (`IsPlain` one
+  load, no shift and `bt`): instructions README -2.1 %, code-heavy -4.0 %, table-heavy -1.5 %,
+  polish -1.6 %, but aligned cycles README +0.0 %, code-heavy -0.1 %, table-heavy -0.8 %,
+  tester-noimg +0.4 % (paired, 15 runs), the set 16 to 72 KB: `WriteCidText` is bound by the
+  stores and the loop's exit, not the test. Table rows split by one SSE2 pass each (the pipes as
+  16-bit masks, flags for '\\', '$' and the math text bytes or '&', so math tables skip
+  `EraseMathTextBytes`): 4 K fewer `memchr` calls a table-heavy build, but the pass costs more
+  (instructions table-heavy +0.8 %, README +0.9 %, notes +1.0 %; aligned cycles table-heavy
+  -0.1 %, README +0.8 %, notes +0.9 %); `SplitTableRowRaw` went out of line and `ClassifyLine`
+  lost 136 bytes of inlining.
 - Round 3, continued (opt3/next, 2026-10-19): the line classes in a vector `resize`d first, then
   classified into each slot: +0.02 to +0.25 % instructions (the fill loop); emplacing each slot is
   kept. The paragraph tests' pass without telling the parser about 0xE2 (`maySymbols`): essay
@@ -1220,6 +1376,23 @@ Binary size (2026-10-19):
 - Not measured, excluded by their requirements: `-Oz` for the `-Os` units (GCC 12 or newer; the
   release runners' GCC 11 rejects it) and `-z pack-relative-relocs` (DT_RELR, most of the 11 KB
   of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release runs on).
+- UCRT's own `strtod` for the page size and margin options on MinGW UCRT builds (round 4,
+  2026-10-19): libstdc++ makes `strtod` libmingwex's `__mingw_strtod` (its gdtoa), 18,944 bytes of
+  a UCRT-linked `rayomd.exe`. mingw-w64's headers call UCRT's conforming to C99, but Wine's
+  ucrtbase reads no hexadecimal (`0x10x0x20in` became an error), and whether Microsoft's rounds
+  every long decimal as gdtoa does could not be checked here: a page size could then change a PDF.
+- Linkers with identical code folding (round 4, 2026-10-19; GCC 13 and 11, dynamic): gold
+  (binutils 2.42) has no `INSERT` for `src/hot.ld` and keeps the unwind tables `no_unwind.ld`
+  drops, 1,276,952 bytes against bfd's 1,264,280; its `--icf=safe` and `--icf=all` -16,384 from
+  there, and gold is deprecated upstream. lld 14 (GCC 11): `--icf=safe` folds nothing (GCC emits
+  no address-significance tables), `--icf=all` -14,944, with `hot.ld` and `no_unwind.ld`
+  1,255,576 against bfd's 1,272,408, but `all` may fold functions whose addresses are compared.
+  The release links with GNU ld; not switched.
+
+Considered and declined for security (round 4, 2026-10-19; RayoMD reads untrusted Markdown, SVG,
+PNG and fonts): Ubuntu's GCC hardening defaults stay. `-fno-stack-protector` (canaries in 715
+functions) would take 32,768 bytes off the dynamic GCC 13 binary, `-fcf-protection=return` (no
+IBT `endbr64`, SHSTK marking kept) 8,264.
 
 Note embeds and linked notes (2026-10-19; per embed against the same text inline, perf stat,
 100 embeds of small notes: warm 10.2 K instructions and 4.9 µs before the process's note cache,

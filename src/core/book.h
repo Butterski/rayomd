@@ -34,7 +34,9 @@ struct BookFiles {
 // it first, as mdBook prints it. The book has a table of contents with `options.toc`, or where the
 // first file with a "[TOC]" paragraph has it, listing `options.tocDepth` levels (BookContents);
 // each file has the page breaks of `options.pageBreakBeforeLevel` (BreakBeforeHeadings). Stops at
-// the next file once `options.cancel` is set, the build then abandoned.
+// the next file once `options.cancel` is set, the build then abandoned. From 256 KiB of text the
+// files are parsed on up to six threads (one a CPU the process may run on), each under this
+// thread's dialect and character references; the result is the same.
 void ParseBookFiles(const std::vector<BookChapter>& chapters, const std::vector<std::string>& texts,
     const std::vector<std::string>& titles, const PdfOptions& options, BookFiles& files);
 

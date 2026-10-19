@@ -1634,6 +1634,10 @@ WinAnsiReferences::~WinAnsiReferences() {
     tWinAnsiReferences = previous;
 }
 
+bool WinAnsiReferences::Active() {
+    return tWinAnsiReferences;
+}
+
 FootnoteLabels::FootnoteLabels(const std::unordered_map<std::string, int>& numbers)
     : previous(tFootnoteLabels), previousBytes(tFootnoteLabelBytes) {
     size_t longest = 0;
@@ -1738,7 +1742,11 @@ std::string ResolveReferenceLinks(std::string_view input, const ReferenceDefinit
         bool image = input[i] == '!' && i + 1 < input.size() && input[i + 1] == '[';
         if (image) labelStart++;
         if (input[labelStart] != '[') {
-            output.push_back(input[i++]);
+            // This byte starts nothing, nor do those up to the next that may be syntax ('\\',
+            // '`', "![" and '[' among them): copied as one run, not a push_back each.
+            const size_t next = RayoMd::Text::FindByteClass<RayoMd::Text::kByteInlineSyntax>(input, i + 1);
+            output.append(input.data() + i, next - i);
+            i = next;
             continue;
         }
         size_t close = nextCloseBracket(labelBracket, labelStart + 1);

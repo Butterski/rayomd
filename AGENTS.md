@@ -286,6 +286,21 @@ theme's cover, y down from the page's top edge). The parser stamps the lines at 
 blocks (the `--toc` table, a book's titles), nested ones and footnotes have no entry, and books
 never fill it. The hooks only read layout state: the PDF bytes are the same with or without a
 map (`CheckSourceMap`).
+`TinyPdf::BuildSession` (rayomd-gui's preview on every edit; `src/core/build_session.h` and `.cpp`,
+design and numbers in `docs/development/incremental_builds.md`) gives the bytes, result and source map
+`BuildPdf` gives and takes the layout of the top-level blocks an edit left alone from its last build:
+a build of a session is `BuildPdf` with the session set for the thread (`CurrentLayoutSession`); the
+builders lay its blocks out one at a time (`SessionAccess::Render`, `RenderBlockRange`, reached
+through `SessionCalls`; compiled only with `RAYOMD_BUILD_SESSION`, which the engine library and the core
+tests set and the command lines do not, so they carry none of it), note the renderer's state before each
+(`LayoutMark`) and replay a run of blocks equal to the last build's from the same state (page content,
+pages, links, headings, anchors, contents lines, source map entries, CIDs and formula glyphs). A new
+piece of renderer state that a later block reads goes into `LayoutMark` and `SessionAccess` (compared
+where a run starts, set where it ends), a new field of `Block` into `SameBlock`, a new option into
+`SameOptions` (static_asserts on their sizes catch it); anything that a block's page content depends
+on beyond its block and that state (as footnote numbers, image names, PDF/UA's tags) must make the
+session lay those blocks out, or the whole document. Ordinary builds pay one test of the thread's
+session per build. Core check 137 (`tests/session_tests.inc`) compares random edits built both ways.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
@@ -472,6 +487,13 @@ Important image/link details:
 
 - `src/core/embeds.h` and `src/core/embeds.cpp`
   Obsidian's note embeds: reading them (`ResolveEmbeds`, bounded in count, depth, bytes read and
+
+- `src/core/build_session.h` and `src/core/build_session.cpp`
+  `BuildSession`: the tape of the last build (blocks, marks, page content, the renderer's marks and
+  sets), the blocks compared with it (`SameBlock`, runs of one shift without images), runs replayed
+  into the renderer, options compared (`SameOptions`). The renderers' side (`SessionAccess`) is in
+  `tiny_pdf.cpp`, reached through `SessionCalls`; both only with `RAYOMD_BUILD_SESSION` (the
+  `rayomd_engine` library and the core tests). Built at `-Os`; checked by `tests/session_tests.inc`.
   scanned, lookups), the build's `EmbedScope`, and splicing their blocks into the parse
   (`ParseWithEmbeds`, `SpliceEmbeds`). Built at `-Os`; checked by `tests/embeds_tests.inc`
   (core test exits 130, embeds, and 131, linked notes and backlinks).
@@ -485,6 +507,11 @@ Important image/link details:
   what one document may have (`kMaxBookBytes`), and a SUMMARY.md that lists a file again under
   any name (a link, letter case, `x/../`) is refused: files are told apart by their identity
   (`RayoMd::File::FileIdentity`, device and inode or volume and file index), not their names.
+  From 256 KiB of text `ParseBookFiles` parses the files on up to six threads (`ForEachBookFile`,
+  one a usable CPU), each helper under the calling thread's dialect, hidden tags and WinAnsi
+  character references (`WinAnsiReferences::Active`); a new thread-local the parser reads must be
+  handed to them there too, or a large book parses differently from a small one (`CheckBook`,
+  core check 96, builds a 400 KB book with references and Obsidian's syntax on all CPUs and on one).
 
 - `src/core/print_colors.h` and `src/core/print_colors.cpp`
   `--black-text`'s rewrite of finished content (`PrintColors`): 64 bytes a step in AVX2 (two
@@ -698,8 +725,12 @@ Important image/link details:
   What both command lines share for batch export: the JSON Lines report (one
   line per document, written by the worker that finished it), the up-to-date
   check behind `--skip-unchanged` (PDF newer than its Markdown and ending in
-  `%%EOF`) and the recursive collection behind `--recursive` (sorted by name as indices: a sort
-  of the files themselves, two paths each, was 20 KB of code).
+  `%%EOF`), the recursive collection behind `--recursive` (sorted by name as indices: a sort
+  of the files themselves, two paths each, was 20 KB of code) and the workers (`RunJobs`: one a
+  usable CPU, at most 6, unless `--workers`; they take the inputs' sizes for the 16/64 MiB limits
+  between them before they build). Keep per-file work off the thread that starts them: three stats
+  a file there were 16 ms before the first build of 2,000 notes. Output folders are made once a
+  run of their files.
 
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single
@@ -708,18 +739,29 @@ Important image/link details:
   runs once a run (`--bench` and `--serve` only call the engine in their loops).
 
 - `src/cli/terminate.cpp`
-  Both command lines' terminate handler in place of libstdc++'s (whose demangler is 61 KB):
-  the same message with the exception's type as the ABI names it (`St9bad_alloc`), then
-  `abort()`. Not part of the engine library.
+  The terminate handler in place of libstdc++'s (whose demangler is 61 KB) where `no_unwind.cpp`
+  is not linked (the static Linux build, Debug builds): the same message with the exception's
+  type as the ABI names it (`St9bad_alloc`), then `abort()`. Not part of the engine library.
+
+- `src/cli/std_throws.cpp`
+  The release CLIs' `std::__throw_*` functions (Linux and MinGW): the error libstdc++ would throw
+  is reported as the terminate handler reported it and the process aborts. libstdc++ defines them
+  all in one archive member, which links the exception classes, the copy-on-write string of their
+  `what()` and `std::system_error`'s categories (45 KB of `rayomd.exe`, 6 KB on Linux). Every one
+  the program refers to must be defined there: a missing one links the member, and the link then
+  fails on the duplicate definitions.
 
 - `src/cli/no_unwind.cpp` and `src/cli/no_unwind.ld`
-  The dynamic Linux release CLI's exception runtime: `__cxa_throw` prints the terminate
-  message and aborts, so libgcc's unwinder, the personality routine and the emergency exception
-  pool (a 73 KB allocation at every start) are never linked, and the linker script drops the
-  unwind and exception tables nothing reads then (58 KB in all). The nothrow `operator new`
-  is its own (malloc and the new-handler, null when both fail; libstdc++'s caught a throw).
-  Release builds only, as only they compile without exceptions; not the static build, whose
-  libc.a links the unwinder for thread cancellation, nor the engine library.
+  The exception runtime of the dynamic Linux and the MinGW release CLIs: `__cxa_throw` prints
+  the terminate message and aborts, so libgcc's unwinder, the personality routine (`_v0`, on
+  MinGW `_seh0`) and the emergency exception pool (a 73 KB allocation at every start) are never
+  linked, and on Linux the linker script drops the unwind and exception tables nothing reads then
+  (58 KB in all). Its terminate handler takes `terminate.cpp`'s place (no exception is ever
+  active). The nothrow `operator new` is its own (malloc and the new-handler, null when both
+  fail; libstdc++'s caught a throw). Release builds only, as only they compile without
+  exceptions; not the static Linux build, whose libc.a links the unwinder for thread
+  cancellation, nor the engine library. Windows keeps its SEH tables (`.pdata`, `.xdata`): the
+  x64 ABI requires them of every function that calls or saves registers.
 
 - `src/win32/main_windows_cli.cpp`
   The Windows CLI: wide paths, `CommandLineToArgvW`, a console program. Its modes mirror
@@ -731,6 +773,13 @@ Important image/link details:
   System DLLs loaded on first use in GNU and Clang builds: `delay_load.cpp` for
   `CommandLineToArgvW`; `delay_image_*.cpp` for the engine's own Windows imports (OLE,
   Winsock, WinHTTP), which are also linked into `rayomd_engine`.
+
+- `src/win32/string_instances.cpp`
+  The `std::string`/`std::wstring` members the MinGW CLI (GCC) calls out of line, instantiated one
+  by one: GNU ld keeps every PE function that has SEH unwind data, so libstdc++'s whole
+  `string-inst.o` and `wstring-inst.o` were linked for the first member called (32 KB). A member
+  not listed links them again without an error; `performance.md` ("Regression and size gate") has
+  the command that lists what the objects call.
 
 - `src/win32/rayomd.rc`
   Windows manifest and app icon resources. Keep resource changes localized here.
@@ -926,14 +975,20 @@ GitHub CI entry points:
   starts 0.6 ms sooner and warm builds run 5 % faster than with `libstdc++.so`. Keep
   iostreams (`<iostream>`, `<fstream>`, `<sstream>`) out of the CLI and the core: they
   pull about 460 KB of locale and stream code into that build. Use `RayoMd::File` and
-  C stdio.
+  C stdio, without the printf family (`snprintf`, `swprintf`, `fprintf`) in code the Windows build
+  links: libstdc++ makes them MinGW's own formatter and gdtoa (30 KB of `rayomd.exe`); write
+  numbers with `std::to_chars` or by hand (`std::to_string` and `to_chars` for integers are
+  header code). `strtod` links MinGW's too (gdtoa's parser, 17 KB): it is in `export_options.cpp`
+  only.
 - Release builds compile without exceptions and RTTI on Windows and Linux, on Linux also without
   unwind tables (221 KB of the 1.74 MB binary): never write `try`, `catch`, `throw`,
   `dynamic_cast` or `typeid`. An
   exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before: in the
-  dynamic Linux release at the throw, without unwinding (`src/cli/no_unwind.cpp`), elsewhere
-  through the command lines' own terminate handler (`src/cli/terminate.cpp`, the only
-  `-fexceptions` file; libstdc++'s links the C++ demangler, 61 KB). A call-graph profile with
+  release command lines where it is made (`src/cli/std_throws.cpp` for libstdc++'s
+  `std::__throw_*`, `src/cli/no_unwind.cpp`'s `__cxa_throw` for the rest, dynamic Linux and MinGW),
+  in the static Linux build through the command lines' own terminate handler
+  (`src/cli/terminate.cpp`, the only `-fexceptions` file; libstdc++'s links the C++ demangler,
+  61 KB). A call-graph profile with
   `perf --call-graph=dwarf` needs a build with `-fasynchronous-unwind-tables`, and without
   `src/cli/no_unwind.ld`, which drops the unwind tables of the dynamic release.
 - Fonts are mapped read-only (`FileBytes`); read font data in place instead of copying
@@ -969,7 +1024,14 @@ GitHub CI entry points:
 - Page content is rendered straight into the caller's output buffer and
   `PdfObjects::BuildInto` assembles the file in place around it. Do not go back
   to one string per page: allocating and freeing those buffers cost 7-15 % of a
-  warm build on Windows.
+  warm build on Windows. Each page's content starts after a gap (`NewPage`'s
+  `StartPageContent`): what the thread's last build put before it (`PdfObjects::LeaveGaps`,
+  off for `--black-text` and `--compress`), so a build of the same layout moves no content;
+  `pageStarts[k]` is where page k's content starts, and page k ends at `pageStarts[k + 1]`
+  less `PageGapBefore(k + 1)`, not at the next start. Code that reads the content between
+  pages must take the gap out or turn the gaps off; the gap's last byte is the byte the page
+  would follow without it (PDF/UA's `StructTree::NewLine` reads it). Core check 62 builds
+  every option profile on a warm thread against a new one.
 - Paragraph text is parsed and wrapped as flat runs (`InlineRuns`, `AsciiRuns`,
   `StyledRuns`): one text buffer per paragraph, reused from paragraph to
   paragraph. Keep a string or vector per span, word, or line off these paths.
