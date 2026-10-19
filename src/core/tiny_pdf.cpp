@@ -1757,9 +1757,13 @@ public:
     }
     void MarkPlain(uint16_t unit) { plain[unit >> 6] |= 1ull << (unit & 63); }
 
+    // The recorded CIDs in ascending order. From kSortFromBits of them on, they are read off the
+    // bits in order (1,024 words, a few instructions each, and one store a CID) instead of sorted:
+    // a page of CJK text has thousands, which std::sort took 1.4 M instructions for.
     const CidList& Values() const {
         if (!sorted) {
-            std::sort(values.begin(), values.end());
+            if (values.size() < kSortFromBits) std::sort(values.begin(), values.end());
+            else ValuesFromBits();
             sorted = true;
         }
         return values;
@@ -1788,6 +1792,18 @@ public:
     uint32_t missingBmp = 0;
 
 private:
+    static constexpr size_t kSortFromBits = 256;
+
+    // `values` rewritten in ascending order from `bits`, which hold exactly its CIDs.
+    RAYOMD_NOINLINE void ValuesFromBits() const {
+        uint16_t* out = values.data();
+        for (uint32_t word = 0; word < bits.size(); word++) {
+            for (uint64_t set = bits[word]; set != 0; set &= set - 1) {
+                *out++ = (uint16_t)(word * 64 + RayoMd::Text::Detail::LowestBit64(set));
+            }
+        }
+    }
+
     std::array<uint64_t, 1024> bits;
     std::array<uint64_t, 1024> plain;
     mutable CidList values;
