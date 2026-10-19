@@ -178,14 +178,22 @@ std::wstring MakeTempSiblingPath(const std::wstring& path, const wchar_t* finalE
 
     static std::atomic<unsigned long> counter{0};
     unsigned long id = counter.fetch_add(1, std::memory_order_relaxed);
-    wchar_t suffix[128];
-    swprintf(suffix, 128, L".rayomd-%lu-%lu-%lu-%llu%s",
-        (unsigned long)GetCurrentProcessId(),
-        (unsigned long)GetCurrentThreadId(),
-        id,
-        (unsigned long long)GetTickCount64(),
-        finalExtension ? finalExtension : L".tmp");
-    return dir + L"." + filename + suffix;
+    // ".rayomd-PID-TID-ID-TICKS" and the extension, digits by hand: swprintf links MinGW's printf.
+    std::wstring name = dir + L"." + filename + L".rayomd";
+    for (unsigned long long value : { (unsigned long long)GetCurrentProcessId(),
+             (unsigned long long)GetCurrentThreadId(), (unsigned long long)id,
+             (unsigned long long)GetTickCount64() }) {
+        wchar_t digits[20];
+        size_t count = 0;
+        do {
+            digits[count++] = static_cast<wchar_t>(L'0' + value % 10);
+            value /= 10;
+        } while (value != 0);
+        name += L'-';
+        while (count != 0) name += digits[--count];
+    }
+    name += finalExtension ? finalExtension : L".tmp";
+    return name;
 }
 
 bool WriteBinaryTempFile(const std::wstring& tempPath, const std::string& content) {

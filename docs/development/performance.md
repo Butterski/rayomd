@@ -60,6 +60,10 @@ fixture.
   instantiations of the members the program calls: `rayomd.exe` -31,744. With a gc that drops
   unreferenced functions with their unwind data, `rayomd.exe` would hold 30 KB less code, nearly
   all of it those members (measured with `.pdata` and `.xdata` discarded).
+- **No printf on MinGW**: libstdc++ makes MinGW's `snprintf` and `swprintf` libmingwex's own
+  (`__mingw_pformat`, with gdtoa for `%f`); the batch report's numbers (an exact `%.3f`,
+  `AppendThousandths`, the same text as glibc's and MinGW's printf on 6.6 million doubles), the
+  temporary file's name and a URL's port are written by hand. `rayomd.exe` -30,208.
 
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
@@ -1250,6 +1254,11 @@ Binary size (2026-10-19):
 - Not measured, excluded by their requirements: `-Oz` for the `-Os` units (GCC 12 or newer; the
   release runners' GCC 11 rejects it) and `-z pack-relative-relocs` (DT_RELR, most of the 11 KB
   of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release runs on).
+- UCRT's own `strtod` for the page size and margin options on MinGW UCRT builds (round 4,
+  2026-10-19): libstdc++ makes `strtod` libmingwex's `__mingw_strtod` (its gdtoa), 18,944 bytes of
+  a UCRT-linked `rayomd.exe`. mingw-w64's headers call UCRT's conforming to C99, but Wine's
+  ucrtbase reads no hexadecimal (`0x10x0x20in` became an error), and whether Microsoft's rounds
+  every long decimal as gdtoa does could not be checked here: a page size could then change a PDF.
 
 Note embeds and linked notes (2026-10-19; per embed against the same text inline, perf stat,
 100 embeds of small notes: warm 10.2 K instructions and 4.9 µs before the process's note cache,

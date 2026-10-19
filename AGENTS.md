@@ -944,7 +944,11 @@ GitHub CI entry points:
   starts 0.6 ms sooner and warm builds run 5 % faster than with `libstdc++.so`. Keep
   iostreams (`<iostream>`, `<fstream>`, `<sstream>`) out of the CLI and the core: they
   pull about 460 KB of locale and stream code into that build. Use `RayoMd::File` and
-  C stdio.
+  C stdio, without the printf family (`snprintf`, `swprintf`, `fprintf`) in code the Windows build
+  links: libstdc++ makes them MinGW's own formatter and gdtoa (30 KB of `rayomd.exe`); write
+  numbers with `std::to_chars` or by hand (`std::to_string` and `to_chars` for integers are
+  header code). `strtod` links MinGW's too (gdtoa's parser, 17 KB): it is in `export_options.cpp`
+  only.
 - Release builds compile without exceptions and RTTI on Windows and Linux, on Linux also without
   unwind tables (221 KB of the 1.74 MB binary): never write `try`, `catch`, `throw`,
   `dynamic_cast` or `typeid`. An

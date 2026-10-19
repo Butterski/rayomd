@@ -6,9 +6,78 @@
 #include "text_utils.h"
 
 #include <algorithm>
+#include <charconv>
+#include <cstdint>
+#include <cstring>
 #include <string_view>
+#include <vector>
 
 namespace RayoMd::Batch {
+
+namespace {
+
+void AppendNumber(std::string& out, unsigned long long value) {
+    char digits[20];
+    out.append(digits, static_cast<size_t>(std::to_chars(digits, digits + sizeof(digits), value).ptr - digits));
+}
+
+// printf's "%.3f", without printf (which links MinGW's pformat and gdtoa): the double's exact
+// value rounded to thousandths, ties to even.
+void AppendThousandths(std::string& out, double value) {
+    uint64_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    if (bits >> 63) out += '-';
+    const int biased = static_cast<int>((bits >> 52) & 0x7FF);
+    uint64_t mantissa = bits & ((uint64_t(1) << 52) - 1);
+    if (biased == 0x7FF) {
+        out += mantissa ? "nan" : "inf";
+        return;
+    }
+    if (biased != 0) mantissa |= uint64_t(1) << 52;
+    const int exponent = (biased != 0 ? biased : 1) - 1075;  // value = mantissa * 2^exponent
+    if (exponent >= 0) {
+        // An integer of 16 digits or more: mantissa * 2^exponent in base-10^9 limbs, low first.
+        std::vector<uint64_t> limbs{ mantissa % 1000000000, mantissa / 1000000000 % 1000000000,
+                                     mantissa / 1000000000000000000 };
+        for (int left = exponent; left > 0; left -= 30) {
+            const int shift = std::min(left, 30);
+            uint64_t carry = 0;
+            for (uint64_t& limb : limbs) {
+                const uint64_t product = (limb << shift) + carry;
+                limb = product % 1000000000;
+                carry = product / 1000000000;
+            }
+            if (carry != 0) limbs.push_back(carry);
+        }
+        while (limbs.size() > 1 && limbs.back() == 0) limbs.pop_back();
+        AppendNumber(out, limbs.back());
+        for (size_t i = limbs.size() - 1; i-- > 0;) {
+            char digits[9];
+            for (int d = 8; d >= 0; --d, limbs[i] /= 10) digits[d] = static_cast<char>('0' + limbs[i] % 10);
+            out.append(digits, 9);
+        }
+        out += ".000";
+        return;
+    }
+    // mantissa * 1000 < 2^63: the thousandths are its quotient by 2^-exponent, rounded.
+    const uint64_t scaled = mantissa * 1000;
+    const int shift = -exponent;
+    uint64_t thousandths = 0;
+    if (shift < 64) {
+        thousandths = scaled >> shift;
+        const uint64_t rest = scaled & ((uint64_t(1) << shift) - 1);
+        const uint64_t half = uint64_t(1) << (shift - 1);
+        if (rest > half || (rest == half && (thousandths & 1) != 0)) ++thousandths;
+    }
+    AppendNumber(out, thousandths / 1000);
+    const unsigned fraction = static_cast<unsigned>(thousandths % 1000);
+    out += '.';
+    out += static_cast<char>('0' + fraction / 100);
+    out += static_cast<char>('0' + fraction / 10 % 10);
+    out += static_cast<char>('0' + fraction % 10);
+}
+
+} // namespace
 
 Report::~Report() {
     Close();
@@ -45,12 +114,17 @@ void Report::Write(const Record& record) {
         AppendJsonString(line, record.error);
         line += '"';
     }
-    char numbers[160];
-    std::snprintf(numbers, sizeof(numbers),
-        ",\"pages\":%u,\"bytes\":%llu,\"ms\":%.3f,\"missing_characters\":%u,\"failed_images\":%u}\n",
-        record.pages, static_cast<unsigned long long>(record.bytes), record.milliseconds, record.missingCharacters,
-        record.failedImages);
-    line += numbers;
+    line += ",\"pages\":";
+    AppendNumber(line, record.pages);
+    line += ",\"bytes\":";
+    AppendNumber(line, static_cast<unsigned long long>(record.bytes));
+    line += ",\"ms\":";
+    AppendThousandths(line, record.milliseconds);
+    line += ",\"missing_characters\":";
+    AppendNumber(line, record.missingCharacters);
+    line += ",\"failed_images\":";
+    AppendNumber(line, record.failedImages);
+    line += "}\n";
 
     std::lock_guard<std::mutex> lock(mutex);
     if (!file) return;
