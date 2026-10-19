@@ -1247,6 +1247,26 @@ bool CheckEditedMedia() {
         if (!ok) std::cerr << "an image behind a folder link that changed was not resolved again" << std::endl;
     }
 #endif
+    // A theme's logo rewritten between two builds, as an image of the document.
+    if (ok) {
+        const auto withLogo = [&](const fs::path& logo, std::string& pdf) {
+            TinyPdf::PdfOptions options;
+            options.sourcePath = (root / "doc.md").u8string();
+            options.theme.logoPath = logo.u8string();
+            options.theme.headerLeft = "{title}";
+            const TinyPdf::BuildResult result = TinyPdf::BuildPdf("# Logo\n\nText.\n", options, pdf);
+            return result.Ok() && result.failedImages == 0;
+        };
+        std::string expected[2], built[2];
+        for (int version = 0; version < 2 && ok; version++) {
+            const fs::path unseen = root / ("logo-fresh" + std::to_string(version) + ".png");
+            ok = WriteFile(unseen, pngs[version]) && withLogo(unseen, expected[version]) &&
+                WriteFile(root / "logo.png", pngs[version]) && withLogo(root / "logo.png", built[version]) &&
+                built[version] == expected[version];
+        }
+        ok = ok && built[0] != built[1];
+        if (!ok) std::cerr << "a theme's logo that changed was not read again" << std::endl;
+    }
     fs::remove_all(root);
     return ok;
 }

@@ -338,7 +338,8 @@ Important image/link details:
   (`KeptImagePath` in `vault.cpp`, at most 4,096): a later build resolves it with one `stat`, whose
   stamp the image caches then take, instead of `realpath`'s one call a path component and a
   `stat`. Only the same file (size, times, device and inode) keeps the answer: a file that
-  changed, moved, or that the path now reaches through another link is resolved again.
+  changed, moved, or that the path now reaches through another link is resolved again. A theme's
+  logo is kept the same way by its absolute path (no root). Keep new caching of files on this rule.
 - URL images are controlled by `BuildOptions::enableUrlImages`.
 - Windows image support uses WinHTTP/WIC through the Win32 build. WIC sees only PNG and JPEG
   files (by their magic bytes) that RayoMD's own readers reject, once, through Microsoft's own

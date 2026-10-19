@@ -4337,6 +4337,7 @@ public:
     // be read or decoded.
     RAYOMD_COLD bool ResolveThemeFile(const std::string& pathUtf8, int& index) {
         RayoMd::File::Path normalized;
+        RayoMd::File::Stamp stamp;
 #ifdef _WIN32
         // Theme assets are local files: a UNC, device or network-drive path is refused before
         // anything opens it, so a theme cannot make the build connect to a share.
@@ -4344,18 +4345,34 @@ public:
             failed++;
             return false;
         }
-#endif
         if (!TryCanonicalForPolicy(PathFromUtf8(pathUtf8), normalized)) {
             failed++;
             return false;
         }
+        stamp = RayoMd::File::StampOf(normalized);
+#else
+        // Resolved with one stat while it is the file resolved before (Internal::KeptImagePath, no root).
+        RayoMd::File::Path absolute;
+        if (!RayoMd::File::Absolute(PathFromUtf8(pathUtf8), absolute)) {
+            failed++;
+            return false;
+        }
+        normalized = Internal::KeptImagePath(absolute, {}, stamp);
+        if (normalized.empty()) {
+            if (!TryCanonicalForPolicy(absolute, normalized)) {
+                failed++;
+                return false;
+            }
+            stamp = RayoMd::File::StampOf(normalized);
+            Internal::KeepImagePath(absolute, {}, normalized, stamp);
+        }
+#endif
         const std::string key = "file:" + PathToUtf8(normalized);
         auto known = indexByKey.find(key);
         if (known != indexByKey.end()) {
             index = known->second;
             return true;
         }
-        const RayoMd::File::Stamp stamp = RayoMd::File::StampOf(normalized);
         std::string keyStorage;
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
         if (sharedImage && !budget.Take(sharedImage->decodedPixels)) {
