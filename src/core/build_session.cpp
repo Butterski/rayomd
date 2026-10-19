@@ -92,6 +92,7 @@ const char* Relocate(std::string_view text, const Block& from, const Block& to) 
 
 // Whether `cids` holds the first `count` CIDs of `recorded`, another build's.
 bool Covers(const LayoutCids& cids, const std::vector<uint16_t>& recorded, size_t count) {
+    if (count == 0) return true;
     const std::vector<uint16_t>& own = cids.recorded(cids.set);
     // As a rule both builds recorded the same CIDs in the same order up to here.
     if (own.size() >= count && std::memcmp(own.data(), recorded.data(), count * sizeof(uint16_t)) == 0) return true;

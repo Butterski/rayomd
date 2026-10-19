@@ -185,8 +185,14 @@ public:
     virtual void Forget() = 0;
 };
 
-// The session of the build running on this thread (BuildSession::Build), or null.
+// The session of the build running on this thread (BuildSession::Build), or null. Builds without
+// RAYOMD_BUILD_SESSION (the command lines, CMakeLists.txt) have none: their builders keep no session
+// code at all, as MinGW's linker keeps unused functions.
+#ifdef RAYOMD_BUILD_SESSION
 LayoutSession* CurrentLayoutSession();
+#else
+inline LayoutSession* CurrentLayoutSession() { return nullptr; }
+#endif
 
 } // namespace Internal
 } // namespace TinyPdf

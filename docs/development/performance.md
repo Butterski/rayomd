@@ -49,11 +49,14 @@ byte what `BuildPdf` gives. A letter typed in 700 copies of `tester.md`: 920 M -
 a build, cycles 2.7x fewer (perf, near the start, middle and end alike); a line deleted or a
 paragraph inserted: 2.6x; 50 copies of the essay: 3.3x fewer instructions, 1.4 to 1.6x fewer cycles
 (the parse, a third of what is left, and three memory-bound passes over the page content: replay,
-the tape's copy, `BuildInto`'s move). Ordinary builds: within +0.06 % instructions on every fixture,
-the command line +583 bytes of code. Tried and replaced on the way:
+the tape's copy, `BuildInto`'s move). Ordinary builds: within +0.06 % instructions on every fixture
+with the session compiled in; the command lines, built without it, +80 bytes of code. Tried and
+replaced on the way:
 
 - The session's block loop called directly by the builders: +4.7 KB in the command lines, which
-  never make a session; behind `SessionCalls`, which only `BuildSession` fetches, +0.6 KB.
+  never make a session; behind `SessionCalls`, which only `BuildSession` fetches, +0.6 KB on Linux,
+  but +24 KB in rayomd.exe (MinGW's linker kept the unused functions); now compiled only into the
+  engine library and the tests (`RAYOMD_BUILD_SESSION`).
 - Heading and anchor marks moved to the new blocks by finding their text in the old blocks: a cache
   miss a heading on the old (cold) blocks, 3 % of an essay's session build; the tape now notes each
   mark's block and offset while the blocks are warm.

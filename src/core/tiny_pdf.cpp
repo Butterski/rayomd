@@ -13392,10 +13392,12 @@ RAYOMD_COLD static std::vector<std::vector<int>> AddBookLinkAnnotations(PdfObjec
     return AddLinkAnnotationObjects(pdf, links, winAnsi, targets, internalLinks, print);
 }
 
+#ifdef RAYOMD_BUILD_SESSION
 // BuildSession (build_session.h): a document laid out a top-level block at a time, the renderer's
 // state before each noted (LayoutSession::Mark), and each run of blocks that the session's last
 // build laid out from the same state taken from its tape instead of being laid out (Replay). Cold:
-// only the builds of a session come here.
+// only the builds of a session come here, and only builds with RAYOMD_BUILD_SESSION (the engine
+// library and the tests, not the command lines) compile it.
 RAYOMD_COLD static bool SessionHasCid(const void* set, uint16_t cid) {
     return static_cast<const UsedCidSet*>(set)->Has(cid);
 }
@@ -13553,12 +13555,13 @@ struct SessionAccess {
     }
 };
 
-// Only a BuildSession asks for these (build_session.cpp), so only its executables have them.
+// Only a BuildSession asks for these (build_session.cpp).
 RAYOMD_COLD Internal::SessionCalls Internal::SessionRendererCalls() {
     return { { SessionAccess<StandardRenderer>::RenderAny, SessionAccess<Renderer>::RenderAny },
         { SessionAccess<StandardRenderer>::EndLayout, SessionAccess<Renderer>::EndLayout },
         { SessionAccess<StandardRenderer>::Commit, SessionAccess<Renderer>::Commit } };
 }
+#endif
 
 // Page content is rendered straight into the output buffer. A buffer the caller reuses
 // keeps its capacity; a new one starts at the size a document of this length usually

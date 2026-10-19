@@ -71,8 +71,9 @@ A `BuildSession` holds a tape of its last successful build. A build in a session
 with the session set for the thread (`Internal::CurrentLayoutSession`), so every other step of a
 build (the embeds, the font choice, a fallback font's probe and second build, the cancel flag,
 the assembly) is the one `BuildPdf` takes. The builders lay a session's blocks out through
-`SessionCalls` (`SessionRendererCalls`, which only `BuildSession` asks for: the command lines link
-none of it):
+`SessionCalls` (`SessionRendererCalls`, which only `BuildSession` asks for). All of it is compiled only
+with `RAYOMD_BUILD_SESSION`, which the `rayomd_engine` library and the core tests set: the command lines
+make no session and carry none of it (unused, MinGW's linker kept 24 KB of it in `rayomd.exe`).
 
 1. **Parse** the whole text, as `BuildPdf` does.
 2. **Compare** the blocks with the tape's (`SessionLayout::Begin`, `Same`): the common prefix of
@@ -178,9 +179,10 @@ the blocks 12 %, replays 10 %, old blocks 8 %, outline and annotations 12 %, `Bu
 cycles the copies weigh more than in instructions: the replayed content, the content kept and
 `BuildInto`'s move are three passes over 7 MB (e50) to 25 MB (t700), memory-bound.
 
-Ordinary builds: `ab.sh --instructions` against 5.2.4, every fixture within +0.06 %; the command
-line's code +583 bytes (`RenderBlocks`' loop is `RenderBlockRange`, which a session calls a block at
-a time), the file the same size.
+Ordinary builds: `ab.sh --instructions` against 5.2.4 with the session hooks compiled in (as in the
+engine library), every fixture within +0.06 %. The command line, built without them: code +80 bytes
+(`RenderBlocks`' loop is `RenderBlockRange`, which a session calls a block at a time), the file the
+same size.
 
 ## Next
 
