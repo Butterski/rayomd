@@ -136,9 +136,10 @@ constexpr size_t kDefaultLookaheadBudget = static_cast<size_t>(-1);
 std::vector<InlineSpan> ParseInlineSpans(std::string_view input, bool recognizeMath = true,
     size_t lookaheadBudget = kDefaultLookaheadBudget);
 // The same parse into `out`, which is cleared first and must not hold `input`. The runs,
-// read in order, cover out.text without a gap.
+// read in order, cover out.text without a gap. `maySymbols` false: the caller knows `input` has no
+// 0xE2 (ParagraphRunsTest), so no status symbol is looked for.
 void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath = true,
-    size_t lookaheadBudget = kDefaultLookaheadBudget);
+    size_t lookaheadBudget = kDefaultLookaheadBudget, bool maySymbols = true);
 // StripInlineMarkdown's text (markdown_parser.h) without a copy: a view of `input`, or of
 // `scratch.text`.
 std::string_view StripInlineMarkdownView(std::string_view input, InlineRuns& scratch, bool recognizeMath);
@@ -165,6 +166,14 @@ inline bool NeedsInlineParse(std::string_view text, unsigned char classes = 0, u
     return (seen & RayoMd::Text::kByteAutolinkLead) &&
         (text.find("://") != std::string_view::npos || text.find('@') != std::string_view::npos);
 }
+
+// Whether a paragraph renderer's run paths take `text`, found in one pass (AVX2 where the CPU has
+// it, 32 bytes a step) instead of a search for each: kParagraphGeneral for text with a line feed,
+// a '$' or "\(" (or, with `notes`, a "[^"), which takes the general path; else kParagraphSymbol
+// when it has the 0xE2 of a status symbol (ParseInlineRuns' `maySymbols`), or 0.
+constexpr unsigned kParagraphGeneral = 1;
+constexpr unsigned kParagraphSymbol = 2;
+unsigned ParagraphRunsTest(std::string_view text, bool notes);
 
 // The character reference ("&amp;", "&#169;", "&#xA9;") at text[at]: its length in bytes, with
 // its code point, or 0 when none starts there. The named references are those of HTML 4 and
