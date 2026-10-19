@@ -224,16 +224,17 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # thousands: at -Os GCC copies and zeroes the layout's 64-byte boxes with `rep movs`/`rep stos`,
     # which take tens of cycles to start, and calls every one-line helper. Vector loops for those
     # and inlining up to 12 instructions: tester.md x700 -10.8 % cycles for 9 KB, where -O2 gave
-    # -15.7 % for 52 KB (performance.md, round 5).
+    # -15.7 % for 52 KB. The CFF subsetter interprets every charstring a CJK document shows the
+    # same way: a fresh export of a page of CJK -12.7 % for 2.2 KB (performance.md, round 5).
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         include(CheckCXXCompilerFlag)
         check_cxx_compiler_flag(-mstringop-strategy=vector_loop RAYOMD_HAVE_STRINGOP_STRATEGY)
-        set(math_options -Os --param=max-inline-insns-size=12)
+        set(small_step_options -Os --param=max-inline-insns-size=12)
         if(RAYOMD_HAVE_STRINGOP_STRATEGY)
-            list(APPEND math_options -mstringop-strategy=vector_loop)
+            list(APPEND small_step_options -mstringop-strategy=vector_loop)
         endif()
-        set_source_files_properties(src/core/math_parser.cpp src/core/math_layout.cpp
-            PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:${math_options}>")
+        set_source_files_properties(src/core/math_parser.cpp src/core/math_layout.cpp src/core/cff.cpp
+            PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:${small_step_options}>")
     endif()
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
     # RayoMD's streams at half the code; the inflater, 1.5 % slower than -O3 at 8.9 KB of code
