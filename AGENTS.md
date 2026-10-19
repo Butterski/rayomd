@@ -333,7 +333,13 @@ Important math details (contract: `docs/development/native_math.md`):
 Important image/link details:
 
 - Local image paths are resolved relative to `TinyPdf::BuildOptions::sourcePath`
-  when the caller provides an input file path.
+  when the caller provides an input file path. On POSIX a document's image found inside its root
+  is kept for the process by the joined path and root with the stamp of the file it resolved to
+  (`KeptImagePath` in `vault.cpp`, at most 4,096): a later build resolves it with one `stat`, whose
+  stamp the image caches then take, instead of `realpath`'s one call a path component and a
+  `stat`. Only the same file (size, times, device and inode) keeps the answer: a file that
+  changed, moved, or that the path now reaches through another link is resolved again. A theme's
+  logo is kept the same way by its absolute path (no root). Keep new caching of files on this rule.
 - URL images are controlled by `BuildOptions::enableUrlImages`.
 - Windows image support uses WinHTTP/WIC through the Win32 build. WIC sees only PNG and JPEG
   files (by their magic bytes) that RayoMD's own readers reject, once, through Microsoft's own
@@ -371,12 +377,19 @@ Important image/link details:
   whole conversion.
 - An SVG image (a file or URL) is converted by `src/core/svg.cpp`, without a
   dependency, into a form XObject for each document, as its text uses the
-  document's fonts; such forms never enter the cross-document image cache. Their `data:`
-  images do: decoded once a process and kept by the SHA-256 of their bytes
-  (`ImageRegistry::AddDecoded`), as a preview builds the same SVG on every edit. One
-  that needs what the converter does not draw (HTML, scripts, style sheets it
-  cannot match) or hits a limit shows its alt text. Keep every limit failing
-  closed: SVG input is untrusted.
+  document's fonts and its `data:` images the document's image indices; such forms never enter
+  the cross-document image cache. Their `data:` images do: decoded once a process and kept by
+  the SHA-256 of their bytes (`ImageRegistry::AddDecoded`). The form itself is kept for later
+  builds of the process by what decides it (`ImageRegistry::ConvertSvgFile`, `diagram_cache.cpp`'s
+  `ConvertedSvg`, at most 32 MiB): the file's key and stamp (as the raster cache's), the renderer
+  and its fonts (`TtfFont::loadId`), and the index its first `data:` image took, with the images
+  it registered and its text runs; `TakeConvertedSvg` registers those images again, charged to
+  the decode budget, and replays the runs into the glyph sets (`CidText`), so a build that takes
+  it writes the bytes a conversion writes (core check 138, `CheckEditedMedia`). A conversion that
+  the budget refused an image, or that a cancel ended, is not kept; a kept form the budget would
+  refuse an image of is converted again. One that needs what the converter does not draw (HTML,
+  scripts, style sheets it cannot match) or hits a limit shows its alt text. Keep every limit
+  failing closed: SVG input is untrusted.
 - The images of one build decode at most `kDecodeBudgetPixels` (2^30) pixels in all
   (`DecodeBudget`, one per `ImageRegistry`, so per pass of a build): a re-encoded PNG, a WIC
   decode and an SVG's `data:` image are charged before their pixels are read, and an image
@@ -479,7 +492,8 @@ Important image/link details:
   The notes a document embeds or links to: a root folder (`Vault`), resolution relative to the
   note, the root, then by name (an index built once, bounded), confinement by resolved path, and
   on Windows `DirectPathHasLink` (shared with `tiny_pdf.cpp`'s direct image path); the process's
-  cache of notes, name indexes and resolved roots, and `ResolvedPath`/`IsWithinRoot` on UTF-8
+  cache of notes, name indexes, resolved roots and documents' image paths (`KeptImagePath`), and
+  `ResolvedPath`/`IsWithinRoot` on UTF-8
   paths. Its paths are UTF-8 strings joined and normalized by `src/common/path.h`'s lexical
   functions; on Windows a path that comes from a directory listing stays a wide
   `RayoMd::File::Path` until it is opened (a name with an unpaired surrogate has no UTF-8 form);
@@ -541,8 +555,9 @@ Important image/link details:
   code block. Pie arcs are Béziers from the module's own sine; keep transcendental calls out.
 
 - `src/core/diagram_cache.h` and `src/core/diagram_cache.cpp`
-  The process's drawn diagrams for `ImageRegistry::AddDiagram`: key, bound and lock, and the
-  containers whose instantiations stay out of `tiny_pdf.cpp`. Built at `-Os`.
+  The process's drawn forms for `ImageRegistry`: diagrams (`AddDiagram`) and SVG files and URLs
+  (`ConvertSvgFile`, `TakeConvertedSvg`): keys, bounds and locks, and the containers whose
+  instantiations stay out of `tiny_pdf.cpp`. Built at `-Os`.
 
 - `src/core/cff.h` and `src/core/cff.cpp`
   OpenType fonts with PostScript outlines: the 'CFF ' table checked once when the font

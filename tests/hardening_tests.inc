@@ -1150,6 +1150,127 @@ bool CheckSvgGradientPaints() {
     return ok;
 }
 
+// A preview builds its document again on every edit, on one thread, through BuildPdf or a
+// BuildSession, and the process keeps what its images took: the decoded PNG, an SVG file's form
+// with its data: image (ImageRegistry::ConvertSvgFile), the diagram. A PNG and an SVG rewritten
+// between two builds show their new content: every build, in both renderers, gives the bytes the
+// same files give in a folder the process has not seen, and an SVG file is converted again only
+// when it changed (a rewrite of the same bytes, too: its stamp is new).
+bool CheckEditedMedia() {
+    const fs::path root = fs::temp_directory_path() / "rayomd-test-edited-media";
+    fs::remove_all(root);
+    const auto pngOf = [](uint32_t shade) {
+        return MakeRgbaPng(48, 32, [shade](uint32_t x, uint32_t y, int c) {
+            return c == 3 ? (uint8_t)(x * 5 + shade) : (uint8_t)(x * 3 + y * shade + (uint32_t)c * 40);
+        });
+    };
+    const auto svgOf = [](const char* fill, const char* word, const std::string& png) {
+        return std::string("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\"><rect width=\"9\" height=\"9\" fill=\"") +
+            fill + "\"/><text x=\"2\" y=\"16\" font-size=\"6\">" + word + "</text><image x=\"20\" y=\"0\" width=\"20\" " +
+            "height=\"20\" href=\"data:image/png;base64," + Base64(png) + "\"/></svg>";
+    };
+    const std::string pngs[2] = { pngOf(7), pngOf(91) };
+    const std::string svgs[2] = { svgOf("red", "Before", pngs[1]), svgOf("blue", "\xC5\xBB\xC3\xB3\xC5\x82w after", pngs[0]) };
+    const std::string document = "# Media\n\nSome text.\n\n![picture](pic.png)\n\n![shape](shape.svg)\n\n"
+        "```mermaid\nflowchart LR\n  A[One] --> B[Two]\n```\n\nThe end.\n";
+    int folders = 0;
+    // `markdown` with the files of `version` in a new folder: what a process that never saw them makes.
+    const auto fresh = [&](int version, const std::string& markdown, TinyPdf::PdfOptions options, std::string& pdf) {
+        const fs::path folder = root / ("fresh" + std::to_string(folders++));
+        fs::create_directories(folder);
+        options.sourcePath = (folder / "doc.md").u8string();
+        return WriteFile(folder / "pic.png", pngs[version]) && WriteFile(folder / "shape.svg", svgs[version]) &&
+            TinyPdf::BuildPdf(markdown, options, pdf).Ok();
+    };
+    std::vector<std::string> fonts = { std::string() };
+#ifdef _WIN32
+    if (const char* windows = std::getenv("WINDIR")) fonts.push_back(std::string(windows) + "\\Fonts\\arial.ttf");
+#else
+    fonts.push_back("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+#endif
+    if (!fs::exists(fs::u8path(fonts.back()))) fonts.pop_back();
+    bool ok = true;
+    for (const std::string& font : fonts) {
+        TinyPdf::PdfOptions options;
+        options.theme.fontPath = font;
+        const fs::path live = root / (font.empty() ? "live" : "live-font");
+        fs::create_directories(live);
+        options.sourcePath = (live / "doc.md").u8string();
+        TinyPdf::BuildSession session;
+        std::string edited = document;
+        for (int round = 0; round < 4 && ok; round++) {
+            const int version = round % 2;
+            ok = WriteFile(live / "pic.png", pngs[version]) && WriteFile(live / "shape.svg", svgs[version]);
+            edited.insert(edited.find("text."), "x");   // a key typed in the paragraph
+            std::string expected, built, again, expectedEdited, inSession;
+            const uint64_t before = TinyPdf::Internal::SvgFileConversions();
+            ok = ok && fresh(version, document, options, expected) && TinyPdf::BuildPdf(document, options, built).Ok();
+            // The fresh folder's SVG and the rewritten one.
+            const uint64_t converted = TinyPdf::Internal::SvgFileConversions() - before;
+            ok = ok && built == expected && TinyPdf::BuildPdf(document, options, again).Ok() && again == expected &&
+                fresh(version, edited, options, expectedEdited) && session.Build(edited, options, inSession).Ok() &&
+                inSession == expectedEdited && converted == 2 && TinyPdf::Internal::SvgFileConversions() - before == 3;
+            if (!ok) {
+                std::cerr << "an edited image or SVG (round " << round << (font.empty() ? "" : ", Unicode") << ", "
+                          << converted << " conversions) did not show its new content" << std::endl;
+            }
+        }
+    }
+#ifndef _WIN32
+    // A folder on the way to an image that becomes a link elsewhere between two builds: an image it
+    // now leads to outside the document's folder is refused, as a fresh build refuses it, and one
+    // inside shows (the kept resolution, KeptImagePath, holds only for the file it found).
+    if (ok) {
+        const fs::path folder = root / "linked";
+        const fs::path outside = root / "outside";
+        for (const char* name : { "inA", "inB" }) fs::create_directories(folder / name);
+        fs::create_directories(outside);
+        ok = WriteFile(folder / "inA" / "p.png", pngs[0]) && WriteFile(folder / "inB" / "p.png", pngs[1]) &&
+            WriteFile(outside / "p.png", pngs[1]);
+        TinyPdf::PdfOptions options;
+        options.sourcePath = (folder / "doc.md").u8string();
+        const std::string markdown = "![p](sub/p.png)\n";
+        const auto linkTo = [&](const fs::path& target) {
+            std::error_code error;
+            fs::remove(folder / "sub", error);
+            fs::create_directory_symlink(target, folder / "sub", error);
+            return !error;
+        };
+        const auto build = [&](uint32_t failures, std::string& pdf) {
+            const TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdf);
+            return result.Ok() && result.failedImages == failures;
+        };
+        std::string first, refused, other, again;
+        ok = ok && linkTo(folder / "inA") && build(0, first) && build(0, again) && again == first &&
+            linkTo(outside) && build(1, refused) && linkTo(folder / "inB") && build(0, other) && other != first &&
+            linkTo(folder / "inA") && build(0, again) && again == first;
+        if (!ok) std::cerr << "an image behind a folder link that changed was not resolved again" << std::endl;
+    }
+#endif
+    // A theme's logo rewritten between two builds, as an image of the document.
+    if (ok) {
+        const auto withLogo = [&](const fs::path& logo, std::string& pdf) {
+            TinyPdf::PdfOptions options;
+            options.sourcePath = (root / "doc.md").u8string();
+            options.theme.logoPath = logo.u8string();
+            options.theme.headerLeft = "{title}";
+            const TinyPdf::BuildResult result = TinyPdf::BuildPdf("# Logo\n\nText.\n", options, pdf);
+            return result.Ok() && result.failedImages == 0;
+        };
+        std::string expected[2], built[2];
+        for (int version = 0; version < 2 && ok; version++) {
+            const fs::path unseen = root / ("logo-fresh" + std::to_string(version) + ".png");
+            ok = WriteFile(unseen, pngs[version]) && withLogo(unseen, expected[version]) &&
+                WriteFile(root / "logo.png", pngs[version]) && withLogo(root / "logo.png", built[version]) &&
+                built[version] == expected[version];
+        }
+        ok = ok && built[0] != built[1];
+        if (!ok) std::cerr << "a theme's logo that changed was not read again" << std::endl;
+    }
+    fs::remove_all(root);
+    return ok;
+}
+
 bool CheckHardening() {
     return CheckCancel() && CheckSpecialFiles() && CheckFontChangedInPlace() && CheckDeepCompositeGlyph() &&
         CheckImageContainment() && CheckCachePermissions() && CheckThemeFields() && CheckBookFiles() &&
