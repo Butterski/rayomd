@@ -209,10 +209,99 @@ bool CheckIndexCap(const fs::path& root) {
     return !spacious.Find(base, "TARGET", true).empty() || Fail("a note by name, letter case aside");
 }
 
+// The process's notes (vault.h): a second build reads no note and walks no folder; a note
+// rewritten, added, removed or swapped for a link out of the vault is seen on the next build; a
+// note written within the settle time is read every time; builds on several threads agree.
+bool CheckNoteCache(const fs::path& root) {
+    using namespace TinyPdf::Internal;
+#ifdef _WIN32
+    constexpr uint64_t kShort = 500000, kDefault = 20000000;   // 50 ms, 2 s in 100 ns
+#else
+    constexpr uint64_t kShort = 50000000, kDefault = 2000000000;   // 50 ms, 2 s in ns
+#endif
+    const auto settle = []() { std::this_thread::sleep_for(std::chrono::milliseconds(120)); };
+    const fs::path vault = root / "cache";
+    WriteNote(vault / "a.md", "Alpha one.\n");
+    WriteNote(vault / "sub" / "deep.md", "Deep one.\n");
+    SetNoteSettleTime(kShort);
+    ForgetNotes();
+    settle();
+    const TinyPdf::PdfOptions options = ObsidianOptions(vault / "main.md");
+    std::string pdf;
+    const auto build = [&options, &pdf](const std::string& markdown, VaultCounters& work) {
+        const VaultCounters before = CountedVaultWork();
+        const bool ok = TinyPdf::BuildPdf(markdown, options, pdf).Ok();
+        const VaultCounters after = CountedVaultWork();
+        work = { after.reads - before.reads, after.walks - before.walks };
+        return ok;
+    };
+    const std::string doc = "![[a]]\n\n![[deep]]\n";
+    VaultCounters work;
+    if (!build(doc, work) || work.reads != 2 || work.walks != 1) {
+        std::cerr << "first build: " << work.reads << " reads, " << work.walks << " walks" << std::endl;
+        return Fail("a first build");
+    }
+    const std::string first = pdf;
+    if (!build(doc, work) || work.reads != 0 || work.walks != 0 || pdf != first) {
+        std::cerr << "second build: " << work.reads << " reads, " << work.walks << " walks" << std::endl;
+        return Fail("a second build reads its notes again");
+    }
+    WriteNote(vault / "a.md", "Alpha two.\n");
+    settle();
+    if (!build(doc, work) || work.reads != 1 || work.walks != 0 || pdf.find("(Alpha two.) Tj") == std::string::npos) {
+        return Fail("a note rewritten is read again");
+    }
+    WriteNote(vault / "sub" / "new.md", "New one.\n");
+    settle();
+    if (!build(doc + "\n![[new]]\n", work) || work.walks != 1 || pdf.find("(New one.) Tj") == std::string::npos) {
+        return Fail("a note added to a folder is found by name");
+    }
+    fs::remove(vault / "a.md");
+    settle();
+    if (!build(doc, work) || pdf.find("Alpha") != std::string::npos) return Fail("a note removed is still embedded");
+#ifndef _WIN32
+    WriteNote(root / "outside-cache.md", "Outside text.\n");
+    fs::remove(vault / "sub" / "deep.md");
+    std::error_code error;
+    fs::create_symlink(root / "outside-cache.md", vault / "sub" / "deep.md", error);
+    settle();
+    if (error || !build(doc, work) || pdf.find("Outside") != std::string::npos) return Fail("a note swapped for a link out of the vault");
+#endif
+    SetNoteSettleTime(kDefault);
+    WriteNote(vault / "fresh.md", "Fresh one.\n");
+    if (!build("![[fresh]]\n", work) || work.reads != 1 || !build("![[fresh]]\n", work) || work.reads != 1) {
+        return Fail("a note written within the settle time is kept");
+    }
+    SetNoteSettleTime(kShort);
+    WriteNote(vault / "b.md", "Bravo one.\n");
+    settle();
+    std::vector<std::string> outputs(4);
+    std::vector<std::thread> threads;
+    for (std::string& output : outputs) {
+        threads.emplace_back([&output, &options]() {
+            for (int round = 0; round < 20; round++) {
+                std::string built;
+                if (!TinyPdf::BuildPdf("![[b]]\n\n![[new]]\n", options, built).Ok() || (!output.empty() && built != output)) {
+                    output = "differs";
+                    return;
+                }
+                output = built;
+            }
+        });
+    }
+    for (std::thread& thread : threads) thread.join();
+    SetNoteSettleTime(kDefault);
+    ForgetNotes();
+    for (const std::string& output : outputs) {
+        if (output != outputs[0] || output.find("(Bravo one.) Tj") == std::string::npos) return Fail("builds on several threads");
+    }
+    return true;
+}
+
 bool CheckEmbeds() {
     const fs::path root = fs::temp_directory_path() / "rayomd-test-embeds";
     fs::remove_all(root);
-    const bool ok = CheckResolution(root) && CheckLimits(root) && CheckBuilds(root) && CheckIndexCap(root);
+    const bool ok = CheckResolution(root) && CheckLimits(root) && CheckBuilds(root) && CheckIndexCap(root) && CheckNoteCache(root);
     fs::remove_all(root);
     return ok;
 }

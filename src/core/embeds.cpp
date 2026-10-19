@@ -454,12 +454,12 @@ public:
         std::string folder = vault.Root();
         if (!options.vaultRoot.empty()) {
             const std::string_view parent = ParentOf(options.sourcePath);
-            folder = ResolvedPath(parent.empty() ? std::string_view(".") : parent);
+            folder = CachedResolvedPath(parent.empty() ? std::string_view(".") : parent);
             if (folder.empty()) return false;
         }
         FolderIndex(folder);
         // Note 0 is the document, by its resolved path: never read, always on the chain.
-        NoteOf(ResolvedPath(options.sourcePath));
+        NoteOf(ResolvedFilePath(options.sourcePath, folder));
         chain.push_back(0);
         // No reallocation while Expand holds an entry's text.
         set.entries.reserve(EmbedSet::kMaxEmbeds + 1);
@@ -490,7 +490,7 @@ private:
     // A note found, by its path (each path once, whatever names it), read on its first embed.
     struct Note {
         const std::string* path = nullptr;     // its key in `paths`
-        std::string text;
+        std::shared_ptr<const std::string> text;   // whole, from the vault (its process's cache)
         RayoMd::File::FileIdentity identity;
         std::vector<std::string_view> lines;   // of `text`, made for its first section or block
         size_t body = 0;                       // BodyOffset
@@ -531,20 +531,20 @@ private:
             if (cycle) continue;
             std::string entryText;
             if (target.anchor.empty()) {
-                if (note.text.size() > EmbedSet::kMaxBytes - bytes) continue;
+                if (note.text->size() > EmbedSet::kMaxBytes - bytes) continue;
                 // Its lines from the body on, each ended by '\n', as the parser reads them.
-                if (note.body <= note.text.size()) {
-                    entryText.reserve(note.text.size() - note.body + 1);
-                    entryText.assign(note.text, note.body, std::string::npos);
+                if (note.body <= note.text->size()) {
+                    entryText.reserve(note.text->size() - note.body + 1);
+                    entryText.assign(*note.text, note.body, std::string::npos);
                     entryText += '\n';
                 }
-            } else if (note.text.size() <= kMaxScanBytes - scanned) {
-                scanned += note.text.size();
-                if (note.lines.empty()) note.lines = Lines(note.text);
+            } else if (note.text->size() <= kMaxScanBytes - scanned) {
+                scanned += note.text->size();
+                if (note.lines.empty()) note.lines = Lines(*note.text);
                 // The body's first line: as many lines before it as line ends.
-                const size_t start = note.text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
-                const size_t body = note.body > note.text.size() ? note.lines.size()
-                    : (size_t)std::count(note.text.begin() + (ptrdiff_t)start, note.text.begin() + (ptrdiff_t)note.body, '\n');
+                const size_t start = note.text->compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+                const size_t body = note.body > note.text->size() ? note.lines.size()
+                    : (size_t)std::count(note.text->begin() + (ptrdiff_t)start, note.text->begin() + (ptrdiff_t)note.body, '\n');
                 entryText = target.block ? BlockText(note.lines, body, target.anchor) : Section(note.lines, body, target.anchor);
             }
             if (entryText.empty() || entryText.size() > EmbedSet::kMaxBytes - bytes) continue;
@@ -596,9 +596,10 @@ private:
     bool Load(Note& note, uint32_t from) {
         if (!note.tried) {
             note.tried = true;
-            if (vault.Read(*note.path, std::min(EmbedSet::kMaxBytes, kMaxReadBytes - read), note.text, note.identity)) {
-                read += note.text.size();
-                note.body = BodyOffset(note.text);
+            note.text = vault.Read(*note.path, std::min(EmbedSet::kMaxBytes, kMaxReadBytes - read), note.identity);
+            if (note.text != nullptr) {
+                read += note.text->size();
+                note.body = BodyOffset(*note.text);
                 const std::string_view parent = ParentOf(*note.path);
                 note.folder = parent == set.folders[from] ? from : FolderIndex(parent);
             } else {

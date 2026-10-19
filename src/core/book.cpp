@@ -498,7 +498,9 @@ bool ReadLinkedBook(const fs::path& note, const TinyPdf::PdfOptions& options, in
     const bool byName = options.dialect == TinyPdf::MarkdownDialect::Obsidian;
     const std::string notePath = PathToUtf8(note);
     TinyPdf::Internal::Vault vault(options.vaultRoot, notePath);
-    std::string first = ResolvedPath(notePath);
+    // The note's folder is the root without --vault: one lstat then, no realpath walk.
+    std::string first = options.vaultRoot.empty() && vault.Valid() ? TinyPdf::Internal::ResolvedFilePath(notePath, vault.Root())
+                                                                   : ResolvedPath(notePath);
     if (first.empty()) {
         error = "could not read input Markdown file: " + notePath;
         return false;
@@ -529,7 +531,8 @@ bool ReadLinkedBook(const fs::path& note, const TinyPdf::PdfOptions& options, in
         }
         TinyPdf::BookChapter chapter;
         RayoMd::File::FileIdentity identity;
-        const bool whole = vault.Read(found[at].path, std::min(kMaxFileBytes, left), chapter.markdown, identity);
+        const std::shared_ptr<const std::string> text = vault.Read(found[at].path, std::min(kMaxFileBytes, left), identity);
+        const bool whole = text != nullptr;
         if (!whole && identity.opened && identity.size > left && identity.size <= kMaxFileBytes) {
             leftOut = found.size() - at;
             break;
@@ -542,6 +545,7 @@ bool ReadLinkedBook(const fs::path& note, const TinyPdf::PdfOptions& options, in
             }
             continue;
         }
+        chapter.markdown = *text;
         left -= chapter.markdown.size();
         chapter.path = found[at].path;
         if (at > 0) chapter.title = TinyPdf::Internal::StemOf(found[at].path);

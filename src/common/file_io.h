@@ -14,6 +14,8 @@
 #include <string_view>
 #include <vector>
 
+struct stat;
+
 namespace RayoMd::File {
 
 // fopen of `path` with fopen's mode ("rb", "wb"), close-on-exec; null when it cannot be opened. A
@@ -31,6 +33,12 @@ intptr_t OpenRegular(const std::filesystem::path& path, uint64_t& size);
 int OpenRegular(const std::filesystem::path& path, uint64_t& size);
 #endif
 
+struct FileIdentity;
+#ifndef _WIN32
+// What an fstat or fstatat says of a file as its FileIdentity (all but `opened`).
+void IdentityOf(const struct stat& info, FileIdentity& identity);
+#endif
+
 // The size of an open file, -1 when it has none (a pipe). Leaves the position at the end.
 long long SizeOf(std::FILE* file);
 
@@ -43,17 +51,17 @@ bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& con
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint8_t>& content);
 
 // Which file ReadAll opened, the same for each of its names (links, letter case, "a/../a"): its
-// device and inode (POSIX) or volume serial number and file index (Windows); and its size, also
-// when that is more than ReadAll's `maximum`. `opened` is false when no regular file was opened.
+// device and inode (POSIX) or volume serial number and file index (Windows); its size, also when
+// that is more than ReadAll's `maximum`; and its last write and last status change (POSIX,
+// nanoseconds) or creation (Windows, 100 ns), as Stamp has them. `opened` is false when no regular
+// file was opened.
 struct FileIdentity {
     uint64_t volume = 0;
     uint64_t index = 0;
     uint64_t size = 0;
+    uint64_t modified = 0;
+    uint64_t changed = 0;
     bool opened = false;
-
-    bool operator<(const FileIdentity& other) const {
-        return volume != other.volume ? volume < other.volume : index < other.index;
-    }
 };
 // As ReadAll, and the identity of the file it opened.
 bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content, FileIdentity& identity);
