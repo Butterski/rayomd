@@ -346,6 +346,17 @@ if(RAYOMD_BUILD_CLI)
         add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
             target_sources(rayomd PRIVATE src/cli/terminate.cpp)
+            if(NOT RAYOMD_STATIC)
+                # Release builds, compiled without exceptions: a throw aborts without unwinding, and
+                # the unwind tables nothing reads are dropped. Not static: glibc's libc.a links the
+                # unwinder for thread cancellation.
+                target_sources(rayomd PRIVATE $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.cpp>)
+                if(RAYOMD_HOT_SECTIONS)
+                    set(script "${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.ld")
+                    target_link_options(rayomd PRIVATE "$<$<CONFIG:Release>:-Wl,-T,${script}>")
+                    set_property(TARGET rayomd APPEND PROPERTY LINK_DEPENDS "${script}")
+                endif()
+            endif()
         endif()
         if(RAYOMD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
             # No .eh_frame registration at startup: the unwinder reads PT_GNU_EH_FRAME (static_frames.cpp).
