@@ -338,11 +338,12 @@ if(RAYOMD_BUILD_CLI)
             if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
                 # Release builds, compiled without exceptions: libstdc++'s throws abort where they
                 # are made, without its exception runtime (std_throws.cpp, no_unwind.cpp; as on
-                # Linux).
+                # Linux). libstdc++'s string members one by one, not its whole string-inst.o.
                 target_sources(rayomd PRIVATE
                     $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/std_throws.cpp>
                     $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.cpp>
-                    $<$<NOT:$<CONFIG:Release>>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/terminate.cpp>)
+                    $<$<NOT:$<CONFIG:Release>>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/terminate.cpp>
+                    src/win32/string_instances.cpp)
             else()
                 target_sources(rayomd PRIVATE src/cli/terminate.cpp)
             endif()

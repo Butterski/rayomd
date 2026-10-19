@@ -743,6 +743,13 @@ Important image/link details:
   `CommandLineToArgvW`; `delay_image_*.cpp` for the engine's own Windows imports (OLE,
   Winsock, WinHTTP), which are also linked into `rayomd_engine`.
 
+- `src/win32/string_instances.cpp`
+  The `std::string`/`std::wstring` members the MinGW CLI (GCC) calls out of line, instantiated one
+  by one: GNU ld keeps every PE function that has SEH unwind data, so libstdc++'s whole
+  `string-inst.o` and `wstring-inst.o` were linked for the first member called (32 KB). A member
+  not listed links them again without an error; `performance.md` ("Regression and size gate") has
+  the command that lists what the objects call.
+
 - `src/win32/rayomd.rc`
   Windows manifest and app icon resources. Keep resource changes localized here.
 

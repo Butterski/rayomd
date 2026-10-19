@@ -41,6 +41,26 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 4: package size (opt4/size2, 2026-10-19)
+
+Against 5.2.4 (`27cf8f0`): the dynamic Linux binary of GCC 13 (GCC 11, the release runners', in
+brackets) and MinGW's `rayomd.exe` (GCC 13, as the cross image builds it). Every step keeps the
+2,875 PDFs of the byte check, the 5,936 and 6,044 feature-on exports, and under Wine the 359
+documents in eight option sets of the MinGW build; `ab.sh --instructions` within +0.3 % on every
+fixture.
+
+- **libstdc++'s throws abort where they are made** (`src/cli/std_throws.cpp`): its one archive
+  member of `std::__throw_*` linked the exception classes, their copy-on-write strings and
+  `std::system_error`'s categories; the MinGW CLI also takes `no_unwind.cpp` (no SEH unwinder or
+  personality routine). Linux -12,312 (-8,216), `rayomd.exe` -51,712.
+- **MinGW's string members one by one** (`src/win32/string_instances.cpp`): GNU ld keeps every PE
+  function that has SEH unwind data (its scripts `KEEP` `.pdata`, binutils 2.47 too), so
+  `--gc-sections` drops no function of an object once one of its members is linked: the first
+  `std::string` member called linked all of `string-inst.o` and `wstring-inst.o`. Explicit
+  instantiations of the members the program calls: `rayomd.exe` -31,744. With a gc that drops
+  unreferenced functions with their unwind data, `rayomd.exe` would hold 30 KB less code, nearly
+  all of it those members (measured with `.pdata` and `.xdata` discarded).
+
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
 Measured against 5.2.3 (`f28d74b`), g++ 13.3 Release, Docker; instructions by `ab.sh
@@ -699,6 +719,16 @@ in brackets): 1,740,064 (1,727,720) bytes in 5.2.2; no exceptions, RTTI or unwin
 tag names and Mermaid tables without relocations -4,096; the PNG filters' scalar ends -36,864;
 no unwinder (`src/cli/no_unwind.cpp`, `no_unwind.ld`) -57,976: 1,292,976 (1,297,008). MinGW: no
 `-fdata-sections` (zero statics written as data) -316 KB, no string streams in the CLI -65 KB.
+
+MinGW's `src/win32/string_instances.cpp` lists the `std::string` and `std::wstring` members the
+program calls out of line. After code changes, or with another GCC, list them and compare (a
+member missing there links libstdc++'s whole `string-inst.o` again, 15 to 18 KB, without an
+error; the link map then shows it under "Archive member included"):
+
+```sh
+for f in $(find build/mingw/CMakeFiles/rayomd.dir -name '*.obj' ! -name 'string_instances*'); do
+  x86_64-w64-mingw32-nm -u -C "$f"; done | grep -E 'U std::__cxx11::basic_string<(char|wchar_t),[^(]*>::' | sort -u
+```
 
 Keep the candidate comparable to its baseline: same suite, seed, style, margin,
 image mode, worker count, compiler, build type, and storage. Linux release
