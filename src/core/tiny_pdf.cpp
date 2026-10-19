@@ -13572,6 +13572,10 @@ RAYOMD_COLD static Internal::LayoutCids SessionCidSet(UsedCidSet* set) {
     return cids;
 }
 
+RAYOMD_COLD static void SessionStartPage(std::string& content, std::vector<size_t>& pageStarts) {
+    StartPageContent(content, pageStarts);
+}
+
 template <typename RendererType>
 struct SessionAccess {
     static constexpr bool kUnicode = std::is_same<RendererType, Renderer>::value;
@@ -13612,6 +13616,8 @@ struct SessionAccess {
         target.contentsLines = &r.contentsLines;
         target.pageBottoms = r.pageBottoms;
         target.glyphs = r.math.GlyphUse();
+        target.startPage = SessionStartPage;
+        target.gapBefore = PageGapBefore;
         if constexpr (kUnicode) {
             target.cids[0] = SessionCidSet(&r.usedCids);
             for (int face = 0; face < 3; face++) target.cids[face + 1] = SessionCidSet(r.faceCids[face].get());
@@ -13777,7 +13783,13 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     const PdfOptions& options, std::string& pdfBytes, BuildResult& stats, const BookSource* book = nullptr) {
     // Character references come out as the WinAnsi codes the standard fonts show.
     const Internal::WinAnsiReferences references;
+#ifdef RAYOMD_BUILD_SESSION
+    // A BuildSession's builds parse into its blocks, which its next build's parse reuses.
+    std::vector<Block> ownBlocks;
+    std::vector<Block>& blocks = Internal::BuildBlocks(ownBlocks, book);
+#else
     std::vector<Block> blocks;
+#endif
     Internal::Footnotes footnotes;
     std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
     std::unique_ptr<BookParse> bookParse;   // a book's files: off the stack, which single documents keep as it was
@@ -13796,8 +13808,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     std::vector<Internal::HeadingNumber> numbers;   // --number-headings
     if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
     PdfObjects pdf;
-    // No gaps for a session build: it copies the last build's page content (build_session.h).
-    if (!options.blackText && !options.compress && Internal::CurrentLayoutSession() == nullptr) pdf.LeaveGaps();
+    // A session's build replays page content page by page, each after its gap (build_session.cpp).
+    if (!options.blackText && !options.compress) pdf.LeaveGaps();
     int pagesId = pdf.Reserve();
     // WinAnsiEncoding: without it the fonts' built-in StandardEncoding shows the straight
     // quote and the backtick as curly quotes, and transcoded Latin text has no codes above
@@ -14399,7 +14411,13 @@ RAYOMD_COLD static void ThemeFaceStyle(const TtfFont& face, int& flags, int& ita
 static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& font, const PdfOptions& options,
     std::string& pdfBytes, FallbackCheck* check, size_t& missingCharacters, BuildResult& stats,
     const BookSource* book = nullptr, const ThemeFaces* faces = nullptr) {
+#ifdef RAYOMD_BUILD_SESSION
+    // A BuildSession's builds parse into its blocks, which its next build's parse reuses.
+    std::vector<Block> ownBlocks;
+    std::vector<Block>& blocks = Internal::BuildBlocks(ownBlocks, book);
+#else
     std::vector<Block> blocks;
+#endif
     Internal::Footnotes footnotes;
     std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
     std::unique_ptr<BookParse> bookParse;   // a book's files: off the stack, which single documents keep as it was
@@ -14419,8 +14437,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
 
     PdfObjects pdf;
-    // No gaps for a session build: it copies the last build's page content (build_session.h).
-    if (!options.blackText && !options.compress && Internal::CurrentLayoutSession() == nullptr) pdf.LeaveGaps();
+    // A session's build replays page content page by page, each after its gap (build_session.cpp).
+    if (!options.blackText && !options.compress) pdf.LeaveGaps();
 
     int fontFileId = pdf.Reserve();
     int cidMapId = pdf.Reserve();
