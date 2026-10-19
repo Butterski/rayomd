@@ -366,9 +366,12 @@ constexpr size_t kMaxTableColumns = 1000;
 // given, receives the column alignments of a table that starts here.
 static bool IsTableStart(const std::vector<std::string_view>& lines, size_t i, std::vector<int>* aligns = nullptr) {
     if (i + 1 >= lines.size()) return false;
-    if (lines[i].find('|') == std::string_view::npos ||
-        lines[i + 1].find('|') == std::string_view::npos ||
-        lines[i + 1].find('-') == std::string_view::npos) {
+    // A separator line's first cell starts with '-' or ':', after a '|' or not: most lines after a
+    // paragraph's line fail on that, and its line is not searched.
+    const std::string_view separator = LTrimView(lines[i + 1]);
+    if (separator.empty() || (separator[0] != '|' && separator[0] != '-' && separator[0] != ':')) return false;
+    if (separator.find('|') == std::string_view::npos || separator.find('-') == std::string_view::npos ||
+        lines[i].find('|') == std::string_view::npos) {
         return false;
     }
     const size_t cells = CountTableCells(lines[i]);
