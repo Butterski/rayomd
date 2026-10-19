@@ -64,6 +64,10 @@ fixture.
   (`__mingw_pformat`, with gdtoa for `%f`); the batch report's numbers (an exact `%.3f`,
   `AppendThousandths`, the same text as glibc's and MinGW's printf on 6.6 million doubles), the
   temporary file's name and a URL's port are written by hand. `rayomd.exe` -30,208.
+- **The icon's PNG images recompressed** (zopflipng, the same pixels): `rayomd.exe` -7,168.
+
+Against 5.2.4: the dynamic Linux binary 1,276,592 -> 1,264,280 (GCC 11 1,280,624 -> 1,272,408),
+`rayomd.exe` 1,588,224 -> 1,467,392.
 
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
@@ -885,6 +889,16 @@ case found so far took seconds for 40,000 to 200,000 openers).
 Findings that could make RayoMD faster later, with the evidence and the reason
 they were not taken yet. Add to this list when a change turns one up.
 
+**Never-run functions of `tiny_pdf.cpp` at -Os (size, round 4).** 140 KB of `tiny_pdf.cpp`'s
+out-of-line functions run in none of the eight warm fixtures (callgrind, default options): books,
+embeds, themes, image decoding and caches, the font folder scan, PDF/A and PDF/UA paths, math
+tables. Compiled at `-Os` the same functions are about 83 KB (`DecodeImageBytes` 9.8 -> 5.5 KB,
+`PdfImage`'s move 4.2 -> 0.4 KB, `BuildBookPdf` 3.1 -> 1.3 KB), plus 25 KB of functions `-Os`
+inlines elsewhere: an estimated 30 to 50 KB off both platforms. Agreed form: an attribute on whole
+cold functions only (cold, noinline, `optimize("Os")`), checked for GCC 11, with `symdiff.py` on
+the hot functions and the `ab.sh` gate; not measured yet. Image decoding and math tables are per
+pixel and per cell: keep them out.
+
 **`std::filesystem` out of the build (size).** MinGW's libstdc++.a has no per-function
 sections, and its `fs_path.o` and `fs_ops.o` pull the codecvt facets, the locale's
 initialisation and with it every facet, `fstream`, `istream` and `ostream` (`copy_file` uses a
@@ -1259,6 +1273,18 @@ Binary size (2026-10-19):
   a UCRT-linked `rayomd.exe`. mingw-w64's headers call UCRT's conforming to C99, but Wine's
   ucrtbase reads no hexadecimal (`0x10x0x20in` became an error), and whether Microsoft's rounds
   every long decimal as gdtoa does could not be checked here: a page size could then change a PDF.
+- Linkers with identical code folding (round 4, 2026-10-19; GCC 13 and 11, dynamic): gold
+  (binutils 2.42) has no `INSERT` for `src/hot.ld` and keeps the unwind tables `no_unwind.ld`
+  drops, 1,276,952 bytes against bfd's 1,264,280; its `--icf=safe` and `--icf=all` -16,384 from
+  there, and gold is deprecated upstream. lld 14 (GCC 11): `--icf=safe` folds nothing (GCC emits
+  no address-significance tables), `--icf=all` -14,944, with `hot.ld` and `no_unwind.ld`
+  1,255,576 against bfd's 1,272,408, but `all` may fold functions whose addresses are compared.
+  The release links with GNU ld; not switched.
+
+Considered and declined for security (round 4, 2026-10-19; RayoMD reads untrusted Markdown, SVG,
+PNG and fonts): Ubuntu's GCC hardening defaults stay. `-fno-stack-protector` (canaries in 715
+functions) would take 32,768 bytes off the dynamic GCC 13 binary, `-fcf-protection=return` (no
+IBT `endbr64`, SHSTK marking kept) 8,264.
 
 Note embeds and linked notes (2026-10-19; per embed against the same text inline, perf stat,
 100 embeds of small notes: warm 10.2 K instructions and 4.9 µs before the process's note cache,
