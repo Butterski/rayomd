@@ -913,12 +913,13 @@ static RAYOMD_NOINLINE bool ClassifyHtmlLine(std::string_view line, LineInfo& in
     return true;
 }
 
-static LineInfo ClassifyLine(std::string_view line) {
-    LineInfo info;
+// Classifies `line` into `info`, which holds a default LineInfo: the caller's slot, so that the
+// lines' classes are written where they stay instead of copied there.
+static void ClassifyLine(std::string_view line, LineInfo& info) {
     info.trimmed = TrimView(line);
     if (info.trimmed.empty()) {
         info.kind = LineKind::Empty;
-        return info;
+        return;
     }
     // Each block marker starts with its own bytes (after the indent), so only the checks of the
     // line's first byte run, in the order that decides between them ("---" is a rule, "- x" an
@@ -932,51 +933,51 @@ static LineInfo ClassifyLine(std::string_view line) {
             info.kind = LineKind::Fence;
             info.text = fence;
         }
-        return info;
+        return;
     }
     case '$':
     case '\\':
-        if (ClassifyMathLine(info)) return info;
+        if (ClassifyMathLine(info)) return;
         if (IsPageBreakLine(info.trimmed)) info.kind = LineKind::PageBreak;
-        return info;
+        return;
     case '<':
         if (IsPageBreakLine(info.trimmed)) {
             info.kind = LineKind::PageBreak;
-            return info;
+            return;
         }
         ClassifyHtmlLine(line, info);
-        return info;
+        return;
     case '!':
     case '[':
         if (ParseStandaloneImage(info.trimmed, nullptr)) info.kind = LineKind::Image;
-        return info;
+        return;
     case '-':
     case '*':
     case '_':
         if (IsRuleLine(line)) {
             info.kind = LineKind::Rule;
-            return info;
+            return;
         }
         if (ParseBulletView(line, info.level, info.text)) info.kind = LineKind::Bullet;
-        return info;
+        return;
     case '+':
         if (ParseBulletView(line, info.level, info.text)) info.kind = LineKind::Bullet;
-        return info;
+        return;
     case '#':
         if (ParseHeadingView(line, info.level, info.text)) info.kind = LineKind::Heading;
-        return info;
+        return;
     case '>': {
         info.kind = LineKind::Quote;
         std::string_view text = info.trimmed.substr(1);
         if (!text.empty() && text[0] == ' ') text.remove_prefix(1);
         info.text = TrimView(text);
-        return info;
+        return;
     }
     default:
         if (info.trimmed[0] >= '0' && info.trimmed[0] <= '9' && ParseNumberedView(line, info.level, info.number, info.text)) {
             info.kind = LineKind::Numbered;
         }
-        return info;
+        return;
     }
 }
 
@@ -993,7 +994,9 @@ static bool IsSingleParagraphLine(std::string_view text) {
     if (text.empty() || IsSpace(text.front()) || IsSpace(text.back())) return false;
     if (text.find('\n') != std::string_view::npos || text.find("]:") != std::string_view::npos) return false;
     if (StartsWith(text, std::string_view("\xEF\xBB\xBF", 3))) return false;
-    return ClassifyLine(text).kind == LineKind::Plain;
+    LineInfo info;
+    ClassifyLine(text, info);
+    return info.kind == LineKind::Plain;
 }
 
 static Block& AppendBlock(std::vector<Block>& blocks, BlockType type) {
@@ -1186,8 +1189,9 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
     infos.reserve(lines.size());
     bool hasMathOpeners = false;
     for (std::string_view line : lines) {
-        infos.push_back(ClassifyLine(line));
-        hasMathOpeners = hasMathOpeners || infos.back().kind == LineKind::MathOpen;
+        LineInfo& info = infos.emplace_back();
+        ClassifyLine(line, info);
+        hasMathOpeners = hasMathOpeners || info.kind == LineKind::MathOpen;
     }
     if (hasMathOpeners) ResolveMathOpeners(lines, infos);
 
