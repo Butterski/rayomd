@@ -974,7 +974,9 @@ GitHub CI entry points:
   off for `--black-text` and `--compress`), so a build of the same layout moves no content;
   `pageStarts[k]` is where page k's content starts, and page k ends at `pageStarts[k + 1]`
   less `PageGapBefore(k + 1)`, not at the next start. Code that reads the content between
-  pages must take the gap out or turn the gaps off.
+  pages must take the gap out or turn the gaps off; the gap's last byte is the byte the page
+  would follow without it (PDF/UA's `StructTree::NewLine` reads it). Core check 62 builds
+  every option profile on a warm thread against a new one.
 - Paragraph text is parsed and wrapped as flat runs (`InlineRuns`, `AsciiRuns`,
   `StyledRuns`): one text buffer per paragraph, reused from paragraph to
   paragraph. Keep a string or vector per span, word, or line off these paths.

@@ -2039,10 +2039,17 @@ static size_t PageGapBefore(size_t page) {
     return gaps != nullptr && page < gaps->size() && (*gaps)[page] <= kMaxPageGap ? (*gaps)[page] : 0;
 }
 
-// A new page's content starts after its gap (NewPage).
+// A new page's content starts after its gap (NewPage). The gap's last byte is the one a page's
+// content would follow without a gap, the last of the page before, or a line feed before the first
+// page (whose content would start the empty buffer): PDF/UA's marked content starts a line after
+// a byte other than a line feed (StructTree::NewLine), and must see what it sees without gaps.
 static RAYOMD_HOT_INLINE void StartPageContent(std::string& content, std::vector<size_t>& pageStarts) {
     const size_t gap = PageGapBefore(pageStarts.size());
-    if (gap != 0) ResizeForOverwrite(content, content.size() + gap);
+    if (gap != 0) {
+        const size_t before = content.size();
+        ResizeForOverwrite(content, before + gap);
+        content[before + gap - 1] = before != 0 ? content[before - 1] : '\n';
+    }
     pageStarts.push_back(content.size());
 }
 
