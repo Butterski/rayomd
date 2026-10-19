@@ -740,8 +740,8 @@ Important image/link details:
 
 - `src/cli/terminate.cpp`
   The terminate handler in place of libstdc++'s (whose demangler is 61 KB) where `no_unwind.cpp`
-  is not linked (the static Linux build, Debug builds): the same message with the exception's
-  type as the ABI names it (`St9bad_alloc`), then `abort()`. Not part of the engine library.
+  is not linked (Debug builds, other compilers): the same message with the exception's type as
+  the ABI names it (`St9bad_alloc`), then `abort()`. Not part of the engine library.
 
 - `src/cli/std_throws.cpp`
   The release CLIs' `std::__throw_*` functions (Linux and MinGW): the error libstdc++ would throw
@@ -752,15 +752,18 @@ Important image/link details:
   fails on the duplicate definitions.
 
 - `src/cli/no_unwind.cpp` and `src/cli/no_unwind.ld`
-  The exception runtime of the dynamic Linux and the MinGW release CLIs: `__cxa_throw` prints
-  the terminate message and aborts, so libgcc's unwinder, the personality routine (`_v0`, on
-  MinGW `_seh0`) and the emergency exception pool (a 73 KB allocation at every start) are never
-  linked, and on Linux the linker script drops the unwind and exception tables nothing reads then
-  (58 KB in all). Its terminate handler takes `terminate.cpp`'s place (no exception is ever
+  The exception runtime of the Linux (dynamic and static) and the MinGW release CLIs:
+  `__cxa_throw` prints the terminate message and aborts, so libgcc's unwinder, the personality
+  routine (`_v0`, on MinGW `_seh0`) and the emergency exception pool (a 73 KB allocation at every
+  start) are never linked, and on Linux the linker script drops the unwind and exception tables
+  nothing reads then (58 KB dynamic, 107 KB static). For the static build it also defines what
+  glibc's libc.a calls of the unwinder (`__gcc_personality_v0` for stdio's cleanups,
+  `_Unwind_ForcedUnwind` and `_Unwind_GetCFA` for a thread's exit or cancellation, which RayoMD
+  never does): a symbol of libgcc_eh.a still referenced would link it again, and the link fails
+  on the duplicates. Its terminate handler takes `terminate.cpp`'s place (no exception is ever
   active). The nothrow `operator new` is its own (malloc and the new-handler, null when both
   fail; libstdc++'s caught a throw). Release builds only, as only they compile without
-  exceptions; not the static Linux build, whose libc.a links the unwinder for thread
-  cancellation, nor the engine library. Windows keeps its SEH tables (`.pdata`, `.xdata`): the
+  exceptions; not the engine library. Windows keeps its SEH tables (`.pdata`, `.xdata`): the
   x64 ABI requires them of every function that calls or saves registers.
 
 - `src/win32/main_windows_cli.cpp`
@@ -946,8 +949,11 @@ GitHub CI entry points:
   and UBSan, and runs each target 60 s on the seed corpus; any crash, timeout or OOM fails it.
 
 - `.github/workflows/release.yml`
-  Packages default Linux, curl-enabled Linux, and Windows artifacts for matching version
-  bumps, `v<VERSION>` tags, and manual dispatch; keep `VERSION` and package contents aligned.
+  Packages default Linux, curl-enabled Linux, static Linux and Windows artifacts for matching
+  version bumps, `v<VERSION>` tags, and manual dispatch; keep `VERSION` and package contents
+  aligned. Archives are packed at zopfli strength (`pigz -11` for the `.tar.gz`, 7-Zip's
+  `-mx=9 -mpass=15` for the `.zip`): the same formats, 29 to 52 KB smaller each than `tar -z`
+  and zlib's level 6 (5.2.5's binaries).
 
 ## Benchmark And Documentation Rules
 
@@ -985,8 +991,8 @@ GitHub CI entry points:
   `dynamic_cast` or `typeid`. An
   exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before: in the
   release command lines where it is made (`src/cli/std_throws.cpp` for libstdc++'s
-  `std::__throw_*`, `src/cli/no_unwind.cpp`'s `__cxa_throw` for the rest, dynamic Linux and MinGW),
-  in the static Linux build through the command lines' own terminate handler
+  `std::__throw_*`, `src/cli/no_unwind.cpp`'s `__cxa_throw` for the rest, Linux and MinGW),
+  in Debug builds through the command lines' own terminate handler
   (`src/cli/terminate.cpp`, the only `-fexceptions` file; libstdc++'s links the C++ demangler,
   61 KB). A call-graph profile with
   `perf --call-graph=dwarf` needs a build with `-fasynchronous-unwind-tables`, and without
