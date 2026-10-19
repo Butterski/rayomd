@@ -183,7 +183,8 @@ endfunction()
 # document, an HTML block is mapped once, the notes a document embeds or links to are read once,
 # the image encoder's threads only hand out segments that flate.cpp compresses, and the command
 # lines parse their arguments, list a batch and write its report once per run (--bench and
-# --serve only call the engine in their loops). Optimize these translation units for package size
+# --serve only call the engine in their loops), and a BuildSession compares and replays its tape
+# a run of blocks at a time (copies, not per-byte work). Optimize these translation units for package size
 # while leaving the performance-critical renderer and parser on the normal release flags.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
@@ -215,6 +216,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/embeds.cpp
         src/common/path.cpp
         src/common/thread_object.cpp
+        src/core/build_session.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
     # RayoMD's streams at half the code; the inflater, 1.5 % slower than -O3 at 8.9 KB of code
@@ -286,7 +288,8 @@ set(RAYOMD_CORE_SOURCES
     src/core/print_colors.cpp
     src/core/word_bounds.cpp
     src/common/path.cpp
-    src/common/thread_object.cpp)
+    src/common/thread_object.cpp
+    src/core/build_session.cpp)
 
 if(NOT WIN32)
     if(RAYOMD_USE_CURL)

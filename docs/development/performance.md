@@ -41,6 +41,26 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 4: incremental builds for the preview (opt4/incremental, 2026-10-19)
+
+`TinyPdf::BuildSession` (design, breakdown and numbers: `incremental_builds.md`): consecutive builds
+of an edited document take the layout of unchanged top-level blocks from the last build, byte for
+byte what `BuildPdf` gives. A letter typed in 700 copies of `tester.md`: 920 M -> 278 M instructions
+a build, cycles 2.7x fewer (perf, near the start, middle and end alike); a line deleted or a
+paragraph inserted: 2.6x; 50 copies of the essay: 3.3x fewer instructions, 1.4 to 1.6x fewer cycles
+(the parse, a third of what is left, and three memory-bound passes over the page content: replay,
+the tape's copy, `BuildInto`'s move). Ordinary builds: within +0.06 % instructions on every fixture,
+the command line +583 bytes of code. Tried and replaced on the way:
+
+- The session's block loop called directly by the builders: +4.7 KB in the command lines, which
+  never make a session; behind `SessionCalls`, which only `BuildSession` fetches, +0.6 KB.
+- Heading and anchor marks moved to the new blocks by finding their text in the old blocks: a cache
+  miss a heading on the old (cold) blocks, 3 % of an essay's session build; the tape now notes each
+  mark's block and offset while the blocks are warm.
+- All blocks after an edit compared up front: an edit that moves flowing text for the rest of the
+  document (never in step again) cost 6.4 % more instructions than `BuildPdf`; compared only where
+  the layout is in step, 4 %.
+
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
 Measured against 5.2.3 (`f28d74b`), g++ 13.3 Release, Docker; instructions by `ab.sh

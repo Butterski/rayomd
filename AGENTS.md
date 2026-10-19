@@ -286,6 +286,20 @@ theme's cover, y down from the page's top edge). The parser stamps the lines at 
 blocks (the `--toc` table, a book's titles), nested ones and footnotes have no entry, and books
 never fill it. The hooks only read layout state: the PDF bytes are the same with or without a
 map (`CheckSourceMap`).
+`TinyPdf::BuildSession` (rayomd-gui's preview on every edit; `src/core/build_session.h` and `.cpp`,
+design and numbers in `docs/development/incremental_builds.md`) gives the bytes, result and source map
+`BuildPdf` gives and takes the layout of the top-level blocks an edit left alone from its last build:
+a build of a session is `BuildPdf` with the session set for the thread (`CurrentLayoutSession`); the
+builders lay its blocks out one at a time (`SessionAccess::Render`, `RenderBlockRange`, reached only
+through `SessionCalls`, so the command lines link none of it), note the renderer's state before each
+(`LayoutMark`) and replay a run of blocks equal to the last build's from the same state (page content,
+pages, links, headings, anchors, contents lines, source map entries, CIDs and formula glyphs). A new
+piece of renderer state that a later block reads goes into `LayoutMark` and `SessionAccess` (compared
+where a run starts, set where it ends), a new field of `Block` into `SameBlock`, a new option into
+`SameOptions` (static_asserts on their sizes catch it); anything that a block's page content depends
+on beyond its block and that state (as footnote numbers, image names, PDF/UA's tags) must make the
+session lay those blocks out, or the whole document. Ordinary builds pay one test of the thread's
+session per build. Core check 137 (`tests/session_tests.inc`) compares random edits built both ways.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
@@ -472,6 +486,12 @@ Important image/link details:
 
 - `src/core/embeds.h` and `src/core/embeds.cpp`
   Obsidian's note embeds: reading them (`ResolveEmbeds`, bounded in count, depth, bytes read and
+
+- `src/core/build_session.h` and `src/core/build_session.cpp`
+  `BuildSession`: the tape of the last build (blocks, marks, page content, the renderer's marks and
+  sets), the blocks compared with it (`SameBlock`, runs of one shift without images), runs replayed
+  into the renderer, options compared (`SameOptions`). The renderers' side (`SessionAccess`) is in
+  `tiny_pdf.cpp`, reached through `SessionCalls`. Built at `-Os`; checked by `tests/session_tests.inc`.
   scanned, lookups), the build's `EmbedScope`, and splicing their blocks into the parse
   (`ParseWithEmbeds`, `SpliceEmbeds`). Built at `-Os`; checked by `tests/embeds_tests.inc`
   (core test exits 130, embeds, and 131, linked notes and backlinks).
