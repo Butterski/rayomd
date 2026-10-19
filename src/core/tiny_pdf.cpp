@@ -13984,14 +13984,16 @@ RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, con
         return true;
     };
     bool stable = hasLayoutChars([&](uint16_t cid) { return primary.HasGlyph(cid); });
-    // Control characters have no glyph anywhere: no reason to change fonts. The others go into
-    // `wanted` as bits, in the words listed in `words`, so that a candidate's count takes a word at
-    // a time: a page of CJK has thousands of characters (each `used` CID comes once).
+    // Control characters have no glyph anywhere: no reason to change fonts.
+    size_t fewest = 0;
+    for (const uint16_t cid : used) fewest += cid >= 0x20 && !primary.HasGlyph(cid);
+    if (fewest == 0) return { nullptr, stable };
+    // The others as bits in `wanted`, in the words listed in `words`, so that a candidate's count
+    // takes a word at a time: a page of CJK has thousands of characters (each `used` CID comes once).
     uint64_t wanted[1024];
     uint16_t words[1024];
     uint64_t touched[16] = {};
     size_t wordCount = 0;
-    size_t fewest = 0;
     for (const uint16_t cid : used) {
         if (cid < 0x20) continue;
         const uint32_t word = cid >> 6;
@@ -14002,9 +14004,7 @@ RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, con
             words[wordCount++] = (uint16_t)word;
         }
         wanted[word] |= 1ull << (cid & 63);
-        fewest += !primary.HasGlyph(cid);
     }
-    if (fewest == 0) return { nullptr, stable };
     const auto missingIn = [&](const std::vector<uint64_t>& coverage) {
         size_t count = 0;
         for (size_t index = 0; index < wordCount; index++) {
