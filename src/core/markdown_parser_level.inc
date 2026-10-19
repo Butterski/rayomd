@@ -7,6 +7,7 @@
 // made of the other's (+0.4 to 0.8 % instructions on BuildPdf in the engine library); the copy
 // every other parse runs is the same code as without sessions.
 
+#if !RAYOMD_SESSION_LEVEL
     LevelLines level(depth);
     std::vector<std::string_view>& lines = level.lines;
     std::vector<LineInfo>& infos = level.infos;
@@ -70,6 +71,20 @@
             index++;
         }
     }
+#else
+    // The document's lines and classes in the record this parse leaves, those the edit left alone
+    // shifted from the last build's (session_parse.cpp's ClassifyInSession).
+    ReferenceDefinitions definitions;
+    const bool definitionSyntax = markdown.find("]:") != std::string::npos;
+    notes->possible = definitionSyntax;
+    const bool notesPossible = notes->possible;
+    const size_t firstNote = notes->found.size();
+    LineChange change;
+    ParseLines& level = ClassifyInSession(markdown, definitionSyntax, definitions, *notes, change);
+    std::vector<std::string_view>& lines = level.lines;
+    std::vector<LineInfo>& infos = level.infos;
+    std::vector<unsigned char>& suppressed = NextRecord(*tSessionDocument).suppressed;
+#endif
     // The footnotes defined at this level, parsed once its link definitions are known.
     if (notes != nullptr && notes->found.size() > firstNote) DefineFootnotes(firstNote, definitions, depth, *notes);
     auto isSuppressed = [&](size_t index) {
@@ -96,7 +111,7 @@
         if (frontMatterEnd < infos.size()) i = frontMatterEnd + 1;
     }
 #if RAYOMD_SESSION_LEVEL
-    i = BeginInSession(markdown, lines, infos, suppressed.data(), suppressed.size(), definitions, definitionSyntax, i, notes);
+    i = BeginInSession(lines, suppressed, definitions, definitionSyntax, i, change, notes);
 #endif
 
     const bool stampLines = depth == 0;

@@ -48,10 +48,19 @@ struct ParsePass {
     uint32_t closed;           // 1 when no HTML element was open
 };
 
+// The lines of a session's parse and their classes (session_parse.cpp), which the next parse shifts
+// past its edit.
+struct ParseLines;
+struct ParseLinesFree {
+    void operator()(ParseLines* lines) const;
+};
+
 // What a session's document-level parse leaves for the next (session_parse.h): the text it read,
-// each line's class and definition mark, the link definitions, and every pass of its block loop.
+// its lines, each line's class and definition mark, the link definitions, and every pass of its
+// block loop.
 struct ParseRecord {
     std::string text;
+    std::unique_ptr<ParseLines, ParseLinesFree> lines;   // views of `text`
     std::vector<uint8_t> kinds;
     std::vector<unsigned char> suppressed;
     ReferenceDefinitions definitions;

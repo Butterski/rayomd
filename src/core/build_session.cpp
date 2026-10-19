@@ -583,9 +583,6 @@ public:
     size_t resync = SIZE_MAX;    // the last parse's pass the loop stopped at
 };
 
-namespace {
-
-// The first byte at which `a` and `b`, of `size` bytes each, differ; `size` for none.
 size_t FirstDifference(const char* a, const char* b, size_t size) {
     constexpr size_t kChunk = 4096;
     size_t at = 0;
@@ -594,7 +591,6 @@ size_t FirstDifference(const char* a, const char* b, size_t size) {
     return at;
 }
 
-// How many bytes `a` and `b` end with alike, at most `limit`.
 size_t CommonEnd(const char* aEnd, const char* bEnd, size_t limit) {
     constexpr size_t kChunk = 4096;
     size_t same = 0;
@@ -602,6 +598,8 @@ size_t CommonEnd(const char* aEnd, const char* bEnd, size_t limit) {
     while (same < limit && aEnd[-1 - static_cast<ptrdiff_t>(same)] == bEnd[-1 - static_cast<ptrdiff_t>(same)]) same++;
     return same;
 }
+
+namespace {
 
 bool SameDefinitions(const ReferenceDefinitions& a, const ReferenceDefinitions& b) {
     if (a.size() != b.size()) return false;
@@ -630,7 +628,7 @@ bool MayHoldMarker(const std::vector<Block>& blocks, size_t first, size_t end) {
 // SIZE_MAX to parse whole. Sets what DocumentPass and EndDocumentParse need.
 size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, const std::string& text,
     const std::vector<std::string_view>& lines, const std::vector<unsigned char>& suppressed,
-    const ReferenceDefinitions& definitions, bool definitionSyntax, size_t first) {
+    const ReferenceDefinitions& definitions, bool definitionSyntax, size_t first, const LineChange& change) {
     constexpr size_t kNone = SIZE_MAX;
     const ParseRecord& next = parse.next;
     const size_t count = lines.size();
@@ -646,7 +644,7 @@ size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, const std::stri
     const size_t oldSize = last.text.size();
     const size_t size = text.size();
     const size_t common = std::min(oldSize, size);
-    const size_t differs = FirstDifference(last.text.data(), text.data(), common);
+    const size_t differs = change.known ? change.differs : FirstDifference(last.text.data(), text.data(), common);
     const char* const base = text.data();
     const auto lineStart = [&](size_t line) { return static_cast<size_t>(lines[line].data() - base); };
     size_t changed = count;      // the first line that may differ
@@ -662,7 +660,7 @@ size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, const std::stri
         }
         changed = low == 0 ? 0 : low - 1;
         // A line after it whose line feed before it is in the end both texts share.
-        const size_t same = CommonEnd(last.text.data() + oldSize, base + size, common - differs);
+        const size_t same = change.known ? change.same : CommonEnd(last.text.data() + oldSize, base + size, common - differs);
         low = changed + 1;
         high = count;
         while (low < high) {
@@ -676,18 +674,19 @@ size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, const std::stri
     if (static_cast<int64_t>(suffix) - shift < 0 || static_cast<int64_t>(suffix) - shift > static_cast<int64_t>(oldCount)) {
         return kNone;
     }
-    // The lines' classes and definition marks, which their context gives, the same as well.
+    // The lines' classes and definition marks, which their context gives, the same as well (where
+    // the parse's classes come from the last's, only those it classified again may differ).
     const std::vector<uint8_t>& kinds = next.kinds;
     const auto sameLine = [&](size_t line, size_t old) {
         return kinds[line] == last.kinds[old] && (suppressed.empty() || suppressed[line] == last.suppressed[old]);
     };
-    for (size_t line = 0; line < changed; line++) {
+    for (size_t line = change.known ? std::min(change.classFirst, changed) : 0; line < changed; line++) {
         if (!sameLine(line, line)) {
             changed = line;
             break;
         }
     }
-    for (size_t line = count; line > suffix; line--) {
+    for (size_t line = change.known ? std::max(std::min(change.classEnd, count), suffix) : count; line > suffix; line--) {
         if (!sameLine(line - 1, static_cast<size_t>(static_cast<int64_t>(line - 1) - shift))) {
             suffix = line;
             break;
@@ -743,17 +742,17 @@ size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, const std::stri
 
 } // namespace
 
-std::vector<uint8_t>& DocumentKinds(DocumentParse& parse) {
-    return parse.next.kinds;
+const ParseRecord* LastRecord(const DocumentParse& parse) {
+    return parse.last;
 }
 
-std::vector<unsigned char>& DocumentSuppressed(DocumentParse& parse) {
-    return parse.next.suppressed;
+ParseRecord& NextRecord(DocumentParse& parse) {
+    return parse.next;
 }
 
-size_t BeginDocumentParse(DocumentParse& parse, const std::string& text, const std::vector<std::string_view>& lines,
+size_t BeginDocumentParse(DocumentParse& parse, const std::vector<std::string_view>& lines,
     const std::vector<unsigned char>& suppressed, const ReferenceDefinitions& definitions, bool definitionSyntax,
-    size_t first, const FootnoteParse& notes) {
+    size_t first, const LineChange& change, const FootnoteParse& notes) {
     ParseRecord& next = parse.next;
     parse.budget = ParseBudget::Current();
     parse.referenceStart = parse.budget != nullptr ? parse.budget->referenceBytes : 0;
@@ -768,10 +767,10 @@ size_t BeginDocumentParse(DocumentParse& parse, const std::string& text, const s
     // passes, the same as the last's, then define none and wait for none either.
     (void)notes;
     if (parse.last != nullptr) {
-        const size_t resumed = ResumeLine(parse, *parse.last, text, lines, suppressed, definitions, definitionSyntax, first);
+        const size_t resumed = ResumeLine(parse, *parse.last, next.text, lines, suppressed, definitions, definitionSyntax,
+            first, change);
         if (resumed != SIZE_MAX) start = resumed;
     }
-    next.text.assign(text);
     return start;
 }
 

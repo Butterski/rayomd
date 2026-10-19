@@ -68,7 +68,8 @@ const char* const kSnippets[] = { "a", " ", "\n", "\n\n", "word ", "**bold**", "
 const char* const kLines[] = { "[ref]: https://example.com/other\n", "[new]: <https://e.com/n>\n", "[^n]: A note.\n",
     "---\n", "---\ntitle: T\n---\n", "```\n", "~~~\n", "    code\n", "<div align=\"center\">\n", "</div>\n", "<!--\n",
     "-->\n", "<pre>\n", "</pre>\n", "  continued\n", ">\n", "lazy\n", "===\n", "| x | y |\n", "|---|---|\n", "$$\n",
-    "\\[\n", "\\]\n", "\n", "[TOC]\n", "\\newpage\n", "1) x\n" };
+    "\\[\n", "\\]\n", "\n", "[TOC]\n", "\\newpage\n", "1) x\n", "[t]: /url\n  \"A title\"\n", "    ```\n", "$$ x $$\n",
+    "line\r\n" };
 
 size_t LineStart(const std::string& text, size_t at) {
     while (at > 0 && text[at - 1] != '\n') at--;
