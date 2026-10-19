@@ -27,9 +27,13 @@ constexpr uint8_t kEmptyLineKind = 1;
 // One document-level parse of a session's build (build_session.cpp).
 class DocumentParse;
 
-// Sets the document parse of this thread's next depth-0 ParseMarkdownImpl with footnotes, the
-// document's (markdown_parser.cpp); null for none. Its block loop's end clears it.
+// Sets the document parse of this thread's next depth-0 ParseMarkdownLevel with footnotes, the
+// document's; null for none. Its block loop's end clears it (session_parse.cpp).
 void SetDocumentParse(DocumentParse* parse);
+// Whether one is set: ParseMarkdownLevel then parses the document with ParseSessionDocument, the
+// level parse with the session's hooks, compiled apart (session_parse.cpp).
+bool SessionDocumentSet();
+std::vector<Block> ParseSessionDocument(const std::string& markdown, int depth, FootnoteParse* notes);
 // Where the document's parse takes `kinds` (the class of each line after ResolveMathOpeners) and the
 // lines the definitions take (its `suppressed`).
 std::vector<uint8_t>& DocumentKinds(DocumentParse& parse);

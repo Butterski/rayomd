@@ -294,7 +294,8 @@ set(RAYOMD_CORE_SOURCES
 # BuildSession (incremental builds for an editor's preview): only the engine library and the core
 # tests have it, compiled with RAYOMD_BUILD_SESSION; the command lines make no session and carry
 # none of its code (MinGW's linker kept 24 KB of it in rayomd.exe when it was there unused).
-set(RAYOMD_SESSION_SOURCES src/core/build_session.cpp)
+# session_parse.cpp compiles markdown_parser.cpp a second time with the session's parse hooks.
+set(RAYOMD_SESSION_SOURCES src/core/build_session.cpp src/core/session_parse.cpp)
 
 if(NOT WIN32)
     if(RAYOMD_USE_CURL)
