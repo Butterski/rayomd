@@ -32,9 +32,16 @@ int WinAnsiCode(uint32_t codePoint) {
 
 namespace {
 
-// Bytes from text[at] that are ASCII, eight at a time.
+// Bytes from text[at] that are ASCII: 32 a step (two SSE2 loads, their sign bits), else eight.
 size_t AsciiRunLength(std::string_view text, size_t at) {
     const size_t start = at;
+#if RAYOMD_TEXT_SSE2
+    for (; at + 32 <= text.size(); at += 32) {
+        const __m128i low = _mm_loadu_si128(reinterpret_cast<const __m128i*>(text.data() + at));
+        const __m128i high = _mm_loadu_si128(reinterpret_cast<const __m128i*>(text.data() + at + 16));
+        if (_mm_movemask_epi8(_mm_or_si128(low, high)) != 0) break;
+    }
+#endif
     for (; at + 8 <= text.size(); at += 8) {
         uint64_t word;
         std::memcpy(&word, text.data() + at, 8);

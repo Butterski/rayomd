@@ -9,6 +9,7 @@
 #include "../common/compiler.h"
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <utility>
 
@@ -54,15 +55,21 @@ constexpr int kMaxNesting = 16;
 std::string DecodeAscii(std::string_view value) {
     std::string out;
     out.reserve(value.size());
-    for (size_t at = 0; at < value.size(); at++) {
+    // The text up to each '&' in one append, not a byte at a time.
+    for (size_t at = 0; at < value.size();) {
+        const void* found = memchr(value.data() + at, '&', value.size() - at);
+        const size_t amp = found != nullptr ? static_cast<size_t>(static_cast<const char*>(found) - value.data()) : value.size();
+        out.append(value.data() + at, amp - at);
+        if (amp == value.size()) break;
         uint32_t codePoint = 0;
-        const size_t length = value[at] == '&' ? MatchCharacterReference(value, at, codePoint) : 0;
+        const size_t length = MatchCharacterReference(value, amp, codePoint);
         if (length != 0 && codePoint != 0 && codePoint < 0x80) {
             out.push_back(static_cast<char>(codePoint));
-            at += length - 1;
-            continue;
+            at = amp + length;
+        } else {
+            out.push_back('&');
+            at = amp + 1;
         }
-        out.push_back(value[at]);
     }
     return out;
 }

@@ -41,6 +41,36 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
+
+Measured against 5.2.3 (`f28d74b`), g++ 13.3 Release, Docker; instructions by `ab.sh
+--instructions`, cycles by `perf stat -e cycles:u` in alternating runs on CPU 3 (a busy host: where
+release builds disagree with callgrind, builds with `-falign-functions=64 -falign-loops=32` decide).
+Every step keeps the 2,875 PDFs of the byte check, the 5,936 and 6,044 feature-on exports, and
+4,480 exports of 140 generated documents (code blocks in 29 fence languages with wide, narrow,
+control, tab, CR and non-ASCII units; tables with and without formulas and Unicode cells).
+
+- **Highlighted code lines bounded by the widest ASCII advance** (`Renderer::codeWidest`): an
+  ASCII block's line of n units is at most n times the widest of the 128 ASCII widths, so a line
+  under the width by that bound is drawn whole without summing its units. code-heavy -3.6 %
+  instructions, cycles -1.5 %. A first try that decided every piece in integer units in one pass
+  (`WrapUnits`, no pre-pass) cost code-heavy +1.7 % instructions: the pre-pass loop was cheaper.
+- **WinAnsi transcoding 32 bytes a step** (`AsciiRunLength`, SSE2): the essay, a Latin document,
+  is transcoded whole on every build. essay -1.4 % instructions, -1.1 % cycles.
+- **The inline parser's stops in AVX2** (`FindStopsAvx2`, inline_markdown.cpp): the twelve bytes
+  that may start syntax or an autolink looked up by nibble in two `vpshufb` tables (each high nibble
+  of a stop owns a bit; a static_assert checks the tables against `kByteClasses`), where SSE2 took
+  a compare and an OR per byte. essay -3.9 %, native_math -1.3 %, README -0.7 % instructions;
+  cycles essay -2.1 % (aligned -2.6 %), README and tester-noimg even in the aligned builds.
+- **Link destinations, image labels, HTML attributes decoded in runs** (`AppendDestination`,
+  `AppendDecoded`, `DecodeAscii`): appends up to each '&' or backslash instead of a `push_back` a
+  byte. README -2.4 %, table-heavy -0.8 % instructions; README cycles -1.4 % aligned.
+- **UTF-8 to wide text in one SSE2 pass, out of line** (`WriteUtf8Wide`): ASCII tested and widened
+  16 bytes a step. table-heavy -0.8 %, README -0.7 % instructions, table-heavy cycles -1.7 %;
+  1.7 KB less code.
+
+Against 5.2.3: the binary 1,333,944 -> 1,329,848 bytes.
+
 ## Round 2 against 5.2.2: layout and parsing (2026-10-19)
 
 Measured against 5.2.2 (`e4bdc54`), g++ 13.3 Release, Docker; instructions by `ab.sh
@@ -943,6 +973,17 @@ decisions) and 19 % of README's branch misses. Inlined into `WrapStyledInline` t
 a load in the chain; see *Tried and rejected* for what did not fix it. Headings still wrap
 through `WrapText` (a vector and strings per heading, under 1 % of README).
 
+**Records built on the stack and copied into vectors (2026-10-19).** perf puts 10 % of
+`ParseMarkdownImpl`'s cycles on README on the 32-byte copy of each `LineInfo` that `ClassifyLine`
+returns into `infos.push_back` (two 16-byte loads of what byte stores had just written), and 9.6 % of
+`WrapAsciiInline`'s on the same pattern for `AsciiSegment`. Writing the segment's fields in place
+changed nothing measurable (below), so the samples may be skid; the `LineInfo` copy was not tried.
+
+**One scan for WrapAsciiRuns' tests.** Each paragraph of the standard renderer takes four `memchr`
+passes ('\n', '$', "\(", "[^") and `ParseInlineRuns` a fifth (0xE2): 3.2 % of the essay's cycles. The
+tests are of the raw text (a "[^" in a code span counts), so the parser's stops cannot answer them;
+one AVX2 pass for all five bytes, with the pairs checked at their candidates, would.
+
 **Keeping the header row's wrapped cells.** A table that breaks wraps its header
 row again (about 0.3 % of the table fixture's 1.7 %); keeping them needs a second
 set of cell buffers in the hot loop. **Inserting the TOC block** moves every later
@@ -964,6 +1005,11 @@ Each was measured, lost, and is described in full in the
 [Performance History](https://github.com/Butterski/rayomd/wiki/Performance-History).
 
 Text and layout:
+- Round 3 (2026-10-19): `WrapUnits` shared by the cells of a table (the last one of a size and
+  width kept for the thread, texts up to 4,096 units given that many units' slack, so its two
+  divisions run once a table): table-heavy -0.5 % instructions, cycles even (median +0.8 %, min
+  -0.2 %, 31 runs); the divisions overlap the work around them. `AsciiSegment` written in place
+  instead of an aggregate copied from the stack: essay -0.02 % instructions, cycles even.
 
 - Carrying run widths from wrapping to painting in the Unicode renderer: no gain
   once the additions had to stay in order.

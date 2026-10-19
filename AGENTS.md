@@ -550,7 +550,10 @@ Important image/link details:
   delimiters. Both renderers consume this model so visible text and link annotations
   cannot drift. `ParseInlineRuns` is the parser (flat runs for the hot paths);
   `ParseInlineSpans` is the same result as strings, for tests and cold paths; the spans of one
-  link share its target (`SharedUrl`, `shared_url.h`), never a copy each.
+  link share its target (`SharedUrl`, `shared_url.h`), never a copy each. The parser copies text
+  up to the next byte that may start syntax (`FindStops`: AVX2 nibble tables where the CPU has them,
+  checked against `kByteClasses` by a static_assert; else `FindByteClass`'s SSE2): a new syntax byte
+  goes into `kByteInlineSyntax`, and the tables follow.
 
 - `src/core/math_parser.h` and `src/core/math_parser.cpp`
   Tokenizer, parser, error recovery, and limits for the TeX math subset; produces a
