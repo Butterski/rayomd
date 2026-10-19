@@ -112,6 +112,12 @@ linked notes) identical.
   ab time code-heavy -4.4 %, README -1.5 %. 400 generated documents of code blocks (27 fence
   languages, deep indents, blank-filled lines, tabs, non-ASCII, `--black-text`, `--pdfua`,
   `--no-highlight`) identical. Core check 134 compares it with the loop. Text +4 KB.
+- **The lexer's words end by a bit scan** (`Text::WordEnd`, highlight.cpp): `CodeLexer::Run`'s and
+  `Word`'s loops over word bytes ended at a branch that mispredicts at every word; SSE2 now tests
+  sixteen bytes (letters, digits, '_', bytes from 0x80) and takes the first other one, while the
+  load ends inside the text. code-heavy -0.3 % instructions, perf cycles -3.0 to -3.1 %, ab time
+  -3.2 %; README +0.05 % instructions, cycles -0.2 %. The same in the lexer's rarer word loops
+  (variables, heredocs, attributes, line starts) cost code-heavy +0.12 % instructions; not taken.
 
 ## After 4.6.1: formula fonts, tables, fallback fonts, images, code, static start
 

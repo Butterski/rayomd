@@ -12,6 +12,11 @@
 #include <optional>
 #include <vector>
 
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+#include <emmintrin.h>
+#define RAYOMD_LEXER_SSE2 1
+#endif
+
 namespace TinyPdf::Internal {
 namespace {
 
@@ -301,6 +306,33 @@ inline bool SameBytes(const char* text, const char* word, size_t length) {
 struct Text {
     const char* s;
     uint8_t* out;
+    size_t size;    // of s: the loads below end inside it
+
+    // The end of the word bytes (IsWord) from j, at most `end`: sixteen bytes a load while they
+    // are inside the text, so a word's end is a bit scan, not a branch that mispredicts there.
+    size_t WordEnd(size_t j, size_t end) const {
+        if (j >= end) return j;
+#if RAYOMD_LEXER_SSE2
+        for (; j + 16 <= size; j += 16) {
+            const __m128i c = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + j));
+            const __m128i letter = _mm_sub_epi8(_mm_or_si128(c, _mm_set1_epi8(0x20)), _mm_set1_epi8('a'));
+            const __m128i digit = _mm_sub_epi8(c, _mm_set1_epi8('0'));
+            const __m128i word = _mm_or_si128(
+                _mm_or_si128(_mm_cmpeq_epi8(_mm_min_epu8(letter, _mm_set1_epi8(25)), letter),
+                    _mm_cmpeq_epi8(_mm_min_epu8(digit, _mm_set1_epi8(9)), digit)),
+                _mm_cmpeq_epi8(c, _mm_set1_epi8('_')));
+            // Bytes from 0x80 are word bytes: their sign bits.
+            const unsigned other = ~static_cast<unsigned>(_mm_movemask_epi8(word) | _mm_movemask_epi8(c)) & 0xFFFFu;
+            if (other != 0) {
+                const size_t to = j + static_cast<size_t>(__builtin_ctz(other));
+                return to < end ? to : end;
+            }
+            if (j + 16 >= end) return end;
+        }
+#endif
+        while (j < end && IsWord(s[j])) j++;
+        return j;
+    }
 
     // Tokens are mostly short: up to 16 bytes take two overlapping stores, where a call to
     // memset cost more than the token. One copy out of line: as fast, and 8 KB less code.
@@ -610,7 +642,7 @@ void CodeLexer::Run(size_t i, size_t end) {
             if (language == kPowerShell && IsWordStart(next) && (i == 0 || !IsWord(s[i - 1]))) {
                 // An operator, -eq, or a parameter, -Path.
                 to = i + 1;
-                while (to < end && IsWord(s[to])) to++;
+                to = t.WordEnd(to, end);
                 const uint8_t kind = words.Find(s + i, to - i);
                 t.Mark(i, to, kind & kClassBits);
             }
@@ -624,7 +656,7 @@ void CodeLexer::Run(size_t i, size_t end) {
                 to = HeredocOpener(i, end, heredoc);
             } else if (language == kPhp && next == '?') {
                 to = i + 2;
-                while (to < end && IsWord(s[to])) to++;
+                to = t.WordEnd(to, end);
                 t.Mark(i, to, kCodeKeyword);
             }
             break;
@@ -647,7 +679,7 @@ void CodeLexer::Run(size_t i, size_t end) {
             // A batch file's !name!, expanded when the line runs.
             if (language == kBatch && IsWordStart(next)) {
                 size_t close = i + 1;
-                while (close < end && IsWord(s[close])) close++;
+                close = t.WordEnd(close, end);
                 if (close < end && s[close] == '!') {
                     to = close + 1;
                     t.Mark(i, to, kCodeVariable);
@@ -658,7 +690,7 @@ void CodeLexer::Run(size_t i, size_t end) {
             // A Ruby symbol, :name.
             if (language == kRuby && IsWordStart(next) && (i == 0 || s[i - 1] != ':')) {
                 to = i + 1;
-                while (to < end && IsWord(s[to])) to++;
+                to = t.WordEnd(to, end);
                 if (to < end && (s[to] == '?' || s[to] == '!')) to++;
                 t.Mark(i, to, kCodeConstant);
             }
@@ -680,7 +712,7 @@ void CodeLexer::Run(size_t i, size_t end) {
 size_t CodeLexer::Word(size_t i, size_t end, bool afterDefiner, bool& definer, bool& operand) {
     size_t j = i + 1;
     for (;;) {
-        while (j < end && IsWord(s[j])) j++;
+        j = t.WordEnd(j, end);
         if (j >= end) break;
         if (s[j] == '$' && (flags & kDollarLetters)) j++;
         else if (s[j] == '-' && shellWords && j + 1 < end && IsWordStart(s[j + 1])) j += 2;   // apt-get
@@ -2022,7 +2054,7 @@ void ClassifyCode(uint8_t language, std::string_view code, uint8_t* classes) {
     if (code.empty()) return;
     memset(classes, kCodePlain, code.size());
     if (language == 0 || language >= kLanguageCount) return;
-    const Text text{ code.data(), classes };
+    const Text text{ code.data(), classes, code.size() };
     const size_t n = code.size();
     switch (kSpecs[language].mode) {
     case kCodeMode: CodeLexer(language, text).Run(0, n); break;
