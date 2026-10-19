@@ -152,17 +152,22 @@ RAYOMD_NOINLINE void AppendReference(std::string& out, uint32_t codePoint) {
     out.push_back(code >= 0 ? static_cast<char>(code) : IsSpaceReference(codePoint) ? ' ' : '?');
 }
 
-// Appends `value` with its character references decoded.
+// Appends `value` with its character references decoded: the text up to each '&' in one append.
 void AppendDecoded(std::string& out, std::string_view value) {
-    for (size_t i = 0; i < value.size(); i++) {
+    for (size_t i = 0; i < value.size();) {
+        const void* found = memchr(value.data() + i, '&', value.size() - i);
+        const size_t amp = found != nullptr ? static_cast<size_t>(static_cast<const char*>(found) - value.data()) : value.size();
+        out.append(value.data() + i, amp - i);
+        if (amp == value.size()) return;
         uint32_t codePoint = 0;
-        const size_t length = value[i] == '&' ? MatchCharacterReference(value, i, codePoint) : 0;
+        const size_t length = MatchCharacterReference(value, amp, codePoint);
         if (length == 0) {
-            out.push_back(value[i]);
+            out.push_back('&');
+            i = amp + 1;
             continue;
         }
         AppendReference(out, codePoint);
-        i += length - 1;
+        i = amp + length;
     }
 }
 
@@ -322,16 +327,24 @@ RAYOMD_NOINLINE void AppendDestination(std::string_view target, std::string& url
         value = target.substr(0, end);
     }
     value = TrimView(value);
-    for (size_t i = 0; i < value.size(); i++) {
+    for (size_t i = 0; i < value.size();) {
+        // The bytes before the next backslash or '&' in one append.
+        size_t plain = i;
+        while (plain < value.size() && value[plain] != '\\' && value[plain] != '&') plain++;
+        urls.append(value.data() + i, plain - i);
+        i = plain;
+        if (i == value.size()) break;
         uint32_t codePoint = 0;
         size_t length = 0;
         if (value[i] == '\\' && i + 1 < value.size() && std::ispunct((unsigned char)value[i + 1])) {
-            urls.push_back(value[++i]);
+            urls.push_back(value[i + 1]);
+            i += 2;
         } else if (value[i] == '&' && (length = MatchCharacterReference(value, i, codePoint)) != 0) {
             AppendReference(urls, codePoint);
-            i += length - 1;
+            i += length;
         } else {
             urls.push_back(value[i]);
+            i++;
         }
     }
     if (!Html::SafeUrl(std::string_view(urls).substr(begin))) urls.resize(begin);
