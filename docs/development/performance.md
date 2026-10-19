@@ -60,18 +60,35 @@ the text before and after the edit (the GUI's case), medians of 3 paired rounds.
   page after `StartPageContent`'s gap, `LayoutTape::pageGaps`): `BuildInto` moves nothing on a
   replayed layout. On top of the parse step: t700 x1.11 cycles, t70 x1.09, e50 x1.04, instructions
   even (callgrind counted the move as 24 M a build of t700).
-- Open: in the engine library (`RAYOMD_BUILD_SESSION`), ordinary `BuildPdf` builds measure +0.41 to
-  +0.78 % instructions on notes, README and tester-noimg (callgrind, `--bench` of a CLI compiled
-  with the define): the hooks in `ParseMarkdownImpl` stop GCC inlining a string destructor
-  (`_M_dispose` out of line) and grow its self cost. Tried without effect: keeping NRVO of
-  `blocks` (a `return` of the hook's result had broken it: that part, a vector move, is gone), no
-  local for the session (thread-local tested at each hook), the definition marks passed as a
-  pointer, the reserve unconditional. With the hooks folded away the difference is +0.01 %. The
-  command line is unaffected: its `.text` is byte-identical to 5.2.5's.
+- **The session's parse in a copy of the parser compiled apart** (`session_parse.cpp` compiles
+  `markdown_parser.cpp` a second time, its external functions renamed; the level parse is
+  `markdown_parser_level.inc`, included as `ParseMarkdownImpl` without hooks and as
+  `ParseSessionDocument` with them). With the hooks in `ParseMarkdownImpl`, ordinary `BuildPdf`
+  builds in the engine library measured +0.41 to +0.78 % instructions on notes, README and
+  tester-noimg (GCC no longer inlined a string destructor there); a second copy in the same unit,
+  +1.3 to 2.1 % (single-caller helpers no longer inlined). Tried first without effect: keeping NRVO
+  of `blocks`, a thread-local tested at each hook instead of a local, the definition marks passed as
+  a pointer. Now `ab.sh --instructions` of the CLI compiled as the engine library (with
+  `RAYOMD_BUILD_SESSION`, the session sources linked in) against 5.2.5 the same way: -0.00 to
+  +0.03 % on every fixture. The command line's `.text` is byte-identical to 5.2.5's. The copy costs
+  session builds of t700 3 % more instructions (its inline-markdown calls are not inlined).
+- All steps, a quiet re-run (7 paired rounds, ranges within 2 %): t700 a letter or a line deleted
+  in the middle 183 -> 108 Mcycles (x1.67 to x1.69, instructions x1.77); t70 x1.61 (x1.78); e50
+  a letter at the start, middle or end x1.29 to x1.30 (instructions x1.45 to x1.52), a line deleted
+  x1.14 (x1.38), a paragraph inserted x1.27 (x1.41). e50 stays under x1.4 in cycles: what is left
+  is classifying every line (now its largest part), the comparisons and the copies.
+- First keystrokes (lab harness, t700, a new session, letters typed one after another, a new output
+  string each build, quiet host): the full build 183 ms, then 59, 53, 41, and 32 from the fourth
+  on. Three unchanged builds first take 59, 43, 32; the two edits after them still 42 and 41, so
+  part of the warm-up is the session's (an edit's buffers), part the process's. With glibc's
+  `MALLOC_MMAP_THRESHOLD_` and `MALLOC_TRIM_THRESHOLD_` raised, the first three keystrokes are 51
+  ms each and the rest 32: large buffers handed to and taken back from the kernel each build cost
+  much of it (in a loaded run, 65 -> 33 ms steady). Not fixed here; the GUI could keep its output
+  buffer or set those thresholds.
 - Not done: classifying only the changed lines (record the line classes and the definition and
   formula passes' states, about 35 M instructions of t700's session build), the tape's content
-  spliced instead of copied (`EndLayout`'s copy, 25 MB for t700), the first keystroke's fresh tape
-  (reserve from the last), footnote documents (replay the body when the numbers are equal).
+  spliced instead of copied (`EndLayout`'s copy, 25 MB for t700), footnote documents (replay the
+  body when the numbers are equal), the worst case's measure.
 
 ## Round 4: package size (opt4/size2, 2026-10-19)
 

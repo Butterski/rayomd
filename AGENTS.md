@@ -302,12 +302,16 @@ on beyond its block and that state (as footnote numbers, image names, PDF/UA's t
 session lay those blocks out, or the whole document. Ordinary builds pay one test of the thread's
 session per build. Core check 137 (`tests/session_tests.inc`) compares random edits built both ways.
 A session's parse goes on from its last build's (`ParseInSession`, `src/core/session_parse.h`): the
-builders parse into the session's blocks (`BuildBlocks`), and `ParseMarkdownImpl`'s block loop notes
-its state at every pass (`DocumentPass`). New state that the loop carries from one pass to the next
-(beyond the line, the open HTML elements and the ParseBudget) must go into `ParsePass` and be compared
-there, and anything a later pass reads before its own line, or a transformation of the blocks after
-the parse, must make the session parse whole; the hooks in `ParseMarkdownImpl` move GCC's code in
-the engine library (performance.md, round 5), so keep them as few as they are.
+builders parse into the session's blocks (`BuildBlocks`), and the session's copy of the level parse
+notes its block loop's state at every pass (`DocumentPass`). The level parse's body is
+`src/core/markdown_parser_level.inc`: `ParseMarkdownImpl` includes it without hooks
+(`RAYOMD_SESSION_LEVEL` 0), and `src/core/session_parse.cpp`, which compiles `markdown_parser.cpp` a
+second time in the engine library only (its external functions renamed), as `ParseSessionDocument`
+with them; hooks in the plain copy, or both copies in one unit, cost BuildPdf 0.4 to 2 % (round 5 in
+performance.md). A new external function of `markdown_parser.cpp` must be renamed there too. New state
+that the loop carries from one pass to the next (beyond the line, the open HTML elements and the
+ParseBudget) must go into `ParsePass` and be compared there, and anything a later pass reads before
+its own line, or a transformation of the blocks after the parse, must make the session parse whole.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
