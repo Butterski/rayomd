@@ -18,14 +18,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <set>
-#include <sstream>
 #include <string_view>
 #include <thread>
 #include <utility>
 #include <chrono>
 #include <filesystem>
-#include <codecvt>
-#include <locale>
 
 #ifndef RAYOMD_VERSION
 #define RAYOMD_VERSION "0.0.0"
@@ -85,30 +82,20 @@ struct WinExportOptions {
 // ============================================================================
 std::wstring Utf8ToWide(const std::string& str) {
     if (str.empty()) return L"";
-#ifdef _WIN32
     int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
     std::wstring wstr(len, 0);
     MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &wstr[0], len);
     wstr.resize(len - 1);
     return wstr;
-#else
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
-    return conv.from_bytes(str);
-#endif
 }
 
 std::string WideToUtf8(const std::wstring& wstr) {
     if (wstr.empty()) return "";
-#ifdef _WIN32
     int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
     std::string str(len, 0);
     WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &str[0], len, nullptr, nullptr);
     str.resize(len - 1);
     return str;
-#else
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
-    return conv.to_bytes(wstr);
-#endif
 }
 
 #ifdef _WIN32
@@ -983,15 +970,14 @@ int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
     double totalMs = (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
     double avgMs = totalMs / (double)iterations;
 
-    std::ostringstream report;
-    report << "input_bytes=" << markdown.size() << "\n";
-    report << "iterations=" << iterations << "\n";
-    report << "total_ms=" << RayoMd::Text::FormatDouble(totalMs) << "\n";
-    report << "avg_ms=" << RayoMd::Text::FormatDouble(avgMs) << "\n";
-    report << "avg_pdf_bytes=" << (totalBytes / (size_t)iterations) << "\n";
-    report << "path=" << RayoMd::Text::RendererPathName(markdown) << "\n";
+    std::string report = "input_bytes=" + std::to_string(markdown.size()) + "\n";
+    report += "iterations=" + std::to_string(iterations) + "\n";
+    report += "total_ms=" + RayoMd::Text::FormatDouble(totalMs) + "\n";
+    report += "avg_ms=" + RayoMd::Text::FormatDouble(avgMs) + "\n";
+    report += "avg_pdf_bytes=" + std::to_string(totalBytes / (size_t)iterations) + "\n";
+    report += std::string("path=") + RayoMd::Text::RendererPathName(markdown) + "\n";
 
-    if (!WriteUtf8File(JoinPath(outputDir, L"bench-results.txt"), report.str())) return 12;
+    if (!WriteUtf8File(JoinPath(outputDir, L"bench-results.txt"), report)) return 12;
     return 0;
 }
 int RunDoctor() {

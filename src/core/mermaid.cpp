@@ -844,8 +844,8 @@ private:
     // A shape's brackets and the label between them.
     bool Shape(int& shape, std::string_view& text) {
         struct Form {
-            const char* open;
-            const char* close;
+            char open[3];
+            char close[3];
             int shape;
         };
         // Longer openers first; "[/" and "[\" each close two ways.
@@ -2318,7 +2318,7 @@ enum SeqHead : uint8_t { kSeqNoHead, kSeqArrow, kSeqCross, kSeqOpen };
 enum NotePlace : uint8_t { kLeftOf, kRightOf, kOver };
 enum FrameKind : uint8_t { kLoop, kAlt, kOpt, kPar, kCritical, kBreak, kRectFrame };
 
-const char* const kFrameWords[] = { "loop", "alt", "opt", "par", "critical", "break", "" };
+const char kFrameWords[][9] = { "loop", "alt", "opt", "par", "critical", "break", "" };
 
 struct Participant {
     std::string_view name;

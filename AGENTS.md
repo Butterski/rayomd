@@ -86,8 +86,12 @@ unit, where it moved GCC's inlining of the line classifier. A table with a refer
 shows its cells as plain text, as one with a formula does. Without definitions the
 PDF bytes stay as they are.
 `--footnotes=page` (`PdfOptions::footnotes`, `FootnotePlacement::Page`) sets each note at the foot
-of the page of its first reference (`PageNoteLayout` in `tiny_pdf.cpp`, its account in
-`page_notes.cpp`): every note is laid out once before the text (`Measure`, in `footMode`: no page
+of the page of its first reference. The steps are one copy for both renderers in `page_notes.cpp`
+(`PageNoteCore`, at `-Os`, beside the account `PageNotes`), which sees a renderer through a
+`NoteHost` (references to the fields both have, one `NoteCall` dispatch, `PageNoteLayout<R>::Call`,
+for what each does its own way); `tiny_pdf.cpp` keeps only that dispatch, the line and row hooks
+of the cold paths and `SetNotesAside`: every note is laid out once before the text (`Measure`, in
+`footMode`: no page
 breaks, the content, links, marks, images and glyph counts it made taken back) for its height and
 the notes it refers to; the cold paths that paint references (`RenderMathLines`,
 `RenderMathTextLines` with `EnsureNotes`, `RenderMathTable` rows) keep room below the line for its
@@ -98,16 +102,22 @@ blocks move both with `Indent`/`RestoreMargin`, so `Ensure` keeps its size); `Ne
 `PageNotes::pageEnds` pointer: a direct call put it in a cycle with the paint paths and moved GCC's
 inlining of `MarkHeading`), the end of
 a document and of each book file paint them (`Paint`). The measuring layout writes into the
-stash (`PageNotes::content` in `page_notes.cpp`, and `FootStash`'s links, headings and anchors,
-swapped for the renderer's while it runs; one `PageNotes::Info` a note holds its height, state and
-where its layout ended), and `Paint` replays a note from it (`ReplayNote`, one copy for both
-renderers) under one `cm` translation, its links, marks and references moved by as much, instead
+stash (`PageNotes::content`, kept by the thread from export to export, and `FootStash`'s links,
+headings and anchors, swapped for the renderer's while it runs; one `PageNotes::Info` a note holds
+its height, state and where its layout ended). A note whose blocks after its first paragraph refer
+to no note (`MayCut`) is measured with its bottom at `PageNoteBase::cut`, half a page below where
+it is too tall for a page: once a page would end there below it, `Break` sets `stop`, at which
+`NoteHost::cancel` (the build's `g_cancel`) points meanwhile, so `BuildCancelled` ends its blocks
+and a note of many pages, which the end section lays out again, is not laid out whole twice; the
+half page is more than the room any layout keeps without filling it, so nothing changes in a note
+that fits. `Paint` replays a note from the stash (`ReplayNote`)
+under one `cm` translation, its links, marks and references moved by as much, instead
 of laying it out again; only under PDF/UA and for a note whose layout changed the images is it laid
 out a second time (`PageNotes::Replayed`), and only then is the renderer set aside (`FootScope`:
-its shared buffers traded by `SwapFootBuffers`, so a paragraph or table row broken by the page goes
-on; the paragraph and table runs trade places with the thread's `KeptBuffer` slots, which the
-renderer emptied when it started, as a second destructor of those types moved GCC's inlining of
-the renderers' destructors). A note
+its shared buffers traded with `FootBuffers` by `SwapFootBuffers`, so a paragraph or table row
+broken by the page goes on; the paragraph and table runs trade places with the thread's
+`KeptBuffer` slots, which the renderer emptied when it started, as a second destructor of those
+types moved GCC's inlining of the renderers' destructors). A note
 only notes refer to (`Footnotes::referenced`) goes with the first that does, at most 8 deep; a
 cluster too tall for a page with its line stays in the end section, which then holds only such
 notes. Under PDF/UA a foot note is a Note of the Document opened over the open elements
@@ -180,9 +190,19 @@ most 20,000 entries and 32 levels; on Windows no reparse point below the root,
 each entry's footnote labels suffixed `~eN`; the fonts are chosen on all of the text
 (`EmbedSet::all`, also for `GuessFallbackFont`). Paths are UTF-8 strings throughout (normalized in
 place, `Normalize`, only when a name has a "." or empty component); on Linux a candidate is one
-`openat2` beneath the root's descriptor, and a note costs that, an `fstat`, one `read` and a
-`close`; each folder and name is looked up once a build, and the name index is one `readdir` walk
-(`Vault::Walk`) into a single string buffer, ordered by an 8-byte key of each name. The parse does
+`openat2` beneath the root's descriptor (opened on the first note not in the cache), and a note
+read costs that, an `fstat`, one `read` into the string kept and a `close`; each folder and name is
+looked up once a build, and the name index is one `readdir` walk (`Walk`) into a single string
+buffer, ordered by an 8-byte key of each name. What a vault read is kept for the process (`Kept` in
+`vault.cpp`: notes as `shared_ptr<const std::string>`, at most `kMaxNoteCacheBytes` (64 MiB) and
+4,096 notes, least recently used out first; the name indexes of the last four roots; resolved
+roots), so a preview, `--serve` or a batch builds the same note again for one `stat` a note (one
+`GetFileAttributesExW` on Windows): size, last write and status change to the nanosecond, device and
+inode must be as they were, a note written within `SetNoteSettleTime` (2 s) of its read is never
+kept, and only what `Check` accepted (beneath the root, through no link) enters; an index is kept
+with the identity of every folder it read and every link's target, each checked by one `stat`.
+Keep new caching of files on this rule: a file that changed, moved or became a link out of the
+vault must be read again on the next build (`CheckNoteCache`). The parse does
 not change for any other document: `ParseObsidian` takes the rewrite from `RewriteDocument`, which
 in a build in an `EmbedScope` first turns the document's embed lines into `<!---->` (a comment ends
 the block before it and gives none; the rewrite leaves it, so it turns no embed into a link), and
@@ -443,8 +463,14 @@ Important image/link details:
 - `src/core/vault.h` and `src/core/vault.cpp`
   The notes a document embeds or links to: a root folder (`Vault`), resolution relative to the
   note, the root, then by name (an index built once, bounded), confinement by resolved path, and
-  on Windows `DirectPathHasLink` (shared with `tiny_pdf.cpp`'s direct image path); also
-  `ResolvedPath` and `IsWithinRoot`, which `book.cpp` uses. Built at `-Os`.
+  on Windows `DirectPathHasLink` (shared with `tiny_pdf.cpp`'s direct image path); the process's
+  cache of notes, name indexes and resolved roots; and the string path helpers `book.cpp` uses
+  instead of `std::filesystem` (`ResolvedPath`, `IsWithinRoot`, `ParentOf`, `AppendPath`,
+  `Normalize`, `RelativePath`, `FileNameOf`, `StemOf`: `operator/=`, `lexically_normal`,
+  `lexically_relative`, `filename` and `stem` as libstdc++ gives them, pinned by
+  `CheckPathHelpers`). On Windows a path that comes from a directory listing stays a wide
+  `std::filesystem::path` until it is opened (`ResolvedWidePath`; a name with an unpaired surrogate
+  has no UTF-8 form); only containment tests read it as UTF-8. Built at `-Os`.
 
 - `src/core/embeds.h` and `src/core/embeds.cpp`
   Obsidian's note embeds: reading them (`ResolveEmbeds`, bounded in count, depth, bytes read and
@@ -558,7 +584,30 @@ Important image/link details:
   its pixels are re-encoded for a PDF. Choosing and applying in AVX2 where the CPU has it
   (GCC/Clang `target("avx2")`, chosen once), else SSE2 on x86-64, with the scalar
   functions kept as the reference and the fallback; core check 99 compares the dispatched,
-  the SSE2 and the scalar code with the textbook filters.
+  the SSE2 and the scalar code with the textbook filters. Built at `-O2`: a row's last bytes take
+  its last full vector step again (the costs of what the step before counted masked off,
+  `kTailMask`), so scalar code runs only for the first pixel and rows shorter than a step; at
+  `-O3` GCC vectorized those scalar loops into 45 KB of code, now 9 KB, for 3.5 % fewer
+  instructions on a 1024x1024 RGBA PNG.
+
+- `src/core/word_bounds.h` and `src/core/word_bounds.cpp`
+  The standard renderer's word measuring (`MeasureWords`): every word's first byte and end as
+  positions (a 64-byte step's white-space bits, their edges, flattened a mask byte at a time from a
+  table) and the prefix sums of the AFM advances (a byte at a time: AVX2's gather costs more cycles
+  on Zen 2, see performance.md), so a word's width is
+  `prefix[end] - prefix[begin]`, the same integer as summing it byte by byte. AVX2 where the CPU has
+  it (asked once), else SSE2, else bytes; texts under 16 bytes always bytes. `BreakAsciiWords` and
+  `WrapAsciiInline` in `tiny_pdf.cpp` wrap from them in the thread's `WrapScratch` (page footnotes
+  trade it in `SwapFootBuffers`); texts under `kShortAsciiText` (16) bytes, most table cells, are
+  read a byte at a time there, as the pass costs more than it saves. `MeasureWideWords` does the
+  same for the Unicode renderer's UTF-16 text (widths gathered from `TtfFont::widthCache`, which has
+  an entry more for it; a surrogate or an uncached width a unit at a time through the font), whose
+  wrapping (`BreakWideWords`, `PlaceStyledWords`) decides in integer units where they are farther
+  from the width than the double sums' rounding (`WrapUnits`) and lays a paragraph out again in
+  doubles otherwise: a change to how widths are summed or compared must keep both paths. Core check
+  133 compares the dispatched, SSE2 and portable code with byte and unit loops. `SplitColorRuns`
+  splits a line of highlighted code into runs of one colour sixteen characters a step (AVX2, else
+  the loop `SplitColorRunsScalar`) for both renderers' `PaintCodeRuns`; core check 134.
 
 - `src/common/file_io.cpp`
   Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows. On POSIX,
@@ -630,12 +679,28 @@ Important image/link details:
   What both command lines share for batch export: the JSON Lines report (one
   line per document, written by the worker that finished it), the up-to-date
   check behind `--skip-unchanged` (PDF newer than its Markdown and ending in
-  `%%EOF`) and the recursive collection behind `--recursive`.
+  `%%EOF`) and the recursive collection behind `--recursive` (sorted by name as indices: a sort
+  of the files themselves, two paths each, was 20 KB of code).
 
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single
   export, stdin Markdown export, folder batch, stdin batch, warm serve mode,
-  books, and benchmarks.
+  books, and benchmarks. Built at `-Os` with `batch_report.cpp` and the Windows CLI: the glue
+  runs once a run (`--bench` and `--serve` only call the engine in their loops).
+
+- `src/cli/terminate.cpp`
+  Both command lines' terminate handler in place of libstdc++'s (whose demangler is 61 KB):
+  the same message with the exception's type as the ABI names it (`St9bad_alloc`), then
+  `abort()`. Not part of the engine library.
+
+- `src/cli/no_unwind.cpp` and `src/cli/no_unwind.ld`
+  The dynamic Linux release CLI's exception runtime: `__cxa_throw` prints the terminate
+  message and aborts, so libgcc's unwinder, the personality routine and the emergency exception
+  pool (a 73 KB allocation at every start) are never linked, and the linker script drops the
+  unwind and exception tables nothing reads then (58 KB in all). The nothrow `operator new`
+  is its own (malloc and the new-handler, null when both fail; libstdc++'s caught a throw).
+  Release builds only, as only they compile without exceptions; not the static build, whose
+  libc.a links the unwinder for thread cancellation, nor the engine library.
 
 - `src/win32/main_windows_cli.cpp`
   The Windows CLI: wide paths, `CommandLineToArgvW`, a console program. Its modes mirror
@@ -843,6 +908,15 @@ GitHub CI entry points:
   iostreams (`<iostream>`, `<fstream>`, `<sstream>`) out of the CLI and the core: they
   pull about 460 KB of locale and stream code into that build. Use `RayoMd::File` and
   C stdio.
+- Release builds compile without exceptions and RTTI on Windows and Linux, on Linux also without
+  unwind tables (221 KB of the 1.74 MB binary): never write `try`, `catch`, `throw`,
+  `dynamic_cast` or `typeid`, and call the `std::error_code` overloads of `std::filesystem`. An
+  exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before: in the
+  dynamic Linux release at the throw, without unwinding (`src/cli/no_unwind.cpp`), elsewhere
+  through the command lines' own terminate handler (`src/cli/terminate.cpp`, the only
+  `-fexceptions` file; libstdc++'s links the C++ demangler, 61 KB). A call-graph profile with
+  `perf --call-graph=dwarf` needs a build with `-fasynchronous-unwind-tables`, and without
+  `src/cli/no_unwind.ld`, which drops the unwind tables of the dynamic release.
 - Fonts are mapped read-only (`FileBytes`); read font data in place instead of copying
   the file.
 - `TtfFont` is allocated by its own `operator new` (calloc) or lives in static storage:
@@ -860,8 +934,9 @@ GitHub CI entry points:
   process holds, within the decode's share of the pool's three, so a busy batch asks for
   none. The first encoders of a process carve their buffers from 2 MB pages
   (`MADV_HUGEPAGE` on Linux), which saves most of a fresh process's page faults.
-- `WriteFixed2` may write one byte past the end it returns, within the
-  `kFixed2MaxChars` every caller must leave.
+- `WriteFixed2` may overwrite all `kFixed2MaxChars` bytes from where it starts (an operand under
+  10,000 writes ".dd" after its digits whether it has decimals or not), within the room every
+  caller must leave; never call it where bytes after the number must survive.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document
   libraries to the native package.
 - Reuse output buffers in batch/server paths where practical.
@@ -900,7 +975,9 @@ GitHub CI entry points:
   translation unit of its own behind a small interface, as `theme.cpp` does: inside
   `tiny_pdf.cpp`, the theme layout moved `std::string::push_back` and appends of the
   link annotations out of line (+2.6 % instructions on `baseline.md`). Write output
-  that grows by pieces through `TailWriter`, not per-byte `push_back`.
+  that grows by pieces through `TailWriter`, not per-byte `push_back`. A `TailWriter` writes
+  past the string's size until it ends: nothing else may append to that string meanwhile. Grow
+  a string that is then written whole with `ResizeForOverwrite`, not `resize` (which fills it).
 - Keep image caches bounded. Image support can dominate memory on large or many
   remote images.
 - Linux benchmarks are much faster on native/ext4 storage than on `/mnt/*` WSL

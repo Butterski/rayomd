@@ -12,7 +12,7 @@ namespace {
 
 constexpr size_t kTagCount = static_cast<size_t>(Tag::Count);
 
-// In the order of Tag.
+// In the order of Tag. Read only by the compiler: TagName reads kTagNameTable.
 constexpr std::string_view kTagNames[] = {
     "",
     "h1", "h2", "h3", "h4", "h5", "h6", "br", "b", "i", "strong", "em", "a", "pre", "code", "img", "tt", "div",
@@ -27,6 +27,31 @@ constexpr std::string_view kTagNames[] = {
     "script", "style", "template", "textarea", "noscript", "object", "embed", "svg", "math",
 };
 static_assert(std::size(kTagNames) == kTagCount, "a name for every tag");
+
+constexpr size_t TagNameBytes() {
+    size_t bytes = 0;
+    for (std::string_view name : kTagNames) bytes += name.size();
+    return bytes;
+}
+
+// The names one after another and where each begins: a table of views held a pointer for each,
+// which the loader relocated in every process.
+struct TagNameTable {
+    char text[TagNameBytes()];
+    uint16_t begin[kTagCount + 1];
+};
+
+constexpr TagNameTable MakeTagNameTable() {
+    TagNameTable table{};
+    size_t at = 0;
+    for (size_t index = 0; index < kTagCount; index++) {
+        table.begin[index] = static_cast<uint16_t>(at);
+        for (char c : kTagNames[index]) table.text[at++] = c;
+    }
+    table.begin[kTagCount] = static_cast<uint16_t>(at);
+    return table;
+}
+constexpr TagNameTable kTagNameTable = MakeTagNameTable();
 
 // A letter's code is 1-26 in either case, a digit's 27-36; -1 for anything else.
 constexpr int NameCode(char c) {
@@ -151,7 +176,9 @@ void KeepAttribute(TagToken& token, std::string_view name, std::string_view valu
 
 std::string_view TagName(Tag tag) {
     const size_t index = static_cast<size_t>(tag);
-    return index < kTagCount ? kTagNames[index] : std::string_view();
+    if (index >= kTagCount) return std::string_view();
+    const size_t begin = kTagNameTable.begin[index];
+    return std::string_view(kTagNameTable.text + begin, kTagNameTable.begin[index + 1] - begin);
 }
 
 Tag LookupTag(std::string_view name) {

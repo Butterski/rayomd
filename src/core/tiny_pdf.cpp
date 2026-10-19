@@ -34,6 +34,7 @@
 #include "tagged.h"
 #include "theme.h"
 #include "vault.h"
+#include "word_bounds.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -75,6 +76,7 @@
 #include <thread>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -470,7 +472,8 @@ struct TtfFont {
     // a load writes only the code points the font maps and touches only their pages: assigning
     // 64K entries zeroed 128 KB, a twentieth of a short Unicode export (2026-10-13).
     std::array<uint16_t, 65536> glyphForBmp;
-    mutable std::array<std::atomic<uint16_t>, 65536> widthCache;   // zero to begin with: see above
+    // Zero to begin with: see above. One entry more than code points, which MeasureWideWords reads.
+    mutable std::array<std::atomic<uint16_t>, 65537> widthCache;
 
     // hmtx and loca are read in place from the font file, checked once when it is loaded.
     uint16_t Advance(uint16_t glyph) const {
@@ -996,94 +999,6 @@ static RAYOMD_HOT_INLINE size_t ScanWideWord(const TtfFont& font, const wchar_t*
     return at;
 }
 
-// Greedy word wrap of text without inline styles: emit(line) receives every line. A line
-// is the piece of `raw` from its first to its last word; only when two of its words are
-// not exactly one space apart is it rebuilt in a scratch string. The view passed to emit
-// is valid until emit returns.
-template <typename Emit>
-static void WrapWideWords(const TtfFont& font, std::wstring_view raw, double maxWidth, double size, Emit emit) {
-    const double spaceWidth = TextWidth(font, L" ", size);
-    std::wstring respaced;
-    size_t lineStart = 0;
-    size_t lineEnd = 0;         // the line is raw[lineStart, lineEnd); empty when they are equal
-    bool singleSpaced = true;
-    double lineWidth = 0.0;
-    bool emitted = false;
-    auto flush = [&]() {
-        std::wstring_view line = raw.substr(lineStart, lineEnd - lineStart);
-        if (!singleSpaced) {
-            respaced.clear();
-            AppendSingleSpaced(respaced, line);
-            line = respaced;
-        }
-        emit(line);
-        emitted = true;
-    };
-    auto startLine = [&](size_t start, size_t end, double width) {
-        lineStart = start;
-        lineEnd = end;
-        lineWidth = width;
-        singleSpaced = true;
-    };
-
-    const double scale = size * 0.001;
-    size_t i = 0;
-    while (i < raw.size()) {
-        while (i < raw.size() && IsWideSpace(raw[i])) i++;
-        const size_t start = i;
-        double wordWidth;
-        i = ScanWideWord(font, raw.data(), start, raw.size(), scale, wordWidth);
-        if (i == start) continue;
-        const bool lineEmpty = lineEnd == lineStart;
-
-        if (!lineEmpty && lineWidth + spaceWidth + wordWidth <= maxWidth) {
-            if (start - lineEnd != 1 || raw[lineEnd] != L' ') singleSpaced = false;
-            lineEnd = i;
-            lineWidth += spaceWidth + wordWidth;
-            continue;
-        }
-        if (lineEmpty && wordWidth <= maxWidth) {
-            startLine(start, i, wordWidth);
-            continue;
-        }
-        if (!lineEmpty) {
-            flush();
-            lineStart = lineEnd = 0;
-            lineWidth = 0.0;
-        }
-        if (wordWidth <= maxWidth) {
-            startLine(start, i, wordWidth);
-            continue;
-        }
-
-        // A word wider than the line is cut into pieces; the last piece stays open.
-        size_t partStart = start;
-        double partWidth = 0.0;
-        for (size_t at = start; at < i; at++) {
-            const double chWidth = CodepointWidth(font, (uint16_t)raw[at], scale);
-            if (at > partStart && partWidth + chWidth > maxWidth) {
-                emit(raw.substr(partStart, at - partStart));
-                emitted = true;
-                partStart = at;
-                partWidth = 0.0;
-            }
-            partWidth += chWidth;
-        }
-        startLine(partStart, i, partWidth);
-    }
-    if (lineEnd != lineStart) flush();
-    if (!emitted) emit(std::wstring_view(L""));
-}
-
-static std::vector<std::wstring> WrapText(const TtfFont& font, std::wstring_view raw, double maxWidth, double size) {
-    std::vector<std::wstring> lines;
-    lines.reserve(std::max<size_t>(1, raw.size() / 72));
-    WrapWideWords(font, raw, maxWidth, size, [&](std::wstring_view line) {
-        lines.emplace_back(line.data(), line.size());
-    });
-    return lines;
-}
-
 static std::vector<std::wstring> WrapCodeLine(const TtfFont& font, std::wstring_view line, double maxWidth, double size) {
     std::vector<std::wstring> lines;
     std::wstring part;
@@ -1184,39 +1099,352 @@ public:
     T value;
 };
 
-// Lets one drawing operation write its operators through a raw pointer, then appends them to a
-// content stream in one piece. The per-span paint functions used a dozen small appends each;
-// this is one growth and no temporaries. An operation whose upper bound fits writes into a
-// buffer of the thread's own, which stays in L1, and only the bytes it wrote are appended:
-// growing the string by the bound zero-filled all of it first (std::string has no growth
-// without filling before C++23). A larger bound, a writer opened while another holds the
-// buffer, and Windows (where MinGW's thread_local is a call) grow the string by the bound and
-// trim what was not written. The buffer is not a member: a pointer into the writer itself kept
-// GCC from holding `cursor` in a register across calls. Constructor and destructor are always
-// inlined: left to GCC, the destructor went out of line and `Text` out of `PaintAsciiRuns`.
+// Texts under this many bytes are wrapped without MeasureWords (WrapMeasure).
+constexpr size_t kShortAsciiText = 16;
+
+// The words of a text and the AFM units of its bytes (word_bounds.h) for the wrapping below, so
+// a word's width is prefix[end] - prefix[begin]: one buffer, kept from text to text, that only
+// grows.
+struct WrapMeasure {
+    std::vector<uint32_t> buffer;
+    struct View {
+        uint32_t* prefix;   // prefix[i]: the units of the bytes before i, modulo 2^32
+        uint32_t* bounds;   // each word's first byte and one past its last (MeasureWords)
+    };
+    // Room for a text of n bytes.
+    RAYOMD_HOT_INLINE View Size(size_t n) {
+        if (buffer.size() < n * 2 + 2 + Internal::kWordBoundsSlack) Grow(n);
+        return { buffer.data(), buffer.data() + n + 1 };
+    }
+    RAYOMD_NOINLINE void Grow(size_t n) { buffer.resize(n * 2 + 2 + Internal::kWordBoundsSlack); }
+    size_t Bytes() const { return KeptBytes(buffer) + KeptBytes(breaks); }
+
+    // The lines BreakAsciiWords made: text[start, end), `units` wide.
+    struct Break {
+        uint32_t start;
+        uint32_t end;
+        uint64_t units;
+        bool singleSpaced;      // its words exactly one space apart
+    };
+    std::vector<Break> breaks;
+
+    // MeasureWords (word_bounds.h) of text[0, n) in `advances`; a short text's bytes from `summed`
+    // on are summed too (the caller's sums overwrite them). A text under kShortAsciiText bytes, a
+    // table cell or a short list item, is read here a byte at a time: the vector pass costs more
+    // than it saves there. A byte ends a word where its advance is 0, which every table gives
+    // exactly the white space MeasureWords looks for.
+    static RAYOMD_NOINLINE size_t Words(const char* text, size_t n, size_t summed, const uint16_t* advances,
+        View view) {
+        if (n >= kShortAsciiText) return Internal::MeasureWords(text, n, summed, advances, view.prefix, view.bounds);
+        uint32_t sum = 0;
+        size_t k = 0;
+        bool inWord = false;
+        view.prefix[0] = 0;
+        for (size_t i = 0; i < n; i++) {
+            const unsigned units = advances[static_cast<unsigned char>(text[i])];
+            view.prefix[i + 1] = sum += units;
+            if ((units != 0) != inWord) {
+                view.bounds[k++] = static_cast<uint32_t>(i);
+                inWord = !inWord;
+            }
+        }
+        if (inWord) view.bounds[k++] = static_cast<uint32_t>(n);
+        return k / 2;
+    }
+};
+
+// The WrapMeasure every ASCII wrap of the thread works in: no renderer holds one, as a member made
+// the standard renderer's constructor too large to inline. Page footnotes, laid out while a
+// paragraph's lines are drawn, trade it for a spare (SwapFootBuffers); a renderer that ends gives
+// one grown past kKeptBufferBytes back to the allocator (ReleaseWrapScratch).
+static WrapMeasure& WrapScratch() {
+    static thread_local WrapMeasure scratch;
+    return scratch;
+}
+
+RAYOMD_COLD static void ReleaseWrapScratch() {
+    WrapMeasure& scratch = WrapScratch();
+    if (scratch.Bytes() <= kKeptBufferBytes) return;
+    std::vector<uint32_t>().swap(scratch.buffer);
+    std::vector<WrapMeasure::Break>().swap(scratch.breaks);
+}
+
+// The Unicode renderer lays text out on double sums: a character is its AFM units times the scale,
+// a word the sum of its characters in text order, a line its words and spaces. Every term is
+// positive and each sum takes at most 3n + 4 roundings of 2^-53 for text of n code units, so the
+// sums the double path compares lie within `slack` (relative, with room to spare) of their units
+// times the scale. Its wrapping is done in integer units instead, each comparison with a limit
+// decided by Above when the units are farther from the limit than that, which is the double
+// path's decision then; when they are closer (equal widths, or nearly), the text is laid out again
+// in doubles. The units have no chain of dependent floating-point additions. Every comparison of
+// a text is with one limit, the line's width, so the units certainly below it (`below`) and
+// certainly above it (`above`) are worked out once, two units farther out than the rounding of
+// that division can reach, and only the units between take the comparison in doubles.
+struct WrapUnits {
+    double scale;
+    double slack;
+    double limit;
+    uint64_t below = 0;             // units under it are not above the limit
+    uint64_t above = UINT64_MAX;    // units from it on are
+    WrapUnits(double size, size_t units, double limitWidth)
+        : scale(size * 0.001), slack(static_cast<double>(units * 4 + 16) * 0x1p-52), limit(limitWidth) {
+        // Only for a positive scale and a limit of fewer than 2^40 units, where a unit is far
+        // wider than the rounding of the products below (a NaN limit fails the test too).
+        if (!(scale > 0.0) || !(limit >= 0.0) || !(limit < scale * 0x1p40)) return;
+        const double low = limit / (scale * (1.0 + slack));
+        const double high = limit / (scale * (1.0 - slack));
+        below = low >= 2.0 ? static_cast<uint64_t>(low) - 2 : 0;
+        above = static_cast<uint64_t>(high) + 3;
+    }
+    // 1 when the double path's sum of `units` is above the limit, 0 when it is not, -1 when the
+    // units are too close to the limit to tell.
+    RAYOMD_HOT_INLINE int Above(uint64_t units) const {
+        if (units < below) return 0;
+        if (units >= above) return 1;
+        const double value = static_cast<double>(units) * scale;
+        const double margin = value * slack;
+        if (value - margin > limit) return 1;
+        if (value + margin <= limit) return 0;
+        return -1;
+    }
+};
+
+// ScanWideWord in integer units: the end of the word that starts at text[start], its units in
+// `units`.
+static RAYOMD_HOT_INLINE size_t ScanWideUnits(const TtfFont& font, const wchar_t* text, size_t start, size_t end,
+    uint64_t& units) {
+    uint64_t sum = 0;
+    size_t at = start;
+    while (at < end && !IsWideSpace(text[at])) {
+        uint32_t cp = (uint16_t)text[at++];
+        if (cp >= 0xD800 && cp <= 0xDBFF && at < end) {
+            const uint32_t lo = (uint16_t)text[at];
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                at++;
+            }
+        }
+        sum += font.CodepointWidth(cp);
+    }
+    units = sum;
+    return at;
+}
+
+// Wide texts under this many code units are measured a word at a time, not by MeasureWideWords.
+constexpr size_t kShortWideText = 16;
+
+static uint32_t FontCodepointWidth(const void* font, uint32_t codepoint) {
+    return static_cast<const TtfFont*>(font)->CodepointWidth(codepoint);
+}
+
+// MeasureWideWords (word_bounds.h) of `text` in `font`, into the thread's wrap scratch: the words'
+// bounds and the prefix sums of their units, as ScanWideUnits sums them.
+static RAYOMD_NOINLINE size_t MeasureWideText(const TtfFont& font, std::wstring_view text, WrapMeasure::View& view) {
+    static_assert(sizeof(std::atomic<uint16_t>) == sizeof(uint16_t), "the width cache is read as uint16_t");
+    view = WrapScratch().Size(text.size());
+    return Internal::MeasureWideWords(text.data(), text.size(), reinterpret_cast<const uint16_t*>(font.widthCache.data()),
+        FontCodepointWidth, &font, view.prefix, view.bounds);
+}
+
+// The lines WrapWideWords shows, into breaks: a line is the piece of `raw` from its first to its
+// last word, and singleSpaced when they are exactly one space apart; a word wider than the line
+// is cut into pieces by character, the last staying open. Always at least one line, an empty one
+// for text without a word. In integer units (WrapUnits) unless Exact; false when a comparison
+// was too close to tell there.
+template <bool Exact>
+static bool BreakWideWordsIn(const TtfFont& font, std::wstring_view raw, double maxWidth, double size,
+    std::vector<WrapMeasure::Break>& breaks) {
+    using Width = std::conditional_t<Exact, double, uint64_t>;
+    breaks.clear();
+    const double scale = size * 0.001;
+    const WrapUnits units(size, raw.size(), maxWidth);
+    // `width` > `limit` and `width` <= `limit` as the double path decides them (also for a NaN
+    // limit, where neither holds); -1 when the units are too close to tell.
+    const auto above = [&](Width width, double limit) RAYOMD_HOT_LAMBDA -> int {
+        if constexpr (Exact) return width > limit;
+        else return units.Above(width);
+    };
+    const auto atMost = [&](Width width, double limit) RAYOMD_HOT_LAMBDA -> int {
+        if constexpr (Exact) {
+            return width <= limit;
+        } else {
+            const int over = units.Above(width);
+            return over < 0 ? -1 : 1 - over;
+        }
+    };
+    Width spaceWidth;
+    if constexpr (Exact) spaceWidth = TextWidth(font, L" ", size);
+    else spaceWidth = font.CodepointWidth(' ');
+    size_t lineStart = 0;
+    size_t lineEnd = 0;         // the line is raw[lineStart, lineEnd); empty when they are equal
+    bool singleSpaced = true;
+    Width lineWidth = 0;
+    const auto startLine = [&](size_t start, size_t end, Width width) RAYOMD_HOT_LAMBDA {
+        lineStart = start;
+        lineEnd = end;
+        lineWidth = width;
+        singleSpaced = true;
+    };
+
+    // In units, the words of text of kShortWideText units or more come from MeasureWideWords.
+    const bool measured = !Exact && raw.size() >= kShortWideText;
+    WrapMeasure::View view{};
+    size_t words = 0;
+    if (measured) words = MeasureWideText(font, raw, view);
+    size_t word = 0;
+    size_t i = 0;
+    for (;;) {
+        size_t start;
+        Width wordWidth;
+        if (measured) {
+            if (word == words) break;
+            start = view.bounds[word * 2];
+            i = view.bounds[word * 2 + 1];
+            word++;
+            if constexpr (!Exact) {
+                if (i - start < 0x10000) wordWidth = static_cast<uint32_t>(view.prefix[i] - view.prefix[start]);
+                else ScanWideUnits(font, raw.data(), start, raw.size(), wordWidth);
+            }
+        } else {
+            if (i >= raw.size()) break;
+            while (i < raw.size() && IsWideSpace(raw[i])) i++;
+            start = i;
+            if constexpr (Exact) i = ScanWideWord(font, raw.data(), start, raw.size(), scale, wordWidth);
+            else i = ScanWideUnits(font, raw.data(), start, raw.size(), wordWidth);
+            if (i == start) continue;
+        }
+        const bool lineEmpty = lineEnd == lineStart;
+        // Whether the word joins the line, then whether it fits a line of its own.
+        const int joins = lineEmpty ? 0 : atMost(lineWidth + spaceWidth + wordWidth, maxWidth);
+        if (joins < 0) return false;
+        if (joins != 0) {
+            if (start - lineEnd != 1 || raw[lineEnd] != L' ') singleSpaced = false;
+            lineEnd = i;
+            lineWidth += spaceWidth + wordWidth;
+            continue;
+        }
+        const int fits = atMost(wordWidth, maxWidth);
+        if (fits < 0) return false;
+        if (!lineEmpty) {
+            breaks.push_back({ static_cast<uint32_t>(lineStart), static_cast<uint32_t>(lineEnd), 0, singleSpaced });
+            lineStart = lineEnd = 0;
+            lineWidth = 0;
+        }
+        if (fits != 0) {
+            startLine(start, i, wordWidth);
+            continue;
+        }
+
+        // A word wider than the line is cut into pieces; the last piece stays open.
+        size_t partStart = start;
+        Width partWidth = 0;
+        for (size_t at = start; at < i; at++) {
+            Width chWidth;
+            if constexpr (Exact) chWidth = CodepointWidth(font, (uint16_t)raw[at], scale);
+            else chWidth = font.CodepointWidth((uint16_t)raw[at]);
+            if (at > partStart) {
+                const int full = above(partWidth + chWidth, maxWidth);
+                if (full < 0) return false;
+                if (full != 0) {
+                    breaks.push_back({ static_cast<uint32_t>(partStart), static_cast<uint32_t>(at), 0, true });
+                    partStart = at;
+                    partWidth = 0;
+                }
+            }
+            partWidth += chWidth;
+        }
+        startLine(partStart, i, partWidth);
+    }
+    if (lineEnd != lineStart || breaks.empty()) {
+        breaks.push_back({ static_cast<uint32_t>(lineStart), static_cast<uint32_t>(lineEnd), 0, singleSpaced });
+    }
+    return true;
+}
+
+// BreakWideWordsIn into the thread's wrap scratch, in units and, when they could not tell, in
+// doubles. Out of line: one copy for every WrapWideWords.
+static RAYOMD_NOINLINE void BreakWideWords(const TtfFont& font, std::wstring_view raw, double maxWidth, double size) {
+    std::vector<WrapMeasure::Break>& breaks = WrapScratch().breaks;
+    if (!BreakWideWordsIn<false>(font, raw, maxWidth, size, breaks)) BreakWideWordsIn<true>(font, raw, maxWidth, size, breaks);
+}
+
+// Greedy word wrap of text without inline styles (BreakWideWords): emit(line) receives every line.
+// Only when two of a line's words are not exactly one space apart is it rebuilt in a scratch
+// string. The view passed to emit is valid until emit returns; emit lays out no other text.
+template <typename Emit>
+static void WrapWideWords(const TtfFont& font, std::wstring_view raw, double maxWidth, double size, Emit emit) {
+    BreakWideWords(font, raw, maxWidth, size);
+    const std::vector<WrapMeasure::Break>& breaks = WrapScratch().breaks;
+    std::wstring respaced;
+    for (const WrapMeasure::Break& line : breaks) {
+        std::wstring_view shown = raw.substr(line.start, line.end - line.start);
+        if (!line.singleSpaced) {
+            respaced.clear();
+            AppendSingleSpaced(respaced, shown);
+            shown = respaced;
+        }
+        emit(shown);
+    }
+}
+
+static std::vector<std::wstring> WrapText(const TtfFont& font, std::wstring_view raw, double maxWidth, double size) {
+    std::vector<std::wstring> lines;
+    lines.reserve(std::max<size_t>(1, raw.size() / 72));
+    WrapWideWords(font, raw, maxWidth, size, [&](std::wstring_view line) {
+        lines.emplace_back(line.data(), line.size());
+    });
+    return lines;
+}
+
+// Growth of a std::string without filling it (C++23's resize_and_overwrite, which C++17 lacks):
+// with libstdc++ the length is set through its private `_M_set_length`, named in an explicit
+// instantiation, where access is not checked; the bytes between the old and the new size are left
+// as they are for the caller to write. Other libraries fill them (`resize`).
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
+#define RAYOMD_STRING_SET_LENGTH 1
+namespace {
+void SetStringLength(std::string& text, size_t size);
+template <void (std::string::*SetLength)(std::string::size_type)>
+struct StringLengthAccess {
+    friend void SetStringLength(std::string& text, size_t size) { (text.*SetLength)(size); }
+};
+template struct StringLengthAccess<&std::string::_M_set_length>;
+} // namespace
+#endif
+
+// Makes `text` `size` bytes long; what lies past its old size is the caller's to write.
+static RAYOMD_HOT_INLINE void ResizeForOverwrite(std::string& text, size_t size) {
+#ifdef RAYOMD_STRING_SET_LENGTH
+    if (size > text.capacity()) text.reserve(size);
+    SetStringLength(text, size);
+#else
+    text.resize(size);
+#endif
+}
+
+// Lets one drawing operation write its operators through a raw pointer straight into the end of
+// a content stream: room for `maxBytes` is made once (no fill, see ResizeForOverwrite), and the
+// destructor sets the string's size to where the writing ended. The per-span paint functions used
+// a dozen small appends each; this is one capacity test and no copy. Until it ends, nothing else
+// may change the string. Constructor and destructor are always inlined: left to GCC, the
+// destructor went out of line and `Text` out of `PaintAsciiRuns`.
 class TailWriter {
 public:
     RAYOMD_HOT_INLINE TailWriter(std::string& target, size_t maxBytes) : out(target) {
-#ifndef _WIN32
-        if (maxBytes <= sizeof(scratch) && !scratchBusy) {
-            scratchBusy = true;
-            start = scratch;
-            cursor = start;
-            return;
-        }
+        const size_t base = target.size();
+#ifdef RAYOMD_STRING_SET_LENGTH
+        if (target.capacity() - base < maxBytes) target.reserve(base + maxBytes);
+#else
+        target.resize(base + maxBytes);
 #endif
-        start = Grow(target, maxBytes);
-        cursor = start;
+        cursor = &target[0] + base;
     }
     RAYOMD_HOT_INLINE ~TailWriter() {
-#ifndef _WIN32
-        if (start == scratch) {
-            out.append(start, (size_t)(cursor - start));
-            scratchBusy = false;
-            return;
-        }
-#endif
+#ifdef RAYOMD_STRING_SET_LENGTH
+        SetStringLength(out, (size_t)(cursor - out.data()));
+#else
         out.resize((size_t)(cursor - out.data()));
+#endif
     }
     TailWriter(const TailWriter&) = delete;
     TailWriter& operator=(const TailWriter&) = delete;
@@ -1232,28 +1460,14 @@ public:
         memcpy(cursor, text, size);
         cursor += size;
     }
+    RAYOMD_HOT_INLINE void Bytes(std::string_view text) { Bytes(text.data(), text.size()); }
     void Fixed(double value) { cursor = RayoMd::Text::WriteFixed2(cursor, value); }
     void Number(size_t value) { cursor = std::to_chars(cursor, cursor + 20, value).ptr; }
     char* cursor = nullptr;
 
 private:
-    static char* Grow(std::string& target, size_t maxBytes) {
-        const size_t base = target.size();
-        target.resize(base + maxBytes);
-        return &target[base];
-    }
-
     std::string& out;
-    char* start = nullptr;
-#ifndef _WIN32
-    static thread_local char scratch[1024];
-    static thread_local bool scratchBusy;
-#endif
 };
-#ifndef _WIN32
-thread_local char TailWriter::scratch[1024];
-thread_local bool TailWriter::scratchBusy = false;
-#endif
 
 // Room for one operand written by TailWriter::Fixed, with its separator.
 constexpr size_t kOperandBytes = RayoMd::Text::kFixed2MaxChars + 1;
@@ -1854,7 +2068,7 @@ public:
             rendered.swap(pdf);
             pdf.reserve(wanted);
         }
-        pdf.resize(total);
+        ResizeForOverwrite(pdf, total);     // every byte of it is written below
         char* const base = &pdf[0];
         const char* const payloads = relocate ? rendered.data() : base;
         const size_t payloadLimit = relocate ? rendered.size() : total;
@@ -2173,14 +2387,6 @@ struct PdfImage {
 using SharedPdfImage = std::shared_ptr<const PdfImage>;
 
 using Internal::SharedUrl;
-
-struct LinkRect {
-    double x1 = 0.0;
-    double y1 = 0.0;
-    double x2 = 0.0;
-    double y2 = 0.0;
-    SharedUrl url;   // the link's target, shared by all its rectangles
-};
 
 // Adds the rectangle of link text that starts at x on `baseline` and is `width` wide. A piece
 // of the same link that goes on where the last one ended (link text in several styles)
@@ -3842,7 +4048,7 @@ public:
         return resolved;
     }
     uint32_t FailedImages() const { return failed; }
-    // What a layout that is thrown away (the measuring of page footnotes, PageNoteLayout) changed:
+    // What a layout that is thrown away (the measuring of page footnotes, SetNotesAside) changed:
     // its images, failures and decode budget go back to a snapshot, so the layout that is kept
     // finds them as if the other had not run.
     struct Snapshot {
@@ -4439,7 +4645,7 @@ static void AppendUriLiteral(std::string& out, std::string_view url, bool winAns
     }
     static const char kHex[] = "0123456789ABCDEF";
     const size_t at = out.size();
-    out.resize(at + url.size() * 3);
+    ResizeForOverwrite(out, at + url.size() * 3);
     char* cursor = &out[at];
     for (const char ch : url) {
         const unsigned char byte = static_cast<unsigned char>(ch);
@@ -4454,7 +4660,7 @@ static void AppendUriLiteral(std::string& out, std::string_view url, bool winAns
         if (ch == '(' || ch == ')' || ch == '\\') *cursor++ = '\\';
         *cursor++ = ch;
     }
-    out.resize((size_t)(cursor - out.data()));
+    ResizeForOverwrite(out, (size_t)(cursor - out.data()));
 }
 
 // ---- Headings: the outline (bookmarks) and the targets of internal links -----------------
@@ -4468,16 +4674,6 @@ RAYOMD_COLD static std::string NumberedText(std::string_view number, std::string
     numbered += text;
     return numbered;
 }
-
-// A heading as drawn: its level, its text as the parser left it (WinAnsi bytes in a Latin
-// document of the standard renderer, else UTF-8), its page and the top of its first line.
-// The text lies in the document's blocks, which outlive the assembly of the file.
-struct HeadingMark {
-    int level = 1;
-    std::string_view text;
-    size_t page = 0;
-    double top = 0.0;
-};
 
 // Heading text without its footnote references (kMathTextOpen, kNoteMark ... kMathTextClose).
 RAYOMD_COLD static std::string WithoutFootnotes(std::string_view text) {
@@ -4858,10 +5054,10 @@ RAYOMD_COLD static std::string InfoDictionary(const char* producer, const Docume
     const auto field = [&info](std::string_view key, std::string_view value, bool valueWinAnsi) {
         if (value.empty()) return;
         const size_t at = info.size();
-        info.resize(at + key.size() + value.size() * 4 + 6);
+        ResizeForOverwrite(info, at + key.size() + value.size() * 4 + 6);
         memcpy(&info[at], key.data(), key.size());
         const char* const end = WriteTextString(&info[at + key.size()], value, valueWinAnsi);
-        info.resize((size_t)(end - info.data()));
+        ResizeForOverwrite(info, (size_t)(end - info.data()));
     };
     if (!metadata.title.empty()) {
         field(" /Title ", metadata.title, false);
@@ -5021,35 +5217,16 @@ RAYOMD_COLD static std::string PercentDecoded(std::string_view text) {
 }
 
 // A footnote reference is its number at 0.7 times the size of the text around it, raised by
-// 0.36 of that size; the notes after the text are 0.85 times the body size, a note's blocks
-// after its first paragraph indented by 16 points.
+// 0.36 of that size; the notes after the text are kNoteTextFactor (page_notes.h) times the body
+// size, a note's blocks after its first paragraph indented by 16 points.
 constexpr double kNoteSizeFactor = 0.7;
 constexpr double kNoteRiseFactor = 0.36;
-constexpr double kNoteTextFactor = 0.85;
 constexpr double kNoteIndent = 16.0;
 // HTML's <sup> is set as a footnote number is; <sub> at the same size, lowered by 0.18 of the
 // size of the text around it.
 constexpr double kScriptDropFactor = 0.18;
 // The fill behind HTML's <mark>: the yellow browsers draw.
-constexpr const char* kMarkFill = "1 0.973 0.773";
-
-// Where the footnotes are drawn: note N's text and its first reference, at [N - 1]; a top of
-// kUnplaced where it is not drawn (not a negative one: a long page reaches below 0).
-struct NoteMarks {
-    static constexpr double kUnplaced = -HUGE_VAL;
-    struct Point {
-        size_t page = 0;
-        double top = kUnplaced;
-    };
-    std::vector<Point> notes;
-    std::vector<Point> references;
-
-    void MarkReference(int note, size_t page, double top) {
-        if (references.size() < (size_t)note) references.resize((size_t)note);
-        Point& point = references[(size_t)note - 1];
-        if (point.top == kUnplaced) point = { page, top };
-    }
-};
+constexpr std::string_view kMarkFill = "1 0.973 0.773";
 
 // The number of the footnote a span stands for: an InlineMath::Note span, whose text is the
 // label, or in heading and cell text a formula that is kNoteMark and the number. 0 for any
@@ -5070,7 +5247,7 @@ RAYOMD_COLD static int FootnoteNumber(const Internal::Footnotes* footnotes, cons
 }
 
 // The short rule above the footnotes, from (x, y) `length` to the right.
-RAYOMD_COLD static void AppendFootnoteRule(std::string& c, const char* color, double x, double y, double length) {
+RAYOMD_COLD static void AppendFootnoteRule(std::string& c, std::string_view color, double x, double y, double length) {
     AppendLit(c, "q ");
     c += color;
     AppendLit(c, " RG 0.5 w ");
@@ -5484,7 +5661,7 @@ public:
     }
     bool IsDisplay(int index) const { return items[(size_t)index].display; }
 
-    double Emit(int index, std::string& content, double x, double baseline, const char* rgb) {
+    double Emit(int index, std::string& content, double x, double baseline, std::string_view rgb) {
         used = true;
         items[(size_t)index].formula.Emit(content, x, baseline, rgb, &glyphUse);
         return items[(size_t)index].formula.Width();
@@ -5712,9 +5889,10 @@ template <typename RendererType>
 struct PageNoteLayout;
 
 // A table that contains formulas. Rows are as tall as their tallest cell; cells
-// without a formula wrap exactly as they do in RenderTable.
+// without a formula wrap exactly as they do in RenderTable. Not cold: its loops run for every
+// cell.
 template <typename RendererType>
-RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block& block) {
+RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& block) {
     const std::vector<std::vector<std::string>>& rows = block.rows;
     if (rows.empty()) return;
     size_t columns = 0;
@@ -5741,10 +5919,10 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
         double lineTop = top - pad;
         for (size_t li = from; li < to; li++) {
             MathLineExtent extent = extentOf(cell, li);
-            double lineWidth = renderer.MathCellLineWidth(cell, li, size, header);
+            // A left-aligned line, the usual one, is placed without its width.
             double tx = cellX + pad;
-            if (align == 0) tx = cellX + (colWidth - lineWidth) * 0.5;
-            else if (align == 1) tx = cellX + colWidth - pad - lineWidth;
+            if (align == 0) tx = cellX + (colWidth - renderer.MathCellLineWidth(cell, li, size, header)) * 0.5;
+            else if (align == 1) tx = cellX + colWidth - pad - renderer.MathCellLineWidth(cell, li, size, header);
             renderer.PaintMathCellLine(cell, li, tx, lineTop - extent.above - size, size,
                 renderer.TableTextColor(header), header);
             lineTop -= lh + extent.above + extent.below;
@@ -5969,26 +6147,16 @@ struct ContentsLine {
 
 // A run of a line of highlighted code: where it ends, and the colour index of its characters
 // (Internal::kCodeColorOfClass).
-struct CodeRun {
-    uint32_t end;
-    uint8_t color;
-};
+using CodeRun = Internal::ColorRun;
 
-// Splits a line of highlighted code into runs of one colour, into `runs`, which keeps its room
-// from line to line. Spaces take the colour of the run they are in, leading ones that of the first
-// run, so they never start one.
+// Splits a line of highlighted code into runs of one colour (SplitColorRuns, word_bounds.h), into
+// the first entries of `runs`, which keeps its room from line to line; returns how many. Spaces
+// take the colour of the run they are in, leading ones that of the first run, so they never start
+// one.
 template <typename Char>
-static void SplitCodeRuns(const Char* text, size_t length, const uint8_t* classes, std::vector<CodeRun>& runs) {
-    runs.clear();
-    uint8_t color = 0xFF;   // none yet
-    for (size_t at = 0; at < length; at++) {
-        if (text[at] == ' ') continue;
-        const uint8_t next = Internal::kCodeColorOfClass[classes[at]];
-        if (next == color) continue;
-        if (color != 0xFF) runs.push_back({ (uint32_t)at, color });
-        color = next;
-    }
-    runs.push_back({ (uint32_t)length, color == 0xFF ? (uint8_t)0 : color });
+static size_t SplitCodeRuns(const Char* text, size_t length, const uint8_t* classes, std::vector<CodeRun>& runs) {
+    if (runs.size() < length + 1) runs.resize(length + 1);
+    return Internal::SplitColorRuns(text, length, classes, Internal::kCodeColorOfClass, runs.data());
 }
 
 // Where a block's layout started: the page it began on, y there, and the content length.
@@ -6109,260 +6277,143 @@ RAYOMD_COLD static void RenderFootnoteSection(RendererType& renderer, const Inte
     renderer.lineHeight = lineHeight;
 }
 
-// Page footnotes: a document's account of them (page_notes.h, which also keeps the content of the
-// notes' measuring layouts), the links, headings and anchors those layouts made, and `Spare`, the
-// renderer's buffers that SwapFootBuffers trades for its own while notes are laid out at the foot
-// of a page, so that the paragraph, table row or code block the page broke goes on. The measuring
-// layout writes straight into the stash, which takes the renderer's places while it runs (Trade,
-// before and after). Destroyed out of line: one copy for both renderers.
-struct FootStash {
-    std::vector<LinkRect> links;
-    std::vector<HeadingMark> marks;
-    std::vector<HeadingMark> anchors;
-
-    FootStash() = default;
-    FootStash(const FootStash&) = delete;
-    FootStash& operator=(const FootStash&) = delete;
-    RAYOMD_COLD ~FootStash() {}
-    RAYOMD_COLD void Trade(std::string& content, std::string& notesContent, std::vector<LinkRect>& pageLinks,
-        std::vector<HeadingMark>& headings, std::vector<HeadingMark>& ids) {
-        content.swap(notesContent);
-        pageLinks.swap(links);
-        headings.swap(marks);
-        ids.swap(anchors);
-    }
+// What the Unicode renderer sets aside while notes are measured (its BeginMeasure): the notes'
+// measuring layout is untagged, counts no missing glyph and starts no fallback probe.
+struct NoteMeasure {
+    Internal::StructTree* tags;   // a tagged build: notes are laid out again, not replayed
+    bool probing;
+    uint32_t missing[4];
+    uint32_t missingBmp;
 };
 
-template <typename Spare>
-struct PageNoteState : Internal::PageNotes {
-    using Internal::PageNotes::PageNotes;
-    FootStash stash;
-    Spare spare;
+// Page footnotes (SwapFootBuffers): the buffers the renderers' paint paths share, which they trade
+// for their own while notes are laid out at the foot of a page, so that the paragraph, table row
+// or code block the page broke goes on; each renderer uses those of its types. A formula table's
+// cells, of a type each renderer has its own, are the renderer's (`mathTableCells`).
+struct FootBuffers {
+    MathPool::Spare math;
+    std::string codeText;              // the Unicode renderer's codeText, the standard one's codeLine
+    std::wstring codeWide;
+    std::vector<uint8_t> codeClasses;
+    std::vector<uint8_t> codeLineClasses;
+    std::vector<CodeRun> codeRuns;
+    RunLinkUrls runLinkUrls;
+    WrapMeasure wrap;                  // the standard renderer's WrapScratch
+    void* mathTableCells = nullptr;    // the renderer's std::vector<MathCell>
 };
 
-// Page footnotes (ReplayNote): headings or anchors [first, last) of a note's measuring layout,
-// moved to `page` and by `dy`, after `to`'s.
-RAYOMD_COLD static void MoveMarks(const std::vector<HeadingMark>& from, uint32_t first, uint32_t last, size_t page, double dy,
-    std::vector<HeadingMark>& to) {
-    const size_t start = to.size();
-    to.insert(to.end(), from.begin() + first, from.begin() + last);
-    for (size_t at = start; at < to.size(); at++) {
-        to[at].page = page;
-        to[at].top += dy;
+// What each renderer gives its page footnotes beside the NoteHost: its images and table of
+// contents' lines, which the measuring layout takes back (SetNotesAside), its formula table's
+// cells, the spare buffers' that differ by renderer, and its NewPage hook.
+struct NoteParts {
+    ImageRegistry* const& images;
+    std::vector<ContentsLine>& contentsLines;
+    void* mathTableCells;
+    bool (*pageEnds)(void* renderer);
+};
+
+// A document's page footnotes as the renderers hold them (page_notes.h, PageNoteCore): with the
+// spare buffers and what the notes' measuring layout sets aside (SetNotesAside).
+struct PageNoteState : PageNoteBase {
+    PageNoteState(const NoteHost& renderer, const Internal::Footnotes& footnotes, const NoteParts& own)
+        : PageNoteBase(renderer, footnotes.notes.size(), footnotes.referenced), parts(own) {
+        spare.mathTableCells = own.mathTableCells;
+        pageEnds = own.pageEnds;
     }
+    FootBuffers spare;
+    const NoteParts& parts;
+    ImageRegistry::Snapshot savedImages{};
+    size_t savedContents = 0;
+    NoteMeasure measured{};
+};
+
+// NoteHost::measure: what the notes' measuring layout changes goes back afterwards, its images,
+// the table of contents' lines and (NoteCall::Measure) its tags, glyph counts and fallback probe.
+RAYOMD_COLD static bool SetNotesAside(PageNoteBase& base, bool begin) {
+    PageNoteState& notes = static_cast<PageNoteState&>(base);
+    const NoteParts& parts = notes.parts;
+    const NoteHost& host = notes.host;
+    if (begin) {
+        notes.savedContents = parts.contentsLines.size();
+        if (parts.images != nullptr) notes.savedImages = parts.images->Save();
+        if (host.tagged) host.call(host.renderer, NoteCall::Measure, 1, &notes.measured);
+        return notes.measured.tags != nullptr;
+    }
+    if (host.tagged) host.call(host.renderer, NoteCall::Measure, 0, &notes.measured);
+    if (parts.images != nullptr) parts.images->Restore(notes.savedImages);
+    parts.contentsLines.erase(parts.contentsLines.begin() + static_cast<std::ptrdiff_t>(notes.savedContents),
+        parts.contentsLines.end());
+    return false;
 }
 
-// Note `note` again from its measuring layout, its top at `y` on `page`: the content under one
-// translation, its links, headings, anchors and the first references of the notes only notes refer
-// to moved by as much. What a second layout would draw, at the cost of a copy. Each note is painted
-// once, so its links move out of the stash.
-RAYOMD_COLD static void ReplayNote(const Internal::PageNotes& notes, FootStash& stash, int note, size_t page, double y,
-    std::string& content, std::vector<LinkRect>& links, std::vector<HeadingMark>& headings, std::vector<HeadingMark>& ids,
-    NoteMarks& marks) {
-    const double dy = y - notes.measureTop;
-    const Internal::PageNotes::Ends begin = notes.Begin(note);
-    const Internal::PageNotes::Ends& end = notes.EndsOf(note);
-    marks.notes[static_cast<size_t>(note) - 1] = { page, y };
-    char head[12 + RayoMd::Text::kFixed2MaxChars + 4];
-    memcpy(head, "q 1 0 0 1 0 ", 12);
-    char* at = RayoMd::Text::WriteFixed2(head + 12, dy);
-    memcpy(at, " cm\n", 4);
-    content.append(head, static_cast<size_t>(at + 4 - head));
-    content.append(notes.content.data() + begin.content, end.content - begin.content);
-    AppendLit(content, "Q\n");
-    if (begin.links != end.links) {
-        const size_t first = links.size();
-        links.insert(links.end(), std::make_move_iterator(stash.links.begin() + begin.links),
-            std::make_move_iterator(stash.links.begin() + end.links));
-        for (size_t link = first; link < links.size(); link++) {
-            links[link].y1 += dy;
-            links[link].y2 += dy;
-        }
-    }
-    if (begin.marks != end.marks) MoveMarks(stash.marks, begin.marks, end.marks, page, dy, headings);
-    if (begin.anchors != end.anchors) MoveMarks(stash.anchors, begin.anchors, end.anchors, page, dy, ids);
-    for (const Internal::PageNotes::Ref* ref = notes.RefBegin(note); ref < notes.RefEnd(note); ref++) {
-        if (!notes.Body(ref->note)) marks.MarkReference(ref->note, page, ref->top + dy);
-    }
+// NoteHost::imageMark: a note whose layout added an image or a failure is laid out again.
+RAYOMD_COLD static uint64_t NoteImageMark(PageNoteBase& base) {
+    const ImageRegistry* const images = static_cast<PageNoteState&>(base).parts.images;
+    return images == nullptr ? 0 : (static_cast<uint64_t>(images->Images().size()) << 32) + images->FailedImages();
 }
 
-// PaintNote with page footnotes: a reference to `note` on `page`, its number's top at `top`. While
-// measuring, an edge of the notes' graph; in a note at the foot, the first reference of a note only
-// notes refer to, as a note the text refers to links back to the text.
-RAYOMD_COLD static void NoteReferenced(Internal::PageNotes& notes, NoteMarks& marks, int note, size_t page, double top) {
-    if (notes.Measuring()) notes.Refer(note, top);
-    else if (!notes.footMode || !notes.Body(note)) marks.MarkReference(note, page, top);
+// The blocks with their notes at the foot of the pages, those too tall for a page after them; the
+// renderer's `slot` (its pageNotes) points at them meanwhile. One copy for both renderers.
+RAYOMD_COLD static void RenderPageNotes(const NoteHost& host, const std::vector<Block>& blocks,
+    const Internal::Footnotes& footnotes, const NoteParts& parts, PageNoteState*& slot) {
+    KeptLocal<std::string, 4> kept;   // the notes' measured layouts, kept from export to export
+    PageNoteState state(host, footnotes, parts);
+    state.content.swap(kept.value);
+    slot = &state;
+    PageNoteCore::Begin(state);
+    host.call(host.renderer, NoteCall::Render, 0, &blocks);
+    PageNoteCore::End(state);
+    slot = nullptr;
+    state.content.swap(kept.value);
 }
 
-// Footnotes at the foot of the page (FootnotePlacement::Page; page_notes.h keeps the account),
-// for both renderers. Every note is laid out once before the text, where nothing breaks a page,
-// for its height and the notes it refers to (Measure); a line of the cold paths with references
-// to notes not placed yet keeps room for them below it (Reserve, ReserveRow); and the page's
-// notes are painted at its foot when it ends (Paint: from NewPage, at the end of a document and
-// of each book file), down to the page margin, from their measuring layout (ReplayNote) or laid
-// out again with the renderer's state set aside (FootScope), so that a paragraph or table row the
-// page broke goes on as it was. Nothing here runs without page footnotes: the renderers test
-// `pageNotes` first.
+// Footnotes at the foot of the page (FootnotePlacement::Page): what page_notes.cpp's PageNoteCore,
+// one copy for both renderers, asks of each renderer, and the calls from its paint paths. Nothing
+// here runs without page footnotes: the renderers test `pageNotes` first.
 template <typename RendererType>
 struct PageNoteLayout {
-    // What the bottom tests compare with while notes are laid out: far below any page, so that
-    // nothing breaks one.
-    static constexpr double kNoBottom = 1e15;
-
-    // The renderer set for laying out notes: the page's margin and the notes' size, no page
-    // breaks or reservations (footMode), no source map, the buffers its paint paths share
-    // swapped for the notes' own (SwapFootBuffers); all of it back when it ends.
-    class FootScope {
-    public:
-        FootScope(RendererType& renderer, double top)
-            : r(renderer), y(renderer.y), margin(renderer.margin), bottom(renderer.textBottom), bodySize(renderer.bodySize),
-              lineHeight(renderer.lineHeight), listDepth(renderer.listDepth), quoteBar(renderer.quoteBar),
-              sourceMap(renderer.sourceMap) {
-            Internal::PageNotes& notes = *r.pageNotes;
-            r.SwapFootBuffers();
-            notes.footMode = true;
-            r.textBottom = -kNoBottom;
-            r.margin = notes.margin;
-            r.y = top;
-            r.bodySize = notes.bodySize * kNoteTextFactor;
-            r.lineHeight = r.bodySize * 1.35;
-            r.listDepth = 0;
-            r.quoteBar = r.plainQuoteBar;
-            r.sourceMap = nullptr;
-        }
-        ~FootScope() {
-            r.SwapFootBuffers();
-            r.pageNotes->footMode = false;
-            r.y = y;
-            r.margin = margin;
-            r.textBottom = bottom;
-            r.bodySize = bodySize;
-            r.lineHeight = lineHeight;
-            r.listDepth = listDepth;
-            r.quoteBar = quoteBar;
-            r.sourceMap = sourceMap;
-        }
-        FootScope(const FootScope&) = delete;
-        FootScope& operator=(const FootScope&) = delete;
-
-    private:
-        RendererType& r;
-        const double y, margin, bottom, bodySize, lineHeight;
-        const int listDepth;
-        const char* const quoteBar;
-        std::vector<SourceBlock>* const sourceMap;
-    };
-
-    // Note `index` as the end section sets it, without its page test: where it starts (`mark`),
-    // its first paragraph, its other blocks indented; a Note of the Document under PDF/UA.
-    RAYOMD_COLD static void Note(RendererType& r, size_t index, bool mark) {
-        if (mark) r.noteMarks.notes[index] = { r.pageStarts.size() - 1, r.y };
-        const Block& note = r.footnotes->notes[index];
-        const int tagged = r.TagBeginFootNote();
-        r.RenderParagraph(note.text);
-        if (!note.children.empty()) {
-            const double margin = r.margin;
-            r.Indent(kNoteIndent);
-            RenderBlocks(r, note.children);
-            r.RestoreMargin(margin);
-        }
-        r.TagEndFootNote(tagged);
-    }
-
-    // Each note's height and the notes it refers to, from a layout written into the stash (the
-    // renderer's content, page links, headings and anchors swapped for its buffers meanwhile, so
-    // nothing is copied or cut back): Paint replays it where it can. Taken back otherwise: its
-    // images, and (BeginMeasure) its tags, glyph counts and fallback probe. The glyphs it marks
-    // used are those the notes paint later, as each is painted once.
-    RAYOMD_COLD static void Measure(RendererType& r) {
-        auto& notes = *r.pageNotes;
-        FootStash& stash = notes.stash;
-        const size_t count = r.footnotes->notes.size();
-        const size_t contentsLines = r.contentsLines.size();
-        const ImageRegistry::Snapshot images = r.images != nullptr ? r.images->Save() : ImageRegistry::Snapshot{};
-        const auto state = r.BeginMeasure();
-        stash.Trade(r.content, notes.content, r.pageLinks.back(), r.headings, r.ids);
-        {
-            // Anywhere below the top of a page: a note's layout does not depend on where it starts.
-            // Its middle (pageH * 0.5 bit for bit on pages of a fixed size).
-            notes.measureTop = r.pageH - r.fullH * 0.5;
-            FootScope scope(r, notes.measureTop);
-            for (size_t index = 0; index < count && !BuildCancelled(); index++) {
-                const size_t imageCount = r.images != nullptr ? r.images->Images().size() : 0;
-                const uint32_t failed = r.images != nullptr ? r.images->FailedImages() : 0;
-                notes.BeginMeasure(static_cast<int>(index) + 1);
-                r.y = notes.measureTop;
-                Note(r, index, false);
-                notes.EndMeasure(notes.measureTop - r.y,
-                    { r.content.size(), static_cast<uint32_t>(r.pageLinks.back().size()), static_cast<uint32_t>(r.headings.size()),
-                        static_cast<uint32_t>(r.ids.size()) },
-                    state.tags == nullptr && (r.images == nullptr ||
-                        (r.images->Images().size() == imageCount && r.images->FailedImages() == failed)));
-            }
-        }
-        stash.Trade(r.content, notes.content, r.pageLinks.back(), r.headings, r.ids);
-        r.EndMeasure(state);
-        if (r.images != nullptr) r.images->Restore(images);
-        r.contentsLines.erase(r.contentsLines.begin() + static_cast<std::ptrdiff_t>(contentsLines), r.contentsLines.end());
-        notes.Settle(r.fullH - r.margin * 2.0 - r.lineHeight);
-    }
-
-    // The notes waiting at the foot of the page from `y` down: a rule, then each; where they end.
-    RAYOMD_COLD static double PaintPending(RendererType& r, double y) {
-        auto& notes = *r.pageNotes;
-        const size_t page = r.pageStarts.size() - 1;
-        y -= 8.0;
-        r.TagArtifact();
-        AppendFootnoteRule(r.content, r.ruleColor, notes.margin, y, (r.pageW - notes.margin * 2.0) / 3.0);
-        y -= 10.0;
-        for (const int note : notes.Pending()) {
-            if (notes.Replayed(note)) {
-                ReplayNote(notes, notes.stash, note, page, y, r.content, r.pageLinks.back(), r.headings, r.ids, r.noteMarks);
-                y -= notes.Height(note);
-            } else {
-                r.y = y;
-                Note(r, static_cast<size_t>(note) - 1, true);
-                y = r.y;
-            }
-        }
-        return y;
-    }
-
-    // The notes waiting at the foot of the page that ends: a rule at the top of the room kept for
-    // them, then each, down to the page margin. The page's text ends where they begin. On a long
-    // page (PdfPageSize::autoHeight), whose box ends below what it holds, they follow its text
-    // instead, and the page ends below them. Only a note laid out again (not Replayed) needs the
-    // renderer set aside.
-    RAYOMD_COLD static void Paint(RendererType& r) {
-        auto& notes = *r.pageNotes;
-        if (!notes.Pending().empty()) {
-            notes.SetTextEnd(r.pageStarts.size() - 1, r.content.size());
-            const bool longPage = r.pageBottoms != nullptr;
-            const double top = longPage ? r.y : notes.margin + (r.textBottom - r.margin);
-            bool layout = false;
-            for (const int note : notes.Pending()) layout = layout || !notes.Replayed(note);
-            double end = 0.0;
-            if (layout) {
-                FootScope scope(r, top);
-                end = PaintPending(r, top);
-            } else {
-                end = PaintPending(r, top);
-            }
-            if (longPage) r.y = end;
-            notes.ClearPending();
-        }
-        r.textBottom = r.margin + (r.pageH - r.fullH);
-    }
-
-    // NewPage, through PageNotes::pageEnds: true where no page may end (the notes' own layout),
-    // else the page's notes painted. Called through a pointer: a direct call made NewPage part of a
-    // cycle with the paint paths the notes take, and GCC then inlined MarkHeading and a line lambda
-    // of RenderParagraph differently (+0.14 % instructions on notes.md without page footnotes).
-    RAYOMD_COLD static bool Break(void* renderer) {
+    // What PageNoteCore asks of the renderer (NoteCall). A note is laid out as the end section sets
+    // it, without its page test or mark: its first paragraph, its other blocks indented; a Note of
+    // the Document under PDF/UA.
+    RAYOMD_COLD static void Call(void* renderer, NoteCall what, size_t index, const void* data) {
         RendererType& r = *static_cast<RendererType*>(renderer);
-        if (r.pageNotes->footMode) return true;
-        Paint(r);
-        return false;
+        switch (what) {
+        case NoteCall::Note: {
+            const Block& note = r.footnotes->notes[index];
+            const int tagged = r.TagBeginFootNote();
+            r.RenderParagraph(note.text);
+            if (!note.children.empty()) {
+                const double margin = r.margin;
+                r.Indent(kNoteIndent);
+                RenderBlocks(r, note.children);
+                r.RestoreMargin(margin);
+            }
+            r.TagEndFootNote(tagged);
+            break;
+        }
+        case NoteCall::Swap: r.SwapFootBuffers(r.pageNotes->spare); break;
+        case NoteCall::NewPage: r.NewPage(); break;
+        case NoteCall::Artifact:
+            if constexpr (RendererType::kTagged) r.TagArtifact();
+            break;
+        case NoteCall::Measure:
+            if constexpr (RendererType::kTagged) {
+                NoteMeasure& state = *static_cast<NoteMeasure*>(const_cast<void*>(data));
+                if (index != 0) r.BeginMeasure(state);
+                else r.EndMeasure(state);
+            }
+            break;
+        case NoteCall::EndSection: RenderFootnoteSection(r, *r.footnotes, static_cast<const Internal::PageNotes*>(data)); break;
+        case NoteCall::Render: r.Render(*static_cast<const std::vector<Block>*>(data)); break;
+        }
+    }
+
+    // NewPage, through PageNotes::pageEnds. Called through a pointer: a direct call made NewPage
+    // part of a cycle with the paint paths the notes take, and GCC then inlined MarkHeading and a
+    // line lambda of RenderParagraph differently (+0.14 % instructions on notes.md without page
+    // footnotes).
+    RAYOMD_COLD static bool Break(void* renderer) {
+        return PageNoteCore::Break(*static_cast<RendererType*>(renderer)->pageNotes);
     }
 
     // The notes a line of the cold paths refers to that wait to be placed, into the line's.
@@ -6378,51 +6429,35 @@ struct PageNoteLayout {
     // references bring, which then wait at the foot of the page it lands on.
     template <typename Line>
     RAYOMD_COLD static void Reserve(RendererType& r, const Line& line, double needed) {
-        Internal::PageNotes& notes = *r.pageNotes;
-        if (!notes.footMode) AddLine(r, line);
-        if (notes.LineEmpty()) {
-            r.Ensure(needed);
-            return;
-        }
-        r.Ensure(needed + notes.Collect(r.fullH - r.margin * 2.0 - needed));
-        r.textBottom += notes.Place(r.y - needed - r.textBottom);
+        if (!r.pageNotes->footMode) AddLine(r, line);
+        PageNoteCore::Reserve(*r.pageNotes, needed);
     }
 
     // RenderMathTable: the room the notes of a row's references take below it (`needed` high), 0
     // when none waits; PlaceRow then puts them at the foot of the page the row is drawn on.
     template <typename Cells>
     RAYOMD_COLD static double RowNeed(RendererType& r, const Cells& cells, size_t columns, double needed) {
-        Internal::PageNotes& notes = *r.pageNotes;
-        if (notes.footMode) return 0.0;
+        if (r.pageNotes->footMode) return 0.0;
         for (size_t c = 0; c < columns; c++) {
             if (!cells[c].formula) continue;
             for (const auto& line : cells[c].formulaLines) AddLine(r, line);
         }
-        if (notes.LineEmpty()) return 0.0;
-        return notes.Collect(r.fullH - r.margin * 2.0 - needed);
+        return PageNoteCore::RowNeed(*r.pageNotes, needed);
     }
-    RAYOMD_COLD static void PlaceRow(RendererType& r, double needed) {
-        r.textBottom += r.pageNotes->Place(r.y - needed - r.textBottom);
-    }
+    RAYOMD_COLD static void PlaceRow(RendererType& r, double needed) { PageNoteCore::PlaceRow(*r.pageNotes, needed); }
     template <typename Cells>
     RAYOMD_COLD static void ReserveRow(RendererType& r, const Cells& cells, size_t columns, double needed) {
-        const double need = RowNeed(r, cells, columns, needed);
-        r.Ensure(needed + need);
-        if (need > 0.0) PlaceRow(r, needed);
+        PageNoteCore::ReserveRow(*r.pageNotes, needed, RowNeed(r, cells, columns, needed));
     }
 
     // The blocks with their notes at the foot of the pages, those too tall for a page after them.
     RAYOMD_COLD static void Render(RendererType& r, const std::vector<Block>& blocks, const Internal::Footnotes& footnotes) {
-        PageNoteState<typename RendererType::FootBuffers> state(footnotes.notes.size(), footnotes.referenced, r.margin,
-            r.bodySize);
-        state.pageEnds = &Break;
-        r.pageNotes = &state;
-        r.noteMarks.notes.assign(footnotes.notes.size(), NoteMarks::Point{});
-        Measure(r);
-        r.Render(blocks);
-        if (state.SettleRest()) RenderFootnoteSection(r, footnotes, &state);
-        Paint(r);
-        r.pageNotes = nullptr;
+        const NoteHost host{ &r, r.y, r.margin, r.textBottom, r.bodySize, r.lineHeight, r.pageW, r.pageH, r.fullH, r.listDepth,
+            r.quoteBar, r.plainQuoteBar, r.ruleColor, r.sourceMap, r.content, r.pageLinks, r.headings, r.ids, r.noteMarks,
+            r.pageStarts, r.pageBottoms, RendererType::kTagged, &Call, &SetNotesAside, &NoteImageMark, &AppendFootnoteRule,
+            g_cancel, r.footnotes->notes };
+        decltype(r.mathTableCells) mathTableCells;
+        RenderPageNotes(host, blocks, footnotes, { r.images, r.contentsLines, &mathTableCells, &Break }, r.pageNotes);
     }
 };
 
@@ -6590,6 +6625,10 @@ constexpr char kQuoteBars[][15] = { "0.45 0.62 0.72", "0.04 0.41 0.85", "0.10 0.
     "0.60 0.40 0.00", "0.82 0.14 0.18", "0.00 0.58 0.62", "0.50 0.50 0.50" };
 constexpr char kAlertTitles[][10] = { "", "Note", "Tip", "Important", "Warning", "Caution", "Tip", "Quote" };
 
+static std::string_view QuoteBar(int alert) {
+    return std::string_view(kQuoteBars[alert], sizeof(kQuoteBars[0]) - 1);
+}
+
 // An Obsidian callout (its title in Block::text) has content beyond its title.
 static bool CalloutHasBody(const Block& block) {
     return !block.children.empty() &&
@@ -6609,14 +6648,14 @@ public:
         : heading(Pick(theme.headingColor, "0.02 0.02 0.02", storage[0])),
           link(Pick(theme.linkColor, "0.05 0.30 0.68", storage[1])),
           rule(Pick(theme.accentColor, "0.68 0.68 0.68", storage[2])),
-          quoteBar(Pick(theme.accentColor, kQuoteBars[0], storage[3])) {}
+          quoteBar(Pick(theme.accentColor, QuoteBar(0), storage[3])) {}
     ThemePalette(const ThemePalette&) = delete;
     ThemePalette& operator=(const ThemePalette&) = delete;
 
 private:
     char storage[4][24] = {};   // first: the pointers below are made from it
 
-    static const char* Pick(int32_t rgb, const char* styleColor, char* buffer) {
+    static std::string_view Pick(int32_t rgb, std::string_view styleColor, char* buffer) {
         if (rgb < 0) return styleColor;
         char* out = buffer;
         for (int shift = 16; shift >= 0; shift -= 8) {
@@ -6624,14 +6663,14 @@ private:
             out = RayoMd::Text::WriteFixed2(out, ((rgb >> shift) & 0xFF) / 255.0);
         }
         *out = '\0';
-        return buffer;
+        return std::string_view(buffer, (size_t)(out - buffer));
     }
 
 public:
-    const char* const heading;
-    const char* const link;
-    const char* const rule;       // rules, in the accent colour
-    const char* const quoteBar;   // the bar beside a plain quote, in the accent colour
+    const std::string_view heading;
+    const std::string_view link;
+    const std::string_view rule;       // rules, in the accent colour
+    const std::string_view quoteBar;   // the bar beside a plain quote, in the accent colour
 };
 
 // Defined with the builders.
@@ -6819,11 +6858,11 @@ private:
     std::vector<HeadingMark> ids;   // where the HTML ids (Block::Anchor) are, for "#id" links
     // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
     // the alert it is in.
-    const char* const headingColor;
-    const char* const linkColor;
-    const char* const ruleColor;
-    const char* const plainQuoteBar;
-    const char* quoteBar;
+    const std::string_view headingColor;
+    const std::string_view linkColor;
+    const std::string_view ruleColor;
+    const std::string_view plainQuoteBar;
+    std::string_view quoteBar;
 
     // Notes where a heading's first line is drawn, for its outline entry and the links to it.
     // A line `firstLine` high that does not fit moves to the next page first, as drawing it
@@ -6903,7 +6942,7 @@ private:
     }
 
     static void EmitMathFallback(void* context, std::string& content, std::string_view utf8, double x,
-        double baseline, double size, const char* rgb) {
+        double baseline, double size, std::string_view rgb) {
         Renderer* self = static_cast<Renderer*>(context);
         content += "q ";
         content += rgb;
@@ -7070,7 +7109,7 @@ private:
     }
 
     // A script: its text in the body colour, raised as a note's number or lowered, no link.
-    RAYOMD_MATH_COLD double PaintScript(int index, double x, double baseline, const char* color) {
+    RAYOMD_MATH_COLD double PaintScript(int index, double x, double baseline, std::string_view color) {
         const double size = math.NoteSize(index);
         const double shift = math.Script(index) == 2 ? -size * kScriptDropFactor : size * kNoteRiseFactor;
         if (tags != nullptr) tags->LinkRun({});
@@ -7327,9 +7366,9 @@ private:
     std::vector<MathCell> mathTableCells;   // RenderMathTable's cells, by column
 
     // A table cell inside a table with formulas. A cell without a formula wraps
-    // exactly as RenderTable wraps it.
-    RAYOMD_MATH_COLD void WrapMathCell(const std::string& cell, double width, double size, bool bold, MathCell& out) {
-        out.formula = cell.find(Internal::kMathTextOpen) != std::string::npos;
+    // exactly as RenderTable wraps it. Not cold: it runs for every cell of such a table.
+    RAYOMD_SHARED void WrapMathCell(const std::string& cell, double width, double size, bool bold, MathCell& out) {
+        out.formula = memchr(cell.data(), Internal::kMathTextOpen, cell.size()) != nullptr;
         if (out.formula) {
             out.formulaLines = WrapMathText(cell, width, size, bold);
             return;
@@ -7351,7 +7390,7 @@ private:
     }
 
     RAYOMD_MATH_COLD void PaintMathCellLine(const MathCell& cell, size_t i, double x, double baseline, double size,
-        const char* color, bool bold) {
+        std::string_view color, bool bold) {
         if (cell.formula) PaintMathTextLine(cell.formulaLines[i], x, baseline, size, color, bold);
         else PaintSpanText(x, baseline, size, cell.plain.Line(i), color, bold, false, false);
     }
@@ -7366,7 +7405,7 @@ private:
 
     // Paints a line of plain text and formulas in one colour (headings, table cells).
     RAYOMD_MATH_COLD void PaintMathTextLine(const std::vector<StyledSpan>& line, double x, double baseline, double size,
-        const char* color, bool bold) {
+        std::string_view color, bool bold) {
         double cursor = x;
         for (const StyledSpan& span : line) {
             if (span.math >= 0) {
@@ -7381,7 +7420,7 @@ private:
 
     void TableFill(double x, double top, double w, double h) { DrawRect(x, top, w, h, "0.91 0.93 0.95"); }
     void TableStroke(double x, double top, double w, double h) { DrawStrokeRect(x, top, w, h); }
-    const char* TableTextColor(bool header) const { return header ? "0.04 0.04 0.04" : "0.10 0.10 0.10"; }
+    std::string_view TableTextColor(bool header) const { return header ? "0.04 0.04 0.04" : "0.10 0.10 0.10"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer in one style.
     struct StyledRun {
@@ -7430,7 +7469,7 @@ private:
     std::vector<StyledRuns> tableCells;     // the wrapped cells of a table row, by column
 
     // Colors of text runs: plain text, code and the background of code.
-    struct RunColors { const char* text; const char* code; const char* codeFill; };
+    struct RunColors { std::string_view text; std::string_view code; std::string_view codeFill; };
     static constexpr RunColors kBodyRunColors{ "0.08 0.08 0.08", "0.18 0.18 0.17", "0.94 0.94 0.92" };
     static constexpr RunColors kQuoteRunColors{ "0.18 0.22 0.25", "0.16 0.16 0.15", "0.88 0.89 0.88" };
     static constexpr RunColors kHeaderCellRunColors{ "0.04 0.04 0.04", "0.18 0.18 0.17", "0.94 0.94 0.92" };
@@ -7439,7 +7478,7 @@ private:
     // The background of code `text`, which starts at x and is `width` wide, from its first
     // glyph on: the space shown before a code word stays clear, and so does the word before.
     void CodeBackground(double x, double top, double width, double lh, std::wstring_view text, double size,
-        const char* fill) {
+        std::string_view fill) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == L' ') spaces++;
         const double skip = spaces != 0 ? TextWidth(font, text.substr(0, spaces), size) : 0.0;
@@ -7449,7 +7488,7 @@ private:
     // HTML's <mark> behind a run of text (`mark`, painted before the text) or <u> under it (after
     // it, in the text's colour), from its first glyph: a space the run begins with stays clear.
     RAYOMD_COLD void PaintDecor(double x, double baseline, double width, double size, std::wstring_view text, bool mark,
-        const char* color) {
+        std::string_view color) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == L' ') spaces++;
         const double skip = spaces != 0 ? TextWidth(font, text.substr(0, spaces), size) : 0.0;
@@ -7487,7 +7526,7 @@ private:
             const bool measured = index + 1 < end || run.code || !run.url.empty() || run.decor != 0;
             const double spanWidth = measured ? TextWidth(font, runText, size) : 0.0;
             if (run.code) CodeBackground(x, top, spanWidth, lh, runText, size, colors.codeFill);
-            const char* color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
+            const std::string_view color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
             if (run.decor & Internal::kDecorMark) PaintDecor(x, baseline, spanWidth, size, runText, true, color);
             PaintText(x, baseline, size, runText, color, run.bold || bold, run.italic, run.strike);
             if (run.decor & Internal::kDecorUnderline) PaintDecor(x, baseline, spanWidth, size, runText, false, color);
@@ -7662,18 +7701,46 @@ private:
         out.wide.resize(bytes);     // room for one code unit a byte
         wchar_t* const wideBegin = &out.wide[0];
         wchar_t* wideEnd = wideBegin;
-        out.wideEnds.clear();
-        for (const Internal::InlineRun& span : parsed) {
-            wideEnd = WriteUtf8Wide(wideEnd, out.parsed.Text(span));
-            out.wideEnds.push_back(static_cast<uint32_t>(wideEnd - wideBegin));
+        // Sized to the runs, written by index: only grows from paragraph to paragraph.
+        if (out.wideEnds.size() < parsed.size()) out.wideEnds.resize(parsed.size());
+        uint32_t* const wideEnds = out.wideEnds.data();
+        for (size_t index = 0; index < parsed.size(); index++) {
+            wideEnd = WriteUtf8Wide(wideEnd, out.parsed.Text(parsed[index]));
+            wideEnds[index] = static_cast<uint32_t>(wideEnd - wideBegin);
         }
         out.wide.resize(static_cast<size_t>(wideEnd - wideBegin));
+        if (multiFace || !PlaceStyledWords<false>(out, width, size)) {
+            out.text.clear();
+            out.runs.clear();
+            out.lineEnds.clear();
+            PlaceStyledWords<true>(out, width, size);
+        }
+        return true;
+    }
+
+    // WrapStyledInline's words, from out.wide and out.wideEnds, into out.text, out.runs and
+    // out.lineEnds, which are empty. In integer units (WrapUnits) unless Exact, and then without a
+    // theme's faces; false when a comparison was too close to tell there, or a word was wider than
+    // a line (cut by PlaceWideStyledWord in doubles).
+    template <bool Exact>
+    bool PlaceStyledWords(StyledRuns& out, double width, double size) {
+        using Width = std::conditional_t<Exact, double, uint64_t>;
+        const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
         const std::wstring_view source = out.wide;
         PendingWide pending;        // text of out.wide that comes next in out.text, not copied yet
         size_t lineStart = 0;       // index of the first run of the line being filled
-        double lineWidth = 0.0;
-        const double spaceWidth = TextWidth(font, L" ", size);
+        Width lineWidth = 0;
+        Width spaceWidth;
+        if constexpr (Exact) spaceWidth = TextWidth(font, L" ", size);
+        else spaceWidth = font.CodepointWidth(' ');
         const double scale = size * 0.001;
+        const WrapUnits units(size, source.size(), width);
+        // In units, the words of text of kShortWideText units or more come from MeasureWideWords.
+        const bool measured = !Exact && source.size() >= kShortWideText;
+        WrapMeasure::View view{};
+        size_t words = 0;
+        if (measured) words = MeasureWideText(font, source, view);
+        size_t word = 0;
 
         const size_t runCount = parsed.size();
         const size_t total = source.size();
@@ -7686,7 +7753,7 @@ private:
                 if (out.runs.size() != lineStart || !out.lineEnds.empty()) {
                     out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
                     lineStart = out.runs.size();
-                    lineWidth = 0.0;
+                    lineWidth = 0;
                 }
                 at = runEnd;
                 continue;
@@ -7696,19 +7763,39 @@ private:
             // it has this style and the next word goes into it without comparing styles.
             bool joinLast = false;
             while (at < runEnd) {
-                if (IsWideSpace(source[at])) {
-                    at++;
-                    continue;
-                }
-                const size_t wordStart = at;
-                double wordWidth;
-                at = ScanWideWord(font, source.data(), wordStart, total, scale, wordWidth);
-                // With a theme's faces, each piece of the word in the face of its run, and the space
-                // before it in that of the run it joins.
-                double spanSpace = spaceWidth;
-                if (multiFace) {
-                    wordWidth = FaceWordWidth(out, index, wordStart, at, size);
-                    spanSpace = FaceSpaceWidth(span, size);
+                size_t wordStart;
+                Width wordWidth;
+                Width spanSpace = spaceWidth;
+                if (measured) {
+                    // The next word, if it starts in this run.
+                    if (word == words || view.bounds[word * 2] >= runEnd) {
+                        at = runEnd;
+                        break;
+                    }
+                    wordStart = view.bounds[word * 2];
+                    at = view.bounds[word * 2 + 1];
+                    word++;
+                    if constexpr (!Exact) {
+                        if (at - wordStart < 0x10000) wordWidth = static_cast<uint32_t>(view.prefix[at] - view.prefix[wordStart]);
+                        else ScanWideUnits(font, source.data(), wordStart, total, wordWidth);
+                    }
+                } else {
+                    if (IsWideSpace(source[at])) {
+                        at++;
+                        continue;
+                    }
+                    wordStart = at;
+                    if constexpr (Exact) {
+                        at = ScanWideWord(font, source.data(), wordStart, total, scale, wordWidth);
+                        // With a theme's faces, each piece of the word in the face of its run, and
+                        // the space before it in that of the run it joins.
+                        if (multiFace) {
+                            wordWidth = FaceWordWidth(out, index, wordStart, at, size);
+                            spanSpace = FaceSpaceWidth(span, size);
+                        }
+                    } else {
+                        at = ScanWideUnits(font, source.data(), wordStart, total, wordWidth);
+                    }
                 }
                 const size_t wordEnd = at;
                 // A word that reaches the end of its run goes on in the runs after it unless
@@ -7719,19 +7806,32 @@ private:
 
                 const bool lineEmpty = out.runs.size() == lineStart;
                 bool needsSpace = !lineEmpty;
-                double addWidth = wordWidth + (needsSpace ? spanSpace : 0.0);
+                const Width addWidth = wordWidth + (needsSpace ? spanSpace : 0);
 
-                if (!lineEmpty && lineWidth + addWidth > width) {
-                    out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
-                    lineStart = out.runs.size();
-                    lineWidth = 0.0;
-                    needsSpace = false;
-                    joinLast = false;
+                if (!lineEmpty) {
+                    int full;
+                    if constexpr (Exact) full = lineWidth + addWidth > width;
+                    else full = units.Above(lineWidth + addWidth);
+                    if (full < 0) return false;
+                    if (full != 0) {
+                        out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+                        lineStart = out.runs.size();
+                        lineWidth = 0;
+                        needsSpace = false;
+                        joinLast = false;
+                    }
                 }
-                if (wordWidth > width) {
-                    FlushPendingWide(out, pending);
-                    PlaceWideStyledWord(out, lineStart, lineWidth, index, wordStart, wordEnd, width, size);
-                    joinLast = false;
+                int wide;
+                if constexpr (Exact) wide = wordWidth > width;
+                else wide = units.Above(wordWidth);
+                if (wide != 0) {
+                    if constexpr (Exact) {
+                        FlushPendingWide(out, pending);
+                        PlaceWideStyledWord(out, lineStart, lineWidth, index, wordStart, wordEnd, width, size);
+                        joinLast = false;
+                    } else {
+                        return false;
+                    }
                 } else {
                     bool spaced = false;
                     if (needsSpace) {
@@ -7765,6 +7865,34 @@ private:
                             span.italic, span.strike, url, span.code, span.decor);
                         // A struck word gets an unstyled space run before it, so it never joins.
                         joinLast = !span.strike;
+                    }
+                    if constexpr (!Exact) {
+                        // The words after it in its run one space apart join its run and the pending
+                        // text, which ends where it does, as long as they certainly fit the line: what
+                        // the steps above do for each, without them.
+                        if (measured && joinLast && lastRun == index) {
+                            size_t joinedEnd = wordEnd;
+                            Width joinedWidth = lineWidth;
+                            while (word < words) {
+                                const size_t nextStart = view.bounds[word * 2];
+                                const size_t nextEnd = view.bounds[word * 2 + 1];
+                                if (nextStart != joinedEnd + 1 || nextEnd > runEnd || source[joinedEnd] != L' ' ||
+                                    nextEnd - nextStart >= 0x10000) {
+                                    break;
+                                }
+                                const Width next = spanSpace + static_cast<uint32_t>(view.prefix[nextEnd] - view.prefix[nextStart]);
+                                if (units.Above(joinedWidth + next) != 0) break;
+                                joinedWidth += next;
+                                joinedEnd = nextEnd;
+                                word++;
+                            }
+                            if (joinedEnd != wordEnd) {
+                                pending.length += joinedEnd - wordEnd;
+                                out.runs.back().end = static_cast<uint32_t>(out.text.size() + pending.length);
+                                lineWidth = joinedWidth;
+                                at = joinedEnd;
+                            }
+                        }
                     }
                 }
                 if (lastRun != index) {
@@ -7948,17 +8076,16 @@ private:
         else Ensure(needed);
     }
 
-    void PaintText(double x, double baseline, double size, std::wstring_view line, const char* color,
+    void PaintText(double x, double baseline, double size, std::wstring_view line, std::string_view color,
         bool fauxBold = false, bool italic = false, bool strike = false) {
         if (tags != nullptr) {
             PaintTaggedText(x, baseline, size, line, color, fauxBold, italic, strike);
             return;
         }
-        const size_t colorSize = strlen(color);
         const size_t textBytes = CidTextBytes(line);
-        TailWriter w(content, 96 + colorSize * 2 + kOperandBytes * 9 + textBytes * 2);
+        TailWriter w(content, 96 + color.size() * 2 + kOperandBytes * 9 + textBytes * 2);
         w.Lit("q ");
-        w.Bytes(color, colorSize);
+        w.Bytes(color);
         w.Lit(" rg BT /F1 ");
         w.Fixed(size);
         w.Lit(" Tf 1 0 ");
@@ -7989,7 +8116,7 @@ private:
         if (strike && !line.empty()) {
             double width = TextWidth(font, line, size);
             w.Lit(" ");
-            w.Bytes(color, colorSize);
+            w.Bytes(color);
             w.Lit(" RG 0.55 w ");
             w.Fixed(x);
             w.Lit(" ");
@@ -8004,7 +8131,7 @@ private:
     }
 
     // A line of text at x, `bold` (a theme's bold face draws headings) in the face for it.
-    void DrawTextLine(double x, double size, std::wstring_view line, const char* color = "0.08 0.08 0.08", bool bold = false) {
+    void DrawTextLine(double x, double size, std::wstring_view line, std::string_view color = "0.08 0.08 0.08", bool bold = false) {
         double lh = size * 1.35;
         Ensure(lh);
         if (bold) PaintSpanText(x, y - size, size, line, color, true, false, false);
@@ -8012,12 +8139,11 @@ private:
         y -= lh;
     }
 
-    void DrawRect(double x, double top, double w, double h, const char* color) {
+    void DrawRect(double x, double top, double w, double h, std::string_view color) {
         if (tags != nullptr) tags->Artifact();
-        const size_t colorSize = strlen(color);
-        TailWriter out(content, 24 + colorSize + kOperandBytes * 4);
+        TailWriter out(content, 24 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color, colorSize);
+        out.Bytes(color);
         out.Lit(" rg ");
         out.Fixed(x);
         out.Lit(" ");
@@ -8036,12 +8162,11 @@ private:
         DrawRect(margin, y + 2.0, 3.0, height, quoteBar);
     }
 
-    void DrawStrokeRect(double x, double top, double w, double h, const char* color = "0.72 0.72 0.72", double lineWidth = 0.45) {
+    void DrawStrokeRect(double x, double top, double w, double h, std::string_view color = "0.72 0.72 0.72", double lineWidth = 0.45) {
         if (tags != nullptr) tags->Artifact();
-        const size_t colorSize = strlen(color);
-        TailWriter out(content, 24 + colorSize + kOperandBytes * 5);
+        TailWriter out(content, 24 + color.size() + kOperandBytes * 5);
         out.Lit("q ");
-        out.Bytes(color, colorSize);
+        out.Bytes(color);
         out.Lit(" RG ");
         out.Fixed(lineWidth);
         out.Lit(" w ");
@@ -8084,7 +8209,7 @@ private:
     // (taken by value, so that the untagged path keeps its operands in registers). A list item's
     // label at its start is painted first, as the label's content. Bold text is painted once
     // (PaintStrokedBold): drawn twice, as PaintText draws it, a screen reader would read it twice.
-    RAYOMD_COLD void PaintTaggedText(double x, double baseline, double size, std::wstring_view line, const char* color,
+    RAYOMD_COLD void PaintTaggedText(double x, double baseline, double size, std::wstring_view line, std::string_view color,
         bool fauxBold, bool italic, bool strike) {
         Internal::StructTree* const tree = tags;
         const size_t label = std::min(tree->TakeLabel(), line.size());
@@ -8108,14 +8233,13 @@ private:
 
     // Bold text as PaintText draws it, but once: filled and outlined in its colour (2 Tr), as
     // thick as PaintText's second copy, 0.28 points to the right, makes it.
-    RAYOMD_COLD void PaintStrokedBold(double x, double baseline, double size, std::wstring_view line, const char* color,
+    RAYOMD_COLD void PaintStrokedBold(double x, double baseline, double size, std::wstring_view line, std::string_view color,
         bool italic, bool strike) {
-        const size_t colorSize = strlen(color);
-        TailWriter w(content, 112 + colorSize * 2 + kOperandBytes * 8 + CidTextBytes(line));
+        TailWriter w(content, 112 + color.size() * 2 + kOperandBytes * 8 + CidTextBytes(line));
         w.Lit("q ");
-        w.Bytes(color, colorSize);
+        w.Bytes(color);
         w.Lit(" rg ");
-        w.Bytes(color, colorSize);
+        w.Bytes(color);
         w.Lit(" RG 0.28 w 1 j BT /F1 ");
         w.Fixed(size);
         w.Lit(" Tf 2 Tr 1 0 ");
@@ -8144,7 +8268,7 @@ private:
     }
 
     // PaintText for text in a style: in the theme's face for it, when it has faces.
-    void PaintSpanText(double x, double baseline, double size, std::wstring_view line, const char* color, bool bold,
+    void PaintSpanText(double x, double baseline, double size, std::wstring_view line, std::string_view color, bool bold,
         bool italic, bool strike) {
         if (multiFace) PaintFaceText(ChooseFace(bold, italic), x, baseline, size, line, color, strike);
         else PaintText(x, baseline, size, line, color, bold, italic, strike);
@@ -8153,7 +8277,7 @@ private:
     // `line` in face `choice`: PaintText for `font`, else in the theme's face, its CIDs that face's.
     // Tagged as PaintTaggedText tags it: a list item's label first, bold drawn once.
     RAYOMD_COLD void PaintFaceText(FaceChoice choice, double x, double baseline, double size, std::wstring_view line,
-        const char* color, bool strike) {
+        std::string_view color, bool strike) {
         if (choice.face == 0) {
             PaintText(x, baseline, size, line, color, choice.fauxBold, choice.skew, strike);
             return;
@@ -8178,16 +8302,15 @@ private:
     // The text object of PaintFaceText: in /F2, /F4 or /F5, slanted with `skew`, bold drawn twice
     // (or `once`, filled and outlined, as PaintStrokedBold draws it) with `fauxBold`.
     RAYOMD_COLD void WriteFaceText(FaceChoice choice, double x, double baseline, double size, std::wstring_view line,
-        const char* color, bool strike, bool once) {
+        std::string_view color, bool strike, bool once) {
         const TtfFont& faceFont = FaceFont(choice.face);
-        const size_t colorSize = strlen(color);
-        TailWriter w(content, 160 + colorSize * 3 + kOperandBytes * 10 + CidTextBytes(line) * 2);
+        TailWriter w(content, 160 + color.size() * 3 + kOperandBytes * 10 + CidTextBytes(line) * 2);
         const bool stroked = choice.fauxBold && once;
         w.Lit("q ");
-        w.Bytes(color, colorSize);
+        w.Bytes(color);
         w.Lit(" rg ");
         if (stroked) {
-            w.Bytes(color, colorSize);
+            w.Bytes(color);
             w.Lit(" RG 0.28 w 1 j ");
         }
         w.Lit("BT ");
@@ -8222,7 +8345,7 @@ private:
         if (strike && !line.empty()) {
             const double width = TextWidth(faceFont, line, size);
             w.Lit(" ");
-            w.Bytes(color, colorSize);
+            w.Bytes(color);
             w.Lit(" RG 0.55 w ");
             w.Fixed(x);
             w.Lit(" ");
@@ -8246,7 +8369,7 @@ private:
             const FaceChoice choice = ChooseFace(run.bold || bold, run.italic);
             const double spanWidth = TextWidth(FaceFont(choice.face), runText, size);
             if (run.code) CodeBackground(x, top, spanWidth, lh, runText, size, colors.codeFill);
-            const char* color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
+            const std::string_view color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
             if (run.decor & Internal::kDecorMark) PaintDecor(x, baseline, spanWidth, size, runText, true, color);
             PaintFaceText(choice, x, baseline, size, runText, color, run.strike);
             if (run.decor & Internal::kDecorUnderline) PaintDecor(x, baseline, spanWidth, size, runText, false, color);
@@ -8576,7 +8699,7 @@ private:
     // heading, at `level`, is noted once its first line has found its page, as `markText` when
     // that is given (the text without its number).
     RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, int level, double x, double width, double size,
-        const char* color, bool bold, bool quote, const std::string* markText = nullptr) {
+        std::string_view color, bool bold, bool quote, const std::string* markText = nullptr) {
         math.Clear();
         double lh = size * 1.35;
         bool marked = false;
@@ -8604,9 +8727,9 @@ private:
     // baseline, code backgrounds and link rectangles keep their usual offsets.
     RAYOMD_MATH_COLD void RenderMathLines(const std::vector<std::vector<StyledSpan>>& lines, double x, double width, bool quote,
         uint8_t align = 0) {
-        const char* textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
-        const char* codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
-        const char* codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
+        const std::string_view textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
+        const std::string_view codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
+        const std::string_view codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
         for (const auto& line : lines) {
             MathLineExtent extent = MeasureMathLine(math, line, bodySize, lineHeight);
             double extra = extent.above + extent.below;
@@ -8634,7 +8757,7 @@ private:
                 TagLinkRun(span.url);
                 double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
-                const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : linkColor;
+                const std::string_view color = span.url.empty() ? (span.code ? codeColor : textColor) : linkColor;
                 if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                 PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 if (span.decor & Internal::kDecorUnderline) {
@@ -8682,7 +8805,7 @@ private:
                 TagLinkRun(span.url);
                 double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.94 0.94 0.92");
-                const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
+                const std::string_view color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
                 if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                 PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 if (span.decor & Internal::kDecorUnderline) {
@@ -8735,7 +8858,7 @@ private:
                     TagLinkRun(span.url);
                     const double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                     if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, kBodyRunColors.codeFill);
-                    const char* color = span.url.empty() ? (span.code ? kBodyRunColors.code : kBodyRunColors.text) : linkColor;
+                    const std::string_view color = span.url.empty() ? (span.code ? kBodyRunColors.code : kBodyRunColors.text) : linkColor;
                     if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                     PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                     if (span.decor & Internal::kDecorUnderline) {
@@ -8770,7 +8893,7 @@ private:
     // A GitHub alert: a quote whose bar takes the alert's colour, under the alert's bold title
     // in that colour, which keeps the first line after it on its page.
     RAYOMD_COLD void RenderAlert(const Block& block) {
-        quoteBar = kQuoteBars[block.alert];
+        quoteBar = QuoteBar(block.alert);
         Ensure(lineHeight * 2.0 + 2.0);
         if (!block.text.empty()) {
             RenderCallout(block);
@@ -8835,7 +8958,7 @@ private:
             case BlockType::Quote: {
                 // A quote in an alert has a plain quote's bar, as on GitHub.
                 double savedMargin = margin;
-                const char* savedBar = quoteBar;
+                const std::string_view savedBar = quoteBar;
                 Indent(10.0);
                 quoteBar = plainQuoteBar;
                 RenderQuote(child);
@@ -8924,7 +9047,7 @@ private:
                 TagLinkRun(span.url);
                 double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
-                const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
+                const std::string_view color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
                 if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                 PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 if (span.decor & Internal::kDecorUnderline) {
@@ -9016,7 +9139,7 @@ private:
     // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
     // points into the next, so that the block is one tint. Out of line: written into RenderCode,
     // it moved GCC's inlining of hot calls elsewhere (+0.3 % on baseline.md).
-    RAYOMD_SHARED void CodeTile(double lh, bool& first, const char* color) {
+    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color) {
         const size_t pages = pageStarts.size();
         Ensure(lh + 4.0);
         if (pageStarts.size() != pages) first = true;
@@ -9035,6 +9158,9 @@ private:
         std::string_view body(text);
         if (body.size() >= 3 && memcmp(body.data(), "\xEF\xBB\xBF", 3) == 0) body.remove_prefix(3);   // as SplitLines
         std::wstring& wide = codeWide;
+        // The bytes the lexer reads, a unit of `wide` each: its line feeds are found there, in a
+        // quarter of the bytes.
+        std::string_view narrow = body;
         if (IsAllAscii(body)) {
             // The lexer reads the block as it is; the units drawn are its bytes, a tab as a space.
             wide.resize(body.size());
@@ -9051,6 +9177,7 @@ private:
             }
             codeClasses.resize(wide.size());
             Internal::ClassifyCode(language, codeText, codeClasses.data());
+            narrow = codeText;
         }
         const double size = 9.5;
         const double lh = size * 1.35;
@@ -9064,13 +9191,13 @@ private:
         // million characters. Summing stops past limitUnits, where no such line can end.
         const uint64_t limitUnits = width > 0.0 ? (uint64_t)(width / scale) + 1 : 0;
         for (size_t start = 0;;) {
-            size_t end = wide.find(L'\n', start);
-            const bool last = end == std::wstring::npos;
+            size_t end = narrow.find('\n', start);
+            const bool last = end == std::string_view::npos;
             if (last) end = wide.size();
             const size_t lineEnd = end > start && wide[end - 1] == L'\r' ? end - 1 : end;   // as SplitLines
-            const char* tile = Internal::CodeLineTile(lineEnd > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
+            const std::string_view tile = Internal::CodeLineTile(lineEnd > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
             auto draw = [&](size_t from, size_t to) {
-                CodeTile(lh, first, tile != nullptr ? tile : "0.95 0.95 0.93");
+                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93");
                 PaintCodeRuns(x, y - size, size, std::wstring_view(wide.data() + from, to - from), codeClasses.data() + from);
                 y -= lh;
             };
@@ -9108,19 +9235,20 @@ private:
     // A line of highlighted code at (x, baseline): as PaintText when it is one colour, otherwise
     // one text object with each run after its colour.
     RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::wstring_view text, const uint8_t* classes) {
-        SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
-        if (codeRuns.size() == 1) {
-            PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color).data());
+        const size_t runCount = SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
+        if (runCount == 1) {
+            PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color));
             return;
         }
         if (tags != nullptr) tags->Content();
-        TailWriter w(content, 64 + kOperandBytes * 3 + text.size() * 4 + codeRuns.size() * 32);
+        TailWriter w(content, 64 + kOperandBytes * 3 + text.size() * 4 + runCount * 32);
         size_t begin = 0;
-        for (const CodeRun& run : codeRuns) {
+        for (size_t index = 0; index < runCount; index++) {
+            const CodeRun& run = codeRuns[index];
             const std::string_view color = Internal::CodeColor(run.color);
             if (begin == 0) {
                 w.Lit("q ");
-                w.Bytes(color.data(), color.size());
+                w.Bytes(color);
                 w.Lit(" rg BT /F1 ");
                 w.Fixed(size);
                 w.Lit(" Tf 1 0 0 1 ");
@@ -9129,7 +9257,7 @@ private:
                 w.Fixed(baseline);
                 w.Lit(" Tm ");
             } else {
-                w.Bytes(color.data(), color.size());
+                w.Bytes(color);
                 w.Lit(" rg ");
             }
             w.cursor = WriteCidText(w.cursor, font, text.substr(begin, run.end - begin), usedCids);
@@ -9209,11 +9337,11 @@ private:
     // added after each character (Tc), and `bold` is the bold face, or draws it twice, a little
     // apart, as PaintText does.
     RAYOMD_COLD void AppendOverlayText(std::string& out, double x, double baseline, std::wstring_view text,
-        const char* color, bool bold, double spacing) {
+        std::string_view color, bool bold, double spacing) {
         const FaceChoice choice = multiFace ? ChooseFace(bold, false) : FaceChoice{ 0, bold, false };
-        TailWriter w(out, 128 + kOperandBytes * 6 + CidTextBytes(text) * 2);
+        TailWriter w(out, 128 + color.size() + kOperandBytes * 6 + CidTextBytes(text) * 2);
         w.Lit("q ");
-        w.Bytes(color, strlen(color));
+        w.Bytes(color);
         w.Lit(" rg BT ");
         w.Bytes(kFaceFonts[choice.face], 4);
         w.Fixed(bodySize);
@@ -9467,25 +9595,14 @@ private:
         if (pageBottoms->size() < pageStarts.size()) EndLongPage();
         return pageBottoms->data();
     }
-    // Page footnotes (PageNoteLayout): the buffers the paint paths share, which SwapFootBuffers
-    // trades for the renderer's own while notes are laid out at the foot of a page, so that the
-    // paragraph, table row or code block the page broke goes on. The paragraph's and the table's
-    // runs trade places with the thread's kept ones (KeptBuffer), which hold what the renderer
-    // brought when it started until it ends: no second destructor for them.
-    struct FootBuffers {
-        std::vector<MathCell> mathTableCells;
-        MathPool::Spare math;
-        std::string codeText;
-        std::wstring codeWide;
-        std::vector<uint8_t> codeClasses;
-        std::vector<CodeRun> codeRuns;
-        RunLinkUrls runLinkUrls;
-    };
-    RAYOMD_COLD void SwapFootBuffers() {
-        FootBuffers& spare = pageNotes->spare;
+    // Page footnotes (PageNoteLayout): the buffers the paint paths share traded for the notes' own
+    // (FootBuffers), so that the paragraph, table row or code block the page broke goes on. The
+    // paragraph's and the table's runs trade places with the thread's kept ones (KeptBuffer), which
+    // hold what the renderer brought when it started until it ends: no second destructor for them.
+    RAYOMD_COLD void SwapFootBuffers(FootBuffers& spare) {
         paragraphRuns.Swap(KeptBuffer<StyledRuns>::Held());
         tableCells.swap(KeptBuffer<std::vector<StyledRuns>>::Held());
-        mathTableCells.swap(spare.mathTableCells);
+        mathTableCells.swap(*static_cast<std::vector<MathCell>*>(spare.mathTableCells));
         math.SwapItems(spare.math);
         codeText.swap(spare.codeText);
         codeWide.swap(spare.codeWide);
@@ -9493,22 +9610,16 @@ private:
         codeRuns.swap(spare.codeRuns);
         std::swap(runLinkUrls, spare.runLinkUrls);
     }
-    // The notes' measuring layout (PageNoteLayout::Measure) is untagged, counts no missing glyph
+    // The notes' measuring layout (PageNoteCore::Measure) is untagged, counts no missing glyph
     // and starts no fallback probe: what it changes there goes back.
-    struct MeasureState {
-        Internal::StructTree* tags;   // a tagged build: notes are laid out again, not replayed
-        bool probing;
-        uint32_t missing[4];
-        uint32_t missingBmp;
-    };
-    RAYOMD_COLD MeasureState BeginMeasure() {
-        MeasureState state{ tags, probing, { usedCids.missing, 0, 0, 0 }, usedCids.missingBmp };
+    static constexpr bool kTagged = true;
+    RAYOMD_COLD void BeginMeasure(NoteMeasure& state) {
+        state = { tags, probing, { usedCids.missing, 0, 0, 0 }, usedCids.missingBmp };
         for (int face = 1; face < 4; face++) state.missing[face] = faceCids[face - 1] ? faceCids[face - 1]->missing : 0;
         tags = nullptr;
         probing = false;
-        return state;
     }
-    RAYOMD_COLD void EndMeasure(const MeasureState& state) {
+    RAYOMD_COLD void EndMeasure(const NoteMeasure& state) {
         tags = state.tags;
         probing = state.probing;
         usedCids.missing = state.missing[0];
@@ -9527,7 +9638,7 @@ private:
     RAYOMD_COLD void TagEndFootNote(int note) {
         if (tags != nullptr) tags->EndUnder(note);
     }
-    PageNoteState<FootBuffers>* pageNotes = nullptr;   // while a document's notes go at the foot of its pages
+    PageNoteState* pageNotes = nullptr;   // while a document's notes go at the foot of its pages
     // The lowest y text may reach, which the bottom tests (Ensure, the tables') compare with: the
     // margin (on a long page a margin above its bottom, StartLongPages), nested blocks' as theirs
     // (Indent), and with page footnotes the room kept at the foot
@@ -10167,6 +10278,13 @@ static double AsciiTextWidth(std::string_view text, double size, StandardTextFon
     return UnitsToPoints(units, size);
 }
 
+// AFM units of text[begin, end) in `advances`, for a word too long for the prefix sums.
+RAYOMD_COLD static uint64_t LongWordUnits(const char* text, size_t begin, size_t end, const uint16_t* advances) {
+    uint64_t units = 0;
+    for (size_t at = begin; at < end; at++) units += advances[static_cast<unsigned char>(text[at])];
+    return units;
+}
+
 // Wrapped lines of plain text, kept in one buffer that is reused from cell to cell.
 struct AsciiLines {
     struct Line { uint32_t end; double width; };
@@ -10194,53 +10312,68 @@ static void AppendSingleSpaced(std::string& out, std::string_view text) {
     }
 }
 
-// Greedy word wrap of text without inline syntax, shown in `font`: emit(line, width) receives
-// every line. A line is the piece of `text` from its first to its last word; only when two of
-// its words are not exactly one space apart is it rebuilt in a scratch string. The view
-// passed to emit is valid until emit returns.
-template <typename Emit>
-static void WrapAsciiWords(std::string_view text, double maxWidth, double size, StandardTextFont font, Emit emit) {
-    const StandardWordAdvances& advances = WordAdvances(font);
+// Greedy word wrap of text without inline syntax in `advances`, into measure.breaks: a line is the
+// piece of `text` from its first to its last word, with the units of its words and one space
+// between each two, and whether they are exactly one space apart; a word wider than the line is cut
+// by character. Always at least one line, an empty one for text without a word. A text of
+// kShortAsciiText bytes or more is measured first (MeasureWords); a shorter one, a table cell or a
+// list item, is read a byte at a time: the measuring pass costs more than it saves there. One copy
+// for every WrapAsciiWords.
+static RAYOMD_NOINLINE void BreakAsciiWords(std::string_view text, uint64_t maxUnits, const StandardWordAdvances& advances) {
+    WrapMeasure& measure = WrapScratch();
     const uint64_t spaceUnits = advances.space;
-    const uint64_t maxUnits = MaxUnits(maxWidth, size);
-    std::string respaced;
+    std::vector<WrapMeasure::Break>& breaks = measure.breaks;
+    breaks.clear();
     size_t lineStart = 0;
     size_t lineEnd = 0;         // the line is text[lineStart, lineEnd); empty when they are equal
     bool singleSpaced = true;
     uint64_t lineUnits = 0;
-    bool emitted = false;
-    auto flush = [&]() RAYOMD_HOT_LAMBDA {
-        std::string_view line = text.substr(lineStart, lineEnd - lineStart);
-        if (!singleSpaced) {
-            respaced.clear();
-            AppendSingleSpaced(respaced, line);
-            line = respaced;
-        }
-        emit(line, UnitsToPoints(lineUnits, size));
-        emitted = true;
-    };
-    auto startLine = [&](size_t start, size_t end, uint64_t units) {
+    const auto startLine = [&](size_t start, size_t end, uint64_t units) RAYOMD_HOT_LAMBDA {
         lineStart = start;
         lineEnd = end;
         lineUnits = units;
         singleSpaced = true;
     };
 
-    size_t i = 0;
-    while (i < text.size()) {
-        while (i < text.size() && advances.byte[static_cast<unsigned char>(text[i])] == 0) i++;
-        const size_t start = i;
-        uint64_t wordUnits = 0;
-        for (; i < text.size(); i++) {
-            const unsigned charUnits = advances.byte[static_cast<unsigned char>(text[i])];
-            if (charUnits == 0) break;
-            wordUnits += charUnits;
+    const char* const bytes = text.data();
+    const size_t n = text.size();
+    const bool small = n < kShortAsciiText;
+    const uint32_t* prefix = nullptr;
+    const uint32_t* bounds = nullptr;
+    size_t words = 0;
+    if (!small) {
+        const WrapMeasure::View measured = measure.Size(n);
+        prefix = measured.prefix;
+        bounds = measured.bounds;
+        words = Internal::MeasureWords(bytes, n, n, advances.byte, measured.prefix, measured.bounds);
+    }
+    size_t next = 0;            // a short text's bytes read so far
+    for (size_t word = 0;; word++) {
+        size_t start;
+        size_t i;               // one past the word's last byte
+        uint64_t wordUnits;
+        if (small) {
+            while (next < n && advances.byte[static_cast<unsigned char>(bytes[next])] == 0) next++;
+            if (next == n) break;
+            start = next;
+            wordUnits = 0;
+            for (; next < n; next++) {
+                const unsigned charUnits = advances.byte[static_cast<unsigned char>(bytes[next])];
+                if (charUnits == 0) break;
+                wordUnits += charUnits;
+            }
+            i = next;
+        } else {
+            if (word == words) break;
+            start = bounds[word * 2];
+            i = bounds[word * 2 + 1];
+            wordUnits = i - start < Internal::kPrefixWordBytes ? static_cast<uint32_t>(prefix[i] - prefix[start])
+                : LongWordUnits(bytes, start, i, advances.byte);
         }
-        if (i == start) continue;
         const bool lineEmpty = lineEnd == lineStart;
 
         if (!lineEmpty && lineUnits + spaceUnits + wordUnits <= maxUnits) {
-            if (start - lineEnd != 1 || text[lineEnd] != ' ') singleSpaced = false;
+            if (start - lineEnd != 1 || bytes[lineEnd] != ' ') singleSpaced = false;
             lineEnd = i;
             lineUnits += spaceUnits + wordUnits;
             continue;
@@ -10250,7 +10383,7 @@ static void WrapAsciiWords(std::string_view text, double maxWidth, double size, 
             continue;
         }
         if (!lineEmpty) {
-            flush();
+            breaks.push_back({ static_cast<uint32_t>(lineStart), static_cast<uint32_t>(lineEnd), lineUnits, singleSpaced });
             lineStart = lineEnd = 0;
             lineUnits = 0;
         }
@@ -10263,10 +10396,9 @@ static void WrapAsciiWords(std::string_view text, double maxWidth, double size, 
         size_t partStart = start;
         uint64_t partUnits = 0;
         for (size_t at = start; at < i; at++) {
-            const unsigned charUnits = advances.byte[static_cast<unsigned char>(text[at])];
+            const unsigned charUnits = advances.byte[static_cast<unsigned char>(bytes[at])];
             if (at > partStart && partUnits + charUnits > maxUnits) {
-                emit(text.substr(partStart, at - partStart), UnitsToPoints(partUnits, size));
-                emitted = true;
+                breaks.push_back({ static_cast<uint32_t>(partStart), static_cast<uint32_t>(at), partUnits, true });
                 partStart = at;
                 partUnits = 0;
             }
@@ -10274,8 +10406,32 @@ static void WrapAsciiWords(std::string_view text, double maxWidth, double size, 
         }
         startLine(partStart, i, partUnits);
     }
-    if (lineEnd != lineStart) flush();
-    if (!emitted) emit(std::string_view(""), 0.0);
+    if (lineEnd != lineStart || breaks.empty()) {
+        breaks.push_back({ static_cast<uint32_t>(lineStart), static_cast<uint32_t>(lineEnd), lineUnits, singleSpaced });
+    }
+}
+
+// Greedy word wrap of text without inline syntax, shown in `font` (BreakAsciiWords): emit(line,
+// width) receives every line. Only when two of a line's words are not exactly one space apart is
+// it rebuilt in a scratch string. The view passed to emit is valid until emit returns. emit may
+// lay out other text only with the wrap scratch traded (WrapScratch).
+template <typename Emit>
+static void WrapAsciiWords(std::string_view text, double maxWidth, double size, StandardTextFont font, Emit emit) {
+    BreakAsciiWords(text, MaxUnits(maxWidth, size), WordAdvances(font));
+    const WrapMeasure& measure = WrapScratch();
+    std::string respaced;
+    const WrapMeasure::Break* const lines = measure.breaks.data();
+    const size_t count = measure.breaks.size();
+    for (size_t index = 0; index < count; index++) {
+        const WrapMeasure::Break& line = lines[index];
+        std::string_view shown = text.substr(line.start, line.end - line.start);
+        if (!line.singleSpaced) {
+            respaced.clear();
+            AppendSingleSpaced(respaced, shown);
+            shown = respaced;
+        }
+        emit(shown, UnitsToPoints(line.units, size));
+    }
 }
 
 // Wraps text the parser already stripped. It is read a second time, with math delimiters
@@ -10379,6 +10535,7 @@ public:
         size_t lineBytes = KeptBytes(tableLines);
         for (const AsciiLines& cell : tableLines) lineBytes += cell.Bytes();
         KeptBuffer<std::vector<AsciiLines>>::Give(tableLines, lineBytes);
+        ReleaseWrapScratch();
     }
     StandardRenderer(const StandardRenderer&) = delete;
     StandardRenderer& operator=(const StandardRenderer&) = delete;
@@ -10479,11 +10636,11 @@ private:
     std::vector<HeadingMark> ids;   // where the HTML ids (Block::Anchor) are, for "#id" links
     // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
     // the alert it is in.
-    const char* const headingColor;
-    const char* const linkColor;
-    const char* const ruleColor;
-    const char* const plainQuoteBar;
-    const char* quoteBar;
+    const std::string_view headingColor;
+    const std::string_view linkColor;
+    const std::string_view ruleColor;
+    const std::string_view plainQuoteBar;
+    std::string_view quoteBar;
 
     // Notes where a heading's first line is drawn, for its outline entry and the links to it.
     // A line `firstLine` high that does not fit moves to the next page first, as drawing it
@@ -10530,12 +10687,12 @@ private:
     }
 
     static void EmitLatinMathFallback(void*, std::string& content, std::string_view utf8, double x,
-        double baseline, double size, const char* rgb) {
+        double baseline, double size, std::string_view rgb) {
         std::string text;
         RayoMd::Text::TranscodeToWinAnsiLossy(utf8, text);
-        TailWriter out(content, 48 + strlen(rgb) + kOperandBytes * 3 + text.size() * 2);
+        TailWriter out(content, 48 + rgb.size() + kOperandBytes * 3 + text.size() * 2);
         out.Lit("q ");
-        out.Bytes(rgb, strlen(rgb));
+        out.Bytes(rgb);
         out.Lit(" rg BT /F1 ");
         out.Fixed(size / kMathSizeFactor);
         out.Lit(" Tf 1 0 0 1 ");
@@ -10663,11 +10820,10 @@ private:
         else Ensure(needed);
     }
 
-    void Rect(double x, double top, double w, double h, const char* color, bool stroke = false) {
-        const size_t colorSize = strlen(color);
-        TailWriter out(content, 32 + colorSize + kOperandBytes * 4);
+    void Rect(double x, double top, double w, double h, std::string_view color, bool stroke = false) {
+        TailWriter out(content, 32 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color, colorSize);
+        out.Bytes(color);
         if (stroke) out.Lit(" RG 0.45 w ");
         else out.Lit(" rg ");
         out.Fixed(x);
@@ -10729,8 +10885,8 @@ private:
     }
     // /F1 Helvetica, /F2 Helvetica-Bold, /F4 Helvetica-Oblique, /F5 Helvetica-BoldOblique or
     // /F3 Courier. The oblique faces go into the PDF only when text was shown in them.
-    const char* StyleFontName(uint8_t styleBits) {
-        static const char* const kFaceNames[8] = { "F1", "F2", "F4", "F5", "F3", "F3", "F3", "F3" };
+    std::string_view StyleFontName(uint8_t styleBits) {
+        static constexpr std::string_view kFaceNames[8] = { "F1", "F2", "F4", "F5", "F3", "F3", "F3", "F3" };
         const unsigned face = styleBits & (kStyleBold | kStyleItalic | kStyleCode);
         facesUsed = static_cast<uint8_t>(facesUsed | (1u << face));
         return kFaceNames[face];
@@ -10740,7 +10896,7 @@ private:
     // The background of code `text`, which starts at x and is `width` wide, from its first
     // glyph on: the space shown before a code word stays clear, and so does the word before.
     void CodeBackground(double x, double top, double width, double lh, std::string_view text, double size,
-        const char* fill) {
+        std::string_view fill) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == ' ') spaces++;
         const double skip = UnitsToPoints(WordAdvances(StandardTextFont::Mono).space * spaces, size);
@@ -10750,15 +10906,14 @@ private:
     // A line through struck text, as the Unicode renderer draws it. A leading space of the
     // piece is not struck.
     RAYOMD_COLD void StrikeThrough(double x, double baseline, double width, double size, std::string_view text,
-        uint8_t styleBits, const char* color) {
+        uint8_t styleBits, std::string_view color) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == ' ') spaces++;
         const double skip = UnitsToPoints(StyleAdvances(styleBits).space * spaces, size);
         if (width <= skip) return;
-        const size_t colorSize = strlen(color);
-        TailWriter out(content, 32 + colorSize + kOperandBytes * 4);
+        TailWriter out(content, 32 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color, colorSize);
+        out.Bytes(color);
         out.Lit(" RG 0.55 w ");
         out.Fixed(x + skip);
         out.Lit(" ");
@@ -10773,7 +10928,7 @@ private:
     // HTML's <mark> behind a piece of text (`mark`, painted before the text) or <u> under it (after
     // it, in the text's colour), from its first glyph: a leading space of the piece stays clear.
     RAYOMD_COLD void PaintDecor(double x, double baseline, double width, double size, std::string_view text,
-        uint8_t styleBits, bool mark, const char* color) {
+        uint8_t styleBits, bool mark, std::string_view color) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == ' ') spaces++;
         const double skip = UnitsToPoints(StyleAdvances(styleBits).space * spaces, size);
@@ -10878,7 +11033,7 @@ private:
     }
 
     // A script: its text in `color`, raised as a note's number or lowered, no link.
-    RAYOMD_MATH_COLD double PaintScript(int index, double x, double baseline, const char* color) {
+    RAYOMD_MATH_COLD double PaintScript(int index, double x, double baseline, std::string_view color) {
         const double size = math.NoteSize(index);
         const double shift = math.Script(index) == 2 ? -size * kScriptDropFactor : size * kNoteRiseFactor;
         Text(x, baseline + shift, size * kNoteSizeFactor, math.ScriptText(index), "F1", color);
@@ -11094,7 +11249,7 @@ private:
     // A table cell inside a table with formulas. A cell without a formula wraps
     // exactly as RenderTable wraps it.
     RAYOMD_MATH_COLD void WrapMathCell(const std::string& cell, double width, double size, bool bold, MathCell& out) {
-        out.formula = cell.find(Internal::kMathTextOpen) != std::string::npos;
+        out.formula = memchr(cell.data(), Internal::kMathTextOpen, cell.size()) != nullptr;
         if (out.formula) out.formulaLines = WrapMathText(cell, width, size, bold);
         else WrapAsciiTextCold(cell, width, size, bold ? StandardTextFont::Bold : StandardTextFont::Regular, out.plain);
     }
@@ -11107,7 +11262,7 @@ private:
     }
 
     RAYOMD_MATH_COLD void PaintMathCellLine(const MathCell& cell, size_t i, double x, double baseline, double size,
-        const char* color, bool bold) {
+        std::string_view color, bool bold) {
         if (cell.formula) PaintMathTextLine(cell.formulaLines[i], x, baseline, size, color, bold);
         else Text(x, baseline, size, cell.plain.Text(i), bold ? "F2" : "F1", color);
     }
@@ -11122,7 +11277,7 @@ private:
 
     // Paints a line of plain text and formulas in one colour (headings, table cells).
     RAYOMD_MATH_COLD void PaintMathTextLine(const std::vector<AsciiSpan>& line, double x, double baseline, double size,
-        const char* color, bool bold) {
+        std::string_view color, bool bold) {
         double cursor = x;
         for (const AsciiSpan& span : line) {
             if (span.math >= 0) {
@@ -11137,7 +11292,7 @@ private:
 
     void TableFill(double x, double top, double w, double h) { Rect(x, top, w, h, "0.91 0.93 0.95"); }
     void TableStroke(double x, double top, double w, double h) { Rect(x, top, w, h, "0.72 0.72 0.72", true); }
-    const char* TableTextColor(bool) const { return "0.08 0.08 0.08"; }
+    std::string_view TableTextColor(bool) const { return "0.08 0.08 0.08"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer, in the
     // link, code and emphasis state of the span it came from.
@@ -11196,7 +11351,7 @@ private:
     std::vector<AsciiLines> tableLines;     // the other cells of a table row, by column
 
     // Colors of text runs: plain text, code and the background of code.
-    struct RunColors { const char* text; const char* code; const char* codeFill; };
+    struct RunColors { std::string_view text; std::string_view code; std::string_view codeFill; };
     static constexpr RunColors kBodyRunColors{ "0.08 0.08 0.08", "0.18 0.18 0.17", "0.94 0.94 0.92" };
     static constexpr RunColors kQuoteRunColors{ "0.18 0.22 0.25", "0.16 0.16 0.15", "0.88 0.89 0.88" };
 
@@ -11209,7 +11364,7 @@ private:
             const double spanWidth = runs.Width(run, size);
             const bool code = (run.style & kStyleCode) != 0;
             if (code) CodeBackground(x, top, spanWidth, lh, runs.Text(run), size, colors.codeFill);
-            const char* color = run.url.empty() ? (code ? colors.code : colors.text) : linkColor;
+            const std::string_view color = run.url.empty() ? (code ? colors.code : colors.text) : linkColor;
             if (run.style & kStyleMark) PaintDecor(x, baseline, spanWidth, size, runs.Text(run), run.style, true, color);
             Text(x, baseline, size, runs.Text(run), StyleFontName(run.style), color, runs.plain);
             if (run.style & kStyleStrike) StrikeThrough(x, baseline, spanWidth, size, runs.Text(run), run.style, color);
@@ -11219,13 +11374,25 @@ private:
         }
     }
 
-    // AFM units of parsed text [begin, end) in the font of `segment`.
-    static uint64_t AsciiUnits(const AsciiSegment& segment, const char* source, size_t begin, size_t end) {
-        const uint16_t* advances = StyleAdvances(segment.style).byte;
+    // AFM units of parsed text [begin, end) from segment `first` on, each byte in the font of its
+    // segment: a word too long for the prefix sums (WrapMeasure).
+    RAYOMD_COLD static uint64_t LongRunUnits(const AsciiRuns& out, size_t first, size_t begin, size_t end) {
+        const char* const source = out.parsed.text.data();
         uint64_t units = 0;
-        for (size_t at = begin; at < end; at++) units += advances[static_cast<unsigned char>(source[at])];
+        for (size_t piece = first; begin < end; piece++) {
+            const size_t stop = std::min<size_t>(end, out.segments[piece].end);
+            const uint16_t* advances = StyleAdvances(out.segments[piece].style).byte;
+            for (; begin < stop; begin++) units += advances[static_cast<unsigned char>(source[begin])];
+        }
         return units;
     }
+
+    // What PlaceWideAsciiWord hands back: by value, so WrapAsciiInline keeps them in registers.
+    struct AsciiLineState {
+        char* cursor;
+        size_t lineStart;
+        uint64_t lineUnits;
+    };
 
     // Appends `length` bytes of parsed text at `from`, `units` wide, in link and style state
     // `url` and `style`, to the line whose first run is `lineStart`, after a space `spaceUnits`
@@ -11269,8 +11436,8 @@ private:
 
     // A word wider than a whole line, cut by character where the line is full; the last part
     // stays open for the words after it. The line is empty when this is called.
-    RAYOMD_COLD static void PlaceWideAsciiWord(AsciiRuns& out, char*& cursor, size_t& lineStart, uint64_t& lineUnits,
-        size_t firstSegment, size_t wordStart, size_t wordEnd, uint64_t maxUnits) {
+    RAYOMD_COLD static AsciiLineState PlaceWideAsciiWord(AsciiRuns& out, char* cursor, size_t lineStart,
+        uint64_t lineUnits, size_t firstSegment, size_t wordStart, size_t wordEnd, uint64_t maxUnits) {
         char* const textBegin = &out.text[0];
         const char* const source = out.parsed.text.data();
         const char* pending = source;
@@ -11304,6 +11471,7 @@ private:
             begin = end;
         }
         FlushAsciiRunText(cursor, pending, pendingLength);
+        return { cursor, lineStart, lineUnits };
     }
 
     // Wraps `text` into `out` with the line breaks and span boundaries of WrapAsciiLinks. A word
@@ -11358,92 +11526,113 @@ private:
         size_t lineStart = 0;       // index of the first run of the line being filled
         uint64_t lineUnits = 0;
         const uint64_t maxUnits = MaxUnits(width, size);
-        const StandardWordAdvances& regular = WordAdvances(StandardTextFont::Regular);
 
+        // The units of every byte in the font of its segment, and the words, one pass each: a
+        // word is one subtraction, and the loop below takes a line's words without a branch that
+        // mispredicts at each word's end.
         const size_t segmentCount = out.segments.size();
+        const AsciiSegment* const segments = out.segments.data();
         const size_t total = segmentCount != 0 ? out.segments.back().end : 0;
-        size_t at = 0;
-        for (size_t segment = 0; segment < segmentCount; segment++) {
-            const uint8_t styleBits = out.segments[segment].style;
-            const std::string_view url = out.segments[segment].url;
-            const size_t segmentEnd = out.segments[segment].end;
-            if (styleBits & kStyleBreak) {
-                // A <br> is one space: the line ends there, and each one more after it leaves an
-                // empty line.
-                for (; at < segmentEnd; at++) {
-                    if (out.runs.size() == lineStart && out.lineEnds.empty()) continue;
-                    out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
-                    lineStart = out.runs.size();
-                    lineUnits = 0;
+        const WrapMeasure::View measured = WrapScratch().Size(total);
+        const uint32_t* const prefix = measured.prefix;
+        const size_t firstEnd = segmentCount != 0 ? std::min<size_t>(segments[0].end, total) : 0;
+        uint32_t* const bounds = measured.bounds;
+        const size_t words =
+            WrapMeasure::Words(source, total, firstEnd, StyleAdvances(segmentCount != 0 ? segments[0].style : 0).byte, measured);
+        bounds[words * 2] = static_cast<uint32_t>(total);   // past the last word: the end
+        for (size_t segment = 1, begin = firstEnd; segment < segmentCount; segment++) {
+            const size_t end = segments[segment].end;
+            if (end <= begin) continue;
+            Internal::SumAdvances(source + begin, end - begin, StyleAdvances(segments[segment].style).byte,
+                measured.prefix + begin);
+            begin = end;
+        }
+
+        size_t segment = 0;
+        size_t segmentStart = 0;    // where the bytes of `segment` begin: the end of the one before
+        for (size_t word = 0;; word++) {
+            // The segment of the word's first byte (past the last word, the end); a <br> passed
+            // on the way is one space: the line ends there, and each one more after it leaves an
+            // empty line.
+            const size_t wordStart = bounds[word * 2];
+            while (segment < segmentCount && segments[segment].end <= wordStart) {
+                if (segments[segment].style & kStyleBreak) {
+                    for (size_t count = segments[segment].end - segmentStart; count != 0; count--) {
+                        if (out.runs.size() == lineStart && out.lineEnds.empty()) continue;
+                        out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+                        lineStart = out.runs.size();
+                        lineUnits = 0;
+                    }
+                }
+                segmentStart = segments[segment].end;
+                segment++;
+            }
+            if (word == words) break;
+            size_t wordEnd = bounds[word * 2 + 1];
+            const AsciiSegment& current = segments[segment];
+            const uint32_t segmentSpace = StyleAdvances(current.style).space;
+            // A word that reaches past the end of its segment goes on in the segments after it:
+            // "[link](u)." and "`code`s" are one word each.
+            const bool pieces = wordEnd > current.end;
+            const uint64_t wordUnits = wordEnd - wordStart < Internal::kPrefixWordBytes
+                ? static_cast<uint32_t>(prefix[wordEnd] - prefix[wordStart]) : LongRunUnits(out, segment, wordStart, wordEnd);
+
+            uint32_t spaceUnits = out.runs.size() != lineStart ? segmentSpace : 0;
+            if (spaceUnits != 0 && lineUnits + spaceUnits + wordUnits > maxUnits) {
+                out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+                lineStart = out.runs.size();
+                lineUnits = 0;
+                spaceUnits = 0;
+            }
+            if (wordUnits > maxUnits) {
+                FlushAsciiRunText(cursor, pending, pendingLength);
+                const AsciiLineState state = PlaceWideAsciiWord(out, cursor, lineStart, lineUnits, segment, wordStart, wordEnd, maxUnits);
+                cursor = state.cursor;
+                lineStart = state.lineStart;
+                lineUnits = state.lineUnits;
+                continue;
+            }
+            lineUnits += spaceUnits + wordUnits;
+            if (pieces) {
+                // In one piece per segment the word touches.
+                for (size_t piece = segment, begin = wordStart; begin < wordEnd; piece++) {
+                    const AsciiSegment& part = segments[piece];
+                    const size_t end = std::min<size_t>(wordEnd, part.end);
+                    if (end <= begin) continue;
+                    const uint64_t units = end - begin < Internal::kPrefixWordBytes
+                        ? static_cast<uint32_t>(prefix[end] - prefix[begin]) : LongRunUnits(out, piece, begin, end);
+                    AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, part.style, part.url,
+                        source + begin, end - begin, static_cast<uint32_t>(units), spaceUnits);
+                    spaceUnits = 0;
+                    begin = end;
                 }
                 continue;
             }
-            const StandardWordAdvances& font = StyleAdvances(styleBits);
-            const uint16_t* const advances = font.byte;
-            const uint32_t segmentSpace = font.space;
-            while (at < segmentEnd) {
-                if (regular.byte[static_cast<unsigned char>(source[at])] == 0) {
-                    at++;
-                    continue;
-                }
-                const size_t wordStart = at;
-                uint64_t wordUnits = 0;
-                for (; at < segmentEnd; at++) {
-                    const unsigned charUnits = advances[static_cast<unsigned char>(source[at])];
-                    if (charUnits == 0) break;
-                    wordUnits += charUnits;
-                }
-                // A word that reaches the end of its segment goes on in the segments after it
-                // unless white space follows: "[link](u)." and "`code`s" are one word each.
-                size_t lastSegment = segment;
-                if (at == segmentEnd && at < total && regular.byte[static_cast<unsigned char>(source[at])] != 0) {
-                    do {
-                        const AsciiSegment& next = out.segments[++lastSegment];
-                        const uint16_t* const nextAdvances = StyleAdvances(next.style).byte;
-                        for (; at < next.end; at++) {
-                            const unsigned charUnits = nextAdvances[static_cast<unsigned char>(source[at])];
-                            if (charUnits == 0) break;
-                            wordUnits += charUnits;
-                        }
-                    } while (at == out.segments[lastSegment].end && at < total &&
-                        regular.byte[static_cast<unsigned char>(source[at])] != 0);
-                }
-                const size_t wordEnd = at;
-
-                uint32_t spaceUnits = out.runs.size() != lineStart ? segmentSpace : 0;
-                if (spaceUnits != 0 && lineUnits + spaceUnits + wordUnits > maxUnits) {
-                    out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
-                    lineStart = out.runs.size();
-                    lineUnits = 0;
-                    spaceUnits = 0;
-                }
-                if (wordUnits > maxUnits) {
-                    FlushAsciiRunText(cursor, pending, pendingLength);
-                    PlaceWideAsciiWord(out, cursor, lineStart, lineUnits, segment, wordStart, wordEnd, maxUnits);
-                } else {
-                    lineUnits += spaceUnits + wordUnits;
-                    if (lastSegment == segment) {
-                        AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, styleBits, url,
-                            source + wordStart, wordEnd - wordStart, static_cast<uint32_t>(wordUnits), spaceUnits);
-                    } else {
-                        // In one piece per segment the word touches.
-                        for (size_t piece = segment, begin = wordStart; begin < wordEnd; piece++) {
-                            const AsciiSegment& part = out.segments[piece];
-                            const size_t end = std::min<size_t>(wordEnd, part.end);
-                            if (end == begin) continue;
-                            AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, part.style,
-                                part.url, source + begin, end - begin,
-                                static_cast<uint32_t>(AsciiUnits(part, source, begin, end)), spaceUnits);
-                            spaceUnits = 0;
-                            begin = end;
-                        }
-                    }
-                }
-                if (lastSegment != segment) {
-                    segment = lastSegment - 1;  // go on in the segment that holds the end of the word
+            AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, current.style, current.url,
+                source + wordStart, wordEnd - wordStart, static_cast<uint32_t>(wordUnits), spaceUnits);
+            // The words after it in its segment one space apart, as long as they fit, join its
+            // run and the pending text, which ends where the word does.
+            const size_t joinedFrom = wordEnd;
+            const size_t segmentEnd = current.end;
+            uint64_t joinedUnits = 0;
+            while (word + 1 < words) {
+                const size_t nextStart = bounds[word * 2 + 2];
+                const size_t nextEnd = bounds[word * 2 + 3];
+                if (nextStart != wordEnd + 1 || nextEnd > segmentEnd || source[wordEnd] != ' ' ||
+                    nextEnd - nextStart >= Internal::kPrefixWordBytes) {
                     break;
                 }
+                const uint64_t units = segmentSpace + static_cast<uint64_t>(static_cast<uint32_t>(prefix[nextEnd] - prefix[nextStart]));
+                if (lineUnits + units > maxUnits) break;
+                lineUnits += units;
+                joinedUnits += units;
+                wordEnd = nextEnd;
+                word++;
             }
+            AsciiRun& run = out.runs.back();
+            run.widthUnits += static_cast<uint32_t>(joinedUnits);
+            run.end += static_cast<uint32_t>(wordEnd - joinedFrom);
+            pendingLength += wordEnd - joinedFrom;
         }
 
         FlushAsciiRunText(cursor, pending, pendingLength);
@@ -11707,16 +11896,14 @@ private:
     }
 
     // `plain`: the text holds no byte WriteEscapedLiteral would change (HasLiteralSpecial).
-    void Text(double x, double baseline, double size, std::string_view text, const char* fontName,
-        const char* color = "0.08 0.08 0.08", bool plain = false) {
+    void Text(double x, double baseline, double size, std::string_view text, std::string_view fontName,
+        std::string_view color = "0.08 0.08 0.08", bool plain = false) {
         if (text.empty()) return;
-        const size_t colorSize = strlen(color);
-        const size_t fontSize = strlen(fontName);
-        TailWriter out(content, 48 + colorSize + fontSize + kOperandBytes * 3 + text.size() * 2);
+        TailWriter out(content, 48 + color.size() + fontName.size() + kOperandBytes * 3 + text.size() * 2);
         out.Lit("q ");
-        out.Bytes(color, colorSize);
+        out.Bytes(color);
         out.Lit(" rg BT /");
-        out.Bytes(fontName, fontSize);
+        out.Bytes(fontName);
         out.Lit(" ");
         out.Fixed(size);
         out.Lit(" Tf 1 0 0 1 ");
@@ -11728,7 +11915,7 @@ private:
         out.Lit(") Tj ET Q\n");
     }
 
-    void DrawTextLine(double x, double size, std::string_view line, const char* fontName = "F1", const char* color = "0.08 0.08 0.08", [[maybe_unused]] bool mono = false) {
+    void DrawTextLine(double x, double size, std::string_view line, std::string_view fontName = "F1", std::string_view color = "0.08 0.08 0.08", [[maybe_unused]] bool mono = false) {
         double lh = size * 1.35;
         Ensure(lh);
         Text(x, y - size, size, line, fontName, color);
@@ -11747,9 +11934,8 @@ private:
             return;
         }
         MarkHeading(level, block.text, size * 1.35);
-        ForEachWrappedAsciiLine(block.text, pageW - margin * 2.0, size, StandardTextFont::Bold, [&](std::string_view line, double) {
-            DrawTextLine(margin, size, line, "F2", headingColor);
-        });
+        ForEachWrappedAsciiLine(block.text, pageW - margin * 2.0, size, StandardTextFont::Bold,
+            [&](std::string_view line, double) { DrawTextLine(margin, size, line, "F2", headingColor); });
         y -= level <= 2 ? 8.0 : 5.0;
     }
 
@@ -11770,9 +11956,10 @@ private:
             RenderMathTextLines(shown, level, margin, width, size, headingColor, true, false, &block.text);
         } else {
             MarkHeading(level, block.text, size * 1.35);
-            ForEachWrappedAsciiLine(shown, width, size, StandardTextFont::Bold, [&](std::string_view line, double used) {
-                DrawTextLine(margin + AlignShift(width, used, block.align), size, line, "F2", headingColor);
-            });
+            ForEachWrappedAsciiLine(shown, width, size, StandardTextFont::Bold,
+                [&](std::string_view line, double used) {
+                    DrawTextLine(margin + AlignShift(width, used, block.align), size, line, "F2", headingColor);
+                });
         }
         y -= level <= 2 ? 8.0 : 5.0;
     }
@@ -11789,7 +11976,7 @@ private:
     // heading, at `level`, is noted once its first line has found its page, as `markText` when
     // that is given (the text without its number).
     RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, int level, double x, double width, double size,
-        const char* color, bool bold, bool quote, const std::string* markText = nullptr) {
+        std::string_view color, bool bold, bool quote, const std::string* markText = nullptr) {
         math.Clear();
         double lh = size * 1.35;
         bool marked = false;
@@ -11817,9 +12004,9 @@ private:
     // baseline, code backgrounds and link rectangles keep their usual offsets.
     RAYOMD_MATH_COLD void RenderMathLines(const std::vector<std::vector<AsciiSpan>>& lines, double x, double width, bool quote,
         uint8_t align = 0) {
-        const char* textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
-        const char* codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
-        const char* codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
+        const std::string_view textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
+        const std::string_view codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
+        const std::string_view codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
         for (const auto& line : lines) {
             MathLineExtent extent = MeasureMathLine(math, line, bodySize, lineHeight);
             double extra = extent.above + extent.below;
@@ -11852,7 +12039,7 @@ private:
                 const bool code = (span.style & kStyleCode) != 0;
                 double spanWidth = MathTextWidth(span.text, bodySize, code, (span.style & kStyleBold) != 0);
                 if (code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
-                const char* color = span.url.empty() ? (code ? codeColor : textColor) : linkColor;
+                const std::string_view color = span.url.empty() ? (code ? codeColor : textColor) : linkColor;
                 if (span.style & kStyleMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
@@ -11901,7 +12088,7 @@ private:
                     const bool code = (span.style & kStyleCode) != 0;
                     double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
                     if (code) CodeBackground(cursor, y, spanWidth, lh, span.text, bodySize, "0.94 0.94 0.92");
-                    const char* color = span.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
+                    const std::string_view color = span.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
                     if (span.style & kStyleMark) {
                         PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
                     }
@@ -11975,7 +12162,7 @@ private:
                 const bool code = (span.style & kStyleCode) != 0;
                 const double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
                 if (code) CodeBackground(cursor, y, spanWidth, lh, span.text, bodySize, kBodyRunColors.codeFill);
-                const char* color = span.url.empty() ? (code ? kBodyRunColors.code : kBodyRunColors.text) : linkColor;
+                const std::string_view color = span.url.empty() ? (code ? kBodyRunColors.code : kBodyRunColors.text) : linkColor;
                 if (span.style & kStyleMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
@@ -12005,7 +12192,7 @@ private:
     // A GitHub alert: a quote whose bar takes the alert's colour, under the alert's bold title
     // in that colour, which keeps the first line after it on its page.
     RAYOMD_COLD void RenderAlert(const Block& block) {
-        quoteBar = kQuoteBars[block.alert];
+        quoteBar = QuoteBar(block.alert);
         Ensure(lineHeight * 2.0 + 2.0);
         if (!block.text.empty()) {
             RenderCallout(block);
@@ -12066,7 +12253,7 @@ private:
             case BlockType::Quote: {
                 // A quote in an alert has a plain quote's bar, as on GitHub.
                 double savedMargin = margin;
-                const char* savedBar = quoteBar;
+                const std::string_view savedBar = quoteBar;
                 Indent(10.0);
                 quoteBar = plainQuoteBar;
                 RenderQuote(child);
@@ -12150,7 +12337,7 @@ private:
                 const bool code = (span.style & kStyleCode) != 0;
                 double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
                 if (code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
-                const char* color = span.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
+                const std::string_view color = span.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
                 if (span.style & kStyleMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
@@ -12234,7 +12421,7 @@ private:
     // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
     // points into the next, so that the block is one tint. Out of line: written into RenderCode,
     // it moved GCC's inlining of hot calls elsewhere (+0.3 % on baseline.md).
-    RAYOMD_SHARED void CodeTile(double lh, bool& first, const char* color) {
+    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color) {
         const size_t pages = pageStarts.size();
         Ensure(lh + 4.0);
         if (pageStarts.size() != pages) first = true;
@@ -12280,11 +12467,11 @@ private:
                 line = std::string_view(codeLine.data(), kept);
                 lineClasses = codeLineClasses.data();
             }
-            const char* tile = Internal::CodeLineTile(end > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
+            const std::string_view tile = Internal::CodeLineTile(end > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
             size_t piece = 0;
             do {
                 const size_t count = std::min(perLine, line.size() - piece);
-                CodeTile(lh, first, tile != nullptr ? tile : "0.95 0.95 0.93");
+                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93");
                 PaintCodeRuns(x, y - size, size, line.substr(piece, count), lineClasses + piece);
                 y -= lh;
                 piece += count;
@@ -12299,14 +12486,15 @@ private:
     // otherwise one text object with each run after its colour.
     RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::string_view text, const uint8_t* classes) {
         if (text.empty()) return;
-        SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
-        if (codeRuns.size() == 1) {
-            Text(x, baseline, size, text, "F3", Internal::CodeColor(codeRuns[0].color).data());
+        const size_t runCount = SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
+        if (runCount == 1) {
+            Text(x, baseline, size, text, "F3", Internal::CodeColor(codeRuns[0].color));
             return;
         }
-        TailWriter out(content, 48 + kOperandBytes * 3 + text.size() * 2 + codeRuns.size() * 32);
+        TailWriter out(content, 48 + kOperandBytes * 3 + text.size() * 2 + runCount * 32);
         size_t begin = 0;
-        for (const CodeRun& run : codeRuns) {
+        for (size_t index = 0; index < runCount; index++) {
+            const CodeRun& run = codeRuns[index];
             const std::string_view color = Internal::CodeColor(run.color);
             if (begin == 0) {
                 out.Lit("q ");
@@ -12386,12 +12574,12 @@ private:
     // Text at (x, baseline) in the body size and `fontName`, appended to `out`, a stream of its own;
     // `spacing` is added after each character (Tc).
     RAYOMD_COLD void AppendOverlayText(std::string& out, double x, double baseline, std::string_view text,
-        const char* fontName, const char* color, double spacing) const {
-        TailWriter w(out, 96 + kOperandBytes * 4 + text.size() * 2);
+        std::string_view fontName, std::string_view color, double spacing) const {
+        TailWriter w(out, 96 + color.size() + fontName.size() + kOperandBytes * 4 + text.size() * 2);
         w.Lit("q ");
-        w.Bytes(color, strlen(color));
+        w.Bytes(color);
         w.Lit(" rg BT /");
-        w.Bytes(fontName, strlen(fontName));
+        w.Bytes(fontName);
         w.Lit(" ");
         w.Fixed(bodySize);
         w.Lit(" Tf ");
@@ -12627,41 +12815,30 @@ private:
         if (pageBottoms->size() < pageStarts.size()) EndLongPage();
         return pageBottoms->data();
     }
-    // Page footnotes (PageNoteLayout): the buffers the paint paths share, which SwapFootBuffers
-    // trades for the renderer's own while notes are laid out at the foot of a page, so that the
-    // paragraph, table row or code block the page broke goes on. The paragraph's and the table's
-    // runs and lines trade places with the thread's kept ones (KeptBuffer), which hold what the
-    // renderer brought when it started until it ends: no second destructor for them.
-    struct FootBuffers {
-        std::vector<MathCell> mathTableCells;
-        MathPool::Spare math;
-        std::vector<uint8_t> codeClasses;
-        std::string codeLine;
-        std::vector<uint8_t> codeLineClasses;
-        std::vector<CodeRun> codeRuns;
-        RunLinkUrls runLinkUrls;
-    };
-    RAYOMD_COLD void SwapFootBuffers() {
-        FootBuffers& spare = pageNotes->spare;
+    // Page footnotes (PageNoteLayout): the buffers the paint paths share traded for the notes' own
+    // (FootBuffers), so that the paragraph, table row or code block the page broke goes on. The
+    // paragraph's and the table's runs and lines trade places with the thread's kept ones
+    // (KeptBuffer), which hold what the renderer brought when it started until it ends: no second
+    // destructor for them.
+    RAYOMD_COLD void SwapFootBuffers(FootBuffers& spare) {
+        WrapMeasure& wrap = WrapScratch();
+        wrap.buffer.swap(spare.wrap.buffer);
+        wrap.breaks.swap(spare.wrap.breaks);
         paragraphRuns.Swap(KeptBuffer<AsciiRuns>::Held());
         tableCells.swap(KeptBuffer<std::vector<AsciiRuns>>::Held());
         tableLines.swap(KeptBuffer<std::vector<AsciiLines>>::Held());
-        mathTableCells.swap(spare.mathTableCells);
+        mathTableCells.swap(*static_cast<std::vector<MathCell>*>(spare.mathTableCells));
         math.SwapItems(spare.math);
         codeClasses.swap(spare.codeClasses);
-        codeLine.swap(spare.codeLine);
+        codeLine.swap(spare.codeText);
         codeLineClasses.swap(spare.codeLineClasses);
         codeRuns.swap(spare.codeRuns);
         std::swap(runLinkUrls, spare.runLinkUrls);
     }
-    // The notes' measuring layout (PageNoteLayout::Measure): nothing to set aside here, as these
+    // The notes' measuring layout (PageNoteCore::Measure): nothing to set aside here, as these
     // documents are never tagged and their fonts lack no glyph they count.
-    struct MeasureState {
-        Internal::StructTree* tags = nullptr;   // never tagged: every note may be replayed
-    };
-    MeasureState BeginMeasure() { return {}; }
-    void EndMeasure(const MeasureState&) {}
-    PageNoteState<FootBuffers>* pageNotes = nullptr;   // while a document's notes go at the foot of its pages
+    static constexpr bool kTagged = false;
+    PageNoteState* pageNotes = nullptr;   // while a document's notes go at the foot of its pages
     // The lowest y text may reach, which the bottom tests (Ensure, the tables') compare with: the
     // margin (on a long page a margin above its bottom, StartLongPages), nested blocks' as theirs
     // (Indent), and with page footnotes the room kept at the foot

@@ -30,6 +30,7 @@
 #include "../src/core/mermaid.h"
 #include "../src/core/print_colors.h"
 #include "../src/core/theme.h"
+#include "../src/core/word_bounds.h"
 
 #include <algorithm>
 #include <array>
@@ -3626,6 +3627,205 @@ bool CheckLatinText() {
     return true;
 }
 
+// MeasureWords and SumAdvances (word_bounds.h) against a byte loop: every length from 0 to 300
+// and some longer, texts of words, runs of each white-space byte, bytes from 0x80 and tables
+// whose entry 256 is not 0 (which no sum may read); the dispatched code (AVX2 where the
+// CPU has it), the SSE2 code and the portable code, a slice of a larger buffer each time, so a
+// read past its end would read other bytes.
+bool CheckWordBounds() {
+    using namespace TinyPdf::Internal;
+    uint32_t seed = 20261019u;
+    auto next = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 16;
+    };
+    std::array<uint16_t, 257> advances{};
+    for (size_t i = 0; i < 256; i++) advances[i] = static_cast<uint16_t>(1 + next() % 999);
+    for (const unsigned char white : { ' ', '\t', '\r', '\n' }) advances[white] = 0;
+    advances[256] = 0xBEEF;
+    std::vector<size_t> lengths;
+    for (size_t n = 0; n <= 300; n++) lengths.push_back(n);
+    lengths.insert(lengths.end(), { 511, 512, 513, 4095, 4096, 70000 });
+    std::string buffer;
+    for (size_t n : lengths) {
+        for (int pattern = 0; pattern < 6; pattern++) {
+            buffer.assign(n + 128, 'x');
+            const size_t offset = 64 + next() % 32;
+            buffer.resize(offset + n + 64, 'y');
+            char* const text = &buffer[offset];
+            for (size_t i = 0; i < n; i++) {
+                const uint32_t r = next();
+                switch (pattern) {
+                case 0: text[i] = r % 6 == 0 ? ' ' : static_cast<char>('a' + r % 26); break;   // words
+                case 1: text[i] = static_cast<char>(" \t\r\n"[r % 4]); break;                 // white only
+                case 2: text[i] = static_cast<char>(r); break;                                // any byte
+                case 3: text[i] = r % 3 == 0 ? static_cast<char>(" \t\r\n"[r % 4]) : static_cast<char>(0x80 | r); break;
+                case 4: text[i] = 'w'; break;                                                 // one word
+                default: text[i] = i % 64 < 32 ? ' ' : 'z'; break;                            // across steps
+                }
+            }
+            std::vector<uint32_t> bounds;
+            std::vector<uint32_t> sums(n + 1, 0);
+            bool inWord = false;
+            for (size_t i = 0; i < n; i++) {
+                const unsigned char c = static_cast<unsigned char>(text[i]);
+                sums[i + 1] = sums[i] + advances[c];
+                const bool white = c == ' ' || c == '\t' || c == '\r' || c == '\n';
+                if (white == inWord) {
+                    bounds.push_back(static_cast<uint32_t>(i));
+                    inWord = !white;
+                }
+            }
+            if (inWord) bounds.push_back(static_cast<uint32_t>(n));
+            const size_t summed = n - next() % (n + 1) / 2;
+            using Measure = size_t (*)(const char*, size_t, size_t, const uint16_t*, uint32_t*, uint32_t*);
+            std::vector<std::pair<const char*, Measure>> variants = { { "dispatched", MeasureWords },
+                { "portable", MeasureWordsPortable } };
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+            if (n >= 16) variants.push_back({ "SSE2", MeasureWordsSse2 });
+#endif
+            for (const auto& variant : variants) {
+                std::vector<uint32_t> gotBounds(n + 1 + kWordBoundsSlack, 0xFFFFFFFFu);
+                std::vector<uint32_t> gotSums(n + 1, 0xFFFFFFFFu);
+                const size_t words = variant.second(text, n, summed, advances.data(), gotSums.data(), gotBounds.data());
+                bool same = words * 2 == bounds.size() && std::equal(bounds.begin(), bounds.end(), gotBounds.begin()) &&
+                    std::equal(sums.begin(), sums.begin() + summed + 1, gotSums.begin());
+                for (size_t i = summed + 1; same && i <= n; i++) same = gotSums[i] == 0xFFFFFFFFu;
+                if (!same) {
+                    std::cerr << "MeasureWords (" << variant.first << ") wrong: " << n << " bytes, pattern " << pattern
+                              << ", " << summed << " summed" << std::endl;
+                    return false;
+                }
+            }
+            std::vector<uint32_t> gotSums(n + 1, 0xFFFFFFFFu);
+            gotSums[0] = 7;
+            SumAdvances(text, n, advances.data(), gotSums.data());
+            for (size_t i = 0; i <= n; i++) {
+                if (gotSums[i] != sums[i] + 7) {
+                    std::cerr << "SumAdvances wrong: " << n << " bytes, pattern " << pattern << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+    // MeasureWideWords against a loop over code units, as ScanWideUnits reads them: widths from a
+    // cache with holes (entry 0: asked of the callback, which here does not fill it), surrogate
+    // pairs (also across 8- and 64-unit steps), lone surrogates, every white space and the
+    // characters next to it.
+    std::vector<uint16_t> cache(65537, 0);
+    for (size_t i = 0; i < cache.size(); i++) cache[i] = next() % 7 == 0 ? 0 : static_cast<uint16_t>(1 + next() % 1500);
+    struct Asked { const std::vector<uint16_t>* cache; } asked{ &cache };
+    const WideWidth width = [](const void* context, uint32_t codepoint) -> uint32_t {
+        (void)context;
+        return codepoint > 0xFFFF ? 777u : 3u + codepoint % 11u;
+    };
+    for (size_t n : lengths) {
+        if (n > 5000) continue;
+        for (int pattern = 0; pattern < 6; pattern++) {
+            std::vector<wchar_t> text(n + 64, L'x');
+            for (size_t i = 0; i < n; i++) {
+                const uint32_t r = next();
+                switch (pattern) {
+                case 0: text[i] = r % 6 == 0 ? L' ' : static_cast<wchar_t>(L'a' + r % 26); break;
+                case 1: text[i] = static_cast<wchar_t>(L" \t\r\n"[r % 4]); break;
+                case 2: text[i] = static_cast<wchar_t>(r & 0xFFFF); break;                       // any unit
+                case 3: text[i] = static_cast<wchar_t>(r % 4 == 0 ? 0xD800 + r % 0x400 : r % 4 == 1 ? 0xDC00 + r % 0x400
+                    : r % 4 == 2 ? L' ' : 0x4E00 + r % 0x100); break;                             // pairs and lone halves
+                case 4: text[i] = static_cast<wchar_t>(i % 2 == 0 ? 0xD83D : 0xDE00); break;   // a pair every two units
+                default: text[i] = i % 64 < 31 ? L'\t' : static_cast<wchar_t>(0x3042 + i % 50); break;
+                }
+            }
+            if (pattern == 4 && n > 0 && next() % 2 == 0) text[0] = L'y';                   // pairs at odd offsets
+            std::vector<uint32_t> bounds;
+            std::vector<uint32_t> sums(n + 1, 0);
+            bool inWord = false;
+            for (size_t i = 0; i < n; i++) {
+                const wchar_t c = text[i];
+                const bool white = c == L' ' || c == L'\t' || c == L'\r' || c == L'\n';
+                if (white == inWord) {
+                    bounds.push_back(static_cast<uint32_t>(i));
+                    inWord = !white;
+                }
+                const uint32_t unit = static_cast<uint16_t>(c);
+                if (unit >= 0xD800 && unit <= 0xDBFF && i + 1 < n && static_cast<uint16_t>(text[i + 1]) >= 0xDC00 &&
+                    static_cast<uint16_t>(text[i + 1]) <= 0xDFFF) {
+                    sums[i + 1] = sums[i] + width(&asked, 0x10000 + ((unit - 0xD800) << 10) + (static_cast<uint16_t>(text[i + 1]) - 0xDC00));
+                    i++;
+                    sums[i + 1] = sums[i];
+                    continue;
+                }
+                sums[i + 1] = sums[i] + (cache[unit] != 0 ? cache[unit] : width(&asked, unit));
+            }
+            if (inWord) bounds.push_back(static_cast<uint32_t>(n));
+            using MeasureWide = size_t (*)(const wchar_t*, size_t, const uint16_t*, WideWidth, const void*, uint32_t*, uint32_t*);
+            for (const auto& variant : { std::pair<const char*, MeasureWide>{ "dispatched", MeasureWideWords },
+                     std::pair<const char*, MeasureWide>{ "portable", MeasureWideWordsPortable } }) {
+                std::vector<uint32_t> gotBounds(n + 1 + kWordBoundsSlack, 0xFFFFFFFFu);
+                std::vector<uint32_t> gotSums(n + 1, 0xFFFFFFFFu);
+                const size_t words = variant.second(text.data(), n, cache.data(), width, &asked, gotSums.data(), gotBounds.data());
+                if (words * 2 != bounds.size() || !std::equal(bounds.begin(), bounds.end(), gotBounds.begin()) || gotSums != sums) {
+                    std::cerr << "MeasureWideWords (" << variant.first << ") wrong: " << n << " units, pattern " << pattern
+                              << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// SplitColorRuns (word_bounds.h) against the loop over characters: every length from 0 to 200 and
+// some longer, in narrow and wide characters, lines of spaces, runs of one colour, colours that
+// change at every character and across 16-character steps, classes whose colours repeat
+// (kCodeColorOfClass), a slice of a larger buffer each time.
+template <typename Char>
+bool CheckColorRunsOf(const char* name) {
+    using namespace TinyPdf::Internal;
+    uint32_t seed = 20261020u;
+    auto next = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 16;
+    };
+    std::vector<size_t> lengths;
+    for (size_t n = 0; n <= 200; n++) lengths.push_back(n);
+    lengths.insert(lengths.end(), { 255, 256, 257, 1023, 4096 });
+    for (size_t n : lengths) {
+        for (int pattern = 0; pattern < 6; pattern++) {
+            std::vector<Char> text(n + 64, static_cast<Char>('q'));
+            std::vector<uint8_t> classes(n + 64, 0);
+            for (size_t i = 0; i < n; i++) {
+                const uint32_t r = next();
+                bool space = false;
+                uint8_t cls = 0;
+                switch (pattern) {
+                case 0: space = r % 4 == 0; cls = static_cast<uint8_t>(r / 7 % kCodeClassCount); break;
+                case 1: space = true; break;                                            // spaces only
+                case 2: space = false; cls = static_cast<uint8_t>(r % kCodeClassCount); break;
+                case 3: space = i < 40 || r % 2 == 0; cls = static_cast<uint8_t>(i / 16 % kCodeClassCount); break;
+                case 4: space = r % 9 == 0; cls = 3; break;                             // one colour
+                default: space = i % 32 >= 16; cls = static_cast<uint8_t>(i / 32 % kCodeClassCount); break;
+                }
+                text[i] = space ? static_cast<Char>(' ') : static_cast<Char>(r % 3 == 0 ? (sizeof(Char) > 1 ? 0x2520 : 0xA0) : 'a' + r % 26);
+                classes[i] = space ? static_cast<uint8_t>(r % kCodeClassCount) : cls;
+            }
+            std::vector<ColorRun> want(n + 1), got(n + 1, ColorRun{ 0xFFFFFFFFu, 0xEE });
+            const size_t wantCount = SplitColorRunsScalar(text.data(), n, classes.data(), kCodeColorOfClass, want.data());
+            const size_t gotCount = SplitColorRuns(text.data(), n, classes.data(), kCodeColorOfClass, got.data());
+            bool same = wantCount == gotCount;
+            for (size_t i = 0; same && i < wantCount; i++) same = want[i].end == got[i].end && want[i].color == got[i].color;
+            if (!same) {
+                std::cerr << "SplitColorRuns (" << name << ") wrong: " << n << " characters, pattern " << pattern << std::endl;
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool CheckColorRuns() {
+    return CheckColorRunsOf<char>("char") && CheckColorRunsOf<wchar_t>("wchar_t");
+}
+
 // The PNG row filters against the textbook definitions (PNG specification, section 9): the
 // residuals of every filter, the encoder heuristic's choice (least sum of residual magnitudes as
 // signed bytes, the lowest filter on ties), the dispatched code (AVX2 where the CPU has it) and
@@ -3906,6 +4106,8 @@ int main() {
     if (!CheckSvg()) return 97;
     if (!CheckTaggedPdf()) return 98;
     if (!CheckPngFilters()) return 99;
+    if (!CheckWordBounds()) return 133;
+    if (!CheckColorRuns()) return 134;
     if (!CheckChangedImageFiles()) return 100;
     if (!CheckCidStrings()) return 101;
     if (!CheckWriteAll()) return 102;

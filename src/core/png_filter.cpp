@@ -2,7 +2,10 @@
 
 #include "png_filter.h"
 
+#include "../common/compiler.h"
+
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 
@@ -12,6 +15,8 @@
 // AVX2 where GCC or Clang can compile it for one function: the build stays baseline x86-64 and
 // the CPU is asked once (UseAvx2).
 #if RAYOMD_PNG_SSE2 && (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+#include "../common/cpu_features.h"
+
 #include <immintrin.h>
 #define RAYOMD_PNG_AVX2 1
 #define RAYOMD_AVX2 __attribute__((target("avx2")))
@@ -116,6 +121,49 @@ inline uint64_t LaneSum(__m128i sums) {
     _mm_storeu_si128(reinterpret_cast<__m128i*>(lanes), sums);
     return lanes[0] + lanes[1];
 }
+
+// 32 zero bytes, then 32 of 0xFF: the W bytes loaded from kTailMask + 32 - W + n keep the last n
+// bytes of a W-byte step. A row's last bytes take its last full step again, those counted before
+// cleared, instead of a scalar loop: as fast as the vectorized loops GCC made of it at -O3, which
+// were 37 KB of this file.
+constexpr std::array<uint8_t, 64> MakeTailMask() {
+    std::array<uint8_t, 64> mask{};
+    for (size_t index = 32; index < mask.size(); index++) mask[index] = 0xFF;
+    return mask;
+}
+constexpr std::array<uint8_t, 64> kTailMask = MakeTailMask();
+
+// Adds the cost of `predictor` for `value` to `sum`, of the bytes `keep` keeps when Masked.
+template <bool Masked>
+RAYOMD_HOT_INLINE __m128i AddCost16(__m128i sum, __m128i value, __m128i predictor, __m128i keep) {
+    if constexpr (!Masked) return _mm_add_epi64(sum, Cost16(value, predictor));
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i r = _mm_sub_epi8(value, predictor);
+    return _mm_add_epi64(sum, _mm_sad_epu8(_mm_and_si128(_mm_min_epu8(r, _mm_sub_epi8(zero, r)), keep), zero));
+}
+
+// The five filters' costs of the 16 bytes at x (x >= bpp).
+template <bool Masked>
+RAYOMD_HOT_INLINE void AddCosts16(const uint8_t* row, const uint8_t* up, size_t x, size_t bpp, __m128i keep,
+    __m128i& s0, __m128i& s1, __m128i& s2, __m128i& s3, __m128i& s4) {
+    const __m128i v = Load16(row + x);
+    const __m128i a = Load16(row + x - bpp);
+    const __m128i b = Load16(up + x);
+    const __m128i c = Load16(up + x - bpp);
+    s0 = AddCost16<Masked>(s0, v, _mm_setzero_si128(), keep);
+    s1 = AddCost16<Masked>(s1, v, a, keep);
+    s2 = AddCost16<Masked>(s2, v, b, keep);
+    s3 = AddCost16<Masked>(s3, v, Average16(a, b), keep);
+    s4 = AddCost16<Masked>(s4, v, Paeth16(a, b, c), keep);
+}
+
+template <int Filter>
+RAYOMD_HOT_INLINE __m128i Predictor16(const uint8_t* row, const uint8_t* up, size_t x, size_t bpp) {
+    if constexpr (Filter == 1) return Load16(row + x - bpp);
+    else if constexpr (Filter == 2) return Load16(up + x);
+    else if constexpr (Filter == 3) return Average16(Load16(row + x - bpp), Load16(up + x));
+    else return Paeth16(Load16(row + x - bpp), Load16(up + x), Load16(up + x - bpp));
+}
 #endif
 
 #if RAYOMD_PNG_AVX2
@@ -156,8 +204,8 @@ RAYOMD_AVX2 inline uint64_t LaneSum32(__m256i sums) {
     return lanes[0] + lanes[1] + lanes[2] + lanes[3];
 }
 
-bool UseAvx2() {
-    static const bool avx2 = __builtin_cpu_supports("avx2");
+RAYOMD_HOT_INLINE bool UseAvx2() {
+    static const bool avx2 = RayoMd::Cpu::HasAvx2();
     return avx2;
 }
 #endif
@@ -175,52 +223,69 @@ int ChoosePngFilterSse2(const uint8_t* row, const uint8_t* up, size_t rowBytes, 
     FilterCosts costs;
     size_t x = std::min(bpp, rowBytes);
     costs.Add(row, up, 0, x, bpp);
-    __m128i s0 = _mm_setzero_si128(), s1 = s0, s2 = s0, s3 = s0, s4 = s0;
-    for (; x + 16 <= rowBytes; x += 16) {
-        __m128i v = Load16(row + x);
-        __m128i a = Load16(row + x - bpp);
-        __m128i b = Load16(up + x);
-        __m128i c = Load16(up + x - bpp);
-        s0 = _mm_add_epi64(s0, Cost16(v, _mm_setzero_si128()));
-        s1 = _mm_add_epi64(s1, Cost16(v, a));
-        s2 = _mm_add_epi64(s2, Cost16(v, b));
-        s3 = _mm_add_epi64(s3, Cost16(v, Average16(a, b)));
-        s4 = _mm_add_epi64(s4, Cost16(v, Paeth16(a, b, c)));
+    if (rowBytes >= bpp + 16) {
+        const __m128i zero = _mm_setzero_si128();
+        __m128i s0 = zero, s1 = zero, s2 = zero, s3 = zero, s4 = zero;
+        for (; x + 16 <= rowBytes; x += 16) AddCosts16<false>(row, up, x, bpp, zero, s0, s1, s2, s3, s4);
+        if (x < rowBytes) {
+            const __m128i keep = Load16(kTailMask.data() + 16 + (rowBytes - x));
+            AddCosts16<true>(row, up, rowBytes - 16, bpp, keep, s0, s1, s2, s3, s4);
+            x = rowBytes;
+        }
+        costs.sum[0] += LaneSum(s0);
+        costs.sum[1] += LaneSum(s1);
+        costs.sum[2] += LaneSum(s2);
+        costs.sum[3] += LaneSum(s3);
+        costs.sum[4] += LaneSum(s4);
     }
     costs.Add(row, up, x, rowBytes, bpp);
-    costs.sum[0] += LaneSum(s0);
-    costs.sum[1] += LaneSum(s1);
-    costs.sum[2] += LaneSum(s2);
-    costs.sum[3] += LaneSum(s3);
-    costs.sum[4] += LaneSum(s4);
     return costs.Best();
 }
 #endif
 
 #if RAYOMD_PNG_AVX2
+template <bool Masked>
+RAYOMD_AVX2 inline __m256i AddCost32(__m256i sum, __m256i value, __m256i predictor, __m256i keep) {
+    if constexpr (!Masked) return _mm256_add_epi64(sum, Cost32(value, predictor));
+    const __m256i magnitude = _mm256_and_si256(_mm256_abs_epi8(_mm256_sub_epi8(value, predictor)), keep);
+    return _mm256_add_epi64(sum, _mm256_sad_epu8(magnitude, _mm256_setzero_si256()));
+}
+
+template <bool Masked>
+RAYOMD_AVX2 inline void AddCosts32(const uint8_t* row, const uint8_t* up, size_t x, size_t bpp, __m256i keep,
+    __m256i& s0, __m256i& s1, __m256i& s2, __m256i& s3, __m256i& s4) {
+    const __m256i v = Load32(row + x);
+    const __m256i a = Load32(row + x - bpp);
+    const __m256i b = Load32(up + x);
+    const __m256i c = Load32(up + x - bpp);
+    s0 = AddCost32<Masked>(s0, v, _mm256_setzero_si256(), keep);
+    s1 = AddCost32<Masked>(s1, v, a, keep);
+    s2 = AddCost32<Masked>(s2, v, b, keep);
+    s3 = AddCost32<Masked>(s3, v, Average32(a, b), keep);
+    s4 = AddCost32<Masked>(s4, v, Paeth32(a, b, c), keep);
+}
+
 // ChoosePngFilterSse2 32 bytes a step: twice as fast on an RGB row of the 1024x1024 mascot.
 RAYOMD_AVX2 static int ChoosePngFilterAvx2(const uint8_t* row, const uint8_t* up, size_t rowBytes, size_t bpp) {
     FilterCosts costs;
     size_t x = std::min(bpp, rowBytes);
     costs.Add(row, up, 0, x, bpp);
-    __m256i s0 = _mm256_setzero_si256(), s1 = s0, s2 = s0, s3 = s0, s4 = s0;
-    for (; x + 32 <= rowBytes; x += 32) {
-        __m256i v = Load32(row + x);
-        __m256i a = Load32(row + x - bpp);
-        __m256i b = Load32(up + x);
-        __m256i c = Load32(up + x - bpp);
-        s0 = _mm256_add_epi64(s0, Cost32(v, _mm256_setzero_si256()));
-        s1 = _mm256_add_epi64(s1, Cost32(v, a));
-        s2 = _mm256_add_epi64(s2, Cost32(v, b));
-        s3 = _mm256_add_epi64(s3, Cost32(v, Average32(a, b)));
-        s4 = _mm256_add_epi64(s4, Cost32(v, Paeth32(a, b, c)));
+    if (rowBytes >= bpp + 32) {
+        const __m256i zero = _mm256_setzero_si256();
+        __m256i s0 = zero, s1 = zero, s2 = zero, s3 = zero, s4 = zero;
+        for (; x + 32 <= rowBytes; x += 32) AddCosts32<false>(row, up, x, bpp, zero, s0, s1, s2, s3, s4);
+        if (x < rowBytes) {
+            const __m256i keep = Load32(kTailMask.data() + (rowBytes - x));
+            AddCosts32<true>(row, up, rowBytes - 32, bpp, keep, s0, s1, s2, s3, s4);
+            x = rowBytes;
+        }
+        costs.sum[0] += LaneSum32(s0);
+        costs.sum[1] += LaneSum32(s1);
+        costs.sum[2] += LaneSum32(s2);
+        costs.sum[3] += LaneSum32(s3);
+        costs.sum[4] += LaneSum32(s4);
     }
     costs.Add(row, up, x, rowBytes, bpp);
-    costs.sum[0] += LaneSum32(s0);
-    costs.sum[1] += LaneSum32(s1);
-    costs.sum[2] += LaneSum32(s2);
-    costs.sum[3] += LaneSum32(s3);
-    costs.sum[4] += LaneSum32(s4);
     return costs.Best();
 }
 #endif
@@ -268,43 +333,68 @@ void FilterPngRowScalar(int filter, const uint8_t* row, const uint8_t* up, size_
 }
 
 #if RAYOMD_PNG_SSE2
+// Bytes [bpp, rowBytes) of a row of at least bpp + 16, 16 a step; the last step is the row's last
+// 16 bytes, which writes some of the step before's again, the same values.
+template <int Filter>
+static void FilterSteps16(const uint8_t* row, const uint8_t* up, size_t rowBytes, size_t bpp, uint8_t* out) {
+    for (size_t x = bpp;; x += 16) {
+        if (x + 16 > rowBytes) x = rowBytes - 16;
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(out + x), _mm_sub_epi8(Load16(row + x), Predictor16<Filter>(row, up, x, bpp)));
+        if (x + 16 == rowBytes) return;
+    }
+}
+
 void FilterPngRowSse2(int filter, const uint8_t* row, const uint8_t* up, size_t rowBytes, size_t bpp, uint8_t* out) {
     if (filter == 0) {
         std::memcpy(out, row, rowBytes);
         return;
     }
-    size_t x = std::min(bpp, rowBytes);
-    FilterBytes(filter, row, up, 0, x, bpp, out);
-    for (; x + 16 <= rowBytes; x += 16) {
-        __m128i v = Load16(row + x);
-        __m128i a = Load16(row + x - bpp);
-        __m128i b = Load16(up + x);
-        __m128i predictor = filter == 1 ? a : filter == 2 ? b : filter == 3 ? Average16(a, b)
-            : Paeth16(a, b, Load16(up + x - bpp));
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(out + x), _mm_sub_epi8(v, predictor));
+    if (rowBytes < bpp + 16) {
+        FilterBytes(filter, row, up, 0, rowBytes, bpp, out);
+        return;
     }
-    FilterBytes(filter, row, up, x, rowBytes, bpp, out);
+    FilterBytes(filter, row, up, 0, bpp, bpp, out);
+    switch (filter) {
+    case 1: FilterSteps16<1>(row, up, rowBytes, bpp, out); break;
+    case 2: FilterSteps16<2>(row, up, rowBytes, bpp, out); break;
+    case 3: FilterSteps16<3>(row, up, rowBytes, bpp, out); break;
+    default: FilterSteps16<4>(row, up, rowBytes, bpp, out); break;
+    }
 }
 #endif
 
 #if RAYOMD_PNG_AVX2
+template <int Filter>
+RAYOMD_AVX2 inline __m256i Predictor32(const uint8_t* row, const uint8_t* up, size_t x, size_t bpp) {
+    if constexpr (Filter == 1) return Load32(row + x - bpp);
+    else if constexpr (Filter == 2) return Load32(up + x);
+    else if constexpr (Filter == 3) return Average32(Load32(row + x - bpp), Load32(up + x));
+    else return Paeth32(Load32(row + x - bpp), Load32(up + x), Load32(up + x - bpp));
+}
+
+// FilterSteps16 32 bytes a step, for a row of at least bpp + 32.
+template <int Filter>
+RAYOMD_AVX2 static void FilterSteps32(const uint8_t* row, const uint8_t* up, size_t rowBytes, size_t bpp, uint8_t* out) {
+    for (size_t x = bpp;; x += 32) {
+        if (x + 32 > rowBytes) x = rowBytes - 32;
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(out + x), _mm256_sub_epi8(Load32(row + x), Predictor32<Filter>(row, up, x, bpp)));
+        if (x + 32 == rowBytes) return;
+    }
+}
+
 RAYOMD_AVX2 static void FilterPngRowAvx2(int filter, const uint8_t* row, const uint8_t* up, size_t rowBytes, size_t bpp,
     uint8_t* out) {
-    if (filter == 0) {
-        std::memcpy(out, row, rowBytes);
+    if (filter == 0 || rowBytes < bpp + 32) {
+        FilterPngRowSse2(filter, row, up, rowBytes, bpp, out);
         return;
     }
-    size_t x = std::min(bpp, rowBytes);
-    FilterBytes(filter, row, up, 0, x, bpp, out);
-    for (; x + 32 <= rowBytes; x += 32) {
-        __m256i v = Load32(row + x);
-        __m256i a = Load32(row + x - bpp);
-        __m256i b = Load32(up + x);
-        __m256i predictor = filter == 1 ? a : filter == 2 ? b : filter == 3 ? Average32(a, b)
-            : Paeth32(a, b, Load32(up + x - bpp));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(out + x), _mm256_sub_epi8(v, predictor));
+    FilterBytes(filter, row, up, 0, bpp, bpp, out);
+    switch (filter) {
+    case 1: FilterSteps32<1>(row, up, rowBytes, bpp, out); break;
+    case 2: FilterSteps32<2>(row, up, rowBytes, bpp, out); break;
+    case 3: FilterSteps32<3>(row, up, rowBytes, bpp, out); break;
+    default: FilterSteps32<4>(row, up, rowBytes, bpp, out); break;
     }
-    FilterBytes(filter, row, up, x, rowBytes, bpp, out);
 }
 #endif
 
@@ -433,41 +523,47 @@ RAYOMD_AVX2 void UnfilterPaethAvx2(const uint8_t* raw, const uint8_t* up, size_t
 
 // Two Paeth rows at once: lanes 0 to 3 hold row A's pixel k, lanes 4 to 7 row B's pixel k - 1,
 // whose upper neighbour is row A's pixel k - 1, decoded the step before. Each step's chain is
-// barely longer than one row's, for two pixels: 9.1 -> 6.7 ms on the rows above.
+// barely longer than one row's, for two pixels: 9.1 -> 6.7 ms on the rows above. One step: `a` and
+// `c` carry over, the result is both pixels' bytes.
+RAYOMD_AVX2 inline __m128i PaethPairStep(__m128i upper, __m128i residualA, __m128i residualB, __m128i& a, __m128i& c) {
+    const __m128i d = _mm_cvtepu8_epi16(_mm_unpacklo_epi32(residualA, residualB));
+    const __m128i b = _mm_unpacklo_epi64(upper, a);
+    a = _mm_and_si128(_mm_add_epi16(d, PaethLanesBlend(a, b, c)), _mm_set1_epi16(0xff));
+    c = b;
+    return _mm_packus_epi16(a, a);
+}
+
+// The first step has no pixel of row B, the last none of row A.
 template <size_t Bpp>
 RAYOMD_AVX2 void UnfilterPaethPairAvx2(const uint8_t* rawA, const uint8_t* rawB, const uint8_t* up, size_t rowBytes,
     uint8_t* rowA, uint8_t* rowB) {
     const __m128i zero = _mm_setzero_si128();
-    const __m128i low = _mm_set1_epi16(0xff);
     const size_t pixels = rowBytes / Bpp;
+    if (pixels == 0) return;
     __m128i a = zero;   // the pixels decoded the step before
     __m128i c = zero;
-    for (size_t k = 0; k <= pixels; k++) {
-        const bool inA = k < pixels;
-        const __m128i upper = inA ? _mm_cvtepu8_epi16(LoadPixel<Bpp>(up + k * Bpp)) : zero;
-        const __m128i residualA = inA ? LoadPixel<Bpp>(rawA + k * Bpp) : zero;
-        const __m128i residualB = k > 0 ? LoadPixel<Bpp>(rawB + (k - 1) * Bpp) : zero;
-        const __m128i d = _mm_cvtepu8_epi16(_mm_unpacklo_epi32(residualA, residualB));
-        const __m128i b = _mm_unpacklo_epi64(upper, a);
-        a = _mm_and_si128(_mm_add_epi16(d, PaethLanesBlend(a, b, c)), low);
-        c = b;
-        const __m128i bytes = _mm_packus_epi16(a, a);
-        if (inA) StorePixel<Bpp>(rowA + k * Bpp, bytes);
-        if (k > 0) StorePixel<Bpp>(rowB + (k - 1) * Bpp, _mm_srli_si128(bytes, 4));
+    StorePixel<Bpp>(rowA, PaethPairStep(_mm_cvtepu8_epi16(LoadPixel<Bpp>(up)), LoadPixel<Bpp>(rawA), zero, a, c));
+    for (size_t k = 1; k < pixels; k++) {
+        const __m128i bytes = PaethPairStep(_mm_cvtepu8_epi16(LoadPixel<Bpp>(up + k * Bpp)), LoadPixel<Bpp>(rawA + k * Bpp),
+            LoadPixel<Bpp>(rawB + (k - 1) * Bpp), a, c);
+        StorePixel<Bpp>(rowA + k * Bpp, bytes);
+        StorePixel<Bpp>(rowB + (k - 1) * Bpp, _mm_srli_si128(bytes, 4));
     }
+    const __m128i bytes = PaethPairStep(zero, zero, LoadPixel<Bpp>(rawB + (pixels - 1) * Bpp), a, c);
+    StorePixel<Bpp>(rowB + (pixels - 1) * Bpp, _mm_srli_si128(bytes, 4));
 }
 #endif
 
 bool UnfilterPngRow(uint8_t filter, const uint8_t* raw, const uint8_t* up, size_t rowBytes, size_t bpp,
     uint8_t* row) {
 #if RAYOMD_PNG_SSE2
-    if (filter == 2) {
-        size_t x = 0;
-        for (; x + 16 <= rowBytes; x += 16) {
+    if (filter == 2 && rowBytes >= 16) {
+        // The row's last 16 bytes are its last step, which writes some of the step before's again.
+        for (size_t x = 0;; x += 16) {
+            if (x + 16 > rowBytes) x = rowBytes - 16;
             _mm_storeu_si128(reinterpret_cast<__m128i*>(row + x), _mm_add_epi8(Load16(raw + x), Load16(up + x)));
+            if (x + 16 == rowBytes) return true;
         }
-        for (; x < rowBytes; x++) row[x] = (uint8_t)(raw[x] + up[x]);
-        return true;
     }
     if (filter == 1 && bpp == 4) {
         UnfilterSub4(raw, rowBytes, row);

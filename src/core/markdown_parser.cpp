@@ -58,48 +58,45 @@ static std::string Trim(std::string s) {
     return ToString(v);
 }
 
-// The lines of `text` into `lines`, which it empties first.
+// The lines of `text` into `lines`, which it empties first. Line feeds are found 64 bytes a step
+// (16 a step for the rest), each by a bit scan of the step's mask.
 static void SplitLineViews(const std::string& text, std::vector<std::string_view>& lines) {
     lines.clear();
-    size_t start = StartsWith(std::string_view(text), std::string_view("\xEF\xBB\xBF", 3)) ? 3 : 0;
+    const size_t start = StartsWith(std::string_view(text), std::string_view("\xEF\xBB\xBF", 3)) ? 3 : 0;
     lines.reserve(std::max<size_t>(8, text.size() / 48));
 
-    const char* base = text.data();
-    const char* ptr = base + start;
-    const char* end = base + text.size();
+    const char* const base = text.data();
+    const size_t size = text.size();
     size_t lineStart = start;
+    const auto addLine = [&](size_t pos) RAYOMD_HOT_LAMBDA {
+        size_t lineEnd = pos;
+        if (lineEnd > lineStart && base[lineEnd - 1] == '\r') lineEnd--;
+        lines.emplace_back(base + lineStart, lineEnd - lineStart);
+        lineStart = pos + 1;
+    };
+    size_t at = start;
 
 #ifdef FAST_MD_SSE2
     const __m128i nl = _mm_set1_epi8('\n');
-    while (ptr + 16 <= end) {
-        __m128i chunk = _mm_loadu_si128((const __m128i*)ptr);
-        int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, nl));
-        while (mask) {
-            int bit = 0;
-            while (((mask >> bit) & 1) == 0) bit++;
-            size_t pos = (size_t)(ptr - base) + (size_t)bit;
-            size_t lineEnd = pos;
-            if (lineEnd > lineStart && base[lineEnd - 1] == '\r') lineEnd--;
-            lines.emplace_back(base + lineStart, lineEnd - lineStart);
-            lineStart = pos + 1;
-            mask &= ~(1 << bit);
-        }
-        ptr += 16;
+    const auto feeds = [&](size_t from) RAYOMD_HOT_LAMBDA {
+        return static_cast<uint32_t>(_mm_movemask_epi8(
+            _mm_cmpeq_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(base + from)), nl)));
+    };
+    for (; at + 64 <= size; at += 64) {
+        uint64_t mask = feeds(at) | static_cast<uint64_t>(feeds(at + 16)) << 16 |
+            static_cast<uint64_t>(feeds(at + 32)) << 32 | static_cast<uint64_t>(feeds(at + 48)) << 48;
+        for (; mask != 0; mask &= mask - 1) addLine(at + RayoMd::Text::Detail::LowestBit64(mask));
+    }
+    for (; at + 16 <= size; at += 16) {
+        for (uint32_t mask = feeds(at); mask != 0; mask &= mask - 1) addLine(at + RayoMd::Text::Detail::LowestBit(mask));
     }
 #endif
 
-    while (ptr < end) {
-        if (*ptr == '\n') {
-            size_t pos = (size_t)(ptr - base);
-            size_t lineEnd = pos;
-            if (lineEnd > lineStart && base[lineEnd - 1] == '\r') lineEnd--;
-            lines.emplace_back(base + lineStart, lineEnd - lineStart);
-            lineStart = pos + 1;
-        }
-        ptr++;
+    for (; at < size; at++) {
+        if (base[at] == '\n') addLine(at);
     }
 
-    size_t lineEnd = text.size();
+    size_t lineEnd = size;
     if (lineEnd > lineStart && base[lineEnd - 1] == '\r') lineEnd--;
     lines.emplace_back(base + lineStart, lineEnd - lineStart);
 }
@@ -369,9 +366,12 @@ constexpr size_t kMaxTableColumns = 1000;
 // given, receives the column alignments of a table that starts here.
 static bool IsTableStart(const std::vector<std::string_view>& lines, size_t i, std::vector<int>* aligns = nullptr) {
     if (i + 1 >= lines.size()) return false;
-    if (lines[i].find('|') == std::string_view::npos ||
-        lines[i + 1].find('|') == std::string_view::npos ||
-        lines[i + 1].find('-') == std::string_view::npos) {
+    // A separator line's first cell starts with '-' or ':', after a '|' or not: most lines after a
+    // paragraph's line fail on that, and its line is not searched.
+    const std::string_view separator = LTrimView(lines[i + 1]);
+    if (separator.empty() || (separator[0] != '|' && separator[0] != '-' && separator[0] != ':')) return false;
+    if (separator.find('|') == std::string_view::npos || separator.find('-') == std::string_view::npos ||
+        lines[i].find('|') == std::string_view::npos) {
         return false;
     }
     const size_t cells = CountTableCells(lines[i]);
@@ -462,7 +462,9 @@ static void AppendWithoutMathTextBytes(std::string& out, std::string_view text) 
 }
 
 static void EraseMathTextBytes(std::string& text) {
-    if (text.find(kMathTextOpen) == std::string::npos && text.find(kMathTextClose) == std::string::npos) return;
+    if (memchr(text.data(), kMathTextOpen, text.size()) == nullptr && memchr(text.data(), kMathTextClose, text.size()) == nullptr) {
+        return;   // memchr itself: std::string::find is a call of its own that calls it
+    }
     std::string cleaned;
     cleaned.reserve(text.size());
     AppendWithoutMathTextBytes(cleaned, text);
@@ -811,24 +813,6 @@ struct LineInfo {
     int number = 0;
 };
 
-// Every block marker starts with one of these characters (after the indent). A line
-// that begins with anything else is paragraph text and needs none of the checks below.
-static bool MayStartBlock(char first) {
-    switch (first) {
-    case '`': case '~':             // code fence
-    case '$': case '\\':            // display math, \pagebreak
-    case '<':                       // page-break comment, HTML comment
-    case '!':                       // standalone image
-    case '-': case '*': case '_':   // rule, bullet
-    case '+':                       // bullet
-    case '#':                       // heading
-    case '>':                       // quote
-        return true;
-    default:
-        return std::isdigit((unsigned char)first) != 0;   // numbered item
-    }
-}
-
 static std::string_view ParseFenceMarker(std::string_view trimmed) {
     if (trimmed.empty()) return {};
     char marker = trimmed[0];
@@ -936,54 +920,64 @@ static LineInfo ClassifyLine(std::string_view line) {
         info.kind = LineKind::Empty;
         return info;
     }
-    // A line that starts with '[' starts a block only as a linked image, "[![".
-    if (!MayStartBlock(info.trimmed[0]) && (info.trimmed[0] != '[' || info.trimmed.size() < 3 ||
-        info.trimmed[1] != '!' || info.trimmed[2] != '[')) {
+    // Each block marker starts with its own bytes (after the indent), so only the checks of the
+    // line's first byte run, in the order that decides between them ("---" is a rule, "- x" an
+    // item). Anything else is paragraph text. A line that starts with '[' is a block only as a
+    // linked image, "[![".
+    switch (info.trimmed[0]) {
+    case '`':
+    case '~': {
+        const std::string_view fence = ParseFenceMarker(info.trimmed);
+        if (!fence.empty()) {
+            info.kind = LineKind::Fence;
+            info.text = fence;
+        }
         return info;
     }
-    std::string_view fence = ParseFenceMarker(info.trimmed);
-    if (!fence.empty()) {
-        info.kind = LineKind::Fence;
-        info.text = fence;
-        return info;
-    }
-    if (info.trimmed[0] == '$' || info.trimmed[0] == '\\') {
+    case '$':
+    case '\\':
         if (ClassifyMathLine(info)) return info;
-    }
-    if (IsPageBreakLine(info.trimmed)) {
-        info.kind = LineKind::PageBreak;
+        if (IsPageBreakLine(info.trimmed)) info.kind = LineKind::PageBreak;
         return info;
-    }
-    if (info.trimmed[0] == '<' && ClassifyHtmlLine(line, info)) return info;
-    if (ParseStandaloneImage(info.trimmed, nullptr)) {
-        info.kind = LineKind::Image;
+    case '<':
+        if (IsPageBreakLine(info.trimmed)) {
+            info.kind = LineKind::PageBreak;
+            return info;
+        }
+        ClassifyHtmlLine(line, info);
         return info;
-    }
-    if (IsRuleLine(line)) {
-        info.kind = LineKind::Rule;
+    case '!':
+    case '[':
+        if (ParseStandaloneImage(info.trimmed, nullptr)) info.kind = LineKind::Image;
         return info;
-    }
-    if (ParseHeadingView(line, info.level, info.text)) {
-        info.kind = LineKind::Heading;
+    case '-':
+    case '*':
+    case '_':
+        if (IsRuleLine(line)) {
+            info.kind = LineKind::Rule;
+            return info;
+        }
+        if (ParseBulletView(line, info.level, info.text)) info.kind = LineKind::Bullet;
         return info;
-    }
-    if (ParseBulletView(line, info.level, info.text)) {
-        info.kind = LineKind::Bullet;
+    case '+':
+        if (ParseBulletView(line, info.level, info.text)) info.kind = LineKind::Bullet;
         return info;
-    }
-    if (ParseNumberedView(line, info.level, info.number, info.text)) {
-        info.kind = LineKind::Numbered;
+    case '#':
+        if (ParseHeadingView(line, info.level, info.text)) info.kind = LineKind::Heading;
         return info;
-    }
-    std::string_view left = LTrimView(line);
-    if (StartsWith(left, ">")) {
+    case '>': {
         info.kind = LineKind::Quote;
-        info.text = left.substr(1);
-        if (!info.text.empty() && info.text[0] == ' ') info.text.remove_prefix(1);
-        info.text = TrimView(info.text);
+        std::string_view text = info.trimmed.substr(1);
+        if (!text.empty() && text[0] == ' ') text.remove_prefix(1);
+        info.text = TrimView(text);
         return info;
     }
-    return info;
+    default:
+        if (info.trimmed[0] >= '0' && info.trimmed[0] <= '9' && ParseNumberedView(line, info.level, info.number, info.text)) {
+            info.kind = LineKind::Numbered;
+        }
+        return info;
+    }
 }
 
 // A line that interrupts a paragraph. An HTML block of start condition 7 (any other complete tag

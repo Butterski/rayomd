@@ -41,6 +41,110 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 2 against 5.2.2: layout and parsing (2026-10-19)
+
+Measured against 5.2.2 (`e4bdc54`), g++ 13.3 Release, Docker; instructions by `ab.sh
+--instructions` (callgrind, one warm build) and perf, time by `ab.sh` (11 rounds, CPU 3, a host
+shared with other jobs). Every step keeps the 2,875 PDFs of the byte check and the 11,980
+feature-on exports (`--black-text`, `--hide-tags`, `--footnotes=page`, PDF/UA, embeds and
+linked notes) identical.
+
+- **Words measured in vectors** (`word_bounds.cpp`, `MeasureWords`): the standard renderer's
+  wrapping no longer finds a word's end by a byte loop that mispredicts at every word. One pass
+  marks the white space of 64 bytes, takes the edges of those bits and writes them as positions a
+  mask byte at a time from a table (eight instructions a byte, no branch on the text); another
+  sums the AFM advances into prefix sums, so a word's width is one subtraction, the same integer the
+  byte loop summed (first gathered eight at a time in AVX2; see the gate exception below). `BreakAsciiWords` (one copy for every `WrapAsciiWords`,
+  which then only hands its lines out) and `WrapAsciiInline` read the words from there;
+  `WrapAsciiInline` also joins the words that follow in its segment one space apart to its run and
+  the pending text without a call each. Texts under 16 bytes keep the byte loop: a table cell
+  costs more to measure apart than to read. Instructions: essay -19.1 %, native_math -4.4 %,
+  notes -0.0 %, others +0.07 to +0.15 % (README +0.15 %, `tiny_pdf.cpp`'s inlining of a
+  `push_back`); time: essay -13.9 %, native_math -4.9 %. Text +6.0 KB.
+- **The advance sums a byte at a time again: a deliberate exception to the instruction gate.**
+  `MeasureWords` gathered the advances with AVX2's `vpgatherdd`, microcoded on Zen 2 (and slow on
+  many other cores): perf showed about 15 % of the essay's cycles stalled on it. The scalar prefix
+  sum (two loads, an add and a store a byte) against the gather, perf `cycles:u` in 11 to 15
+  alternating runs: essay -6.6 to -8.5 % cycles at +7.2 % instructions, notes -6.5 % cycles at
+  +0.4 %, table-heavy -1.7 % at 0.0 %, native_math -0.8 to +0.2 % (noise) at +2.0 %. A third
+  variant, the advances of ASCII bytes looked up in registers (eight `vpshufb` a byte plane on
+  XOR-chained nibble tables, no gather): essay +5.9 % instructions and about the scalar loop's
+  cycles, for 256 bytes of tables a font and more code; not taken. The integrator accepted the
+  instruction increase: cycles and time are what users get. The Unicode renderer's gather of
+  widths from the font's 64K-entry cache stays: without it (its scalar path) README +4.9 % cycles,
+  table-heavy +2.8 %.
+- **Line feeds by bit scans** (`SplitLineViews`): 64 bytes a step and a bit scan a line feed,
+  where a loop stepped over the mask's bits one at a time: -0.2 to -1.2 % instructions everywhere.
+- **Lines classified by their first byte** (`ClassifyLine`): each block marker starts with bytes
+  of its own, so a switch on the line's first byte runs only that marker's checks, where every
+  line that might start a block took the whole chain (fence, math, page break, HTML, image, rule,
+  heading, item, number, quote): notes -3.6 %, README, tester-noimg, native_math -1.1 to -1.2 %,
+  others -0.4 to -0.7 %, table-heavy +0.02 % instructions.
+- **The Unicode renderer's wrapping in integer units** (`WrapUnits`, `MeasureWideWords`): its
+  line breaks came from double sums, a character's units times the scale added in text order, a
+  chain of dependent additions. The sums are now integer AFM units, and every comparison with a
+  width is decided where the units are farther from it than the double sums' rounding can reach
+  (at most 3n + 4 roundings of 2^-53, all terms positive; `WrapUnits::Above`), which is the double
+  path's decision; a closer one (equal widths, or nearly) lays the paragraph out again in doubles,
+  the old code kept as `PlaceStyledWords<true>` and `BreakWideWordsIn<true>`, as does a word wider
+  than a line in styled text and a theme's faces. The units of a paragraph come from
+  `MeasureWideWords` (word_bounds.cpp): eight code units a step, their white space as bits and
+  their widths gathered from the font's width cache (one entry more, 65,537, for the gather), a
+  step with a surrogate or a width not cached yet a unit at a time through the font; the word
+  bounds as `MeasureWords` writes them. `PlaceStyledWords<false>` joins the words that follow in
+  a run one space apart, as `WrapAsciiInline` does. Instructions: README -4.3 %, polish -3.2 %,
+  table-heavy -2.3 %, tester-noimg -1.1 %, code-heavy -0.5 %; perf cycles README -2.3 %,
+  table-heavy -2.4 %. Text +12 KB. Checked also with the rounding margin raised to 5 % (most
+  paragraphs laid out twice, README +5 % instructions) and on 3,800 generated Unicode documents
+  (scripts, surrogate pairs, combining marks, spaces of every kind, inline styles, narrow tables,
+  page sizes; DejaVu Sans, Serif and Sans Mono): identical PDFs.
+  Then every comparison of a text is with one limit, the line's width, so `WrapUnits` works out
+  once which units are certainly below it and which certainly above (a division each, two units
+  farther out than its rounding reaches) and compares the units with those; only the units in
+  between take the comparison in doubles. Instructions table-heavy -1.6 %, README -0.9 %, polish
+  -0.5 %, tester-noimg and code-heavy -0.2 %; perf cycles table-heavy -1.3 %, README -0.3 %.
+  A third of the generated documents had carried options the CLI no longer has (`--style`,
+  `--margin`), so both binaries failed on them and they compared nothing; with those replaced by
+  themes (colours and headers; DejaVu Serif faces), `--number-headings`, `--toc`, `--black-text`
+  and `--page-size=a5`, all 5,800 (d1 to d8) and 3,200 of them in DejaVu Serif and Sans Mono give
+  the bytes 5.2.2 gives, every one a PDF.
+- **A table start ruled out by the next line** (`IsTableStart`): every paragraph line was searched
+  for '|' before the line after it was looked at; a separator line starts with '|', '-' or ':'
+  after its indent, so most next lines rule the table out by one byte. Instructions essay -0.6 %,
+  others -0.2 to +0.2 %; time essay -2.4 %, notes and native_math -2.0 %.
+- **Colour runs of highlighted code sixteen characters a step** (`SplitColorRuns`,
+  word_bounds.cpp): `SplitCodeRuns` looked at each character, a branch on its colour that
+  mispredicts at every token. AVX2 now looks up sixteen classes' colours with one `pshufb`, carries
+  the colour over spaces by a doubling scan (lanes 1, 2, 4, 8 back, then the colour from the step
+  before), and writes a run for each bit where a character's colour differs from the one before;
+  the vector of runs is sized once and the painters take a count. Instructions code-heavy -1.3 %,
+  others 0.0 to -0.2 %; perf cycles code-heavy -4.1 to -4.8 %, README -1.6 to -1.9 % (3 runs);
+  ab time code-heavy -4.4 %, README -1.5 %. 400 generated documents of code blocks (27 fence
+  languages, deep indents, blank-filled lines, tabs, non-ASCII, `--black-text`, `--pdfua`,
+  `--no-highlight`) identical. Core check 134 compares it with the loop. Text +4 KB.
+  Then the last step of a line overlaps the one before instead of ending a character at a time,
+  and the colours of the 16 classes are one table (`kCodeColorOfClass`, 16 entries), not copied
+  each call: code-heavy -1.5 % instructions, perf cycles -2.4 to -3.1 %, ab time -3.5 %.
+- **A code block's line feeds found in its bytes** (`RenderHighlightedCode`): `wmemchr` over the
+  wide text read four bytes a unit; the lexer's bytes (the block, or a byte a unit for non-ASCII
+  text) have the line feeds at the same indices. code-heavy -0.8 % instructions, perf cycles -0.6
+  to -0.8 %, ab time -1.1 %.
+- **Tables with formulas** (`RenderMathTable`): every cell's math text bytes were looked for with
+  `std::string::find`, libstdc++'s out-of-line copy that then calls `memchr` (now `memchr`
+  itself: table-heavy -0.9 % instructions); every line of every cell was measured for its
+  placement, which only a centred or right-aligned column uses (now only there, as `RenderTable`
+  does: table-heavy -2.6 % instructions, perf cycles -1.3 %). The Unicode renderer's
+  `WrapMathCell`, which runs for every cell of such a table, is no longer cold (optimized for
+  size): table-heavy -1.9 % instructions, cycles -2.4 %, ab time -2.2 %, its code +0.7 KB.
+  `RenderMathTable` itself, likewise: table-heavy -1.4 % instructions, cycles -0.4 %, ab time
+  -0.5 %, others +0.01 to +0.08 % (layout), text +4 KB.
+- **The lexer's words end by a bit scan** (`Text::WordEnd`, highlight.cpp): `CodeLexer::Run`'s and
+  `Word`'s loops over word bytes ended at a branch that mispredicts at every word; SSE2 now tests
+  sixteen bytes (letters, digits, '_', bytes from 0x80) and takes the first other one, while the
+  load ends inside the text. code-heavy -0.3 % instructions, perf cycles -3.0 to -3.1 %, ab time
+  -3.2 %; README +0.05 % instructions, cycles -0.2 %. The same in the lexer's rarer word loops
+  (variables, heredocs, attributes, line starts) cost code-heavy +0.12 % instructions; not taken.
+
 ## After 4.6.1: formula fonts, tables, fallback fonts, images, code, static start
 
 Measured together on 2026-10-14 against 4.6.1, both built with g++ 13.3 (Release), CPU 3,
@@ -527,6 +631,17 @@ but regresses larger documents, batch/serve throughput, memory, or package size
 must be fixed, isolated behind an opt-in/separate package, or documented as a
 deliberate tradeoff.
 
+Where the bytes go: relink without `-s` and with `-Wl,-Map,FILE`, then sum the input sections
+of the map per object (archive members show which runtime pieces a symbol pulled in, and why:
+"Archive member included to satisfy reference by file (symbol)"); `symdiff.py` for functions.
+The 2026-10-19 cuts, dynamic Linux binary with GCC 13 (GCC 11, the release runners' compiler,
+in brackets): 1,740,064 (1,727,720) bytes in 5.2.2; no exceptions, RTTI or unwind tables
+-221,176; libstdc++'s terminate handler (the demangler) -61,440; `__builtin_cpu_supports`
+(libgcc's cpuinfo) -4,096; the command lines at `-Os` and the batch sorted as indices -61,440;
+tag names and Mermaid tables without relocations -4,096; the PNG filters' scalar ends -36,864;
+no unwinder (`src/cli/no_unwind.cpp`, `no_unwind.ld`) -57,976: 1,292,976 (1,297,008). MinGW: no
+`-fdata-sections` (zero statics written as data) -316 KB, no string streams in the CLI -65 KB.
+
 Keep the candidate comparable to its baseline: same suite, seed, style, margin,
 image mode, worker count, compiler, build type, and storage. Linux release
 claims should use native/ext4 storage. Label WSL `/mnt/*` results explicitly.
@@ -606,13 +721,33 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
   is assembled in place around it in `BuildInto`: no string per page and no second
   copy (7 to 15 % of a warm build on Windows when it was one). The move of every
   page's content to its final place is the one copy left.
-- Operators are written through `TailWriter`: an operation whose upper bound fits
-  1 KB writes into a thread-local buffer and appends what it wrote (no zero-fill);
-  a larger bound, a nested writer and Windows (MinGW's `thread_local` is a call)
-  reserve the bound in the string, which zero-fills it. Numbers are formatted from
-  digit-pair tables (`WriteFixed2`), not library calls. Writing a whole outline
-  through one zero-filled tail evicted L1, so outline entries go through a scratch
-  buffer that stays in L1.
+- Operators are written through `TailWriter` straight into the end of the string: room
+  for the operation's upper bound is reserved (one capacity test), the bytes are written
+  through a pointer and the destructor sets the size. A std::string grows without filling
+  through `ResizeForOverwrite` (libstdc++'s `_M_set_length`, reached by an explicit
+  instantiation; other libraries `resize`), which `BuildInto` also uses for the file's
+  growth. Until 5.2.2 an operation wrote into a 1 KB thread-local buffer and appended it
+  (`_M_append` and a `memcpy` an operation), and Windows zero-filled the bound; writing
+  directly saved 1.2 to 3.4 % of a warm build's instructions and 0.8 to 4.2 % of its cycles
+  (perf stat; callgrind, which counts every byte of a fill, 3.2 to 18 %). Nothing
+  else may change the string while a writer is open on it. Numbers are formatted from
+  digit-pair tables (`WriteFixed2`), not library calls. Outline entries go through a
+  scratch buffer that stays in L1. Colour operands travel as `std::string_view` (the palette,
+  `RunColors`, `CodeColor`, `CodeLineTile`, the paint functions' parameters), so no paint runs
+  `strlen` on its colour or font name (-0.1 to -1.0 % instructions; `strlen` had 1.8 % of README's
+  cycles).
+- Formulas (`MathFormula::Emit`, `math_layout.cpp`) write their operators through `OpWriter`, a
+  2 KB stack buffer appended when full and at the end, never piece by piece (`push_back` a glyph
+  byte, `operator+=` with a `strlen` a literal: 15.7 % of tester-noimg's instructions, now 7.9 %).
+  Its small members are always inlined even at `-Os` (-1.5 % more on tester-noimg, 850 bytes).
+- `WriteFixed2` (2026-10-19): one range test (`< 999999.5` hundredths; the rest, NaN and
+  infinities in the cold `WriteFixed2Wide`, the code it had), an `int` conversion instead of the
+  unsigned 64-bit one (no sign fix-up), `-` written always and the pointer advanced by the sign
+  bit, and ".dd" always written with its length computed (0, 2 or 3 bytes). Identical on 32 M
+  test values (every hundredth to ±20,000 and its neighbours, the half-way points, random bit
+  patterns); in the engine -0.35 to -2.08 % instructions and -0.1 to -2.2 % time on every
+  fixture. A fully branch-free integer part (four digits shifted by their leading zeros) took as
+  many instructions as the branches and more time (scratch benchmark on 191,870 logged inputs).
 - A paragraph is asked once whether its text needs escaping in a PDF literal
   (`HasLiteralSpecial`, SSE2; the plain-text path reuses the classes
   `NeedsInlineParse` summed); its runs are then copied as they are.
@@ -649,6 +784,17 @@ case found so far took seconds for 40,000 to 200,000 openers).
 
 Findings that could make RayoMD faster later, with the evidence and the reason
 they were not taken yet. Add to this list when a change turns one up.
+
+**`std::filesystem` out of the build (size).** MinGW's libstdc++.a has no per-function
+sections, and its `fs_path.o` and `fs_ops.o` pull the codecvt facets, the locale's
+initialisation and with it every facet, `fstream`, `istream` and `ostream` (`copy_file` uses a
+`filebuf`): a MinGW program of one `std::wstring` is 214 KB, with one `std::filesystem::path`
+operation 1,247 KB, with one `file_size` 1,310 KB (GCC 13, `-O2 -static -Wl,--gc-sections`,
+2026-10-19). In `rayomd.exe` (2.32 MB) about 650 to 700 KB are that code. On Linux the same
+members are 69 KB (`fs_path.o` 35 KB, `fs_ops.o` 19.5 KB, `fs_dir.o` 14 KB). Taking it out
+means a small path and folder layer in `RayoMd::File` for every user of `std::filesystem`
+(`tiny_pdf.cpp`, `book.cpp`, `vault.*`, `file_io.*`, `batch_report.*`, `image_cache.cpp`, both
+command lines).
 
 **RayoMD's encoder against ISA-L.** Compressing the colour is the longest stage
 of a new image: 4.2 ms of the mascot's 8.7 on one CPU, where ISA-L's level 1
@@ -744,12 +890,11 @@ notices would save about 10 KB per Unicode PDF.
 to export (no growth after the first), so only a single export grows it; outline entries
 could format their consecutive object numbers once (about 250 instructions a heading).
 
-**`BuildInto` zero-fills what it then overwrites.** `pdf.resize(total)` fills the file's growth
-(polish.md: 31 KB, mostly the font subset copied in after) with zeros first: 1.7 % of a warm
-polish build. C++23's `resize_and_overwrite` would avoid it; C++17 has no growth without filling.
-The remaining per-export allocations are the parser's block strings, the dictionaries moved into
-`PdfObjects` (a head kept per object would need callers to write into it) and `WrapText`'s
-vector of lines for headings and image fallbacks.
+**Per-export allocations.** `BuildInto` grows the file without filling it now
+(`ResizeForOverwrite`, see *Buffers and the content stream*). The remaining per-export
+allocations are the parser's block strings, the dictionaries moved into `PdfObjects` (a head kept
+per object would need callers to write into it) and `WrapText`'s vector of lines for headings and
+image fallbacks.
 
 **Phase 2 items left open (2026-10-13).** The fresh-process leftovers (read() into the input
 string, the 1 MB buffer and font mapping left to exit) and the renderers in translation units of
@@ -787,10 +932,9 @@ them, at a change of `RenderTable`'s loop that untagged documents must not pay f
 Placing content where it ends up needs another object order, which changes the
 bytes.
 
-**The ASCII word loop.** `WrapAsciiInline`'s byte loop (a table load, a zero test
-and a bound test per byte) mispredicts once per word: about 40 % of the essay's
-branch misses. Removing that took more instructions than it saved (see *Tried and
-rejected*); a cheaper branch-free sum of a word's advances would be needed.
+**The ASCII word loop.** Done in round 2 (`MeasureWords`, above). Left: texts under 16 bytes
+keep the byte loop, and `WrapAsciiInline` still parses, builds segments and copies run text per
+paragraph.
 
 **The Unicode word loop.** `ScanWideWord` is about 18 instructions a character, bound by its
 chain of `addsd`; `WrapStyledInline` spends about 120 more a word (run bookkeeping, line
@@ -842,6 +986,39 @@ Text and layout:
   essay (the tail switch mispredicts). Words of up to 8 bytes summed without a
   length branch (16 bytes compared, the rest blanked to spaces): -29 % branch
   misses, +11 % instructions, cycles even, L1i misses x2.7.
+- `MeasureWords` (2026-10-19), what did not make it: every text through the vector pass, short
+  ones in a path of their own behind the call (notes +1.36 % instructions: about 100 instructions
+  a table cell against the byte loop's 50; the byte loop below 16 bytes is kept); the byte loop up
+  to 32 bytes (notes +0.59 %) or 8 (+1.22 %); positions written eight at a time by `tzcnt` rounds
+  (5 instructions an edge, about 20 edges a 64-byte step of prose; the table, 8 a mask byte, is
+  kept: essay -1.2 % more); the short loop inside each `WrapAsciiWords` instantiation (four copies,
+  +5 KB, before `BreakAsciiWords`); the measure buffers a member of `AsciiRuns` (the standard
+  renderer's constructor went out of line, +6 KB; they are the thread's `WrapScratch`).
+- `WriteCidText`'s plain CIDs copied in AVX2 (2026-10-19): eight units a step with their plain
+  bits gathered (README -3.8 %, code-heavy -4.7 % instructions, but the function's cycles +35 %:
+  Zen 2's `vpgatherdd` is microcoded); sixteen ASCII units a step looked up in a register (no
+  gather): README -3.2 %, code-heavy -3.9 %, polish +1.0 % instructions, the function's cycles
+  -9 % on code-heavy and +10 % on README; only runs of 32 units or more: table-heavy +1.6 %
+  instructions (inlining) and the same split of cycles. Four plain units tested together and
+  stored as one 8-byte word, scalar: README +1.9 %, code-heavy +3.2 %, table-heavy +1.5 %
+  instructions, cycles +1.6 to +2.1 %. The scalar loop, a bit test and a store a unit, stays.
+- `NeedsInlineParse`'s byte classes 32 bytes a step in AVX2 (2026-10-19): two pairs of nibble
+  tables (`vpshufb`) giving 13 blocks of bytes of one class, ORed over the text, for text from 64
+  bytes: instructions essay -2.3 %, README -0.3 %, and essay cycles -2.3 % in the release build,
+  but even (+0.15 %, 0.00 %, +0.27 %, 21 runs each) in builds with functions and loops aligned
+  (`-falign-functions=64 -falign-loops=32`): the table loop's loads overlap the work around them,
+  and the gain was the layout's. tester-noimg +0.3 to +1.1 % cycles. Not taken.
+- The highlight lexer's first tests of a byte (line feed, space, word) as a `switch` on a table of
+  byte kinds (2026-10-19), so that a word not at a line start went straight to `Word`: code-heavy
+  +1.7 % instructions, +2.2 to +2.6 % cycles. The tests one after another stay.
+- `MeasureWideWords` without the gather (2026-10-19): the eight widths of a step loaded one at a
+  time from the cache, summed in a register, an uncached one sending the step to the unit loop:
+  cycles even (README -0.0 %, table-heavy -0.3 %, tester-noimg +0.2 %), instructions README
+  +3.1 %, table-heavy +2.8 %, polish +3.0 %. Unlike the standard renderer's sums the wide gather
+  stays.
+- Tables with formulas, cells read once for their byte classes (inline syntax, and control bytes
+  for the math text bytes) instead of `ContainsByteClass` then two `memchr`: table-heavy +0.9 %
+  instructions; a byte loop for the two math text bytes in place of the two `memchr`: +1.4 %.
 - Keeping the default font alive at exit: 1 to 2 % less CPU, no faster by the
   clock (ending the one-shot export with `_Exit`, which skips all of the teardown, is
   kept). Loading the cmap block by block: 10 of 156 faults, a test per glyph
@@ -887,6 +1064,17 @@ Text and layout:
   appends (2026-10-18): perf -0.14 % instructions on 306 notes, but the note's copy of unknown
   length in a cold function became `rep movsb` (callgrind 2.8 times the function's cost). The
   appends are kept.
+- Page footnotes, measuring a note taller than a page only as far as needed (2026-10-19): its
+  blocks laid out one at a time, each moved into a vector of one, stopping a point below the
+  height that no page holds (mixed-u, page over end, +3.34 % against +3.73 % for the stop kept, the
+  same build otherwise), but 1.7 KB of
+  code (`Block`'s move assignment and swap) and blocks that move while laid out; kept is a stop
+  through the cancel flag half a page lower (+0.5 KB). The notes' kept buffer in the slot of
+  `AddOutline`'s scratch, so that no second thread-local string is made: `KeptLocal` went out of
+  line in `AddOutline` too, a call on every export with headings; it has a slot of its own.
+  `TtfFont::IsComposite` always inlined, to keep 5.2.2's choice once the page-footnote templates
+  left `tiny_pdf.cpp` (+0.004 % on README there): on integ2, where GCC leaves it out of line, the
+  same cost polish +0.02 %, README +0.01 %.
 - Long pages (2026-10-18): a five-digit fast path in `WriteFixed2` for their coordinates up to
   14,400 moved GCC's inlining (+0.2 to +0.4 % instructions on fixed pages); their top is at 9,900
   instead (`kLongPageTop`). The renderers' page setup out of line (`SetPageSize`, the long-page
@@ -914,6 +1102,38 @@ README.md, 18.8 % before and 3.9 % kept):
   own (57 K, +1.2 KB of code); `NextTag` inlined (a 5 KB note dense with tags 1.2 K a build cheaper,
   +490 bytes); the next tag taken from the next '#' found for each line (that note +0.6 %).
 
+Binary size (2026-10-19):
+
+- `png_filter.cpp` at `-O2` without rewriting the row ends: 37 KB less, but the mascot's export
+  +3.84 % instructions (callgrind): the scalar ends out of line in `FilterCosts::Add`, the Paeth
+  pair loop +0.74 M. Kept only with the vector row ends and the peeled loop (-3.4 %).
+- `no_unwind.cpp` in the static build: glibc's libc.a links libgcc's unwinder for thread
+  cancellation, so `_Unwind_Resume` is defined twice. The static build keeps libstdc++'s runtime.
+- Not measured, excluded by their requirements: `-Oz` for the `-Os` units (GCC 12 or newer; the
+  release runners' GCC 11 rejects it) and `-z pack-relative-relocs` (DT_RELR, most of the 11 KB
+  of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release runs on).
+
+Note embeds and linked notes (2026-10-19; per embed against the same text inline, perf stat,
+100 embeds of small notes: warm 10.2 K instructions and 4.9 µs before the process's note cache,
+10.5 K and 3.4 µs with it, of which about 6.8 K the resolver's lookups and copies, 3.4 K the note's
+own parse and 0.75 K its `<!---->` line in the document's):
+
+- The embed line as an empty line instead of `<!---->` (0.75 K an embed less): an empty line does
+  not end an indented code block, a list item followed by indented text, or an HTML block of
+  CommonMark's kinds 1 to 5, and a comment does; the bytes would change for such documents.
+- One parse of the document with every note's text in place of its embed line (no parse per
+  note, about 1.1 K an embed, no splice): each note's link definitions would apply to the others
+  and to the document, and a note that leaves a fence, an HTML block, a display formula or an
+  Obsidian comment open would swallow what follows it, which its own parse contains.
+- Skipping Obsidian's rewrite for notes without its syntax: `RewriteObsidian`'s first test,
+  `FindSyntaxPair` (SSE2), is that check, 0.4 K a note of 90 bytes.
+- The name index ordered by `std::sort`: 1.35 KB of instantiations against a Shell sort of the
+  same total order, which runs once per change of the vault.
+- The process cache's notes and roots in maps of their own value types: 1.2 KB more than slots of
+  a vector behind the `unordered_map<std::string, int>` the parser already instantiates.
+- A cold export pays for the cache: 2.2 K instructions a note more than without it (the copies of
+  its path and the slot), 0.9 µs; a warm build saves three of a note's four system calls.
+
 Images and compression:
 
 - zlib at levels 1 to 9, zlib-ng 2.3.3, libdeflate 1.26 (levels 1 to 12) and ISA-L
@@ -940,6 +1160,9 @@ Images and compression:
   relative relocations), 17 to 48 µs with `-z noseparate-code`, but the executable loses
   address randomisation, and RayoMD reads untrusted Markdown, SVG and PNG input. Not taken;
   the static edition is the fast-start option.
+- `src/hot.ld` regenerated after the second optimization round (2026-10-19, 999 sections):
+  warm time +0.38 % geomean (code-heavy +1.21 %, table-heavy +1.09 %, notes +1.08 %), fresh
+  exports +0.26 % against the list of `e4bdc54`, which stays.
 
 ## Keeping the release light
 
