@@ -68,6 +68,6 @@ std::vector<std::string> ThemeBandStreams(const PdfTheme& theme, bool pageNumber
 // rule in `ruleColor` (PDF colour operands), the subject, and the author and the date near the
 // foot. What the document does not give is left out.
 std::string ThemeCoverStream(const ThemeDocument& document, const ThemePage& page, const ThemeLogoImage& logo,
-    const ThemeTextFont& font, const char* headingColor, const char* ruleColor);
+    const ThemeTextFont& font, std::string_view headingColor, std::string_view ruleColor);
 
 } // namespace TinyPdf::Internal

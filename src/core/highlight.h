@@ -52,7 +52,7 @@ constexpr uint8_t kCodeColorOfClass[kCodeClassCount] = { 0, 1, 2, 3, 4, 3, 5, 3,
 std::string_view CodeColor(uint8_t colorIndex);
 
 // The tile behind a line whose first byte has class `codeClass`: a diff's added and removed lines
-// are tinted; null for the others, which keep the tile of the code block.
-const char* CodeLineTile(uint8_t codeClass);
+// are tinted; empty for the others, which keep the tile of the code block.
+std::string_view CodeLineTile(uint8_t codeClass);
 
 } // namespace TinyPdf::Internal

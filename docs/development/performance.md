@@ -606,13 +606,33 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
   is assembled in place around it in `BuildInto`: no string per page and no second
   copy (7 to 15 % of a warm build on Windows when it was one). The move of every
   page's content to its final place is the one copy left.
-- Operators are written through `TailWriter`: an operation whose upper bound fits
-  1 KB writes into a thread-local buffer and appends what it wrote (no zero-fill);
-  a larger bound, a nested writer and Windows (MinGW's `thread_local` is a call)
-  reserve the bound in the string, which zero-fills it. Numbers are formatted from
-  digit-pair tables (`WriteFixed2`), not library calls. Writing a whole outline
-  through one zero-filled tail evicted L1, so outline entries go through a scratch
-  buffer that stays in L1.
+- Operators are written through `TailWriter` straight into the end of the string: room
+  for the operation's upper bound is reserved (one capacity test), the bytes are written
+  through a pointer and the destructor sets the size. A std::string grows without filling
+  through `ResizeForOverwrite` (libstdc++'s `_M_set_length`, reached by an explicit
+  instantiation; other libraries `resize`), which `BuildInto` also uses for the file's
+  growth. Until 5.2.2 an operation wrote into a 1 KB thread-local buffer and appended it
+  (`_M_append` and a `memcpy` an operation), and Windows zero-filled the bound; writing
+  directly saved 1.2 to 3.4 % of a warm build's instructions and 0.8 to 4.2 % of its cycles
+  (perf stat; callgrind, which counts every byte of a fill, 3.2 to 18 %). Nothing
+  else may change the string while a writer is open on it. Numbers are formatted from
+  digit-pair tables (`WriteFixed2`), not library calls. Outline entries go through a
+  scratch buffer that stays in L1. Colour operands travel as `std::string_view` (the palette,
+  `RunColors`, `CodeColor`, `CodeLineTile`, the paint functions' parameters), so no paint runs
+  `strlen` on its colour or font name (-0.1 to -1.0 % instructions; `strlen` had 1.8 % of README's
+  cycles).
+- Formulas (`MathFormula::Emit`, `math_layout.cpp`) write their operators through `OpWriter`, a
+  2 KB stack buffer appended when full and at the end, never piece by piece (`push_back` a glyph
+  byte, `operator+=` with a `strlen` a literal: 15.7 % of tester-noimg's instructions, now 7.9 %).
+  Its small members are always inlined even at `-Os` (-1.5 % more on tester-noimg, 850 bytes).
+- `WriteFixed2` opportunity (2026-10-19, not taken yet): one range test (`< 999999.5`
+  hundredths, the rest in a cold function with today's code), an `int` conversion instead of the
+  unsigned 64-bit one, `-` written always and the pointer advanced by the sign bit, and the
+  fraction written as one 4-byte store with its length computed: identical on 32 M test values
+  (every hundredth to ±20,000 and its neighbours, the half-way points, random bit patterns),
+  -10 % instructions and fewer cycles on 191,870 logged real inputs. A fully branch-free integer
+  part (four digits shifted by their leading zeros) took as many instructions as today's code and
+  more time.
 - A paragraph is asked once whether its text needs escaping in a PDF literal
   (`HasLiteralSpecial`, SSE2; the plain-text path reuses the classes
   `NeedsInlineParse` summed); its runs are then copied as they are.
@@ -744,12 +764,11 @@ notices would save about 10 KB per Unicode PDF.
 to export (no growth after the first), so only a single export grows it; outline entries
 could format their consecutive object numbers once (about 250 instructions a heading).
 
-**`BuildInto` zero-fills what it then overwrites.** `pdf.resize(total)` fills the file's growth
-(polish.md: 31 KB, mostly the font subset copied in after) with zeros first: 1.7 % of a warm
-polish build. C++23's `resize_and_overwrite` would avoid it; C++17 has no growth without filling.
-The remaining per-export allocations are the parser's block strings, the dictionaries moved into
-`PdfObjects` (a head kept per object would need callers to write into it) and `WrapText`'s
-vector of lines for headings and image fallbacks.
+**Per-export allocations.** `BuildInto` grows the file without filling it now
+(`ResizeForOverwrite`, see *Buffers and the content stream*). The remaining per-export
+allocations are the parser's block strings, the dictionaries moved into `PdfObjects` (a head kept
+per object would need callers to write into it) and `WrapText`'s vector of lines for headings and
+image fallbacks.
 
 **Phase 2 items left open (2026-10-13).** The fresh-process leftovers (read() into the input
 string, the 1 MB buffer and font mapping left to exit) and the renderers in translation units of
