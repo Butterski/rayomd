@@ -1181,6 +1181,27 @@ RAYOMD_NOINLINE static void StampSourceLines(std::vector<Block>& blocks, size_t&
     }
 }
 
+// The text of a fenced block's lines [first, end) into `text`, each followed by '\n' but the last
+// of `lines`: one copy of the source where the lines lie in it as they are (no '\r' was taken off
+// their ends), else an append a line. Out of line, as ParseMarkdownImpl's growth moves GCC's inlining.
+static RAYOMD_NOINLINE void FenceText(const std::vector<std::string_view>& lines, size_t first, size_t end,
+    std::string& text) {
+    if (first == end) return;
+    const char* const begin = lines[first].data();
+    const char* next = begin;
+    for (size_t index = first; index < end && next != nullptr; index++) {
+        next = lines[index].data() == next ? lines[index].data() + lines[index].size() + 1 : nullptr;
+    }
+    if (next != nullptr && (end == lines.size() || lines[end].data() == next)) {
+        text.assign(begin, static_cast<size_t>(next - begin) - (end == lines.size() ? 1 : 0));
+        return;
+    }
+    for (size_t index = first; index < end; index++) {
+        text.append(lines[index].data(), lines[index].size());
+        if (index + 1 < lines.size()) text += "\n";
+    }
+}
+
 static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth, FootnoteParse* notes) {
     LevelLines level(depth);
     std::vector<std::string_view>& lines = level.lines;
@@ -1351,13 +1372,8 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             const std::string_view infoString = trimmed.substr(fence.size());
             const bool mathFence = IsMathFenceInfo(infoString);
             const size_t firstContent = i + 1;
-            std::string text;
             i++;
-            while (i < lines.size() && !IsMatchingClosingFence(infos[i], fence)) {
-                text.append(lines[i].data(), lines[i].size());
-                if (i + 1 < lines.size()) text += "\n";
-                i++;
-            }
+            while (i < lines.size() && !IsMatchingClosingFence(infos[i], fence)) i++;
             const size_t contentEnd = i;
             const bool closed = i < lines.size();
             if (i < lines.size()) i++;
@@ -1371,7 +1387,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 }
             }
             Block& code = AppendBlock(blocks, BlockType::Code);
-            code.text = std::move(text);
+            FenceText(lines, firstContent, contentEnd, code.text);
             if (!infoString.empty()) code.codeLanguage = FenceLanguage(infoString);
             continue;
         }
