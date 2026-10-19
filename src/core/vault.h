@@ -23,6 +23,12 @@ namespace TinyPdf::Internal {
 // its "\\?\" prefix): the standard library there resolves no link.
 std::string ResolvedPath(std::string_view path);
 
+#ifdef _WIN32
+// ResolvedPath for a path that may hold a name with no UTF-8 form (an unpaired surrogate, which
+// NTFS allows): the resolved path as Windows gives it, empty when it names nothing.
+std::filesystem::path ResolvedWidePath(const std::filesystem::path& path);
+#endif
+
 // The folder of the file at `path`: up to its last separator, or its root ("/", "C:\"); empty for
 // a bare name. As std::filesystem::path::parent_path() gives it for a path that ends in a name.
 std::string_view ParentOf(std::string_view path);

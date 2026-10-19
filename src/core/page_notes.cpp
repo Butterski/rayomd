@@ -187,7 +187,7 @@ private:
     const NoteHost& h;
     const double y, margin, bottom, bodySize, lineHeight;
     const int listDepth;
-    const char* const quoteBar;
+    const std::string_view quoteBar;
     std::vector<SourceBlock>* const sourceMap;
 };
 

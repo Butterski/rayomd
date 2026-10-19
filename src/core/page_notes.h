@@ -241,9 +241,9 @@ struct NoteHost {
     double& pageH;
     double& fullH;
     int& listDepth;
-    const char*& quoteBar;
-    const char* plainQuoteBar;
-    const char* ruleColor;
+    std::string_view& quoteBar;
+    std::string_view plainQuoteBar;
+    std::string_view ruleColor;
     std::vector<SourceBlock>*& sourceMap;
     std::string& content;
     std::vector<std::vector<LinkRect>>& pageLinks;
@@ -258,7 +258,7 @@ struct NoteHost {
     // it aside and returns whether the build is tagged (no note is replayed then), else puts it back.
     bool (*measure)(PageNoteBase& notes, bool begin);
     uint64_t (*imageMark)(PageNoteBase& notes);   // the images and failed images so far
-    void (*rule)(std::string& content, const char* color, double x, double y, double length);
+    void (*rule)(std::string& content, std::string_view color, double x, double y, double length);
     const std::atomic<bool>* cancel;              // the build's PdfOptions::cancel (BuildCancelled), or nullptr
 };
 

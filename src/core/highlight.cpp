@@ -2036,10 +2036,10 @@ std::string_view CodeColor(uint8_t colorIndex) {
     return colorIndex < sizeof(kColors) / sizeof(kColors[0]) ? kColors[colorIndex] : kColors[0];
 }
 
-const char* CodeLineTile(uint8_t codeClass) {
+std::string_view CodeLineTile(uint8_t codeClass) {
     if (codeClass == kCodeInserted) return ".855 .984 .882";
     if (codeClass == kCodeDeleted) return "1 .922 .914";
-    return nullptr;
+    return {};
 }
 
 } // namespace TinyPdf::Internal

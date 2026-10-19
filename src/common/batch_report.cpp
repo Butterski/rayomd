@@ -161,9 +161,19 @@ bool CollectMarkdown(const fs::path& inputDir, const fs::path& outputDir, bool r
         error = iterError.message();
         return false;
     }
-    std::sort(files.begin(), files.end(), [](const File& left, const File& right) {
-        return RayoMd::File::PathToUtf8(left.input) < RayoMd::File::PathToUtf8(right.input);
-    });
+    // In the order of their UTF-8 names, each made once: sorted as indices, as a sort of the files
+    // themselves (two paths each) took 20 KB of code.
+    std::vector<std::string> names(files.size());
+    std::vector<size_t> order(files.size());
+    for (size_t i = 0; i < files.size(); i++) {
+        names[i] = RayoMd::File::PathToUtf8(files[i].input);
+        order[i] = i;
+    }
+    std::sort(order.begin(), order.end(), [&names](size_t left, size_t right) { return names[left] < names[right]; });
+    std::vector<File> sorted;
+    sorted.reserve(files.size());
+    for (const size_t index : order) sorted.push_back(std::move(files[index]));
+    files = std::move(sorted);
     return true;
 }
 
