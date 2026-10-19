@@ -1065,6 +1065,12 @@ GitHub CI entry points:
   that grows by pieces through `TailWriter`, not per-byte `push_back`. A `TailWriter` writes
   past the string's size until it ends: nothing else may append to that string meanwhile. Grow
   a string that is then written whole with `ResizeForOverwrite`, not `resize` (which fills it).
+- `math_parser.cpp`, `math_layout.cpp` and `cff.cpp` stay at `-Os` but take GCC's
+  `small_step_options` (`CMakeLists.txt`): `-mstringop-strategy=vector_loop` and
+  `--param=max-inline-insns-size=12`. At plain `-Os` their small struct copies and zeroing are
+  `rep movs`/`rep stos` and every one-line helper a call (tester.md x700 10.8 % slower). A unit
+  that runs a step a node or a glyph and must stay small belongs there, not at `-O2` (52 KB for
+  math). `MathFormula::Layout`'s parse arena is the thread's (`RAYOMD_THREAD_OBJECT`).
 - Keep image caches bounded. Image support can dominate memory on large or many
   remote images.
 - Linux benchmarks are much faster on native/ext4 storage than on `/mnt/*` WSL
