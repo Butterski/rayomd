@@ -115,6 +115,10 @@ linked notes) identical.
   Then the last step of a line overlaps the one before instead of ending a character at a time,
   and the colours of the 16 classes are one table (`kCodeColorOfClass`, 16 entries), not copied
   each call: code-heavy -1.5 % instructions, perf cycles -2.4 to -3.1 %, ab time -3.5 %.
+- **A code block's line feeds found in its bytes** (`RenderHighlightedCode`): `wmemchr` over the
+  wide text read four bytes a unit; the lexer's bytes (the block, or a byte a unit for non-ASCII
+  text) have the line feeds at the same indices. code-heavy -0.8 % instructions, perf cycles -0.6
+  to -0.8 %, ab time -1.1 %.
 - **The lexer's words end by a bit scan** (`Text::WordEnd`, highlight.cpp): `CodeLexer::Run`'s and
   `Word`'s loops over word bytes ended at a branch that mispredicts at every word; SSE2 now tests
   sixteen bytes (letters, digits, '_', bytes from 0x80) and takes the first other one, while the
@@ -978,6 +982,9 @@ Text and layout:
   -9 % on code-heavy and +10 % on README; only runs of 32 units or more: table-heavy +1.6 %
   instructions (inlining) and the same split of cycles. The scalar loop, a bit test and a store
   a unit, stays.
+- The highlight lexer's first tests of a byte (line feed, space, word) as a `switch` on a table of
+  byte kinds (2026-10-19), so that a word not at a line start went straight to `Word`: code-heavy
+  +1.7 % instructions, +2.2 to +2.6 % cycles. The tests one after another stay.
 - Keeping the default font alive at exit: 1 to 2 % less CPU, no faster by the
   clock (ending the one-shot export with `_Exit`, which skips all of the teardown, is
   kept). Loading the cmap block by block: 10 of 156 faults, a test per glyph

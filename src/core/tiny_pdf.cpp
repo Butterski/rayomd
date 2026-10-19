@@ -9310,6 +9310,9 @@ private:
         std::string_view body(text);
         if (body.size() >= 3 && memcmp(body.data(), "\xEF\xBB\xBF", 3) == 0) body.remove_prefix(3);   // as SplitLines
         std::wstring& wide = codeWide;
+        // The bytes the lexer reads, a unit of `wide` each: its line feeds are found there, in a
+        // quarter of the bytes.
+        std::string_view narrow = body;
         if (IsAllAscii(body)) {
             // The lexer reads the block as it is; the units drawn are its bytes, a tab as a space.
             wide.resize(body.size());
@@ -9326,6 +9329,7 @@ private:
             }
             codeClasses.resize(wide.size());
             Internal::ClassifyCode(language, codeText, codeClasses.data());
+            narrow = codeText;
         }
         const double size = 9.5;
         const double lh = size * 1.35;
@@ -9339,8 +9343,8 @@ private:
         // million characters. Summing stops past limitUnits, where no such line can end.
         const uint64_t limitUnits = width > 0.0 ? (uint64_t)(width / scale) + 1 : 0;
         for (size_t start = 0;;) {
-            size_t end = wide.find(L'\n', start);
-            const bool last = end == std::wstring::npos;
+            size_t end = narrow.find('\n', start);
+            const bool last = end == std::string_view::npos;
             if (last) end = wide.size();
             const size_t lineEnd = end > start && wide[end - 1] == L'\r' ? end - 1 : end;   // as SplitLines
             const std::string_view tile = Internal::CodeLineTile(lineEnd > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
