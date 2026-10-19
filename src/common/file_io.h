@@ -4,12 +4,13 @@
 
 // Whole-file reads and writes through C stdio. RayoMD does not use iostreams: statically linked,
 // their locale and stream code adds about 460 KB to the command line program. Paths open as
-// wide strings on Windows.
+// wide strings on Windows (path.h).
+
+#include "path.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,7 +21,7 @@ namespace RayoMd::File {
 
 // fopen of `path` with fopen's mode ("rb", "wb"), close-on-exec; null when it cannot be opened. A
 // read mode opens only a regular file (OpenRegular).
-std::FILE* Open(const std::filesystem::path& path, const char* mode);
+std::FILE* Open(const Path& path, const char* mode);
 
 // The regular file at `path` opened for reading, close-on-exec, its size in `size`; a FIFO, a
 // device, a socket or a directory is refused before anything can wait on it: on POSIX the open is
@@ -28,9 +29,9 @@ std::FILE* Open(const std::filesystem::path& path, const char* mode);
 // blocking again; on Windows GetFileType must say FILE_TYPE_DISK. A file descriptor, -1 when it
 // cannot (POSIX), or a HANDLE, INVALID_HANDLE_VALUE when it cannot (Windows, as intptr_t).
 #ifdef _WIN32
-intptr_t OpenRegular(const std::filesystem::path& path, uint64_t& size);
+intptr_t OpenRegular(const Path& path, uint64_t& size);
 #else
-int OpenRegular(const std::filesystem::path& path, uint64_t& size);
+int OpenRegular(const Path& path, uint64_t& size);
 #endif
 
 struct FileIdentity;
@@ -47,8 +48,8 @@ bool SeekTo(std::FILE* file, long long offset);
 
 // The whole regular file (OpenRegular), at most `maximum` bytes; false when it cannot be read, is
 // larger, or is no regular file.
-bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content);
-bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint8_t>& content);
+bool ReadAll(const Path& path, size_t maximum, std::string& content);
+bool ReadAll(const Path& path, size_t maximum, std::vector<uint8_t>& content);
 
 // Which file ReadAll opened, the same for each of its names (links, letter case, "a/../a"): its
 // device and inode (POSIX) or volume serial number and file index (Windows); its size, also when
@@ -64,21 +65,21 @@ struct FileIdentity {
     bool opened = false;
 };
 // As ReadAll, and the identity of the file it opened.
-bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content, FileIdentity& identity);
+bool ReadAll(const Path& path, size_t maximum, std::string& content, FileIdentity& identity);
 
 // As ReadAll, for a `canonical` path (absolute, no symbolic link, no "." or ".."), and only while
 // it still names the file opened: on Linux the path the open descriptor names (/proc/self/fd/N)
 // must be `canonical`, else a directory of it was swapped for a link since the path was worked
 // out, and the file is refused. A check of a path and a later open of it by name cannot tell.
 // Elsewhere as ReadAll.
-bool ReadCanonical(const std::filesystem::path& canonical, size_t maximum, std::vector<uint8_t>& content);
+bool ReadCanonical(const Path& canonical, size_t maximum, std::vector<uint8_t>& content);
 
 // Creates or replaces `path` with `content`. On POSIX systems an existing file is overwritten in
 // place and then cut to size (no O_TRUNC; see file_io.cpp). `ownerOnly`: a new file only, readable
 // and writable by its owner (0600), on POSIX created exclusively and never through a symbolic link
 // (O_EXCL | O_NOFOLLOW), so a name planted before it (a link, another user's file) fails the write
 // instead of taking it; for temporary files of unique names, which are then renamed into place.
-bool WriteAll(const std::filesystem::path& path, std::string_view content, bool ownerOnly = false);
+bool WriteAll(const Path& path, std::string_view content, bool ownerOnly = false);
 
 // What the file at a path is now: its size, its last write, its last status change (POSIX) or
 // creation (Windows), and its identity (POSIX); all zero when there is none. A file rewritten or
@@ -95,16 +96,14 @@ struct Stamp {
     }
     bool operator!=(const Stamp& other) const { return !(*this == other); }
 };
-Stamp StampOf(const std::filesystem::path& path);
+Stamp StampOf(const Path& path);
 
-// The path a UTF-8 name names, and a path's name in UTF-8, without exceptions. On Windows,
-// std::filesystem::u8path, path(std::string), path::u8string and path::string convert between
-// UTF-8 and UTF-16 and throw on a sequence that is neither (invalid UTF-8 in a document's image
-// path or link, an unpaired surrogate in a file name): std::terminate where RayoMD is built
-// without exceptions. These make such a sequence U+FFFD instead, as MultiByteToWideChar and
-// WideCharToMultiByte do: the path then names no file but one with U+FFFD in its name. Elsewhere
-// the bytes are the path's, as with u8path.
-std::filesystem::path PathFromUtf8(std::string_view utf8);
-std::string PathToUtf8(const std::filesystem::path& path);
+// The path a UTF-8 name names, and a path's name in UTF-8. On Windows they convert between UTF-8
+// and UTF-16 as MultiByteToWideChar and WideCharToMultiByte do: a sequence that is neither
+// (invalid UTF-8 in a document's image path or link, an unpaired surrogate in a file name) becomes
+// U+FFFD, and the path then names no file but one with U+FFFD in its name. Elsewhere the bytes
+// are the path's.
+Path PathFromUtf8(std::string_view utf8);
+std::string PathToUtf8(const Path& path);
 
 } // namespace RayoMd::File

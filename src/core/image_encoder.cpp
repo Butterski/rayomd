@@ -3,6 +3,7 @@
 #include "image_encoder.h"
 
 #include "flate.h"
+#include "../common/thread_object.h"
 
 #include <algorithm>
 #include <atomic>
@@ -46,7 +47,7 @@ struct Segment {
 
 // The encoder's tables, one set per thread and kept from segment to segment.
 RayoMd::Flate::Scratch& ThreadScratch() {
-    static thread_local RayoMd::Flate::Scratch scratch;
+    RAYOMD_THREAD_OBJECT(RayoMd::Flate::Scratch, scratch);
     return scratch;
 }
 

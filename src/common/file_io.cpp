@@ -27,7 +27,7 @@
 namespace RayoMd::File {
 
 #ifdef _WIN32
-intptr_t OpenRegular(const std::filesystem::path& path, uint64_t& size) {
+intptr_t OpenRegular(const Path& path, uint64_t& size) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (file == INVALID_HANDLE_VALUE) return (intptr_t)INVALID_HANDLE_VALUE;
     LARGE_INTEGER length = {};
@@ -43,7 +43,7 @@ namespace {
 
 // OpenRegular, with what its fstat said. Out of line: inlined into each ReadAll it added 137
 // bytes to each.
-RAYOMD_NOINLINE int OpenStat(const std::filesystem::path& path, struct stat& info) {
+RAYOMD_NOINLINE int OpenStat(const Path& path, struct stat& info) {
     // Non-blocking, as opening a FIFO without a writer waits for one; made blocking again once
     // fstat says it is a regular file, where O_NONBLOCK means nothing anyway.
     const int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
@@ -58,7 +58,7 @@ RAYOMD_NOINLINE int OpenStat(const std::filesystem::path& path, struct stat& inf
 
 } // namespace
 
-int OpenRegular(const std::filesystem::path& path, uint64_t& size) {
+int OpenRegular(const Path& path, uint64_t& size) {
     struct stat info {};
     const int fd = OpenStat(path, info);
     if (fd >= 0) size = (uint64_t)info.st_size;
@@ -79,7 +79,7 @@ void IdentityOf(const struct stat& info, FileIdentity& identity) {
 }
 #endif
 
-std::FILE* Open(const std::filesystem::path& path, const char* mode) {
+std::FILE* Open(const Path& path, const char* mode) {
     char flags[8] = {};
     size_t length = 0;
     while (length + 2 < sizeof(flags) && mode[length]) {
@@ -170,7 +170,7 @@ static bool ReadOpened(
 }
 
 template <class Bytes>
-static bool ReadAllInto(const std::filesystem::path& path, size_t maximum, Bytes& content) {
+static bool ReadAllInto(const Path& path, size_t maximum, Bytes& content) {
     uint64_t size = 0;
 #ifdef _WIN32
     const intptr_t handle = OpenRegular(path, size);
@@ -183,14 +183,14 @@ static bool ReadAllInto(const std::filesystem::path& path, size_t maximum, Bytes
 #endif
 }
 
-bool ReadCanonical(const std::filesystem::path& canonical, size_t maximum, std::vector<uint8_t>& content) {
+bool ReadCanonical(const Path& canonical, size_t maximum, std::vector<uint8_t>& content) {
 #ifdef __linux__
     uint64_t size = 0;
     const int fd = OpenRegular(canonical, size);
     if (fd < 0) return false;
     char link[32];
     std::snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
-    const std::string& expected = canonical.native();
+    const std::string& expected = canonical;
     // One byte more than expected: a longer target is another file too.
     std::string target(expected.size() + 1, '\0');
     const ssize_t length = ::readlink(link, &target[0], target.size());
@@ -204,15 +204,15 @@ bool ReadCanonical(const std::filesystem::path& canonical, size_t maximum, std::
 #endif
 }
 
-bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content) {
+bool ReadAll(const Path& path, size_t maximum, std::string& content) {
     return ReadAllInto(path, maximum, content);
 }
 
-bool ReadAll(const std::filesystem::path& path, size_t maximum, std::vector<uint8_t>& content) {
+bool ReadAll(const Path& path, size_t maximum, std::vector<uint8_t>& content) {
     return ReadAllInto(path, maximum, content);
 }
 
-bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& content, FileIdentity& identity) {
+bool ReadAll(const Path& path, size_t maximum, std::string& content, FileIdentity& identity) {
     identity = FileIdentity();
 #ifdef _WIN32
     const intptr_t handle = OpenRegular(path, identity.size);
@@ -239,7 +239,7 @@ bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& con
 #endif
 }
 
-bool WriteAll(const std::filesystem::path& path, std::string_view content, [[maybe_unused]] bool ownerOnly) {
+bool WriteAll(const Path& path, std::string_view content, [[maybe_unused]] bool ownerOnly) {
 #ifdef _WIN32
     std::FILE* file = Open(path, "wb");
     if (!file) return false;
@@ -278,7 +278,7 @@ bool WriteAll(const std::filesystem::path& path, std::string_view content, [[may
 #endif
 }
 
-Stamp StampOf(const std::filesystem::path& path) {
+Stamp StampOf(const Path& path) {
     Stamp stamp;
 #ifdef _WIN32
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -304,22 +304,22 @@ Stamp StampOf(const std::filesystem::path& path) {
     return stamp;
 }
 
-std::filesystem::path PathFromUtf8(std::string_view utf8) {
+Path PathFromUtf8(std::string_view utf8) {
 #ifdef _WIN32
-    if (utf8.empty() || utf8.size() > (size_t)INT_MAX) return std::filesystem::path();
+    if (utf8.empty() || utf8.size() > (size_t)INT_MAX) return Path();
     // UTF-16 never needs more code units than UTF-8 needs bytes.
     std::wstring wide(utf8.size(), L'\0');
     const int length = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), &wide[0], (int)wide.size());
     wide.resize(length > 0 ? (size_t)length : 0);
-    return std::filesystem::path(std::move(wide));
+    return wide;
 #else
-    return std::filesystem::path(utf8.begin(), utf8.end());
+    return Path(utf8);
 #endif
 }
 
-std::string PathToUtf8(const std::filesystem::path& path) {
+std::string PathToUtf8(const Path& path) {
 #ifdef _WIN32
-    const std::wstring& wide = path.native();
+    const std::wstring& wide = path;
     if (wide.empty() || wide.size() > (size_t)INT_MAX / 3) return std::string();
     // A UTF-16 code unit takes at most three UTF-8 bytes.
     std::string utf8(wide.size() * 3, '\0');
@@ -328,7 +328,7 @@ std::string PathToUtf8(const std::filesystem::path& path) {
     utf8.resize(length > 0 ? (size_t)length : 0);
     return utf8;
 #else
-    return path.native();
+    return path;
 #endif
 }
 

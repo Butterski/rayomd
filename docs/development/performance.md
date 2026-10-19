@@ -1241,6 +1241,12 @@ Images and compression:
   of source control.
 - Do not raise the 10 MiB reversible limit without maximum-case output/RSS
   measurements on both platforms.
+- Keep the C++17 filesystem library out of `src/` and `include/`: use `src/common/path.h`.
+  Statically linked on MinGW (whose libstdc++.a has no per-function sections) one path
+  operation pulled the codecvt and locale facets and the file streams; replacing it made
+  `rayomd.exe` 2,358,272 → 1,580,032 bytes (−778 KB) and the dynamic Linux binary
+  1,333,944 → 1,268,400 (−65 KB), with identical PDFs and warm instructions −0.6 to +0.05 %
+  (opt3, 2026-10-19).
 
 The router (`tools/benchmark.py`) retains focused implementations under
 `scripts/`. Dated measurements go to the wiki: the

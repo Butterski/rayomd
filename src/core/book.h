@@ -10,8 +10,8 @@
 #include "rayomd/tiny_pdf.h"
 #include "contents.h"
 #include "markdown_parser.h"
+#include "../common/path.h"
 
-#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -88,7 +88,7 @@ Summary ParseSummary(const std::string& markdown);
 // file cannot be read, lies outside, the files pass the budget, or SUMMARY.md lists one twice,
 // under its name or another (a link, other letter case): the same file, by device and inode or
 // volume and file index.
-bool ReadBook(const std::vector<std::filesystem::path>& inputs, TinyPdf::Book& book, std::string& error);
+bool ReadBook(const std::vector<RayoMd::File::Path>& inputs, TinyPdf::Book& book, std::string& error);
 
 // At most this many notes in a book of linked notes.
 constexpr size_t kMaxLinkedNotes = 1000;
@@ -102,7 +102,7 @@ constexpr size_t kMaxLinkedNotes = 1000;
 // name as its title. Past 128 MiB of notes or kMaxLinkedNotes notes, the walk stops: `leftOut`
 // says how many notes it found and left out. False with `error` set when the note itself cannot
 // be read, or options.cancel is set.
-bool ReadLinkedBook(const std::filesystem::path& note, const TinyPdf::PdfOptions& options, int depth, TinyPdf::Book& book,
+bool ReadLinkedBook(const RayoMd::File::Path& note, const TinyPdf::PdfOptions& options, int depth, TinyPdf::Book& book,
     size_t& leftOut, std::string& error);
 
 } // namespace RayoMd::Book

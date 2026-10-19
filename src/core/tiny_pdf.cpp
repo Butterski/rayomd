@@ -11,6 +11,7 @@
 #include "../common/exact_math.h"
 #include "../common/text_utils.h"
 #include "../common/compiler.h"
+#include "../common/thread_object.h"
 #include "book.h"
 #include "cff.h"
 #include "image_cache.h"
@@ -46,6 +47,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <wincodec.h>
+#include <sys/stat.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -67,7 +69,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -330,7 +331,7 @@ static RAYOMD_HOT_INLINE uint32_t ReadU32(const Bytes& data, size_t off) {
 
 #ifndef _WIN32
 static bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& bytes) {
-    return RayoMd::File::ReadAll(std::filesystem::path(path), 64u * 1024u * 1024u, bytes) && !bytes.empty();
+    return RayoMd::File::ReadAll(path, 64u * 1024u * 1024u, bytes) && !bytes.empty();
 }
 #endif
 
@@ -350,7 +351,7 @@ static bool ReadFromHandle(HANDLE file, uint8_t* out, size_t size) {
 // its size, or INVALID_HANDLE_VALUE when it cannot be read or is empty or past 64 MB.
 static HANDLE OpenWholeFile(const std::wstring& path, size_t& size) {
     uint64_t length = 0;
-    HANDLE file = (HANDLE)RayoMd::File::OpenRegular(std::filesystem::path(path), length);
+    HANDLE file = (HANDLE)RayoMd::File::OpenRegular(path, length);
     if (file == INVALID_HANDLE_VALUE) return file;
     if (length == 0 || length > 64u * 1024u * 1024u) {
         CloseHandle(file);
@@ -413,7 +414,7 @@ public:
         clear();
         // A regular file only, opened without waiting on a FIFO (RayoMd::File::OpenRegular).
         uint64_t length = 0;
-        int file = RayoMd::File::OpenRegular(std::filesystem::path(path), length);
+        int file = RayoMd::File::OpenRegular(path, length);
         if (file < 0) return false;
         if (length == 0 || length > 64u * 1024u * 1024u) {
             close(file);
@@ -650,16 +651,15 @@ struct TtfFont {
         std::vector<int> scores;
         size_t visited = 0;
         for (const std::string& root : roots) {
-            std::error_code error;
-            std::filesystem::recursive_directory_iterator entries(root,
-                std::filesystem::directory_options::skip_permission_denied, error);
-            for (const std::filesystem::recursive_directory_iterator end; !error && entries != end && visited < 20000;
-                entries.increment(error), visited++) {
-                std::string name = entries->path().filename().string();
+            // As the standard library's filesystem::recursive_directory_iterator with skip_permission_denied: each
+            // entry, folders entered (not through links), unreadable ones passed over.
+            RayoMd::File::Walk(root, [&](const RayoMd::File::Entry& entry) {
+                if (visited++ >= 20000) return RayoMd::File::WalkStep::Stop;
+                std::string name(entry.name);
                 for (char& ch : name) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-                if (name.size() < 5) continue;
+                if (name.size() < 5) return RayoMd::File::WalkStep::Enter;
                 const bool trueType = name.compare(name.size() - 4, 4, ".ttf") == 0;
-                if (!trueType && name.compare(name.size() - 4, 4, ".otf") != 0) continue;
+                if (!trueType && name.compare(name.size() - 4, 4, ".otf") != 0) return RayoMd::File::WalkStep::Enter;
                 int score = trueType ? 1 : 0;
                 if (name.find("sans") != std::string::npos) score += 4;
                 if (name.find("regular") != std::string::npos) score += 2;
@@ -667,9 +667,10 @@ struct TtfFont {
                          "condensed", "narrow", "mono", "emoji", "symbol", "math" }) {
                     if (name.find(face) != std::string::npos) score -= 10;
                 }
-                paths.push_back(entries->path().string());
+                paths.push_back(*entry.path);
                 scores.push_back(score);
-            }
+                return RayoMd::File::WalkStep::Enter;
+            });
         }
         // The best remaining candidate, the first found among equals, up to 32 attempts. Scores
         // lie between -140 and 7, so kTried marks a file that failed to load.
@@ -1122,7 +1123,7 @@ public:
 
 private:
     static T& Slot() {
-        static thread_local T slot;
+        RAYOMD_THREAD_OBJECT(T, slot);
         return slot;
     }
 };
@@ -1201,7 +1202,7 @@ struct WrapMeasure {
 // paragraph's lines are drawn, trade it for a spare (SwapFootBuffers); a renderer that ends gives
 // one grown past kKeptBufferBytes back to the allocator (ReleaseWrapScratch).
 static WrapMeasure& WrapScratch() {
-    static thread_local WrapMeasure scratch;
+    RAYOMD_THREAD_OBJECT(WrapMeasure, scratch);
     return scratch;
 }
 
@@ -1668,7 +1669,7 @@ RAYOMD_COLD static void MakeBulletMarker(BulletMarker& marker, double size, int 
 
 // The marker of a bullet list item at nesting `depth`, beside text of `size` on `baseline` from x.
 static void AppendBulletMarker(std::string& content, double x, double baseline, double size, int depth) {
-    static thread_local BulletMarker markers[3];
+    RAYOMD_THREAD_OBJECT(BulletMarker[3], markers);
     if (depth > 2) depth = 2;
     BulletMarker& marker = markers[depth];
     if (marker.size != size) MakeBulletMarker(marker, size, depth);
@@ -1807,7 +1808,7 @@ private:
         bool busy = false;
     };
     static Slot& ThreadSlot() {
-        static thread_local Slot slot;
+        RAYOMD_THREAD_OBJECT(Slot, slot);
         return slot;
     }
     UsedCidSet* set = nullptr;
@@ -2307,7 +2308,7 @@ struct FlateWork {
 };
 
 RAYOMD_COLD static FlateWork& ThreadFlateWork() {
-    static thread_local FlateWork work;
+    RAYOMD_THREAD_OBJECT(FlateWork, work);
     return work;
 }
 
@@ -2552,7 +2553,7 @@ static bool IsHttpUrl(std::string_view src) {
 
 static char* WriteEscapedLiteral(char* out, std::string_view text);
 
-// Paths of UTF-8 names and back without exceptions (file_io.h): std::filesystem::u8path and
+// Paths of UTF-8 names and back without exceptions (file_io.h): the standard library's filesystem::u8path and
 // path::u8string threw on Windows for invalid UTF-8 in a document's image path or link and for an
 // unpaired surrogate in a file name, which ended the process.
 using RayoMd::File::PathFromUtf8;
@@ -2619,8 +2620,9 @@ static bool GetFinalNtPath(HANDLE handle, std::wstring& path) {
 }
 
 static bool ExpectedNtPathForDirectDosPath(
-    const std::filesystem::path& absolute, std::wstring& expected) {
-    std::wstring drive = absolute.root_name().native();
+    const RayoMd::File::Path& absolute, std::wstring& expected) {
+    // The root name, a drive "C:".
+    std::wstring drive = absolute.substr(0, absolute.size() >= 2 && absolute[1] == L':' ? 2 : 0);
     if (drive.size() != 2 || drive[1] != L':' ||
         !((drive[0] >= L'A' && drive[0] <= L'Z') ||
           (drive[0] >= L'a' && drive[0] <= L'z'))) return false;
@@ -2635,7 +2637,7 @@ static bool ExpectedNtPathForDirectDosPath(
 
     std::wstring device(targets.data());
     if (device.compare(0, 8, L"\\Device\\") != 0) return false;
-    std::wstring relative = absolute.relative_path().native();
+    std::wstring relative(RayoMd::File::RelativePart(absolute));
     std::replace(relative.begin(), relative.end(), L'/', L'\\');
     while (!relative.empty() && relative.front() == L'\\') relative.erase(relative.begin());
 
@@ -2649,7 +2651,7 @@ static bool ExpectedNtPathForDirectDosPath(
 }
 
 static bool TryApprovedNtRootForPolicy(
-    const std::filesystem::path& absolute, std::wstring& approved) {
+    const RayoMd::File::Path& absolute, std::wstring& approved) {
     std::wstring expected;
     if (!ExpectedNtPathForDirectDosPath(absolute, expected)) return false;
 
@@ -2675,7 +2677,7 @@ static bool TryApprovedNtRootForPolicy(
 // least of all, is opened before the final-path check. One GetFileInformationByHandle gives the
 // attributes, the size and the stamp; only a reparse point has its tag read.
 static DirectLocalImageResult TryOpenDirectLocalImage(
-    const std::filesystem::path& path, const std::wstring& approvedRoot,
+    const RayoMd::File::Path& path, const std::wstring& approvedRoot,
     std::string& key, WinLocalImageFile& file) {
     HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
@@ -2778,43 +2780,104 @@ static bool HasUnsafeWindowsPathPrefix(std::string_view src) {
 static bool IsUnsafeLocalImageSource(std::string_view src) {
     if (src.empty() || src.find('\0') != std::string_view::npos) return true;
     if (HasUnsafeWindowsPathPrefix(src) || HasUriScheme(src)) return true;
-    std::filesystem::path path = PathFromUtf8(src);
-    return path.is_absolute();
+    return RayoMd::File::IsAbsolute(src);
 }
 
-static bool TryCanonicalForPolicy(
-    const std::filesystem::path& path, std::filesystem::path& normalized) {
-    std::error_code ec;
-    std::filesystem::path absolute = path.is_absolute() ? path : std::filesystem::absolute(path, ec);
-    if (ec) return false;
-
-    normalized = std::filesystem::canonical(absolute, ec);
-    if (ec) return false;
-    normalized = normalized.lexically_normal();
-    return true;
+// the standard library's filesystem::canonical as libstdc++ makes it: on POSIX realpath(3) of the absolute path; on
+// Windows, where it resolves no link, the path made normal and absolute (GetFullPathNameW), which
+// must be there, then its root and each of its names joined again by '\', each found there
+// (_wstat64, as libstdc++'s status and symlink_status call it). False when it names nothing.
+static bool TryCanonicalForPolicy(const RayoMd::File::Path& path, RayoMd::File::Path& normalized) {
+    RayoMd::File::Path absolute;
+#ifdef _WIN32
+    RayoMd::File::Path normal = path;
+    RayoMd::File::Normalize(normal);
+    struct __stat64 info;
+    if (!RayoMd::File::Absolute(normal, absolute)) return false;
+    const size_t root = RayoMd::File::RootLength(RayoMd::File::PathView(absolute));
+    // As libstdc++'s status: a path ending in a separator is stat'ed without it (_wstat64 fails
+    // on one; GCC PR 88881).
+    size_t last = absolute.size();
+    while (last > root && (absolute[last - 1] == L'\\' || absolute[last - 1] == L'/')) last--;
+    if (_wstat64(absolute.substr(0, last).c_str(), &info) != 0) return false;
+    normalized.assign(absolute, 0, root);
+    for (size_t at = root; at < absolute.size();) {
+        size_t end = at;
+        while (end < absolute.size() && absolute[end] != L'\\' && absolute[end] != L'/') end++;
+        if (end > at) {
+            if (normalized.size() > root) normalized += L'\\';
+            normalized.append(absolute, at, end - at);
+            if (_wstat64(normalized.c_str(), &info) != 0) return false;
+        }
+        at = end + 1;
+    }
+    return normalized.size() > root || _wstat64(normalized.c_str(), &info) == 0;
+#else
+    if (!RayoMd::File::Absolute(path, absolute)) return false;
+    normalized = RayoMd::File::Resolved(absolute);
+    return !normalized.empty();
+#endif
 }
+
+// The components of a path as the standard library's filesystem::path's iterator gives them: its root name, its root
+// directory, each name, and an empty name after a separator that ends it.
+struct PolicyPathParts {
+    RayoMd::File::PathView path;
+    size_t rootLength;
+    size_t at = 0;
+    bool afterName = false;
+
+    explicit PolicyPathParts(RayoMd::File::PathView text) : path(text), rootLength(RayoMd::File::RootLength(text)) {}
+    static bool IsSeparator(RayoMd::File::PathChar c) {
+#ifdef _WIN32
+        return c == L'/' || c == L'\\';
+#else
+        return c == '/';
+#endif
+    }
+    bool Next(RayoMd::File::PathView& part) {
+        if (at < rootLength) {
+            const size_t nameEnd = IsSeparator(path[rootLength - 1]) ? rootLength - 1 : rootLength;
+            const size_t start = at;
+            at = at < nameEnd ? nameEnd : rootLength;
+            part = path.substr(start, at - start);
+            return true;
+        }
+        part = RayoMd::File::PathView();
+        if (at > path.size()) return false;
+        size_t start = at;
+        while (start < path.size() && IsSeparator(path[start])) start++;
+        if (start == path.size()) {
+            const bool trailing = afterName && start > at;
+            at = path.size() + 1;
+            return trailing;
+        }
+        at = start;
+        while (at < path.size() && !IsSeparator(path[at])) at++;
+        part = path.substr(start, at - start);
+        afterName = true;
+        return true;
+    }
+};
 
 // Whether two components of paths are the same name: on Windows their UTF-16 as it is, with ASCII
 // letters folded unless `exact`. Never converted to UTF-8, which threw on an unpaired surrogate and
 // would make two different such names one.
-static bool PathPartEqualForPolicy(
-    const std::filesystem::path& a, const std::filesystem::path& b, [[maybe_unused]] bool exact) {
+static bool PathPartEqualForPolicy(RayoMd::File::PathView a, RayoMd::File::PathView b, [[maybe_unused]] bool exact) {
 #ifdef _WIN32
-    const std::wstring& left = a.native();
-    const std::wstring& right = b.native();
-    if (exact || left.size() != right.size()) return left == right;
+    if (exact || a.size() != b.size()) return a == b;
     const auto fold = [](wchar_t c) { return c >= L'A' && c <= L'Z' ? (wchar_t)(c - L'A' + L'a') : c; };
-    for (size_t at = 0; at < left.size(); at++) {
-        if (fold(left[at]) != fold(right[at])) return false;
+    for (size_t at = 0; at < a.size(); at++) {
+        if (fold(a[at]) != fold(b[at])) return false;
     }
     return true;
 #else
-    return a.native() == b.native();
+    return a == b;
 #endif
 }
 
 struct DirectRootCacheEntry {
-    std::filesystem::path root;
+    RayoMd::File::Path root;
     std::wstring approvedNtRoot;
 };
 
@@ -2830,15 +2893,13 @@ static DirectRootCache& RootCache() {
 }
 
 static bool TryCanonicalRootForPolicy(
-    const std::filesystem::path& path, std::filesystem::path& normalized,
+    const RayoMd::File::Path& path, RayoMd::File::Path& normalized,
     bool& direct, std::wstring& approvedNtRoot) {
     direct = false;
     approvedNtRoot.clear();
-    std::error_code ec;
-    std::filesystem::path absolute =
-        path.is_absolute() ? path : std::filesystem::absolute(path, ec);
-    if (ec) return false;
-    absolute = absolute.lexically_normal();
+    RayoMd::File::Path absolute;
+    if (!RayoMd::File::Absolute(path, absolute)) return false;
+    RayoMd::File::Normalize(absolute);
 
     DirectRootCache& cache = RootCache();
     {
@@ -2853,7 +2914,7 @@ static bool TryCanonicalRootForPolicy(
         }
     }
 
-    std::filesystem::path canonical;
+    RayoMd::File::Path canonical;
     if (!TryCanonicalForPolicy(absolute, canonical)) return false;
     std::wstring approved;
     if (canonical == absolute) {
@@ -2879,13 +2940,17 @@ static bool TryCanonicalRootForPolicy(
     return true;
 }
 
-static bool IsPathContainedInRoot(
-    const std::filesystem::path& child, const std::filesystem::path& root, bool exact) {
-    std::filesystem::path childNorm = child.lexically_normal();
-    std::filesystem::path rootNorm = root.lexically_normal();
-    auto childIt = childNorm.begin();
-    for (auto rootIt = rootNorm.begin(); rootIt != rootNorm.end(); ++rootIt, ++childIt) {
-        if (childIt == childNorm.end() || !PathPartEqualForPolicy(*childIt, *rootIt, exact)) return false;
+static bool IsPathContainedInRoot(const RayoMd::File::Path& child, const RayoMd::File::Path& root, bool exact) {
+    RayoMd::File::Path childNorm = child;
+    RayoMd::File::Normalize(childNorm);
+    RayoMd::File::Path rootNorm = root;
+    RayoMd::File::Normalize(rootNorm);
+    PolicyPathParts childParts(childNorm);
+    PolicyPathParts rootParts(rootNorm);
+    RayoMd::File::PathView a;
+    RayoMd::File::PathView b;
+    while (rootParts.Next(b)) {
+        if (!childParts.Next(a) || !PathPartEqualForPolicy(a, b, exact)) return false;
     }
     return true;
 }
@@ -2903,8 +2968,8 @@ public:
     // A book's file (BuildBookPdf): its relative images resolve from its own directory, and must
     // still lie in the book's.
     void SetChapter(const std::string& pathUtf8) {
-        chapterBase = PathFromUtf8(pathUtf8).parent_path();
-        if (chapterBase.empty()) chapterBase = ".";
+        chapterBase = PathFromUtf8(RayoMd::File::ParentOf(pathUtf8));
+        if (chapterBase.empty()) chapterBase = RayoMd::File::PathOfAscii(".");
         chapterRootReady = false;
     }
 
@@ -2918,14 +2983,15 @@ public:
             return DirectLocalImageResult::NotApplicable;
         }
 
-        const std::filesystem::path& root = SafeRoot();
+        const RayoMd::File::Path& root = SafeRoot();
         if (!safeRootValid) return DirectLocalImageResult::Rejected;
         if (!safeRootDirect || safeRootNt.empty()) return DirectLocalImageResult::NotApplicable;
 
-        std::filesystem::path path = (root / PathFromUtf8(src)).lexically_normal();
+        RayoMd::File::Path path = Joined(root, PathFromUtf8(src));
+        RayoMd::File::Normalize(path);
         // In the root by name before anything is opened ("..", wildcards), and through no link.
         if (path == root || !IsPathContainedInRoot(path, root, false) ||
-            path.native().find_first_of(L"*?") != std::wstring::npos || Internal::DirectPathHasLink(root, path)) {
+            path.find_first_of(L"*?") != std::wstring::npos || Internal::DirectPathHasLink(root, path)) {
             return DirectLocalImageResult::Rejected;
         }
         return TryOpenDirectLocalImage(path, safeRootNt, key, file);
@@ -2939,9 +3005,9 @@ public:
         if (allowUnsafe) return ResolveUnsafe(src, key, pathUtf8);
         if (!hasSourcePath || IsUnsafeLocalImageSource(src)) return false;
 
-        const std::filesystem::path& root = SafeRoot();
+        const RayoMd::File::Path& root = SafeRoot();
         if (!safeRootValid) return false;
-        const std::filesystem::path* base = &root;
+        const RayoMd::File::Path* base = &root;
         if (!chapterBase.empty()) {
             if (!chapterRootReady) {
                 chapterRootValid = TryCanonicalForPolicy(chapterBase, chapterRoot);
@@ -2950,8 +3016,8 @@ public:
             if (!chapterRootValid) return false;
             base = &chapterRoot;
         }
-        std::filesystem::path normalized;
-        if (!TryCanonicalForPolicy(*base / PathFromUtf8(src), normalized) ||
+        RayoMd::File::Path normalized;
+        if (!TryCanonicalForPolicy(Joined(*base, PathFromUtf8(src)), normalized) ||
             !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
 
         pathUtf8 = PathToUtf8(normalized);
@@ -2960,6 +3026,13 @@ public:
     }
 
 private:
+    // `base` / `path`, as the standard library's filesystem::path's operator/ joins them.
+    static RayoMd::File::Path Joined(const RayoMd::File::Path& base, const RayoMd::File::Path& path) {
+        RayoMd::File::Path joined = base;
+        RayoMd::File::AppendPath(joined, path);
+        return joined;
+    }
+
     // The source's directory, and the one images must lie in: "." for a source path without one;
     // with a vault (Obsidian's dialect, PdfOptions::vaultRoot), the vault, the images resolving
     // from the source's directory as a book's from its file's.
@@ -2968,9 +3041,11 @@ private:
         basesReady = true;
         if (!hasSourcePath) return;
         sourceBase = PathFromUtf8(sourcePath);
-        if (sourceBase.has_filename()) sourceBase = sourceBase.parent_path();
+        if (!RayoMd::File::FileNameOf(RayoMd::File::PathView(sourceBase)).empty()) {
+            sourceBase.resize(RayoMd::File::ParentOf(RayoMd::File::PathView(sourceBase)).size());
+        }
         safeBase = sourceBase;
-        if (safeBase.empty()) safeBase = ".";
+        if (safeBase.empty()) safeBase = RayoMd::File::PathOfAscii(".");
         if (vaultRoot != nullptr && !vaultRoot->empty()) {
             if (chapterBase.empty()) chapterBase = safeBase;
             safeBase = PathFromUtf8(*vaultRoot);
@@ -2981,10 +3056,10 @@ private:
     RAYOMD_COLD bool ResolveEmbedded(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t base) {
         const std::string* folder = Internal::EmbedFolder(base);
         if (folder == nullptr || !hasSourcePath || (!allowUnsafe && IsUnsafeLocalImageSource(src))) return false;
-        std::filesystem::path normalized;
-        if (!TryCanonicalForPolicy(PathFromUtf8(*folder) / PathFromUtf8(src), normalized)) return false;
+        RayoMd::File::Path normalized;
+        if (!TryCanonicalForPolicy(Joined(PathFromUtf8(*folder), PathFromUtf8(src)), normalized)) return false;
         if (!allowUnsafe) {
-            const std::filesystem::path& root = SafeRoot();
+            const RayoMd::File::Path& root = SafeRoot();
             if (!safeRootValid || !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
         }
         pathUtf8 = PathToUtf8(normalized);
@@ -2992,7 +3067,7 @@ private:
         return true;
     }
 
-    const std::filesystem::path& SafeRoot() {
+    const RayoMd::File::Path& SafeRoot() {
         if (!safeRootReady) {
             PrepareBases();
             safeRootValid = TryCanonicalRootForPolicy(
@@ -3003,13 +3078,13 @@ private:
     }
 
     bool ResolveUnsafe(const std::string& src, std::string& key, std::string& pathUtf8) {
-        std::filesystem::path path = PathFromUtf8(src);
-        if (path.is_relative() && hasSourcePath) {
+        RayoMd::File::Path path = PathFromUtf8(src);
+        if (!RayoMd::File::IsAbsolute(RayoMd::File::PathView(path)) && hasSourcePath) {
             PrepareBases();
-            path = (chapterBase.empty() ? sourceBase : chapterBase) / path;
+            path = Joined(chapterBase.empty() ? sourceBase : chapterBase, path);
         }
 
-        std::filesystem::path normalized;
+        RayoMd::File::Path normalized;
         if (!TryCanonicalForPolicy(path, normalized)) return false;
         pathUtf8 = PathToUtf8(normalized);
         key = "file:" + pathUtf8;
@@ -3026,11 +3101,11 @@ private:
     bool chapterRootValid = false;
     const std::string& sourcePath;       // PdfOptions::sourcePath, which outlives the export
     const std::string* vaultRoot;        // PdfOptions::vaultRoot under Obsidian's dialect, else null
-    std::filesystem::path sourceBase;
-    std::filesystem::path safeBase;
-    std::filesystem::path safeRoot;
-    std::filesystem::path chapterBase;   // a book's file's directory, or empty
-    std::filesystem::path chapterRoot;   // and canonical
+    RayoMd::File::Path sourceBase;
+    RayoMd::File::Path safeBase;
+    RayoMd::File::Path safeRoot;
+    RayoMd::File::Path chapterBase;   // a book's file's directory, or empty
+    RayoMd::File::Path chapterRoot;   // and canonical
     std::wstring safeRootNt;
 };
 
@@ -3044,7 +3119,7 @@ static bool ReadLocalImageFile(const std::string& pathUtf8, std::vector<uint8_t>
     return ReadWholeFile(Utf8ToWide(pathUtf8), bytes);
 #else
     if (!contained) return ReadWholeFile(pathUtf8, bytes);
-    return RayoMd::File::ReadCanonical(std::filesystem::path(pathUtf8), 64u * 1024u * 1024u, bytes) && !bytes.empty();
+    return RayoMd::File::ReadCanonical(pathUtf8, 64u * 1024u * 1024u, bytes) && !bytes.empty();
 #endif
 }
 
@@ -4181,7 +4256,7 @@ public:
     // outside the policy for images in documents. False, and one more failed image, when it cannot
     // be read or decoded.
     RAYOMD_COLD bool ResolveThemeFile(const std::string& pathUtf8, int& index) {
-        std::filesystem::path normalized;
+        RayoMd::File::Path normalized;
 #ifdef _WIN32
         // Theme assets are local files: a UNC, device or network-drive path is refused before
         // anything opens it, so a theme cannot make the build connect to a share.
@@ -6657,7 +6732,11 @@ public:
             while (id < ids.size() && ids[id].page < parse.firstPages[index]) id++;
             while (id < ids.size() && ids[id].page < end) file.ids.push_back(ids[id++]);
             file.targets = std::make_unique<HeadingTargets>(file.marks, winAnsi, pageTop, parse.noteMarks[index], &file.ids);
-            if (!chapters[index].part) paths[index] = PathToUtf8(PathFromUtf8(chapters[index].path).lexically_normal());
+            if (!chapters[index].part) {
+                RayoMd::File::Path normal = PathFromUtf8(chapters[index].path);
+                RayoMd::File::Normalize(normal);
+                paths[index] = PathToUtf8(normal);
+            }
         }
     }
 
@@ -13802,7 +13881,8 @@ RAYOMD_COLD static void TaggedDocumentDefaults(DocumentMetadata& metadata, const
     const std::string& sourcePath) {
     if (metadata.lang.empty()) metadata.lang = "en";
     if (!metadata.title.empty() || !headings.empty()) return;
-    metadata.title = PathToUtf8(PathFromUtf8(sourcePath).stem());
+    const RayoMd::File::Path source = PathFromUtf8(sourcePath);
+    metadata.title = PathToUtf8(RayoMd::File::Path(RayoMd::File::StemOf(RayoMd::File::PathView(source))));
     if (metadata.title.empty()) metadata.title = "Document";
 }
 

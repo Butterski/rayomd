@@ -9,6 +9,7 @@
 #include "inline_markdown.h"
 #include "../common/text_utils.h"
 #include "../common/compiler.h"
+#include "../common/thread_object.h"
 
 #include <algorithm>
 #include <cctype>
@@ -1160,7 +1161,7 @@ private:
         std::vector<LineInfo> infos;
     };
     static Slot* Slots() {
-        static thread_local Slot slots[kLevels];
+        RAYOMD_THREAD_OBJECT(Slot[kLevels], slots);
         return slots;
     }
     Slot* const slot;
