@@ -63,6 +63,7 @@
 
 #include "libdeflate.h"
 #if defined(__linux__)
+#include <sched.h>
 #include <sys/resource.h>
 #endif
 
@@ -2866,6 +2867,46 @@ bool CheckBook() {
         std::cerr << "book mismatch" << std::endl;
         return false;
     }
+#ifdef __linux__
+    // A book of more than 256 KiB is parsed on several threads (ParseBookFiles), each under the
+    // calling thread's parser state: WinAnsi character references (the standard renderer's, in
+    // headings, table cells, link titles and HTML, which the block parser decodes) and Obsidian's
+    // dialect with hidden tags. The same bytes as on one CPU, where it parses on this thread alone.
+    TinyPdf::Book large;
+    for (int file = 0; file < 24; file++) {
+        std::string text = "# Chapter " + std::to_string(file) + " caf&eacute;\n\n";
+        for (int part = 0; part < 60; part++) {   // 24 files of about 17 KB
+            const std::string n = std::to_string(part);
+            text += "## Section " + n + " &copy; &#x20AC;\n\nCaf\xC3\xA9 r\xC3\xA9sum\xC3\xA9 text [link][l" + n + "] ==mark== #tag" + n +
+                " [[note" + n + "]] and more words to fill the line &hellip; &mdash; done.\n\n| a &eacute; | b |\n|---|---|\n"
+                "| caf&euro; | &amp; |\n\n[l" + n + "]: https://example.com/&eacute; \"t&copy;\"\n\n<p align=\"center\">caf&eacute; " + n +
+                "</p>\n\n";
+        }
+        large.chapters.push_back({ text, "big/" + std::to_string(file) + ".md", "", 0, false });
+    }
+    cpu_set_t all;
+    if (sched_getaffinity(0, sizeof(all), &all) == 0 && CPU_COUNT(&all) > 1) {
+        int first = 0;
+        while (!CPU_ISSET(first, &all)) first++;
+        cpu_set_t one;
+        CPU_ZERO(&one);
+        CPU_SET(first, &one);
+        for (const TinyPdf::MarkdownDialect dialect : { TinyPdf::MarkdownDialect::GitHub, TinyPdf::MarkdownDialect::Obsidian }) {
+            TinyPdf::PdfOptions bookOptions;
+            bookOptions.dialect = dialect;
+            bookOptions.hideTags = true;
+            bookOptions.toc = true;
+            std::string parallel, single;
+            const bool built = TinyPdf::BuildBookPdf(large, bookOptions, parallel).Ok() &&
+                sched_setaffinity(0, sizeof(one), &one) == 0 && TinyPdf::BuildBookPdf(large, bookOptions, single).Ok();
+            sched_setaffinity(0, sizeof(all), &all);
+            if (!built || parallel != single) {
+                std::cerr << "large book mismatch (parsed on several threads)" << std::endl;
+                return false;
+            }
+        }
+    }
+#endif
     return true;
 }
 

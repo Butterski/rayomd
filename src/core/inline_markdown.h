@@ -215,6 +215,8 @@ public:
     ~WinAnsiReferences();
     WinAnsiReferences(const WinAnsiReferences&) = delete;
     WinAnsiReferences& operator=(const WinAnsiReferences&) = delete;
+    // Whether one lives on this thread: what a thread that parses for it takes over (ParseBookFiles).
+    static bool Active();
 
 private:
     bool previous;

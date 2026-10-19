@@ -485,6 +485,11 @@ Important image/link details:
   what one document may have (`kMaxBookBytes`), and a SUMMARY.md that lists a file again under
   any name (a link, letter case, `x/../`) is refused: files are told apart by their identity
   (`RayoMd::File::FileIdentity`, device and inode or volume and file index), not their names.
+  From 256 KiB of text `ParseBookFiles` parses the files on up to six threads (`ForEachBookFile`,
+  one a usable CPU), each helper under the calling thread's dialect, hidden tags and WinAnsi
+  character references (`WinAnsiReferences::Active`); a new thread-local the parser reads must be
+  handed to them there too, or a large book parses differently from a small one (`CheckBook`,
+  core check 96, builds a 400 KB book with references and Obsidian's syntax on all CPUs and on one).
 
 - `src/core/print_colors.h` and `src/core/print_colors.cpp`
   `--black-text`'s rewrite of finished content (`PrintColors`): 64 bytes a step in AVX2 (two
