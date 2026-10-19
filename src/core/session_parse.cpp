@@ -141,7 +141,7 @@ void ClassifyWhole(ParseRecord& next, ParseLines& out, ReferenceDefinitions& def
         [&](std::string&& label, ReferenceDefinition&& definition) { definitions.emplace(std::move(label), std::move(definition)); });
 }
 
-// `view`, a view of a text at `from`, as the same bytes of a text at `to` (`by` bytes further on).
+// `view` as a view of the same bytes in another text, which holds them `by` bytes further on.
 inline std::string_view Moved(std::string_view view, uintptr_t by) {
     return std::string_view(reinterpret_cast<const char*>(reinterpret_cast<uintptr_t>(view.data()) + by), view.size());
 }

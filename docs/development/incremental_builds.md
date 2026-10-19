@@ -75,11 +75,12 @@ the assembly) is the one `BuildPdf` takes. The builders lay a session's blocks o
 with `RAYOMD_BUILD_SESSION`, which the `rayomd_engine` library and the core tests set: the command lines
 make no session and carry none of it (unused, MinGW's linker kept 24 KB of it in `rayomd.exe`).
 
-1. **Parse** (`ParseInSession`, `session_parse.h`): every line is split and classified as in a
-   fresh parse (with `ResolveMathOpeners` and the definitions' pass, so the link definitions and
-   each line's class are those of the whole text); then the block loop goes on from the last
-   build's parse (see "Parse reuse" below) and the blocks it did not make are the last build's,
-   kept in the session's vector (`SessionBlocks`), which the builders parse into.
+1. **Parse** (`ParseInSession`, `session_parse.h`): the lines and their classes are the last build's,
+   shifted past the edit, and only the changed lines are split and classified (see "Line classes"
+   below), so the link definitions and each line's class are those of the whole text; then the
+   block loop goes on from the last build's parse (see "Parse reuse" below) and the blocks it did
+   not make are the last build's, kept in the session's vector (`SessionBlocks`), which the
+   builders parse into.
 2. **Compare** the blocks with the tape's (`SessionLayout::Begin`, `Same`): the common prefix of
    equal blocks (`SameBlock`: every field the renderers read, not the source lines; a table of
    contents only with equal entries, a numbered heading only with its number). The blocks after it
@@ -103,9 +104,13 @@ make no session and carry none of it (unused, MinGW's linker kept 24 KB of it in
    whose keep would read past it (a heading or anchor last) unless both documents end there.
    Other blocks are laid out by `RenderBlockRange`, the loop `RenderBlocks` itself runs. A replayed
    run's content is copied page by page, each new page after the gap the builder leaves before it
-   (`StartPageContent`, `LayoutTape::pageGaps`), so `BuildInto` moves nothing.
+   (`StartPageContent`; the tape has none), so `BuildInto` moves nothing.
 4. **Keep the content** after the layout (`EndLayout`), before `--compress` or `--black-text`
-   change it, with the CIDs in the order they were recorded (the font sorts them later).
+   change it, with the CIDs in the order they were recorded (the font sorts them later). The tape
+   keeps the content without the page gaps as pieces of buffers (`LayoutTape::pieces`, `pageFree`):
+   what a build replayed stays where the last tape had it, what it laid out is copied into a buffer
+   of its own; when the buffers a tape holds pass twice its content, the content is copied into one
+   again. A replay copies piece by piece.
 5. **Assemble** the whole PDF as `BuildPdf` does, then **commit** the tape (`Commit`): it takes the
    blocks, the table of contents and heading numbers, the renderer's links, headings, anchors and
    contents lines, and where each heading and anchor mark lies in its block.
@@ -126,7 +131,8 @@ starts without a tape: other options (all of `PdfOptions` but `cancel` and `sour
 another renderer or font (ASCII, WinAnsi, a TrueType font, a theme's faces, a fallback font).
 A cancelled or failed build leaves the last tape.
 
-Memory: the tape holds the page content (t700: 25 MB), the blocks, and 88 bytes a block of marks.
+Memory: the tape holds the page content (t700: 25 MB) in buffers of at most twice that, the blocks,
+and 88 bytes a block of marks; the parse record the text, 64 bytes a line of views and classes.
 
 ## Checks
 
@@ -185,6 +191,12 @@ the blocks 12 %, replays 10 %, old blocks 8 %, outline and annotations 12 %, `Bu
 cycles the copies weigh more than in instructions: the replayed content, the content kept and
 `BuildInto`'s move are three passes over 7 MB (e50) to 25 MB (t700), memory-bound.
 
+These are round 4's (5.2.5). Round 5 (the parse going on from the last build's, only the changed
+lines classified, page gaps kept, the tape's content in pieces; performance.md) took a t700 letter
+in the middle from 184 to 84 Mcycles and from 262 to 99 M instructions (e50 30 -> 20 Mcycles, t70
+17.7 -> 8.2); of the 99 M (callgrind) the parse is 7 M, the layout about half (replays 28 M, the
+image blocks laid out again 13 M), the outline and link annotations 20 M, `BuildInto` 8 M.
+
 Ordinary builds: `ab.sh --instructions` against 5.2.4 with the session hooks compiled in (as in the
 engine library), every fixture within +0.06 %. The command line, built without them: code +80 bytes
 (`RenderBlocks`' loop is `RenderBlockRange`, which a session calls a block at a time), the file the
@@ -211,13 +223,47 @@ pass used what it would in a whole parse). A cancelled or failed build puts the 
 blocks back (`UndoParse`). An opened fence changes every line's class after it until the fences
 pair as before: the loop runs to there.
 
+## Line classes
+
+Before its block loop the parse splits the text into lines, classifies each (`ClassifyLine`, a
+function of the line alone), turns the display-math openers without a closing line back into text
+(`ResolveMathOpeners`) and finds the link and footnote definitions (the definitions' pass). The two
+passes carry a state from line to line: the fence open, a formula's or a definition's lines being
+taken. A session's copy (`ClassifyInSession`, `session_parse.cpp`) keeps the lines (views of the
+record's text) and their classes in the parse record (`ParseLines`), with the fences the passes
+paired (`fences`). The next parse:
+
+- takes the lines before the one with the first byte that differs and those after the last line
+  feed of the end both texts share from the last parse, their views moved to the new text and
+  their classes those the last block loop began with (the loop may make a formula opener text);
+- splits and classifies the lines between;
+- runs both passes again from the last blank line before them at which no fence was open (no line
+  before it reads past it) to the first blank line after them at which neither text has a fence
+  open, classifying those lines again (an opener the last pass made text may be one now); from
+  there on both passes go as in the last parse;
+- keeps the last parse's definitions when that stretch has the definitions it had there, else
+  classifies whole, as it does when a footnote definition is near the edit or in the last text
+  (a note's lines may run past blank lines), when "]:" or `WinAnsiReferences` differ, and when the
+  edit is in the first three bytes (a byte order mark).
+
+`ResumeLine` then compares classes only where they were classified again. Shifting the lines is a
+pass over them (64 bytes a line, about 24 instructions; t700 3 M a build) against about 300
+instructions a line for splitting, classifying and the two passes.
+
+## First keystrokes
+
+The first builds of a session touch memory the process never had: a parse record and a tape of
+their own (each build writes one while the last's stays). They are reserved from the last's sizes
+and keep their memory from then on (two of each, alternating; the page content's buffers that no
+tape holds any more are kept for the next, up to four). The builders reserve the output for the
+text's length and no more, so that a recycled output moved to a new buffer of twice its size when
+the text grew by a letter (t700: 28 MB of new pages at the first edit); `BuildSession::Build`
+leaves it room for a text a sixteenth longer, and the parse record's text the same.
+
 ## Next
 
-- **Classify only the changed lines**: now about a quarter of t700's session build; the line
-  classes, `ResolveMathOpeners`' and the definitions pass' states would have to be noted per line
-  and resumed.
-- **Fewer copies**: the tape could keep the replayed content where it lies and splice in the new
-  bytes (`EndLayout` copies all of it), and a first edit's fresh tape could reserve the last's sizes.
+- **The first build after the whole one** still writes 22 MB the process never touched (t700: the
+  new parse record and tape, the PDF's object table): 35 ms against 26 for the next.
 - **Footnotes**: the body could be replayed when the numbers are the same, with the references'
   first places (`NoteMarks::references`) noted per block; the notes section laid out again.
 - **Images**: an image block could be replayed when the registry, asked again, gives the same image

@@ -312,6 +312,12 @@ performance.md). A new external function of `markdown_parser.cpp` must be rename
 that the loop carries from one pass to the next (beyond the line, the open HTML elements and the
 ParseBudget) must go into `ParsePass` and be compared there, and anything a later pass reads before
 its own line, or a transformation of the blocks after the parse, must make the session parse whole.
+The session's copy classifies only the lines an edit changed (`ClassifyInSession`): the others are the
+last parse's, shifted (`ParseLines` in the record), and `ResolveMathOpeners` and the definitions'
+pass run again between blank lines with no fence open. A new pass over the lines before the block
+loop, or a line class that depends on lines past a blank line, must go there too (or make it
+classify whole). The tape keeps the page content in pieces of buffers its tapes share
+(`LayoutTape::pieces`, without the page gaps); nothing outside `build_session.cpp` reads it.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
@@ -498,16 +504,19 @@ Important image/link details:
 
 - `src/core/embeds.h` and `src/core/embeds.cpp`
   Obsidian's note embeds: reading them (`ResolveEmbeds`, bounded in count, depth, bytes read and
-
-- `src/core/build_session.h` and `src/core/build_session.cpp`
-  `BuildSession`: the tape of the last build (blocks, marks, page content, the renderer's marks and
-  sets), the blocks compared with it (`SameBlock`, runs of one shift without images), runs replayed
-  into the renderer, options compared (`SameOptions`). The renderers' side (`SessionAccess`) is in
-  `tiny_pdf.cpp`, reached through `SessionCalls`; both only with `RAYOMD_BUILD_SESSION` (the
-  `rayomd_engine` library and the core tests). Built at `-Os`; checked by `tests/session_tests.inc`.
   scanned, lookups), the build's `EmbedScope`, and splicing their blocks into the parse
   (`ParseWithEmbeds`, `SpliceEmbeds`). Built at `-Os`; checked by `tests/embeds_tests.inc`
   (core test exits 130, embeds, and 131, linked notes and backlinks).
+
+- `src/core/build_session.h` and `src/core/build_session.cpp`
+  `BuildSession`: the tape of the last build (blocks, marks, page content in pieces of shared
+  buffers, the renderer's marks and sets), the blocks compared with it (`SameBlock`, runs of one
+  shift without images), runs replayed into the renderer, options compared (`SameOptions`), the
+  parse's side (`ParseInSession`, `ResumeLine`); `src/core/session_parse.cpp` the session's copy of
+  the level parse and its line classes (`ClassifyInSession`). The renderers' side (`SessionAccess`)
+  is in `tiny_pdf.cpp`, reached through `SessionCalls`; all only with `RAYOMD_BUILD_SESSION` (the
+  `rayomd_engine` library and the core tests). `build_session.cpp` is built at `-Os`; checked by
+  `tests/session_tests.inc`.
 
 - `src/core/book.h` and `src/core/book.cpp`
   Books: reading `--book`'s inputs for both command lines (SUMMARY.md as mdBook and

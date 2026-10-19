@@ -85,10 +85,53 @@ the text before and after the edit (the GUI's case), medians of 3 paired rounds.
   ms each and the rest 32: large buffers handed to and taken back from the kernel each build cost
   much of it (in a loaded run, 65 -> 33 ms steady). Not fixed here; the GUI could keep its output
   buffer or set those thresholds.
-- Not done: classifying only the changed lines (record the line classes and the definition and
-  formula passes' states, about 35 M instructions of t700's session build), the tape's content
-  spliced instead of copied (`EndLayout`'s copy, 25 MB for t700), footnote documents (replay the
-  body when the numbers are equal), the worst case's measure.
+- **Only the changed lines classified** (`ClassifyInSession`, `session_parse.cpp`; incremental_builds.md
+  "Line classes"): the lines and classes are the last parse's, shifted; the passes that carry a
+  state (`ResolveMathOpeners`, the definitions') run again between blank lines with no fence open.
+  Measured first, as the shift is still a pass over every line: about 24 instructions a line
+  against about 300 for splitting, classifying and the passes. A letter in the middle, against
+  `e37f9af` (CPU 7, 3 paired rounds): t700 109.1 -> 90.5 Mcycles (x1.21, instructions 147.7 -> 98.2
+  M), t70 x1.19 (x1.51), e50 x1.10 (x1.17); the parse of t700 57 -> 6.5 M instructions a build.
+- **The tape's content in pieces** (`LayoutTape::pieces`): what a build replayed stays in the
+  buffer the last tape had it in, what it laid out goes into one of its own; one buffer again when
+  they pass twice the content. On the step before (5 rounds): t700 88.7 -> 83.1 Mcycles (x1.07),
+  t70 x1.16, e50 x1.12, instructions even; dropping the copy outright (a lab build) measured 81.8 on
+  t700, so the pieces cost about 1.3 Mcycles.
+- **The first keystrokes**: the builders reserve the output for the text's length and no more, so
+  a recycled output (the GUI keeps it now) moved to a new buffer of twice its size when the text grew
+  by a letter: 7,300 page faults (28 MB of new pages) at the first edit. `BuildSession::Build`
+  leaves room for a text a sixteenth longer, the parse record's text the same, and a session's
+  first tape and records are reserved from the last's. Lab harness `keys` (t700, letters typed one
+  after another in the middle, CPU 7, output kept, ms, the range of three runs; the whole build was
+  already slower at `e37f9af`, not measured further):
+
+  | build | 5.2.5 | `e37f9af` | now |
+  |---|---:|---:|---:|
+  | the whole document | 175-180 | 183-189 | 182-187 |
+  | keystroke 1 | 81-83 | 61-62 | 35-37 |
+  | keystroke 2 | 63-64 | 47-49 | 26.5-28 |
+  | keystroke 3 | 63-65 | 43-45 | 26-28 |
+  | keystroke 4 | 50-53 | 32-34 | 26-27 |
+  | keystroke 5 | 50-52 | 32-34 | 26-28 |
+
+  With a new output string each build: now 43-45, 26.5-27.5, 27-29, 26.5-27.5, 32-34 (the last the
+  process's: glibc hands a freed 30 MB string back). After three unchanged builds, edits take 26 ms
+  from the first (`e37f9af`: 44, 44, 33). What is left of the first keystroke: 5,550 page faults (the
+  new parse record and tape, the PDF's object table).
+- All of round 5 against 5.2.5's `BuildSession` (paired, CPU 7, 5 rounds, ranges within 2 %): t700
+  a letter at the start, middle or end, a line deleted or a paragraph inserted in the middle 182-186
+  -> 84-87 Mcycles (x2.14 to x2.18, instructions x2.52 to x2.69); t70 17.7-18.3 -> 8.1-8.9 (x2.01 to
+  x2.20); e50 a letter 30 -> 20 (x1.50 to x1.53, instructions x1.72 to x1.80), a line deleted x1.29
+  (x1.60), a paragraph inserted x1.47 (x1.65). Against `e37f9af` (a busier run, ranges to 10 %):
+  t700 x1.26 to x1.40 (instructions x1.47 to x1.50), t70 x1.27 to x1.33, e50 x1.20 to x1.25.
+- Gates: `ab.sh --instructions` of the command line against 5.2.5 and of the command line built as
+  the engine library against `e37f9af`: +0.00 % on every fixture (the command line's `.text` and the
+  engine's `markdown_parser.o` and `tiny_pdf.o` code are those of `e37f9af`); the byte check's 2,875
+  PDFs, `oncmp` 5,936 and the embeds' 6,044 exports identical; MinGW's `rayomd.exe` the size of
+  5.2.5's.
+- Not done: footnote documents (replay the body when the numbers are equal), the worst case's
+  measure, the first keystroke's new memory (the session's records could be made at the whole
+  build, which would move the cost there).
 
 ## Round 4: package size (opt4/size2, 2026-10-19)
 
