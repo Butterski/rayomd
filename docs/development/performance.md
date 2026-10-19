@@ -41,6 +41,68 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 5: package size (opt5/size, 2026-10-19)
+
+Against 5.2.5 (`ac59556`), GCC 13.3 unless named; the Linux archives of the GCC 11 builds, as the
+release runners make them. Every build keeps the 2,875 PDFs of the byte check and the 5,936 and
+6,044 feature-on exports; ctest and `verify_cli.py` (GCC 13), ctest of the GCC 11 static build.
+
+| | 5.2.5 | opt5/size | |
+|---|---:|---:|---:|
+| Linux dynamic, GCC 13 | 1,268,376 | 1,251,992 | -16,384 |
+| Linux dynamic, GCC 11 | 1,280,600 | 1,264,216 | -16,384 |
+| Linux static, GCC 13 | 2,285,824 | 2,269,440 | -16,384 |
+| Linux static, GCC 11 | 2,378,336 | 2,361,952 | -16,384 |
+| `rayomd.exe` (MinGW GCC 13) | 1,473,536 | 1,457,152 | -16,384 |
+| `linux-x64.tar.gz` (`tar -z`) | 727,256 | 722,037 | -5,219 |
+| `linux-x64-static.tar.gz` (`tar -z`) | 1,178,766 | 1,173,356 | -5,410 |
+| `windows-x64.zip` (zlib level 6 standing for Compress-Archive) | 820,313 | 814,821 | -5,492 |
+
+- **No padding before jump targets** (`-falign-jumps=1`, GCC release builds): GCC pads a target
+  only jumps reach to 16 bytes, up to 10 bytes of no-ops after an unconditional jump, which never
+  run. Code -15.1 KB (`.text.hot` -9.1 KB, `.text` -6.0 KB), every binary above one 4 KB page
+  or more (-16,384). Instructions (callgrind, `ab.sh`) +0.00 to +0.02 % on the eight fixtures.
+  Cycles (`perf stat -e cycles:u`, CPU 5, alternating pairs; A/A on that host: medians within
+  ±0.7 %, notes 1.7 %): 31 pairs 5.2.5 -> candidate geomean +0.41 % (A/A +0.35 %), 41 pairs
+  the other way -0.02 %, notes.md +1.3 and +1.8 % in both; with functions and loops pinned
+  (`-falign-functions=64 -falign-loops=32` on both) geomean -0.12 % and notes.md -0.42 %: the
+  release build's notes.md difference is placement. Fresh exports (`fresh.sh`, 128 runs) -0.01 %.
+
+Measured and not taken:
+
+- **Cold whole functions of `tiny_pdf.cpp` at `-Os`** (`__attribute__((cold, noinline,
+  optimize("Os")))`, the form agreed in round 4): larger, not smaller. GCC inlines into a function
+  of lower optimization level only the callees whose call costs more than their body (the
+  "optimization mismatch" rule), so what `-O3` had inlined into the cold function, mostly
+  single-caller templates and statics (`AddLinkAnnotationObjects<BookTargets>` 1.8 KB,
+  `BuildInTrueType<…>` 1.1 KB, `make_shared<PdfImage>` 2 KB, the copy of `PdfOptions`, the
+  destructors of `BookTargets` and `FootBuffers`), now stands out of line at `-O3`, beside its
+  inlined copies in the hot callers. Those functions are cold already, and GCC optimizes cold
+  functions for size, so `-Os` takes little more off their own bodies. The 70 `RAYOMD_COLD`
+  functions of books, embeds, themes, image cache, font folder scan, PDF/A, PDF/UA, page notes,
+  long pages and SVG host glue: object +8,539, linked GCC 13 binary +8,320 bytes (GCC 11 object
+  +3,886); with the 30 more of contents, numbering, aligned blocks, CFF and page numbers, and
+  attributes on 16 never-run functions that had none (116 functions): +8,320 too. Singly, 20 of
+  117 made the object smaller, -8,430 together, -5,898 of it `ImageRegistry::Decode` (below);
+  the 9 that left the code of the functions the fixtures run as it was, by 265 bytes together.
+  The attribute kept `-fno-exceptions`, no unwind tables (no `.eh_frame`), the stack protector
+  (`%fs:0x28` canaries and `__stack_chk_fail` calls) and `endbr64` (checked on
+  `StandardThemeText::Emit`). A plain `cold` attribute on the never-run functions without one
+  behaved the same; `ImageRegistry::Decode` cold is -8 KB, but `DecodeImageBytes`, which GCC
+  then treats as called from cold code only, holds the per-pixel PNG paths.
+- `-falign-loops=1` on top: 4 KB more and -0.10 to -0.25 % instructions, but cycles +0.64 %
+  (code-heavy), +1.10 % (essay), +1.01 % (native_math), +0.57 % (tester-noimg), 41 pairs.
+- `-fvect-cost-model=very-cheap` for the `-O3` units: -8,192, code-heavy +4.83 % instructions.
+- `-Oz` for the `-Os` units (GCC 13): -4,096; GCC 11 has no `-Oz`. `-fno-inline-small-functions`,
+  `-fno-ipa-cp`, `-fno-partial-inlining` or smaller inlining parameters for them: no page less.
+- `-fno-plt` and `-fno-ipa-cp-clone`: +4,096 each. `-z noseparate-code`: no page less.
+- Profile feedback (`-fprofile-use` trained on the warm fixtures, the fresh documents and 60
+  generated ones): +16,384; with `-fprofile-partial-training` +126,976.
+- The formula fonts' glyph programs compressed: `kMathGlyphBytes` (46 KB) deflates to 40 KB.
+- The static build's libc: `strerror` links gettext (28 KB), but glibc's `dlopen`, `malloc`'s
+  messages and the resolver's configuration link it as well.
+- For scale: all of `tiny_pdf.cpp` at `-O2` -24,576, at `-Os` -151,296 bytes.
+
 ## Round 4: package size (opt4/size2, 2026-10-19)
 
 Against 5.2.4 (`27cf8f0`): the dynamic Linux binary of GCC 13 (GCC 11, the release runners', in
@@ -983,15 +1045,17 @@ case found so far took seconds for 40,000 to 200,000 openers).
 Findings that could make RayoMD faster later, with the evidence and the reason
 they were not taken yet. Add to this list when a change turns one up.
 
-**Never-run functions of `tiny_pdf.cpp` at -Os (size, round 4).** 140 KB of `tiny_pdf.cpp`'s
-out-of-line functions run in none of the eight warm fixtures (callgrind, default options): books,
-embeds, themes, image decoding and caches, the font folder scan, PDF/A and PDF/UA paths, math
-tables. Compiled at `-Os` the same functions are about 83 KB (`DecodeImageBytes` 9.8 -> 5.5 KB,
-`PdfImage`'s move 4.2 -> 0.4 KB, `BuildBookPdf` 3.1 -> 1.3 KB), plus 25 KB of functions `-Os`
-inlines elsewhere: an estimated 30 to 50 KB off both platforms. Agreed form: an attribute on whole
-cold functions only (cold, noinline, `optimize("Os")`), checked for GCC 11, with `symdiff.py` on
-the hot functions and the `ab.sh` gate; not measured yet. Image decoding and math tables are per
-pixel and per cell: keep them out.
+**Never-run functions of `tiny_pdf.cpp` (size).** Of the unit's 425 KB of code (GCC 13, the
+object), about 125 KB run in none of the eight warm fixtures (callgrind, default options): some
+65 KB of it cold already (`RAYOMD_COLD` functions and the `.cold` parts GCC splits off), which GCC
+compiles for size, and some 60 KB not (image decoding and the image registry about 22 KB of it,
+`BuildBookPdf`, the themes' text, math cells). Round 4 found the same functions about 83 KB when
+the whole unit is built at `-Os`. The agreed attribute (cold, noinline, `optimize("Os")`) on
+whole functions made the binary 8 KB larger (round 5, "Round 5: package size" above): GCC does
+not inline `-O3` callees into an `-Os` function. What remains is the pattern the themes, books and
+page notes took: a feature's functions in a translation unit of their own built at `-Os`, behind
+a small interface, each move checked for the inlining of the hot paths. Image decoding and math
+tables are per pixel and per cell: keep them out.
 
 **`std::filesystem` out of the build (size).** MinGW's libstdc++.a has no per-function
 sections, and its `fs_path.o` and `fs_ops.o` pull the codecvt facets, the locale's
@@ -1373,9 +1437,10 @@ Binary size (2026-10-19):
   pair loop +0.74 M. Kept only with the vector row ends and the peeled loop (-3.4 %).
 - `no_unwind.cpp` in the static build: glibc's libc.a links libgcc's unwinder for thread
   cancellation, so `_Unwind_Resume` is defined twice. The static build keeps libstdc++'s runtime.
-- Not measured, excluded by their requirements: `-Oz` for the `-Os` units (GCC 12 or newer; the
-  release runners' GCC 11 rejects it) and `-z pack-relative-relocs` (DT_RELR, most of the 11 KB
-  of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release runs on).
+- `-Oz` for the `-Os` units: GCC 13 -4,096 (round 5); GCC 12 or newer, the release runners'
+  GCC 11 rejects it. Not measured, excluded by its requirement: `-z pack-relative-relocs` (DT_RELR,
+  most of the 11 KB of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release
+  runs on).
 - UCRT's own `strtod` for the page size and margin options on MinGW UCRT builds (round 4,
   2026-10-19): libstdc++ makes `strtod` libmingwex's `__mingw_strtod` (its gdtoa), 18,944 bytes of
   a UCRT-linked `rayomd.exe`. mingw-w64's headers call UCRT's conforming to C99, but Wine's

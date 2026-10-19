@@ -90,6 +90,13 @@ function(rayomd_release_flags target)
                     $<$<CONFIG:Release>:-Wl,--gc-sections>)
             endif()
         endif()
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+            # No padding before jump targets: GCC aligns a target that only jumps reach to 16 bytes
+            # (up to 10 bytes of no-ops, which nothing executes, as the code before it jumps away),
+            # some 15 KB of the code. The same instructions run (callgrind: the eight warm
+            # fixtures within +0.02 %), cycles within the A/A noise. Loops keep their alignment.
+            target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-falign-jumps=1>)
+        endif()
     endif()
 endfunction()
 
