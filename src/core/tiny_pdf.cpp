@@ -7518,8 +7518,8 @@ private:
     std::vector<MathCell> mathTableCells;   // RenderMathTable's cells, by column
 
     // A table cell inside a table with formulas. A cell without a formula wraps
-    // exactly as RenderTable wraps it.
-    RAYOMD_MATH_COLD void WrapMathCell(const std::string& cell, double width, double size, bool bold, MathCell& out) {
+    // exactly as RenderTable wraps it. Not cold: it runs for every cell of such a table.
+    RAYOMD_SHARED void WrapMathCell(const std::string& cell, double width, double size, bool bold, MathCell& out) {
         out.formula = memchr(cell.data(), Internal::kMathTextOpen, cell.size()) != nullptr;
         if (out.formula) {
             out.formulaLines = WrapMathText(cell, width, size, bold);

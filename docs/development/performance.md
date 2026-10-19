@@ -123,7 +123,9 @@ linked notes) identical.
   `std::string::find`, libstdc++'s out-of-line copy that then calls `memchr` (now `memchr`
   itself: table-heavy -0.9 % instructions); every line of every cell was measured for its
   placement, which only a centred or right-aligned column uses (now only there, as `RenderTable`
-  does: table-heavy -2.6 % instructions, perf cycles -1.3 %).
+  does: table-heavy -2.6 % instructions, perf cycles -1.3 %). The Unicode renderer's
+  `WrapMathCell`, which runs for every cell of such a table, is no longer cold (optimized for
+  size): table-heavy -1.9 % instructions, cycles -2.4 %, ab time -2.2 %, its code +0.7 KB.
 - **The lexer's words end by a bit scan** (`Text::WordEnd`, highlight.cpp): `CodeLexer::Run`'s and
   `Word`'s loops over word bytes ended at a branch that mispredicts at every word; SSE2 now tests
   sixteen bytes (letters, digits, '_', bytes from 0x80) and takes the first other one, while the
