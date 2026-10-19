@@ -6,7 +6,10 @@
 #include "text_utils.h"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <string_view>
+#include <thread>
 
 namespace RayoMd::Batch {
 
@@ -186,6 +189,50 @@ bool CollectMarkdown(const RayoMd::File::Path& inputDir, const RayoMd::File::Pat
     for (const size_t index : order) sorted.push_back(std::move(files[index]));
     files = std::move(sorted);
     return true;
+}
+
+void RunJobs(size_t count, unsigned workers, uint64_t (*size)(void*, size_t),
+    void (*run)(void*, size_t, std::string&), void* context) {
+    if (count == 0) return;
+    if (workers == 0) {
+        workers = std::thread::hardware_concurrency();
+        if (workers == 0) workers = 2;
+        workers = std::min(workers, 6u);
+    }
+    workers = static_cast<unsigned>(std::min<size_t>(workers, count));
+    std::atomic<size_t> sizing{ 0 };
+    std::atomic<size_t> next{ 0 };
+    std::mutex mutex;
+    std::condition_variable sized;
+    unsigned arrived = 0;
+    unsigned active = workers;
+    uint64_t largest = 0;
+    const auto work = [&](unsigned id) {
+        if (workers > 1) {
+            uint64_t mine = 0;
+            for (size_t index; (index = sizing.fetch_add(1, std::memory_order_relaxed)) < count;) {
+                const uint64_t bytes = size(context, index);
+                if (bytes != UINT64_MAX) mine = std::max(mine, bytes);
+            }
+            std::unique_lock<std::mutex> lock(mutex);
+            largest = std::max(largest, mine);
+            if (++arrived == workers) {
+                if (largest > 64u * 1024u * 1024u) active = 1;
+                else if (largest > 16u * 1024u * 1024u) active = std::min(workers, 2u);
+                sized.notify_all();
+            } else {
+                sized.wait(lock, [&]() { return arrived == workers; });
+            }
+            if (id >= active) return;
+        }
+        std::string buffer;
+        buffer.reserve(1024 * 1024);
+        for (size_t index; (index = next.fetch_add(1, std::memory_order_relaxed)) < count;) run(context, index, buffer);
+    };
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+    for (unsigned id = 0; id < workers; id++) threads.emplace_back(work, id);
+    for (std::thread& thread : threads) thread.join();
 }
 
 } // namespace RayoMd::Batch

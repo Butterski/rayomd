@@ -13,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace RayoMd::Batch {
@@ -77,5 +78,22 @@ struct File {
 // False, with `error`, when the folder cannot be read.
 bool CollectMarkdown(const RayoMd::File::Path& inputDir, const RayoMd::File::Path& outputDir, bool recursive,
     std::vector<File>& files, std::string& error);
+
+// The threads of a batch: `run(index, buffer)` for every index below `count`, each thread passing an
+// output buffer of its own, on `workers` threads (0: one a CPU, at most 6; never more than `count`).
+// With more than one, the threads first take the inputs' sizes between them (`size(index)`,
+// UINT64_MAX for none), as an input over 16 MiB leaves the batch at most two threads and one over
+// 64 MiB one; a stat a file on one thread before was a serial part of every batch.
+void RunJobs(size_t count, unsigned workers, uint64_t (*size)(void*, size_t),
+    void (*run)(void*, size_t, std::string&), void* context);
+template <class Size, class Run>
+void RunJobs(size_t count, unsigned workers, Size&& size, Run&& run) {
+    struct Context {
+        std::remove_reference_t<Size>* size;
+        std::remove_reference_t<Run>* run;
+    } context{ &size, &run };
+    RunJobs(count, workers, [](void* self, size_t index) -> uint64_t { return (*static_cast<Context*>(self)->size)(index); },
+        [](void* self, size_t index, std::string& buffer) { (*static_cast<Context*>(self)->run)(index, buffer); }, &context);
+}
 
 } // namespace RayoMd::Batch
