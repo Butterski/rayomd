@@ -59,6 +59,12 @@ Every step keeps the 2,875 PDFs of the byte check and the 5,936 and 6,044 featur
   pays for keeping the gaps: +0.8 K instructions on a 200-byte note, +3 K on 15 to 33 KB. A first
   try that added a parameter to `BuildInto` renamed it out of `src/hot.ld`'s list: notes and polish
   +0.7 to +1.2 % cycles, L1i misses +25 %, at fewer instructions.
+- **Math control words looked up without a `strlen` a step** (`FindCommand`, math_parser.cpp): the
+  binary search compared the word with each entry through `string_view::compare(const char*)`, a
+  `strlen` and a `memcmp` at each of its nine steps (3 % of the cycles of a 1.4 MB build of
+  `tester.md` without images, the GUI's case); the entry is now read once up to the first
+  difference, and a static_assert checks the table's order. tester-noimg -2.0 % instructions,
+  -1.4 % cycles; others unchanged.
 
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
