@@ -10,6 +10,7 @@
 #include "print_colors.h"
 
 #include "../common/text_utils.h"
+#include "../common/thread_object.h"
 
 #include <array>
 #include <cstdint>
@@ -159,7 +160,7 @@ private:
 // holds for every stream and build after it, and a preview built again on each edit finds its
 // colours there. On the heap, so threads that print nothing grow by a pointer only.
 OperandMemo& ThreadMemo() {
-    static thread_local std::unique_ptr<OperandMemo> memo;
+    RAYOMD_THREAD_OBJECT(std::unique_ptr<OperandMemo>, memo);
     if (!memo) memo.reset(new OperandMemo());
     return *memo;
 }

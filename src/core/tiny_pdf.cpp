@@ -11,6 +11,7 @@
 #include "../common/exact_math.h"
 #include "../common/text_utils.h"
 #include "../common/compiler.h"
+#include "../common/thread_object.h"
 #include "book.h"
 #include "cff.h"
 #include "image_cache.h"
@@ -46,6 +47,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <wincodec.h>
+#include <sys/stat.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -67,7 +69,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -180,12 +181,55 @@ static std::wstring Utf8ToWide(std::string_view str) {
 }
 
 // Writes Utf8ToWide(str) at `out`, which has room for one code unit per byte, and returns the end.
-static RAYOMD_HOT_INLINE wchar_t* WriteUtf8Wide(wchar_t* out, std::string_view str) {
-    // ASCII, the usual case for a span or a table cell, needs no decoder.
+// ASCII, the usual case for a span or a table cell, needs no decoder: its bytes are tested and
+// widened in one pass, 16 a step in SSE2 (the last step widens the text's last 16 bytes again).
+// Text with a byte from 0x80 is decoded from its start. Out of line: one copy for its callers.
+static RAYOMD_NOINLINE wchar_t* WriteUtf8Wide(wchar_t* out, std::string_view str) {
+    const char* const bytes = str.data();
+    const size_t n = str.size();
+#if FAST_MD_SSE2
+    if (n >= 16) {
+        const __m128i zero = _mm_setzero_si128();
+        const auto widen = [out, zero](size_t at, __m128i chunk) RAYOMD_HOT_LAMBDA {
+            const __m128i low = _mm_unpacklo_epi8(chunk, zero);
+            const __m128i high = _mm_unpackhi_epi8(chunk, zero);
+            __m128i* const to = reinterpret_cast<__m128i*>(out + at);
+            if constexpr (sizeof(wchar_t) == 4) {
+                _mm_storeu_si128(to, _mm_unpacklo_epi16(low, zero));
+                _mm_storeu_si128(to + 1, _mm_unpackhi_epi16(low, zero));
+                _mm_storeu_si128(to + 2, _mm_unpacklo_epi16(high, zero));
+                _mm_storeu_si128(to + 3, _mm_unpackhi_epi16(high, zero));
+            } else {
+                _mm_storeu_si128(to, low);
+                _mm_storeu_si128(to + 1, high);
+            }
+        };
+        size_t at = 0;
+        bool ascii = true;
+        for (; at + 16 <= n; at += 16) {
+            const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes + at));
+            if (_mm_movemask_epi8(chunk) != 0) {
+                ascii = false;
+                break;
+            }
+            widen(at, chunk);
+        }
+        if (ascii && at < n) {
+            const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes + n - 16));
+            ascii = _mm_movemask_epi8(chunk) == 0;
+            if (ascii) widen(n - 16, chunk);
+        }
+        if (ascii) return out + n;
+    } else if (IsAllAscii(str)) {
+        for (size_t at = 0; at < n; at++) out[at] = (wchar_t)(unsigned char)bytes[at];
+        return out + n;
+    }
+#else
     if (IsAllAscii(str)) {
         for (const char ch : str) *out++ = (wchar_t)(unsigned char)ch;
         return out;
     }
+#endif
 #if defined(_WIN32)
     const int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), out, (int)str.size());
     return out + (len > 0 ? len : 0);
@@ -287,7 +331,7 @@ static RAYOMD_HOT_INLINE uint32_t ReadU32(const Bytes& data, size_t off) {
 
 #ifndef _WIN32
 static bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& bytes) {
-    return RayoMd::File::ReadAll(std::filesystem::path(path), 64u * 1024u * 1024u, bytes) && !bytes.empty();
+    return RayoMd::File::ReadAll(path, 64u * 1024u * 1024u, bytes) && !bytes.empty();
 }
 #endif
 
@@ -307,7 +351,7 @@ static bool ReadFromHandle(HANDLE file, uint8_t* out, size_t size) {
 // its size, or INVALID_HANDLE_VALUE when it cannot be read or is empty or past 64 MB.
 static HANDLE OpenWholeFile(const std::wstring& path, size_t& size) {
     uint64_t length = 0;
-    HANDLE file = (HANDLE)RayoMd::File::OpenRegular(std::filesystem::path(path), length);
+    HANDLE file = (HANDLE)RayoMd::File::OpenRegular(path, length);
     if (file == INVALID_HANDLE_VALUE) return file;
     if (length == 0 || length > 64u * 1024u * 1024u) {
         CloseHandle(file);
@@ -370,7 +414,7 @@ public:
         clear();
         // A regular file only, opened without waiting on a FIFO (RayoMd::File::OpenRegular).
         uint64_t length = 0;
-        int file = RayoMd::File::OpenRegular(std::filesystem::path(path), length);
+        int file = RayoMd::File::OpenRegular(path, length);
         if (file < 0) return false;
         if (length == 0 || length > 64u * 1024u * 1024u) {
             close(file);
@@ -607,16 +651,15 @@ struct TtfFont {
         std::vector<int> scores;
         size_t visited = 0;
         for (const std::string& root : roots) {
-            std::error_code error;
-            std::filesystem::recursive_directory_iterator entries(root,
-                std::filesystem::directory_options::skip_permission_denied, error);
-            for (const std::filesystem::recursive_directory_iterator end; !error && entries != end && visited < 20000;
-                entries.increment(error), visited++) {
-                std::string name = entries->path().filename().string();
+            // As the standard library's filesystem::recursive_directory_iterator with skip_permission_denied: each
+            // entry, folders entered (not through links), unreadable ones passed over.
+            RayoMd::File::Walk(root, [&](const RayoMd::File::Entry& entry) {
+                if (visited++ >= 20000) return RayoMd::File::WalkStep::Stop;
+                std::string name(entry.name);
                 for (char& ch : name) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-                if (name.size() < 5) continue;
+                if (name.size() < 5) return RayoMd::File::WalkStep::Enter;
                 const bool trueType = name.compare(name.size() - 4, 4, ".ttf") == 0;
-                if (!trueType && name.compare(name.size() - 4, 4, ".otf") != 0) continue;
+                if (!trueType && name.compare(name.size() - 4, 4, ".otf") != 0) return RayoMd::File::WalkStep::Enter;
                 int score = trueType ? 1 : 0;
                 if (name.find("sans") != std::string::npos) score += 4;
                 if (name.find("regular") != std::string::npos) score += 2;
@@ -624,9 +667,10 @@ struct TtfFont {
                          "condensed", "narrow", "mono", "emoji", "symbol", "math" }) {
                     if (name.find(face) != std::string::npos) score -= 10;
                 }
-                paths.push_back(entries->path().string());
+                paths.push_back(*entry.path);
                 scores.push_back(score);
-            }
+                return RayoMd::File::WalkStep::Enter;
+            });
         }
         // The best remaining candidate, the first found among equals, up to 32 attempts. Scores
         // lie between -140 and 7, so kTried marks a file that failed to load.
@@ -1079,7 +1123,7 @@ public:
 
 private:
     static T& Slot() {
-        static thread_local T slot;
+        RAYOMD_THREAD_OBJECT(T, slot);
         return slot;
     }
 };
@@ -1158,7 +1202,7 @@ struct WrapMeasure {
 // paragraph's lines are drawn, trade it for a spare (SwapFootBuffers); a renderer that ends gives
 // one grown past kKeptBufferBytes back to the allocator (ReleaseWrapScratch).
 static WrapMeasure& WrapScratch() {
-    static thread_local WrapMeasure scratch;
+    RAYOMD_THREAD_OBJECT(WrapMeasure, scratch);
     return scratch;
 }
 
@@ -1461,7 +1505,24 @@ public:
         cursor += size;
     }
     RAYOMD_HOT_INLINE void Bytes(std::string_view text) { Bytes(text.data(), text.size()); }
+    // A colour's operands ("0.08 0.08 0.08"), 8 to 16 bytes: two overlapping moves of 8, where
+    // Bytes calls memcpy through the PLT; other lengths take memcpy.
+    RAYOMD_HOT_INLINE void Short(std::string_view text) {
+        const char* const from = text.data();
+        const size_t size = text.size();
+        if (size - 8 <= 8) {
+            memcpy(cursor, from, 8);
+            memcpy(cursor + size - 8, from + size - 8, 8);
+        } else {
+            memcpy(cursor, from, size);
+        }
+        cursor += size;
+    }
     void Fixed(double value) { cursor = RayoMd::Text::WriteFixed2(cursor, value); }
+    RAYOMD_HOT_INLINE void Fixed(const RayoMd::Text::Fixed2Text& text) {
+        memcpy(cursor, text.bytes, RayoMd::Text::kFixed2MaxChars);
+        cursor += text.size;
+    }
     void Number(size_t value) { cursor = std::to_chars(cursor, cursor + 20, value).ptr; }
     char* cursor = nullptr;
 
@@ -1471,6 +1532,62 @@ private:
 
 // Room for one operand written by TailWriter::Fixed, with its separator.
 constexpr size_t kOperandBytes = RayoMd::Text::kFixed2MaxChars + 1;
+
+// The text of the font size a renderer wrote last, which the runs of a block repeat: formatted
+// again only when the size changes, compared by its bits (-0 is written "-0").
+class SizeMemo {
+public:
+    SizeMemo() {
+        text.bytes[0] = '0';
+        text.size = 1;
+    }
+    RAYOMD_HOT_INLINE const RayoMd::Text::Fixed2Text& Get(double size) {
+        uint64_t sizeBits;
+        memcpy(&sizeBits, &size, sizeof(sizeBits));
+        if (__builtin_expect(sizeBits != bits, 0)) {
+            bits = sizeBits;
+            text = RayoMd::Text::Fixed2Text(size);
+        }
+        return text;
+    }
+
+private:
+    uint64_t bits = 0;
+    RayoMd::Text::Fixed2Text text;
+};
+
+// The operands every line of a code block repeats, formatted once a block: its tiles' left edge,
+// width and heights (CodeTile: a page's first line's tile reaches 3 points higher, `pad`) and its
+// text's left edge. A line then formats only where its tile and its text stand.
+struct CodeBlockText {
+    CodeBlockText(double tileLeft, double tileWidth, double lh, double textLeft)
+        : left(tileLeft), width(tileWidth), height(lh + 2.0 + 0.0), firstHeight(lh + 2.0 + 3.0), x(textLeft),
+          xValue(textLeft) {}
+    RayoMd::Text::Fixed2Text left, width, height, firstHeight, x;
+    double xValue;
+};
+
+// The operands the cell borders of a table row repeat, formatted once a row (the column width once
+// a table): their bottom, width and height. A cell then formats only its left edge.
+struct CellBorderText {
+    CellBorderText(double top, const RayoMd::Text::Fixed2Text& columnWidth, double h)
+        : bottom(top - h), width(columnWidth), height(h) {}
+    RayoMd::Text::Fixed2Text bottom, width, height;
+};
+
+// A table cell's border from x in its row, grey and 0.45 wide, as both renderers stroke it.
+static void AppendCellBorder(std::string& content, double x, const CellBorderText& row) {
+    TailWriter out(content, 40 + kOperandBytes * 4);
+    out.Lit("q 0.72 0.72 0.72 RG 0.45 w ");
+    out.Fixed(x);
+    out.Lit(" ");
+    out.Fixed(row.bottom);
+    out.Lit(" ");
+    out.Fixed(row.width);
+    out.Lit(" ");
+    out.Fixed(row.height);
+    out.Lit(" re S Q\n");
+}
 
 // The checkbox of a task list item, a square `side` points wide standing on (x, bottom), with
 // a check mark when the task is done. Paths, not a glyph, so every font shows it.
@@ -1565,7 +1682,7 @@ RAYOMD_COLD static void MakeBulletMarker(BulletMarker& marker, double size, int 
 
 // The marker of a bullet list item at nesting `depth`, beside text of `size` on `baseline` from x.
 static void AppendBulletMarker(std::string& content, double x, double baseline, double size, int depth) {
-    static thread_local BulletMarker markers[3];
+    RAYOMD_THREAD_OBJECT(BulletMarker[3], markers);
     if (depth > 2) depth = 2;
     BulletMarker& marker = markers[depth];
     if (marker.size != size) MakeBulletMarker(marker, size, depth);
@@ -1704,7 +1821,7 @@ private:
         bool busy = false;
     };
     static Slot& ThreadSlot() {
-        static thread_local Slot slot;
+        RAYOMD_THREAD_OBJECT(Slot, slot);
         return slot;
     }
     UsedCidSet* set = nullptr;
@@ -2204,7 +2321,7 @@ struct FlateWork {
 };
 
 RAYOMD_COLD static FlateWork& ThreadFlateWork() {
-    static thread_local FlateWork work;
+    RAYOMD_THREAD_OBJECT(FlateWork, work);
     return work;
 }
 
@@ -2449,7 +2566,7 @@ static bool IsHttpUrl(std::string_view src) {
 
 static char* WriteEscapedLiteral(char* out, std::string_view text);
 
-// Paths of UTF-8 names and back without exceptions (file_io.h): std::filesystem::u8path and
+// Paths of UTF-8 names and back without exceptions (file_io.h): the standard library's filesystem::u8path and
 // path::u8string threw on Windows for invalid UTF-8 in a document's image path or link and for an
 // unpaired surrogate in a file name, which ended the process.
 using RayoMd::File::PathFromUtf8;
@@ -2516,8 +2633,9 @@ static bool GetFinalNtPath(HANDLE handle, std::wstring& path) {
 }
 
 static bool ExpectedNtPathForDirectDosPath(
-    const std::filesystem::path& absolute, std::wstring& expected) {
-    std::wstring drive = absolute.root_name().native();
+    const RayoMd::File::Path& absolute, std::wstring& expected) {
+    // The root name, a drive "C:".
+    std::wstring drive = absolute.substr(0, absolute.size() >= 2 && absolute[1] == L':' ? 2 : 0);
     if (drive.size() != 2 || drive[1] != L':' ||
         !((drive[0] >= L'A' && drive[0] <= L'Z') ||
           (drive[0] >= L'a' && drive[0] <= L'z'))) return false;
@@ -2532,7 +2650,7 @@ static bool ExpectedNtPathForDirectDosPath(
 
     std::wstring device(targets.data());
     if (device.compare(0, 8, L"\\Device\\") != 0) return false;
-    std::wstring relative = absolute.relative_path().native();
+    std::wstring relative(RayoMd::File::RelativePart(absolute));
     std::replace(relative.begin(), relative.end(), L'/', L'\\');
     while (!relative.empty() && relative.front() == L'\\') relative.erase(relative.begin());
 
@@ -2546,7 +2664,7 @@ static bool ExpectedNtPathForDirectDosPath(
 }
 
 static bool TryApprovedNtRootForPolicy(
-    const std::filesystem::path& absolute, std::wstring& approved) {
+    const RayoMd::File::Path& absolute, std::wstring& approved) {
     std::wstring expected;
     if (!ExpectedNtPathForDirectDosPath(absolute, expected)) return false;
 
@@ -2572,7 +2690,7 @@ static bool TryApprovedNtRootForPolicy(
 // least of all, is opened before the final-path check. One GetFileInformationByHandle gives the
 // attributes, the size and the stamp; only a reparse point has its tag read.
 static DirectLocalImageResult TryOpenDirectLocalImage(
-    const std::filesystem::path& path, const std::wstring& approvedRoot,
+    const RayoMd::File::Path& path, const std::wstring& approvedRoot,
     std::string& key, WinLocalImageFile& file) {
     HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
@@ -2675,43 +2793,104 @@ static bool HasUnsafeWindowsPathPrefix(std::string_view src) {
 static bool IsUnsafeLocalImageSource(std::string_view src) {
     if (src.empty() || src.find('\0') != std::string_view::npos) return true;
     if (HasUnsafeWindowsPathPrefix(src) || HasUriScheme(src)) return true;
-    std::filesystem::path path = PathFromUtf8(src);
-    return path.is_absolute();
+    return RayoMd::File::IsAbsolute(src);
 }
 
-static bool TryCanonicalForPolicy(
-    const std::filesystem::path& path, std::filesystem::path& normalized) {
-    std::error_code ec;
-    std::filesystem::path absolute = path.is_absolute() ? path : std::filesystem::absolute(path, ec);
-    if (ec) return false;
-
-    normalized = std::filesystem::canonical(absolute, ec);
-    if (ec) return false;
-    normalized = normalized.lexically_normal();
-    return true;
+// the standard library's filesystem::canonical as libstdc++ makes it: on POSIX realpath(3) of the absolute path; on
+// Windows, where it resolves no link, the path made normal and absolute (GetFullPathNameW), which
+// must be there, then its root and each of its names joined again by '\', each found there
+// (_wstat64, as libstdc++'s status and symlink_status call it). False when it names nothing.
+static bool TryCanonicalForPolicy(const RayoMd::File::Path& path, RayoMd::File::Path& normalized) {
+    RayoMd::File::Path absolute;
+#ifdef _WIN32
+    RayoMd::File::Path normal = path;
+    RayoMd::File::Normalize(normal);
+    struct __stat64 info;
+    if (!RayoMd::File::Absolute(normal, absolute)) return false;
+    const size_t root = RayoMd::File::RootLength(RayoMd::File::PathView(absolute));
+    // As libstdc++'s status: a path ending in a separator is stat'ed without it (_wstat64 fails
+    // on one; GCC PR 88881).
+    size_t last = absolute.size();
+    while (last > root && (absolute[last - 1] == L'\\' || absolute[last - 1] == L'/')) last--;
+    if (_wstat64(absolute.substr(0, last).c_str(), &info) != 0) return false;
+    normalized.assign(absolute, 0, root);
+    for (size_t at = root; at < absolute.size();) {
+        size_t end = at;
+        while (end < absolute.size() && absolute[end] != L'\\' && absolute[end] != L'/') end++;
+        if (end > at) {
+            if (normalized.size() > root) normalized += L'\\';
+            normalized.append(absolute, at, end - at);
+            if (_wstat64(normalized.c_str(), &info) != 0) return false;
+        }
+        at = end + 1;
+    }
+    return normalized.size() > root || _wstat64(normalized.c_str(), &info) == 0;
+#else
+    if (!RayoMd::File::Absolute(path, absolute)) return false;
+    normalized = RayoMd::File::Resolved(absolute);
+    return !normalized.empty();
+#endif
 }
+
+// The components of a path as the standard library's filesystem::path's iterator gives them: its root name, its root
+// directory, each name, and an empty name after a separator that ends it.
+struct PolicyPathParts {
+    RayoMd::File::PathView path;
+    size_t rootLength;
+    size_t at = 0;
+    bool afterName = false;
+
+    explicit PolicyPathParts(RayoMd::File::PathView text) : path(text), rootLength(RayoMd::File::RootLength(text)) {}
+    static bool IsSeparator(RayoMd::File::PathChar c) {
+#ifdef _WIN32
+        return c == L'/' || c == L'\\';
+#else
+        return c == '/';
+#endif
+    }
+    bool Next(RayoMd::File::PathView& part) {
+        if (at < rootLength) {
+            const size_t nameEnd = IsSeparator(path[rootLength - 1]) ? rootLength - 1 : rootLength;
+            const size_t start = at;
+            at = at < nameEnd ? nameEnd : rootLength;
+            part = path.substr(start, at - start);
+            return true;
+        }
+        part = RayoMd::File::PathView();
+        if (at > path.size()) return false;
+        size_t start = at;
+        while (start < path.size() && IsSeparator(path[start])) start++;
+        if (start == path.size()) {
+            const bool trailing = afterName && start > at;
+            at = path.size() + 1;
+            return trailing;
+        }
+        at = start;
+        while (at < path.size() && !IsSeparator(path[at])) at++;
+        part = path.substr(start, at - start);
+        afterName = true;
+        return true;
+    }
+};
 
 // Whether two components of paths are the same name: on Windows their UTF-16 as it is, with ASCII
 // letters folded unless `exact`. Never converted to UTF-8, which threw on an unpaired surrogate and
 // would make two different such names one.
-static bool PathPartEqualForPolicy(
-    const std::filesystem::path& a, const std::filesystem::path& b, [[maybe_unused]] bool exact) {
+static bool PathPartEqualForPolicy(RayoMd::File::PathView a, RayoMd::File::PathView b, [[maybe_unused]] bool exact) {
 #ifdef _WIN32
-    const std::wstring& left = a.native();
-    const std::wstring& right = b.native();
-    if (exact || left.size() != right.size()) return left == right;
+    if (exact || a.size() != b.size()) return a == b;
     const auto fold = [](wchar_t c) { return c >= L'A' && c <= L'Z' ? (wchar_t)(c - L'A' + L'a') : c; };
-    for (size_t at = 0; at < left.size(); at++) {
-        if (fold(left[at]) != fold(right[at])) return false;
+    for (size_t at = 0; at < a.size(); at++) {
+        if (fold(a[at]) != fold(b[at])) return false;
     }
     return true;
 #else
-    return a.native() == b.native();
+    return a == b;
 #endif
 }
 
 struct DirectRootCacheEntry {
-    std::filesystem::path root;
+    RayoMd::File::Path root;
     std::wstring approvedNtRoot;
 };
 
@@ -2727,15 +2906,13 @@ static DirectRootCache& RootCache() {
 }
 
 static bool TryCanonicalRootForPolicy(
-    const std::filesystem::path& path, std::filesystem::path& normalized,
+    const RayoMd::File::Path& path, RayoMd::File::Path& normalized,
     bool& direct, std::wstring& approvedNtRoot) {
     direct = false;
     approvedNtRoot.clear();
-    std::error_code ec;
-    std::filesystem::path absolute =
-        path.is_absolute() ? path : std::filesystem::absolute(path, ec);
-    if (ec) return false;
-    absolute = absolute.lexically_normal();
+    RayoMd::File::Path absolute;
+    if (!RayoMd::File::Absolute(path, absolute)) return false;
+    RayoMd::File::Normalize(absolute);
 
     DirectRootCache& cache = RootCache();
     {
@@ -2750,7 +2927,7 @@ static bool TryCanonicalRootForPolicy(
         }
     }
 
-    std::filesystem::path canonical;
+    RayoMd::File::Path canonical;
     if (!TryCanonicalForPolicy(absolute, canonical)) return false;
     std::wstring approved;
     if (canonical == absolute) {
@@ -2776,13 +2953,17 @@ static bool TryCanonicalRootForPolicy(
     return true;
 }
 
-static bool IsPathContainedInRoot(
-    const std::filesystem::path& child, const std::filesystem::path& root, bool exact) {
-    std::filesystem::path childNorm = child.lexically_normal();
-    std::filesystem::path rootNorm = root.lexically_normal();
-    auto childIt = childNorm.begin();
-    for (auto rootIt = rootNorm.begin(); rootIt != rootNorm.end(); ++rootIt, ++childIt) {
-        if (childIt == childNorm.end() || !PathPartEqualForPolicy(*childIt, *rootIt, exact)) return false;
+static bool IsPathContainedInRoot(const RayoMd::File::Path& child, const RayoMd::File::Path& root, bool exact) {
+    RayoMd::File::Path childNorm = child;
+    RayoMd::File::Normalize(childNorm);
+    RayoMd::File::Path rootNorm = root;
+    RayoMd::File::Normalize(rootNorm);
+    PolicyPathParts childParts(childNorm);
+    PolicyPathParts rootParts(rootNorm);
+    RayoMd::File::PathView a;
+    RayoMd::File::PathView b;
+    while (rootParts.Next(b)) {
+        if (!childParts.Next(a) || !PathPartEqualForPolicy(a, b, exact)) return false;
     }
     return true;
 }
@@ -2800,8 +2981,8 @@ public:
     // A book's file (BuildBookPdf): its relative images resolve from its own directory, and must
     // still lie in the book's.
     void SetChapter(const std::string& pathUtf8) {
-        chapterBase = PathFromUtf8(pathUtf8).parent_path();
-        if (chapterBase.empty()) chapterBase = ".";
+        chapterBase = PathFromUtf8(RayoMd::File::ParentOf(pathUtf8));
+        if (chapterBase.empty()) chapterBase = RayoMd::File::PathOfAscii(".");
         chapterRootReady = false;
     }
 
@@ -2815,14 +2996,15 @@ public:
             return DirectLocalImageResult::NotApplicable;
         }
 
-        const std::filesystem::path& root = SafeRoot();
+        const RayoMd::File::Path& root = SafeRoot();
         if (!safeRootValid) return DirectLocalImageResult::Rejected;
         if (!safeRootDirect || safeRootNt.empty()) return DirectLocalImageResult::NotApplicable;
 
-        std::filesystem::path path = (root / PathFromUtf8(src)).lexically_normal();
+        RayoMd::File::Path path = Joined(root, PathFromUtf8(src));
+        RayoMd::File::Normalize(path);
         // In the root by name before anything is opened ("..", wildcards), and through no link.
         if (path == root || !IsPathContainedInRoot(path, root, false) ||
-            path.native().find_first_of(L"*?") != std::wstring::npos || Internal::DirectPathHasLink(root, path)) {
+            path.find_first_of(L"*?") != std::wstring::npos || Internal::DirectPathHasLink(root, path)) {
             return DirectLocalImageResult::Rejected;
         }
         return TryOpenDirectLocalImage(path, safeRootNt, key, file);
@@ -2836,9 +3018,9 @@ public:
         if (allowUnsafe) return ResolveUnsafe(src, key, pathUtf8);
         if (!hasSourcePath || IsUnsafeLocalImageSource(src)) return false;
 
-        const std::filesystem::path& root = SafeRoot();
+        const RayoMd::File::Path& root = SafeRoot();
         if (!safeRootValid) return false;
-        const std::filesystem::path* base = &root;
+        const RayoMd::File::Path* base = &root;
         if (!chapterBase.empty()) {
             if (!chapterRootReady) {
                 chapterRootValid = TryCanonicalForPolicy(chapterBase, chapterRoot);
@@ -2847,8 +3029,8 @@ public:
             if (!chapterRootValid) return false;
             base = &chapterRoot;
         }
-        std::filesystem::path normalized;
-        if (!TryCanonicalForPolicy(*base / PathFromUtf8(src), normalized) ||
+        RayoMd::File::Path normalized;
+        if (!TryCanonicalForPolicy(Joined(*base, PathFromUtf8(src)), normalized) ||
             !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
 
         pathUtf8 = PathToUtf8(normalized);
@@ -2857,6 +3039,13 @@ public:
     }
 
 private:
+    // `base` / `path`, as the standard library's filesystem::path's operator/ joins them.
+    static RayoMd::File::Path Joined(const RayoMd::File::Path& base, const RayoMd::File::Path& path) {
+        RayoMd::File::Path joined = base;
+        RayoMd::File::AppendPath(joined, path);
+        return joined;
+    }
+
     // The source's directory, and the one images must lie in: "." for a source path without one;
     // with a vault (Obsidian's dialect, PdfOptions::vaultRoot), the vault, the images resolving
     // from the source's directory as a book's from its file's.
@@ -2865,9 +3054,11 @@ private:
         basesReady = true;
         if (!hasSourcePath) return;
         sourceBase = PathFromUtf8(sourcePath);
-        if (sourceBase.has_filename()) sourceBase = sourceBase.parent_path();
+        if (!RayoMd::File::FileNameOf(RayoMd::File::PathView(sourceBase)).empty()) {
+            sourceBase.resize(RayoMd::File::ParentOf(RayoMd::File::PathView(sourceBase)).size());
+        }
         safeBase = sourceBase;
-        if (safeBase.empty()) safeBase = ".";
+        if (safeBase.empty()) safeBase = RayoMd::File::PathOfAscii(".");
         if (vaultRoot != nullptr && !vaultRoot->empty()) {
             if (chapterBase.empty()) chapterBase = safeBase;
             safeBase = PathFromUtf8(*vaultRoot);
@@ -2878,10 +3069,10 @@ private:
     RAYOMD_COLD bool ResolveEmbedded(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t base) {
         const std::string* folder = Internal::EmbedFolder(base);
         if (folder == nullptr || !hasSourcePath || (!allowUnsafe && IsUnsafeLocalImageSource(src))) return false;
-        std::filesystem::path normalized;
-        if (!TryCanonicalForPolicy(PathFromUtf8(*folder) / PathFromUtf8(src), normalized)) return false;
+        RayoMd::File::Path normalized;
+        if (!TryCanonicalForPolicy(Joined(PathFromUtf8(*folder), PathFromUtf8(src)), normalized)) return false;
         if (!allowUnsafe) {
-            const std::filesystem::path& root = SafeRoot();
+            const RayoMd::File::Path& root = SafeRoot();
             if (!safeRootValid || !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
         }
         pathUtf8 = PathToUtf8(normalized);
@@ -2889,7 +3080,7 @@ private:
         return true;
     }
 
-    const std::filesystem::path& SafeRoot() {
+    const RayoMd::File::Path& SafeRoot() {
         if (!safeRootReady) {
             PrepareBases();
             safeRootValid = TryCanonicalRootForPolicy(
@@ -2900,13 +3091,13 @@ private:
     }
 
     bool ResolveUnsafe(const std::string& src, std::string& key, std::string& pathUtf8) {
-        std::filesystem::path path = PathFromUtf8(src);
-        if (path.is_relative() && hasSourcePath) {
+        RayoMd::File::Path path = PathFromUtf8(src);
+        if (!RayoMd::File::IsAbsolute(RayoMd::File::PathView(path)) && hasSourcePath) {
             PrepareBases();
-            path = (chapterBase.empty() ? sourceBase : chapterBase) / path;
+            path = Joined(chapterBase.empty() ? sourceBase : chapterBase, path);
         }
 
-        std::filesystem::path normalized;
+        RayoMd::File::Path normalized;
         if (!TryCanonicalForPolicy(path, normalized)) return false;
         pathUtf8 = PathToUtf8(normalized);
         key = "file:" + pathUtf8;
@@ -2923,11 +3114,11 @@ private:
     bool chapterRootValid = false;
     const std::string& sourcePath;       // PdfOptions::sourcePath, which outlives the export
     const std::string* vaultRoot;        // PdfOptions::vaultRoot under Obsidian's dialect, else null
-    std::filesystem::path sourceBase;
-    std::filesystem::path safeBase;
-    std::filesystem::path safeRoot;
-    std::filesystem::path chapterBase;   // a book's file's directory, or empty
-    std::filesystem::path chapterRoot;   // and canonical
+    RayoMd::File::Path sourceBase;
+    RayoMd::File::Path safeBase;
+    RayoMd::File::Path safeRoot;
+    RayoMd::File::Path chapterBase;   // a book's file's directory, or empty
+    RayoMd::File::Path chapterRoot;   // and canonical
     std::wstring safeRootNt;
 };
 
@@ -2941,7 +3132,7 @@ static bool ReadLocalImageFile(const std::string& pathUtf8, std::vector<uint8_t>
     return ReadWholeFile(Utf8ToWide(pathUtf8), bytes);
 #else
     if (!contained) return ReadWholeFile(pathUtf8, bytes);
-    return RayoMd::File::ReadCanonical(std::filesystem::path(pathUtf8), 64u * 1024u * 1024u, bytes) && !bytes.empty();
+    return RayoMd::File::ReadCanonical(pathUtf8, 64u * 1024u * 1024u, bytes) && !bytes.empty();
 #endif
 }
 
@@ -4078,7 +4269,7 @@ public:
     // outside the policy for images in documents. False, and one more failed image, when it cannot
     // be read or decoded.
     RAYOMD_COLD bool ResolveThemeFile(const std::string& pathUtf8, int& index) {
-        std::filesystem::path normalized;
+        RayoMd::File::Path normalized;
 #ifdef _WIN32
         // Theme assets are local files: a UNC, device or network-drive path is refused before
         // anything opens it, so a theme cannot make the build connect to a share.
@@ -5901,6 +6092,7 @@ RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& b
 
     double tableWidth = renderer.pageW - renderer.margin * 2.0;
     double colWidth = tableWidth / columns;
+    const RayoMd::Text::Fixed2Text columnWidth(colWidth);
     double size = 9.6;
     double lh = size * 1.32;
     double pad = 5.0;
@@ -5986,10 +6178,11 @@ RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& b
                 const double top = renderer.y;
                 const double boxHeight = sliceHeight + pad * 2.0;
                 if (r == 0) renderer.TableFill(renderer.margin, top, tableWidth, boxHeight);
+                const CellBorderText border(top, columnWidth, boxHeight);
                 bool remaining = false;
                 for (size_t c = 0; c < columns; c++) {
                     double cellX = renderer.margin + c * colWidth;
-                    renderer.TableStroke(cellX, top, colWidth, boxHeight);
+                    renderer.TableStroke(cellX, border);
                     int align = c < block.aligns.size() ? block.aligns[c] : -1;
                     renderer.TagCell(c, true);
                     paintLines(cells[c], next[c], end[c], cellX, top, align, r == 0);
@@ -6028,9 +6221,10 @@ RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& b
         renderer.TagTableRowStart(r, columns, r == 0 && resumeRow != 0);
         double top = renderer.y;
         if (r == 0) renderer.TableFill(renderer.margin, top, tableWidth, rowHeight);
+        const CellBorderText border(top, columnWidth, rowHeight);
         for (size_t c = 0; c < columns; c++) {
             double cellX = renderer.margin + c * colWidth;
-            renderer.TableStroke(cellX, top, colWidth, rowHeight);
+            renderer.TableStroke(cellX, border);
             int align = c < block.aligns.size() ? block.aligns[c] : -1;
             renderer.TagCell(c, true);
             paintLines(cells[c], 0, cells[c].Count(), cellX, top, align, r == 0);
@@ -6551,7 +6745,11 @@ public:
             while (id < ids.size() && ids[id].page < parse.firstPages[index]) id++;
             while (id < ids.size() && ids[id].page < end) file.ids.push_back(ids[id++]);
             file.targets = std::make_unique<HeadingTargets>(file.marks, winAnsi, pageTop, parse.noteMarks[index], &file.ids);
-            if (!chapters[index].part) paths[index] = PathToUtf8(PathFromUtf8(chapters[index].path).lexically_normal());
+            if (!chapters[index].part) {
+                RayoMd::File::Path normal = PathFromUtf8(chapters[index].path);
+                RayoMd::File::Normalize(normal);
+                paths[index] = PathToUtf8(normal);
+            }
         }
     }
 
@@ -6850,6 +7048,7 @@ private:
     int listDepth = 0;   // the list items the blocks being drawn are nested in
     // The page being rendered is the tail of `content`, so painting is a plain append.
     std::string& content;
+    SizeMemo sizeMemo;              // the font size the text written last had
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     RunLinkUrls runLinkUrls;        // the target of the last link a run drew (AddRunLink)
@@ -6882,9 +7081,11 @@ private:
     const Internal::Footnotes* footnotes = nullptr;
     NoteMarks noteMarks;
     MathFallbackFont mathFallback{};
-    // Highlighted code: whether to highlight it, a block's text as the lexer reads it, the
-    // classes of that text, and the runs of one colour of a line, kept from block to block.
+    // Highlighted code: whether to highlight it, the widest advance of an ASCII unit in `font` (0
+    // until a block needs it), a block's text as the lexer reads it, the classes of that text, and
+    // the runs of one colour of a line, kept from block to block.
     bool highlightCode = true;
+    uint16_t codeWidest = 0;
     std::string codeText;
     std::wstring codeWide;           // the block's text as drawn
     std::vector<uint8_t> codeClasses;
@@ -7419,7 +7620,11 @@ private:
     }
 
     void TableFill(double x, double top, double w, double h) { DrawRect(x, top, w, h, "0.91 0.93 0.95"); }
-    void TableStroke(double x, double top, double w, double h) { DrawStrokeRect(x, top, w, h); }
+    // A table cell's border, an artifact when tagged.
+    void TableStroke(double x, const CellBorderText& row) {
+        if (tags != nullptr) tags->Artifact();
+        AppendCellBorder(content, x, row);
+    }
     std::string_view TableTextColor(bool header) const { return header ? "0.04 0.04 0.04" : "0.10 0.10 0.10"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer in one style.
@@ -7655,18 +7860,18 @@ private:
     // explicit line breaks, possible formulas or HTML scripts (<sup>, <sub>), and with a theme's
     // faces, which take the general path.
     bool WrapStyledRuns(const std::string& text, double width, double size, StyledRuns& out) {
-        if (multiFace || text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
-            text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
-            return false;
-        }
-        return WrapStyledInline(text, width, size, out, false) && !out.parsed.scripts;
+        if (multiFace) return false;
+        const unsigned test = Internal::ParagraphRunsTest(text, footnotes != nullptr);
+        if (test == Internal::kParagraphGeneral) return false;
+        return WrapStyledInline(text, width, size, out, false, test == Internal::kParagraphSymbol) && !out.parsed.scripts;
     }
 
     // WrapStyledRuns for one line of inline Markdown without formulas, such as a table cell.
     // Text too long for the run offsets gives one empty line and false. `recognizeMath` false
-    // (text without '$' and "\(") spares the parser its own search for them.
+    // (text without '$' and "\(") spares the parser its own search for them, `maySymbols` false
+    // (text without 0xE2) the search for status symbols.
     RAYOMD_SHARED bool WrapStyledInline(std::string_view text, double width, double size, StyledRuns& out,
-        bool recognizeMath = true) {
+        bool recognizeMath = true, bool maySymbols = true) {
         out.text.clear();
         out.runs.clear();
         out.lineEnds.clear();
@@ -7693,7 +7898,7 @@ private:
             return true;
         }
 
-        Internal::ParseInlineRuns(text, out.parsed, recognizeMath);
+        Internal::ParseInlineRuns(text, out.parsed, recognizeMath, Internal::kDefaultLookaheadBudget, maySymbols);
         out.parse = NextRunsParse();
         const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
         size_t bytes = 0;
@@ -8085,9 +8290,9 @@ private:
         const size_t textBytes = CidTextBytes(line);
         TailWriter w(content, 96 + color.size() * 2 + kOperandBytes * 9 + textBytes * 2);
         w.Lit("q ");
-        w.Bytes(color);
+        w.Short(color);
         w.Lit(" rg BT /F1 ");
-        w.Fixed(size);
+        w.Fixed(sizeMemo.Get(size));
         w.Lit(" Tf 1 0 ");
         if (italic) w.Lit("0.18 ");
         else w.Lit("0 ");
@@ -8143,7 +8348,7 @@ private:
         if (tags != nullptr) tags->Artifact();
         TailWriter out(content, 24 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color);
+        out.Short(color);
         out.Lit(" rg ");
         out.Fixed(x);
         out.Lit(" ");
@@ -8160,24 +8365,6 @@ private:
     void QuoteStrip(double height) {
         DrawRect(margin, y + 2.0, pageW - margin * 2.0, height, "0.94 0.95 0.96");
         DrawRect(margin, y + 2.0, 3.0, height, quoteBar);
-    }
-
-    void DrawStrokeRect(double x, double top, double w, double h, std::string_view color = "0.72 0.72 0.72", double lineWidth = 0.45) {
-        if (tags != nullptr) tags->Artifact();
-        TailWriter out(content, 24 + color.size() + kOperandBytes * 5);
-        out.Lit("q ");
-        out.Bytes(color);
-        out.Lit(" RG ");
-        out.Fixed(lineWidth);
-        out.Lit(" w ");
-        out.Fixed(x);
-        out.Lit(" ");
-        out.Fixed(top - h);
-        out.Lit(" ");
-        out.Fixed(w);
-        out.Lit(" ");
-        out.Fixed(h);
-        out.Lit(" re S Q\n");
     }
 
     void AddLink(double x, double baseline, double width, double size, const SharedUrl& url) {
@@ -9104,6 +9291,7 @@ private:
         double x = margin + 8.0;
         double width = pageW - margin * 2.0 - 16.0;
         const double scale = size * 0.001;
+        const CodeBlockText blockText(margin, pageW - margin * 2.0, lh, x);
         bool first = true;
         for (size_t start = 0;;) {
             size_t end = wide.find(L'\n', start);
@@ -9111,8 +9299,12 @@ private:
             if (last) end = wide.size();
             const size_t lineEnd = end > start && wide[end - 1] == L'\r' ? end - 1 : end;
             const auto draw = [&](size_t from, size_t to) {
-                CodeTile(lh, first, "0.95 0.95 0.93");
-                DrawTextLine(x, size, std::wstring_view(wide.data() + from, to - from), "0.12 0.12 0.12");
+                CodeTile(lh, first, "0.95 0.95 0.93", blockText);
+                // DrawTextLine's line in the colour of plain code, one run.
+                Ensure(lh);
+                const CodeRun plain{ static_cast<uint32_t>(to - from), 0 };
+                PaintCodeLine(blockText, y - size, size, std::wstring_view(wide.data() + from, to - from), &plain, 1);
+                y -= lh;
             };
             size_t piece = start;
             double pieceWidth = 0.0;
@@ -9139,12 +9331,26 @@ private:
     // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
     // points into the next, so that the block is one tint. Out of line: written into RenderCode,
     // it moved GCC's inlining of hot calls elsewhere (+0.3 % on baseline.md).
-    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color) {
+    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color, const CodeBlockText& block) {
         const size_t pages = pageStarts.size();
         Ensure(lh + 4.0);
         if (pageStarts.size() != pages) first = true;
         const double pad = first ? 3.0 : 0.0;
-        DrawRect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color);
+        // DrawRect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color), with all but the
+        // bottom formatted once a block.
+        if (tags != nullptr) tags->Artifact();
+        TailWriter out(content, 24 + color.size() + kOperandBytes * 4);
+        out.Lit("q ");
+        out.Short(color);
+        out.Lit(" rg ");
+        out.Fixed(block.left);
+        out.Lit(" ");
+        out.Fixed((y + pad) - (lh + 2.0 + pad));
+        out.Lit(" ");
+        out.Fixed(block.width);
+        out.Lit(" ");
+        out.Fixed(first ? block.firstHeight : block.height);
+        out.Lit(" re f Q\n");
         first = false;
     }
 
@@ -9161,12 +9367,19 @@ private:
         // The bytes the lexer reads, a unit of `wide` each: its line feeds are found there, in a
         // quarter of the bytes.
         std::string_view narrow = body;
+        // The widest advance a unit of an ASCII block can have: a line no longer than the width
+        // over it is drawn whole without summing its units (0 for other blocks: always summed).
+        uint64_t widest = 0;
         if (IsAllAscii(body)) {
             // The lexer reads the block as it is; the units drawn are its bytes, a tab as a space.
             wide.resize(body.size());
             for (size_t at = 0; at < body.size(); at++) wide[at] = body[at] == '\t' ? L' ' : (wchar_t)(unsigned char)body[at];
             codeClasses.resize(body.size());
             Internal::ClassifyCode(language, body, codeClasses.data());
+            if (codeWidest == 0) {
+                for (uint32_t unit = 0; unit < 0x80; unit++) codeWidest = std::max(codeWidest, font.CodepointWidth(unit));
+            }
+            widest = codeWidest;
         } else {
             wide.resize(body.size());
             wide.resize((size_t)(WriteUtf8Wide(&wide[0], body) - wide.data()));
@@ -9184,6 +9397,7 @@ private:
         const double x = margin + 8.0;
         const double width = pageW - margin * 2.0 - 16.0;
         const double scale = size * 0.001;
+        const CodeBlockText blockText(margin, pageW - margin * 2.0, lh, x);
         bool first = true;
         // A line whose exact width in 1/1000 em, times the scale and a margin for rounding, is
         // narrower than `width` is drawn whole, as the loop below would draw it: each of that loop's
@@ -9197,16 +9411,24 @@ private:
             const size_t lineEnd = end > start && wide[end - 1] == L'\r' ? end - 1 : end;   // as SplitLines
             const std::string_view tile = Internal::CodeLineTile(lineEnd > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
             auto draw = [&](size_t from, size_t to) {
-                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93");
-                PaintCodeRuns(x, y - size, size, std::wstring_view(wide.data() + from, to - from), codeClasses.data() + from);
+                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93", blockText);
+                const std::wstring_view shown(wide.data() + from, to - from);
+                const size_t runCount = SplitCodeRuns(shown.data(), shown.size(), codeClasses.data() + from, codeRuns);
+                PaintCodeLine(blockText, y - size, size, shown, codeRuns.data(), runCount);
                 y -= lh;
             };
             bool whole = false;
-            if (lineEnd - start < 1000000) {
-                uint64_t units = 0;
-                size_t at = start;
-                for (; at < lineEnd && units <= limitUnits; at++) units += font.CodepointWidth((uint16_t)wide[at]);
-                whole = at == lineEnd && (double)units * scale * (1.0 + 1e-9) < width;
+            const size_t count = lineEnd - start;
+            if (count < 1000000) {
+                // A line of at most `count` units of `widest` is not wider: units <= count * widest.
+                if (widest != 0 && (double)(count * widest) * scale * (1.0 + 1e-9) < width) {
+                    whole = true;
+                } else {
+                    uint64_t units = 0;
+                    size_t at = start;
+                    for (; at < lineEnd && units <= limitUnits; at++) units += font.CodepointWidth((uint16_t)wide[at]);
+                    whole = at == lineEnd && (double)units * scale * (1.0 + 1e-9) < width;
+                }
             }
             if (whole) {
                 draw(start, lineEnd);
@@ -9232,32 +9454,35 @@ private:
         y -= 8.0;
     }
 
-    // A line of highlighted code at (x, baseline): as PaintText when it is one colour, otherwise
-    // one text object with each run after its colour.
-    RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::wstring_view text, const uint8_t* classes) {
-        const size_t runCount = SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
-        if (runCount == 1) {
-            PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color));
-            return;
+    // A line of code from the block's left edge (CodeBlockText): one text object with each of its
+    // `runCount` runs after its colour, which for one run is the text object PaintText writes.
+    // Tagged, a line of one colour is PaintText's, which marks it as content.
+    RAYOMD_SHARED void PaintCodeLine(const CodeBlockText& block, double baseline, double size, std::wstring_view text,
+        const CodeRun* runs, size_t runCount) {
+        if (tags != nullptr) {
+            if (runCount == 1) {
+                PaintText(block.xValue, baseline, size, text, Internal::CodeColor(runs[0].color));
+                return;
+            }
+            tags->Content();
         }
-        if (tags != nullptr) tags->Content();
         TailWriter w(content, 64 + kOperandBytes * 3 + text.size() * 4 + runCount * 32);
         size_t begin = 0;
         for (size_t index = 0; index < runCount; index++) {
-            const CodeRun& run = codeRuns[index];
+            const CodeRun& run = runs[index];
             const std::string_view color = Internal::CodeColor(run.color);
-            if (begin == 0) {
+            if (index == 0) {
                 w.Lit("q ");
-                w.Bytes(color);
+                w.Short(color);
                 w.Lit(" rg BT /F1 ");
-                w.Fixed(size);
+                w.Fixed(sizeMemo.Get(size));
                 w.Lit(" Tf 1 0 0 1 ");
-                w.Fixed(x);
+                w.Fixed(block.x);
                 w.Lit(" ");
                 w.Fixed(baseline);
                 w.Lit(" Tm ");
             } else {
-                w.Bytes(color);
+                w.Short(color);
                 w.Lit(" rg ");
             }
             w.cursor = WriteCidText(w.cursor, font, text.substr(begin, run.end - begin), usedCids);
@@ -9444,6 +9669,7 @@ private:
 
         double tableWidth = pageW - margin * 2.0;
         double colWidth = tableWidth / columns;
+        const RayoMd::Text::Fixed2Text columnWidth(colWidth);
         double size = 9.6;
         double lh = size * 1.32;
         double pad = 5.0;
@@ -9491,10 +9717,10 @@ private:
                 rowHeight = count * lh + pad * 2.0;
                 double top = y;
                 if (r == 0) DrawRect(margin, top, tableWidth, rowHeight, "0.91 0.93 0.95");
-
+                const CellBorderText border(top, columnWidth, rowHeight);
                 for (size_t c = 0; c < columns; c++) {
                     double cellX = margin + c * colWidth;
-                    DrawStrokeRect(cellX, top, colWidth, rowHeight);
+                    TableStroke(cellX, border);
 
                     TagCell(c, true);
                     int align = c < aligns.size() ? aligns[c] : -1;
@@ -10628,6 +10854,7 @@ private:
     int listDepth = 0;   // the list items the blocks being drawn are nested in
     // The page being rendered is the tail of `content`, so painting is a plain append.
     std::string& content;
+    SizeMemo sizeMemo;              // the font size the text written last had
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     RunLinkUrls runLinkUrls;        // the target of the last link a run drew (AddRunLink)
@@ -10823,7 +11050,7 @@ private:
     void Rect(double x, double top, double w, double h, std::string_view color, bool stroke = false) {
         TailWriter out(content, 32 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color);
+        out.Short(color);
         if (stroke) out.Lit(" RG 0.45 w ");
         else out.Lit(" rg ");
         out.Fixed(x);
@@ -11291,7 +11518,7 @@ private:
     }
 
     void TableFill(double x, double top, double w, double h) { Rect(x, top, w, h, "0.91 0.93 0.95"); }
-    void TableStroke(double x, double top, double w, double h) { Rect(x, top, w, h, "0.72 0.72 0.72", true); }
+    void TableStroke(double x, const CellBorderText& row) { AppendCellBorder(content, x, row); }
     std::string_view TableTextColor(bool) const { return "0.08 0.08 0.08"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer, in the
@@ -11480,22 +11707,21 @@ private:
     // and is cut by character only when it is wider than a whole line. Returns false for text
     // with explicit line breaks or possible formulas, which take the general path.
     bool WrapAsciiRuns(const std::string& text, double width, double size, AsciiRuns& out) {
-        if (text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
-            text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
-            return false;
-        }
+        const unsigned test = Internal::ParagraphRunsTest(text, footnotes != nullptr);
+        if (test == Internal::kParagraphGeneral) return false;
         // A paragraph with HTML scripts (<sup>, <sub>) takes the general path, which boxes them.
-        return WrapAsciiInline(text, width, size, 0, out, false) && !out.parsed.scripts;
+        return WrapAsciiInline(text, width, size, 0, out, false, test == Internal::kParagraphSymbol) && !out.parsed.scripts;
     }
 
     // WrapAsciiRuns for one line of inline Markdown without formulas, such as a table cell;
     // every run gets the style bits `baseStyle` too (a bold header). Returns false only for
     // text too long for the run offsets. `recognizeMath` false (text without '$' and "\(")
-    // spares the parser its own search for them.
+    // spares the parser its own search for them, `maySymbols` false (text without 0xE2) the
+    // search for status symbols.
     bool WrapAsciiInline(std::string_view text, double width, double size, uint8_t baseStyle, AsciiRuns& out,
-        bool recognizeMath = true) {
+        bool recognizeMath = true, bool maySymbols = true) {
         if (text.size() >= 0x40000000u) return false;
-        Internal::ParseInlineRuns(text, out.parsed, recognizeMath);
+        Internal::ParseInlineRuns(text, out.parsed, recognizeMath, Internal::kDefaultLookaheadBudget, maySymbols);
         out.parse = NextRunsParse();
         out.segments.clear();
         out.runs.clear();
@@ -11901,11 +12127,11 @@ private:
         if (text.empty()) return;
         TailWriter out(content, 48 + color.size() + fontName.size() + kOperandBytes * 3 + text.size() * 2);
         out.Lit("q ");
-        out.Bytes(color);
+        out.Short(color);
         out.Lit(" rg BT /");
         out.Bytes(fontName);
         out.Lit(" ");
-        out.Fixed(size);
+        out.Fixed(sizeMemo.Get(size));
         out.Lit(" Tf 1 0 0 1 ");
         out.Fixed(x);
         out.Lit(" ");
@@ -12386,6 +12612,7 @@ private:
         double x = margin + 8.0;
         double width = pageW - margin * 2.0 - 16.0;
         const size_t perLine = (size_t)std::max<uint64_t>(1, MaxUnits(width, size) / WordAdvances(StandardTextFont::Mono).space);
+        const CodeBlockText blockText(margin, pageW - margin * 2.0, lh, x);
         bool first = true;
         for (size_t start = 0;;) {
             size_t end = text.find('\n', start);
@@ -12406,8 +12633,14 @@ private:
             size_t piece = 0;
             do {
                 const size_t count = std::min(perLine, line.size() - piece);
-                CodeTile(lh, first, "0.95 0.95 0.93");
-                DrawTextLine(x, size, line.substr(piece, count), "F3", "0.12 0.12 0.12", true);
+                CodeTile(lh, first, "0.95 0.95 0.93", blockText);
+                // DrawTextLine's line in the colour of plain code, one run; an empty one draws nothing.
+                Ensure(lh);
+                if (count != 0) {
+                    const CodeRun plain{ static_cast<uint32_t>(count), 0 };
+                    PaintCodeLine(blockText, y - size, size, line.substr(piece, count), &plain, 1);
+                }
+                y -= lh;
                 piece += count;
             } while (piece < line.size());
             if (last || BuildCancelled()) break;
@@ -12421,12 +12654,25 @@ private:
     // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
     // points into the next, so that the block is one tint. Out of line: written into RenderCode,
     // it moved GCC's inlining of hot calls elsewhere (+0.3 % on baseline.md).
-    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color) {
+    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color, const CodeBlockText& block) {
         const size_t pages = pageStarts.size();
         Ensure(lh + 4.0);
         if (pageStarts.size() != pages) first = true;
         const double pad = first ? 3.0 : 0.0;
-        Rect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color);
+        // Rect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color), with all but the
+        // bottom formatted once a block.
+        TailWriter out(content, 32 + color.size() + kOperandBytes * 4);
+        out.Lit("q ");
+        out.Short(color);
+        out.Lit(" rg ");
+        out.Fixed(block.left);
+        out.Lit(" ");
+        out.Fixed((y + pad) - (lh + 2.0 + pad));
+        out.Lit(" ");
+        out.Fixed(block.width);
+        out.Lit(" ");
+        out.Fixed(first ? block.firstHeight : block.height);
+        out.Lit(" re f Q\n");
         first = false;
     }
 
@@ -12441,6 +12687,7 @@ private:
         const double lh = size * 1.35;
         const double x = margin + 8.0;
         const double width = pageW - margin * 2.0 - 16.0;
+        const CodeBlockText blockText(margin, pageW - margin * 2.0, lh, x);
         // WrapAsciiLiteral's lines: as many Courier characters as fit, and at least one.
         const size_t perLine = (size_t)std::max<uint64_t>(1, MaxUnits(width, size) / WordAdvances(StandardTextFont::Mono).space);
         bool first = true;
@@ -12471,8 +12718,11 @@ private:
             size_t piece = 0;
             do {
                 const size_t count = std::min(perLine, line.size() - piece);
-                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93");
-                PaintCodeRuns(x, y - size, size, line.substr(piece, count), lineClasses + piece);
+                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93", blockText);
+                if (count != 0) {
+                    const size_t runCount = SplitCodeRuns(line.data() + piece, count, lineClasses + piece, codeRuns);
+                    PaintCodeLine(blockText, y - size, size, line.substr(piece, count), codeRuns.data(), runCount);
+                }
                 y -= lh;
                 piece += count;
             } while (piece < line.size());
@@ -12482,32 +12732,28 @@ private:
         y -= 8.0;
     }
 
-    // A line of highlighted code at (x, baseline) in Courier: as Text when it is one colour,
-    // otherwise one text object with each run after its colour.
-    RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::string_view text, const uint8_t* classes) {
-        if (text.empty()) return;
-        const size_t runCount = SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
-        if (runCount == 1) {
-            Text(x, baseline, size, text, "F3", Internal::CodeColor(codeRuns[0].color));
-            return;
-        }
+    // A line of highlighted code at the block's left edge (CodeBlockText) in Courier: one text
+    // object with each of its `runCount` runs after its colour, which for one run is the text
+    // object Text writes.
+    RAYOMD_SHARED void PaintCodeLine(const CodeBlockText& block, double baseline, double size, std::string_view text,
+        const CodeRun* runs, size_t runCount) {
         TailWriter out(content, 48 + kOperandBytes * 3 + text.size() * 2 + runCount * 32);
         size_t begin = 0;
         for (size_t index = 0; index < runCount; index++) {
-            const CodeRun& run = codeRuns[index];
+            const CodeRun& run = runs[index];
             const std::string_view color = Internal::CodeColor(run.color);
-            if (begin == 0) {
+            if (index == 0) {
                 out.Lit("q ");
-                out.Bytes(color.data(), color.size());
+                out.Short(color);
                 out.Lit(" rg BT /F3 ");
-                out.Fixed(size);
+                out.Fixed(sizeMemo.Get(size));
                 out.Lit(" Tf 1 0 0 1 ");
-                out.Fixed(x);
+                out.Fixed(block.x);
                 out.Lit(" ");
                 out.Fixed(baseline);
                 out.Lit(" Tm (");
             } else {
-                out.Bytes(color.data(), color.size());
+                out.Short(color);
                 out.Lit(" rg (");
             }
             out.cursor = WriteEscapedLiteral(out.cursor, text.substr(begin, run.end - begin));
@@ -12660,6 +12906,7 @@ private:
 
         double tableWidth = pageW - margin * 2.0;
         double colWidth = tableWidth / columns;
+        const RayoMd::Text::Fixed2Text columnWidth(colWidth);
         double size = 9.6;
         double lh = size * 1.32;
         double pad = 5.0;
@@ -12712,9 +12959,10 @@ private:
                 rowHeight = count * lh + pad * 2.0;
                 double top = y;
                 if (r == 0) Rect(margin, top, tableWidth, rowHeight, "0.91 0.93 0.95");
+                const CellBorderText border(top, columnWidth, rowHeight);
                 for (size_t c = 0; c < columns; c++) {
                     double cellX = margin + c * colWidth;
-                    Rect(cellX, top, colWidth, rowHeight, "0.72 0.72 0.72", true);
+                    TableStroke(cellX, border);
                     int align = c < aligns.size() ? aligns[c] : -1;
                     if (styled[c]) {
                         const AsciiRuns& cellRuns = tableCells[c];
@@ -13645,7 +13893,8 @@ RAYOMD_COLD static void TaggedDocumentDefaults(DocumentMetadata& metadata, const
     const std::string& sourcePath) {
     if (metadata.lang.empty()) metadata.lang = "en";
     if (!metadata.title.empty() || !headings.empty()) return;
-    metadata.title = PathToUtf8(PathFromUtf8(sourcePath).stem());
+    const RayoMd::File::Path source = PathFromUtf8(sourcePath);
+    metadata.title = PathToUtf8(RayoMd::File::Path(RayoMd::File::StemOf(RayoMd::File::PathView(source))));
     if (metadata.title.empty()) metadata.title = "Document";
 }
 

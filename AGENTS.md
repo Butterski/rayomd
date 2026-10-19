@@ -464,13 +464,11 @@ Important image/link details:
   The notes a document embeds or links to: a root folder (`Vault`), resolution relative to the
   note, the root, then by name (an index built once, bounded), confinement by resolved path, and
   on Windows `DirectPathHasLink` (shared with `tiny_pdf.cpp`'s direct image path); the process's
-  cache of notes, name indexes and resolved roots; and the string path helpers `book.cpp` uses
-  instead of `std::filesystem` (`ResolvedPath`, `IsWithinRoot`, `ParentOf`, `AppendPath`,
-  `Normalize`, `RelativePath`, `FileNameOf`, `StemOf`: `operator/=`, `lexically_normal`,
-  `lexically_relative`, `filename` and `stem` as libstdc++ gives them, pinned by
-  `CheckPathHelpers`). On Windows a path that comes from a directory listing stays a wide
-  `std::filesystem::path` until it is opened (`ResolvedWidePath`; a name with an unpaired surrogate
-  has no UTF-8 form); only containment tests read it as UTF-8. Built at `-Os`.
+  cache of notes, name indexes and resolved roots, and `ResolvedPath`/`IsWithinRoot` on UTF-8
+  paths. Its paths are UTF-8 strings joined and normalized by `src/common/path.h`'s lexical
+  functions; on Windows a path that comes from a directory listing stays a wide
+  `RayoMd::File::Path` until it is opened (a name with an unpaired surrogate has no UTF-8 form);
+  only containment tests read it as UTF-8. Built at `-Os`.
 
 - `src/core/embeds.h` and `src/core/embeds.cpp`
   Obsidian's note embeds: reading them (`ResolveEmbeds`, bounded in count, depth, bytes read and
@@ -550,7 +548,13 @@ Important image/link details:
   delimiters. Both renderers consume this model so visible text and link annotations
   cannot drift. `ParseInlineRuns` is the parser (flat runs for the hot paths);
   `ParseInlineSpans` is the same result as strings, for tests and cold paths; the spans of one
-  link share its target (`SharedUrl`, `shared_url.h`), never a copy each.
+  link share its target (`SharedUrl`, `shared_url.h`), never a copy each. The parser copies text
+  up to the next byte that may start syntax (`FindStops`: AVX2 nibble tables where the CPU has them,
+  checked against `kByteClasses` by a static_assert; else `FindByteClass`'s SSE2): a new syntax byte
+  goes into `kByteInlineSyntax`, and the tables follow. A paragraph's run-path tests ('\n', '$',
+  "\(", "[^", 0xE2) are one pass, `ParagraphRunsTest` (nibble tables checked by a static_assert;
+  core check against the searches in `inline_lookahead_tests.inc`); `StripInlineMarkdown` parses into
+  the thread's `ScratchRuns`.
 
 - `src/core/math_parser.h` and `src/core/math_parser.cpp`
   Tokenizer, parser, error recovery, and limits for the TeX math subset; produces a
@@ -607,13 +611,28 @@ Important image/link details:
   doubles otherwise: a change to how widths are summed or compared must keep both paths. Core check
   133 compares the dispatched, SSE2 and portable code with byte and unit loops. `SplitColorRuns`
   splits a line of highlighted code into runs of one colour sixteen characters a step (AVX2, else
-  the loop `SplitColorRunsScalar`) for both renderers' `PaintCodeRuns`; core check 134.
+  the loop `SplitColorRunsScalar`) for both renderers' `PaintCodeLine`; core check 134.
 
 - `src/common/file_io.cpp`
   Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows. On POSIX,
   `WriteAll` overwrites an existing file in place and cuts it to size (no `O_TRUNC`): truncating
   an ext4 file to zero made its close start writeback, 0.1 ms per export. Keep it so; the cost
   is that a crash can leave old and new bytes mixed.
+
+- `src/common/path.h` and `src/common/path.cpp`
+  The file-system layer in place of the C++17 filesystem library, which the engine and both
+  command lines no longer use (statically linked on MinGW it pulled the locale facets and file
+  streams: 779 KB of rayomd.exe; 65 KB on Linux). `RayoMd::File::Path` is the native string
+  (`std::wstring` on Windows, `std::string` elsewhere); the lexical functions (`AppendPath`,
+  `ParentOf`, `FileNameOf`, `StemOf`, `ExtensionOf`, `ReplaceExtension`, `Normalize`,
+  `RelativePath`, `IsAbsolute`, `RelativePart`, `RootLength`) take either kind and give what
+  libstdc++'s path members give on Linux, with Windows' separators and roots there (a share's
+  `\\server` is a root name, which MinGW's libstdc++ got wrong); the operations (`StatusOf`,
+  `CreateDirectories`, `Remove`, `Rename`, `SetWriteTimeNow`, `SetOwnerOnly`, `Absolute`,
+  `Resolved`, `TempDirectory`, `ForEachEntry`, `Walk`) answer as the library's did, `Walk` in
+  `recursive_directory_iterator`'s order with `skip_permission_denied`, never entering a link.
+  Core check 135 (`tests/path_tests.inc`) holds both to the library. Built at `-Os`. Keep
+  `<filesystem>` out of `src/` and `include/` (tests may use it).
 
 - `src/common/exact_math.h` and `src/common/exact_math.cpp`
   `ceil`, `floor`, `trunc`, `lround`, `llround`, `sqrt` and `fmod` without libm, bit for bit as
@@ -910,7 +929,7 @@ GitHub CI entry points:
   C stdio.
 - Release builds compile without exceptions and RTTI on Windows and Linux, on Linux also without
   unwind tables (221 KB of the 1.74 MB binary): never write `try`, `catch`, `throw`,
-  `dynamic_cast` or `typeid`, and call the `std::error_code` overloads of `std::filesystem`. An
+  `dynamic_cast` or `typeid`. An
   exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before: in the
   dynamic Linux release at the throw, without unwinding (`src/cli/no_unwind.cpp`), elsewhere
   through the command lines' own terminate handler (`src/cli/terminate.cpp`, the only
@@ -940,6 +959,12 @@ GitHub CI entry points:
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document
   libraries to the native package.
 - Reuse output buffers in batch/server paths where practical.
+- A per-thread object with a destructor is `RAYOMD_THREAD_OBJECT(Type, name)`
+  (`src/common/thread_object.h`), never a plain `static thread_local`: MinGW's emulated TLS frees
+  a thread's storage before the C++ thread_local destructors run (GCC PR 80816), which crashed
+  every batch worker and build thread as it ended. Elsewhere the macro is the same `static
+  thread_local`; on MinGW the object lives on the heap and a fiber-local storage callback destroys
+  it. Trivially destructible thread_locals (flags, pointers) need nothing. Core check 136.
 - Be careful with per-line/per-span heap allocation in `tiny_pdf.cpp`.
 - Page content is rendered straight into the caller's output buffer and
   `PdfObjects::BuildInto` assembles the file in place around it. Do not go back

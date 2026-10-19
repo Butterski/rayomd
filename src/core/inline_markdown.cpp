@@ -4,12 +4,22 @@
 #include "html.h"
 #include "../common/text_utils.h"
 #include "../common/compiler.h"
+#include "../common/thread_object.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+
+// The stop scan in AVX2 where GCC or Clang can compile it for one function: the build stays
+// baseline x86-64 and the CPU is asked once, as word_bounds.cpp does.
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+#include <atomic>
+#include <immintrin.h>
+#include "../common/cpu_features.h"
+#define RAYOMD_INLINE_AVX2 1
+#endif
 
 namespace TinyPdf::Internal {
 namespace {
@@ -143,17 +153,22 @@ RAYOMD_NOINLINE void AppendReference(std::string& out, uint32_t codePoint) {
     out.push_back(code >= 0 ? static_cast<char>(code) : IsSpaceReference(codePoint) ? ' ' : '?');
 }
 
-// Appends `value` with its character references decoded.
+// Appends `value` with its character references decoded: the text up to each '&' in one append.
 void AppendDecoded(std::string& out, std::string_view value) {
-    for (size_t i = 0; i < value.size(); i++) {
+    for (size_t i = 0; i < value.size();) {
+        const void* found = memchr(value.data() + i, '&', value.size() - i);
+        const size_t amp = found != nullptr ? static_cast<size_t>(static_cast<const char*>(found) - value.data()) : value.size();
+        out.append(value.data() + i, amp - i);
+        if (amp == value.size()) return;
         uint32_t codePoint = 0;
-        const size_t length = value[i] == '&' ? MatchCharacterReference(value, i, codePoint) : 0;
+        const size_t length = MatchCharacterReference(value, amp, codePoint);
         if (length == 0) {
-            out.push_back(value[i]);
+            out.push_back('&');
+            i = amp + 1;
             continue;
         }
         AppendReference(out, codePoint);
-        i += length - 1;
+        i = amp + length;
     }
 }
 
@@ -313,16 +328,24 @@ RAYOMD_NOINLINE void AppendDestination(std::string_view target, std::string& url
         value = target.substr(0, end);
     }
     value = TrimView(value);
-    for (size_t i = 0; i < value.size(); i++) {
+    for (size_t i = 0; i < value.size();) {
+        // The bytes before the next backslash or '&' in one append.
+        size_t plain = i;
+        while (plain < value.size() && value[plain] != '\\' && value[plain] != '&') plain++;
+        urls.append(value.data() + i, plain - i);
+        i = plain;
+        if (i == value.size()) break;
         uint32_t codePoint = 0;
         size_t length = 0;
         if (value[i] == '\\' && i + 1 < value.size() && std::ispunct((unsigned char)value[i + 1])) {
-            urls.push_back(value[++i]);
+            urls.push_back(value[i + 1]);
+            i += 2;
         } else if (value[i] == '&' && (length = MatchCharacterReference(value, i, codePoint)) != 0) {
             AppendReference(urls, codePoint);
-            i += length - 1;
+            i += length;
         } else {
             urls.push_back(value[i]);
+            i++;
         }
     }
     if (!Html::SafeUrl(std::string_view(urls).substr(begin))) urls.resize(begin);
@@ -872,7 +895,7 @@ RAYOMD_NOINLINE size_t WriteHtmlTag(InlineScanner& scan, RunWriter& writer, Inli
     using Html::Tag;
     // Kept from tag to tag: ScanTag clears only what the last tag set, where a new token would be
     // cleared whole (168 bytes) for every tag.
-    static thread_local Html::TagToken token;
+    RAYOMD_THREAD_OBJECT(Html::TagToken, token);
     const uint32_t length = scan.Tag(at, token);
     if (length == 0) return 0;
     const size_t end = at + length;
@@ -880,7 +903,7 @@ RAYOMD_NOINLINE size_t WriteHtmlTag(InlineScanner& scan, RunWriter& writer, Inli
     writer.Flush(bold, italic, strike);
     HtmlInline& html = writer.html;
     html.active = true;
-    const auto count = [](uint16_t& counter) {
+    const auto count = [&](uint16_t& counter) {
         if (token.closing) {
             if (counter != 0) counter--;
         } else if (!token.selfClosing && counter != 0xFFFF) {
@@ -1301,7 +1324,181 @@ void InlineScanner::BuildDestinationEnds(Tables& index) const {
     }
 }
 
+// The bytes at which ParseInlineRuns stops copying text: inline syntax, and the ':' or '@' at
+// which a bare URL or email address is found.
+constexpr unsigned char kStops = RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteAutolinkLead;
+
+#if RAYOMD_INLINE_AVX2
+// The stops as two tables of 16 bytes, looked up by a byte's low and high nibble (vpshufb): each
+// high nibble of a stop has a bit of its own, which the low-nibble entry of each stop with that
+// high nibble sets, so a byte is a stop when its two entries share a bit. Bytes from 0x80 look up
+// 0 in the low table (vpshufb's sign rule) and in the high one. Twelve compares a step in SSE2
+// (FindByteClass) are four instructions here.
+struct StopNibbles {
+    unsigned char low[16];
+    unsigned char high[16];
+};
+
+constexpr StopNibbles MakeStopNibbles() {
+    StopNibbles tables{};
+    unsigned char bitOfHigh[8] = {};
+    unsigned next = 0;
+    for (unsigned value = 0; value < 0x80; value++) {
+        if ((RayoMd::Text::Detail::kByteClasses[value] & kStops) == 0) continue;
+        if (bitOfHigh[value >> 4] == 0) bitOfHigh[value >> 4] = static_cast<unsigned char>(1u << next++);
+        tables.high[value >> 4] = bitOfHigh[value >> 4];
+        tables.low[value & 15] |= bitOfHigh[value >> 4];
+    }
+    return tables;
+}
+constexpr StopNibbles kStopNibbles = MakeStopNibbles();
+
+constexpr bool StopNibblesExact() {
+    for (unsigned value = 0; value < 256; value++) {
+        const bool stop = value < 0x80 && (kStopNibbles.low[value & 15] & kStopNibbles.high[value >> 4]) != 0;
+        if (stop != ((RayoMd::Text::Detail::kByteClasses[value] & kStops) != 0)) return false;
+    }
+    return true;
+}
+static_assert(StopNibblesExact(), "the nibble tables find exactly the stops");
+
+// The first stop in data[at, size) or size, for at least 32 bytes: 32 a step, the last step
+// reading the text's last 32 bytes again.
+__attribute__((target("avx2"))) RAYOMD_NOINLINE size_t FindStopsAvx2(const char* data, size_t at, size_t size) {
+    const __m256i low = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(kStopNibbles.low)));
+    const __m256i high = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(kStopNibbles.high)));
+    const __m256i nibble = _mm256_set1_epi8(0x0F);
+    const __m256i zero = _mm256_setzero_si256();
+    for (; at + 32 <= size; at += 32) {
+        const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + at));
+        const __m256i hits = _mm256_and_si256(_mm256_shuffle_epi8(low, chunk),
+            _mm256_shuffle_epi8(high, _mm256_and_si256(_mm256_srli_epi16(chunk, 4), nibble)));
+        const uint32_t bits = ~static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(hits, zero)));
+        if (bits != 0) return at + static_cast<size_t>(__builtin_ctz(bits));
+    }
+    if (at == size) return size;
+    const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + size - 32));
+    const __m256i hits = _mm256_and_si256(_mm256_shuffle_epi8(low, chunk),
+        _mm256_shuffle_epi8(high, _mm256_and_si256(_mm256_srli_epi16(chunk, 4), nibble)));
+    const uint32_t bits = ~static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(hits, zero))) >> (at + 32 - size);
+    return bits != 0 ? at + static_cast<size_t>(__builtin_ctz(bits)) : size;
+}
+
+// The CPU's answer, asked once: -1 until then (as word_bounds.cpp keeps it).
+std::atomic<signed char> avx2State{-1};
+
+RAYOMD_NOINLINE bool AskAvx2() {
+    const bool avx2 = RayoMd::Cpu::HasAvx2();
+    avx2State.store(avx2 ? 1 : 0, std::memory_order_relaxed);
+    return avx2;
+}
+#endif
+
+// The first stop (kStops) in `source` from `from` on, or source.size(): AVX2 from 32 bytes where
+// the CPU has it, else FindByteClass.
+inline size_t FindStops(std::string_view source, size_t from) {
+#if RAYOMD_INLINE_AVX2
+    if (source.size() - from >= 32) {
+        const signed char state = avx2State.load(std::memory_order_relaxed);
+        if (state > 0 || (state < 0 && AskAvx2())) return FindStopsAvx2(source.data(), from, source.size());
+    }
+#endif
+    return RayoMd::Text::FindByteClass<kStops>(source, from);
+}
+
+// The bytes ParagraphRunsTest looks for, a bit each: the line feed, '$' and 0xE2 answer for
+// themselves; '\\' and '(', '[' and '^' are the halves of "\(" and "[^".
+enum ParagraphByteBit : unsigned char {
+    kBitLineFeed = 1, kBitDollar = 2, kBitSymbol = 4, kBitBackslash = 8, kBitParen = 16, kBitBracket = 32,
+    kBitCaret = 64
+};
+constexpr unsigned char kParagraphByteValues[7] = { '\n', '$', 0xE2, '\\', '(', '[', '^' };
+
+struct ParagraphTables {
+    unsigned char byte[256];        // the bit of each byte
+    unsigned char low[16];          // by low nibble: the bits of the bytes with that nibble
+    unsigned char high[16];         // by high nibble, likewise; a byte's bit is in both of its entries
+};
+
+constexpr ParagraphTables MakeParagraphTables() {
+    ParagraphTables tables{};
+    for (unsigned bit = 0; bit < 7; bit++) {
+        const unsigned char value = kParagraphByteValues[bit];
+        tables.byte[value] = static_cast<unsigned char>(1u << bit);
+        tables.low[value & 15] |= static_cast<unsigned char>(1u << bit);
+        tables.high[value >> 4] |= static_cast<unsigned char>(1u << bit);
+    }
+    return tables;
+}
+constexpr ParagraphTables kParagraphTables = MakeParagraphTables();
+
+constexpr bool ParagraphNibblesExact() {
+    for (unsigned value = 0; value < 256; value++) {
+        if ((kParagraphTables.low[value & 15] & kParagraphTables.high[value >> 4]) != kParagraphTables.byte[value]) return false;
+    }
+    return true;
+}
+static_assert(ParagraphNibblesExact(), "the nibble tables find exactly the paragraph bytes");
+
+#if RAYOMD_INLINE_AVX2
+// The bits of the 32 bytes at `at`.
+__attribute__((target("avx2"), always_inline)) inline __m256i ParagraphStepAvx2(const char* at, __m256i low, __m256i high,
+    __m256i nibble) {
+    const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(at));
+    return _mm256_and_si256(_mm256_shuffle_epi8(low, _mm256_and_si256(chunk, nibble)),
+        _mm256_shuffle_epi8(high, _mm256_and_si256(_mm256_srli_epi16(chunk, 4), nibble)));
+}
+
+// The bits of all bytes of data[0, size), size at least 32: 32 bytes a step, the last step reading
+// the last 32 bytes again (a bit seen twice is the same bit). Both nibbles are masked, so 0xE2
+// looks up its entries as any byte does.
+__attribute__((target("avx2"))) RAYOMD_NOINLINE unsigned ParagraphBitsAvx2(const char* data, size_t size) {
+    const __m256i low = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(kParagraphTables.low)));
+    const __m256i high = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(kParagraphTables.high)));
+    const __m256i nibble = _mm256_set1_epi8(0x0F);
+    __m256i seen = ParagraphStepAvx2(data + size - 32, low, high, nibble);
+    for (size_t at = 0; at + 32 < size; at += 32) seen = _mm256_or_si256(seen, ParagraphStepAvx2(data + at, low, high, nibble));
+    __m128i half = _mm_or_si128(_mm256_castsi256_si128(seen), _mm256_extracti128_si256(seen, 1));
+    half = _mm_or_si128(half, _mm_srli_si128(half, 8));
+    half = _mm_or_si128(half, _mm_srli_si128(half, 4));
+    uint32_t word = static_cast<uint32_t>(_mm_cvtsi128_si32(half));
+    word |= word >> 16;
+    word |= word >> 8;
+    return word & 0xFF;
+}
+#endif
+
 } // namespace
+
+unsigned ParagraphRunsTest(std::string_view text, bool notes) {
+    unsigned bits = 0;
+#if RAYOMD_INLINE_AVX2
+    if (text.size() >= 32) {
+        const signed char state = avx2State.load(std::memory_order_relaxed);
+        if (state > 0 || (state < 0 && AskAvx2())) {
+            bits = ParagraphBitsAvx2(text.data(), text.size());
+        } else {
+            bits = (text.find('\n') != std::string_view::npos ? kBitLineFeed : 0) |
+                (text.find('$') != std::string_view::npos ? kBitDollar : 0) |
+                (text.find('\xE2') != std::string_view::npos ? kBitSymbol : 0) |
+                (text.find('\\') != std::string_view::npos ? kBitBackslash | kBitParen : 0) |
+                (text.find('^') != std::string_view::npos ? kBitBracket | kBitCaret : 0);
+        }
+    } else
+#endif
+    {
+        for (const char ch : text) bits |= kParagraphTables.byte[static_cast<unsigned char>(ch)];
+    }
+    if (bits & (kBitLineFeed | kBitDollar)) return kParagraphGeneral;
+    // The pairs only where both of their bytes are, which is rare: a backslash, a caret.
+    if ((bits & (kBitBackslash | kBitParen)) == (kBitBackslash | kBitParen) && text.find("\\(") != std::string_view::npos) {
+        return kParagraphGeneral;
+    }
+    if (notes && (bits & (kBitBracket | kBitCaret)) == (kBitBracket | kBitCaret) && text.find("[^") != std::string_view::npos) {
+        return kParagraphGeneral;
+    }
+    return (bits & kBitSymbol) ? kParagraphSymbol : 0;
+}
 
 RAYOMD_NOINLINE size_t MatchCharacterReference(std::string_view text, size_t at, uint32_t& codePoint) {
     if (at + 3 > text.size() || text[at] != '&') return 0;
@@ -1631,11 +1828,11 @@ std::string NormalizeSymbols(std::string text) {
     return out;
 }
 
-void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath, size_t lookaheadBudget) {
+void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath, size_t lookaheadBudget, bool maySymbols) {
     // Only text with a status symbol needs a normalised copy; all other text is read in place.
     std::string normalized;
     std::string_view source = input;
-    if (input.find('\xE2') != std::string_view::npos) {
+    if (maySymbols && input.find('\xE2') != std::string_view::npos) {
         normalized = NormalizeSymbols(std::string(input));
         source = normalized;
     }
@@ -1662,9 +1859,8 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
         else writer.Math(match.display);
     };
     const auto& classes = RayoMd::Text::Detail::kByteClasses;
-    // A bare URL or email address is found at its ':' or '@'. Both are rare in text, and the
-    // stop costs less than looking for "://" and '@' in every text first.
-    constexpr unsigned char kStops = RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteAutolinkLead;
+    // A bare URL or email address is found at its ':' or '@' (kStops). Both are rare in text, and
+    // the stop costs less than looking for "://" and '@' in every text first.
     auto ordinary = [&](size_t index) {
         return (classes[(unsigned char)source[index]] & kStops) == 0;
     };
@@ -1672,7 +1868,7 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
     for (size_t i = 0; i < source.size();) {
         if (ordinary(i)) {
             // A run of bytes none of which can start inline syntax: taken in one append.
-            const size_t end = RayoMd::Text::FindByteClass<kStops>(source, i + 1);
+            const size_t end = FindStops(source, i + 1);
             text.append(source.data() + i, end - i);
             i = end;
             continue;
@@ -1886,6 +2082,36 @@ std::string_view StripInlineMarkdownView(std::string_view input, InlineRuns& scr
     }
     ParseInlineRuns(input, scratch, recognizeMath);
     return TrimView(scratch.text);
+}
+
+namespace {
+struct ScratchSlot {
+    InlineRuns runs;
+    bool busy = false;
+};
+ScratchSlot& ThreadScratch() {
+    RAYOMD_THREAD_OBJECT(ScratchSlot, slot);   // never a plain thread_local: MinGW (thread_object.h)
+    return slot;
+}
+RAYOMD_COLD void ReleaseRuns(InlineRuns& runs) {
+    runs = InlineRuns();
+}
+} // namespace
+
+ScratchRuns::ScratchRuns() : runs(&own) {
+    ScratchSlot& slot = ThreadScratch();
+    if (slot.busy) return;
+    slot.busy = true;
+    runs = &slot.runs;
+}
+
+ScratchRuns::~ScratchRuns() {
+    if (runs == &own) return;
+    constexpr size_t kKeptBytes = 1u << 20;
+    if (runs->text.capacity() + runs->urls.capacity() + runs->runs.capacity() * sizeof(InlineRun) > kKeptBytes) {
+        ReleaseRuns(*runs);
+    }
+    ThreadScratch().busy = false;
 }
 
 std::vector<InlineSpan> ParseInlineSpans(std::string_view input, bool recognizeMath, size_t lookaheadBudget) {

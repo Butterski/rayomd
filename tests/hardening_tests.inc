@@ -312,7 +312,7 @@ bool CheckFontChangedInPlace() {
     const fs::path path = root / "theme.ttf";
     std::string original;
     uint32_t head = 0, headLength = 0, loca = 0, locaLength = 0;
-    if (!RayoMd::File::ReadAll(source, 64u << 20, original) || !FindTable(original, "head", head, headLength) ||
+    if (!RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(source), 64u << 20, original) || !FindTable(original, "head", head, headLength) ||
         !FindTable(original, "loca", loca, locaLength) || headLength < 54 || !WriteFile(path, original)) {
         std::cerr << "cannot prepare the changed-font test" << std::endl;
         return false;
@@ -847,7 +847,7 @@ bool CheckOverlappingGlyphs() {
     fs::create_directories(root);
     std::string font;
     uint32_t head = 0, headLength = 0, loca = 0, locaLength = 0, glyf = 0, glyfLength = 0;
-    if (!RayoMd::File::ReadAll(source, 64u << 20, font) || !FindTable(font, "head", head, headLength) ||
+    if (!RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(source), 64u << 20, font) || !FindTable(font, "head", head, headLength) ||
         !FindTable(font, "loca", loca, locaLength) || !FindTable(font, "glyf", glyf, glyfLength) || headLength < 54) {
         std::cerr << "cannot prepare the overlapping-glyphs test" << std::endl;
         return false;
@@ -957,7 +957,7 @@ bool CheckBookFiles() {
     std::error_code linked;
     fs::create_hard_link(root / "a.md", root / "b.md", linked);
     ok = ok && !linked;
-    const auto readBook = [](const std::vector<fs::path>& inputs, std::string& error) {
+    const auto readBook = [](const std::vector<RayoMd::File::Path>& inputs, std::string& error) {
         TinyPdf::Book book;
         error.clear();
         return RayoMd::Book::ReadBook(inputs, book, error) ? book.chapters.size() : size_t(0);

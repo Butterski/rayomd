@@ -3,6 +3,7 @@
 #include "long_page.h"
 
 #include "../common/text_utils.h"
+#include "../common/thread_object.h"
 
 #include <algorithm>
 #include <string_view>
@@ -10,7 +11,7 @@
 namespace TinyPdf::Internal {
 
 std::vector<double>* LongPageBottoms() {
-    static thread_local std::vector<double> bottoms;
+    RAYOMD_THREAD_OBJECT(std::vector<double>, bottoms);
     bottoms.clear();
     return &bottoms;
 }

@@ -47,6 +47,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -564,6 +565,24 @@ bool CheckClassicInlineExactness() {
         std::cerr << "code-block escape isolation mismatch" << std::endl;
         return false;
     }
+    // A fence's text is one copy of the source where its lines lie there as they are, and is
+    // joined line by line where a "\r" left a line's end: the same text either way.
+    const std::pair<const char*, const char*> fences[] = {
+        { "```\na\n\nb\n```\n", "a\n\nb\n" }, { "```\r\na\r\nb\r\n```\r\n", "a\nb\n" },
+        { "```\na\r\nb\n```", "a\nb\n" }, { "```\na\nb\r\n```", "a\nb\n" }, { "```\na\nb", "a\nb" },
+        { "```\na\nb\r", "a\nb" }, { "```\n```", "" }, { "```\n\n```\nx", "\n" }, { "x\n\n~~~ c\n a\t\n~~~", " a\t\n" },
+    };
+    for (const auto& [source, text] : fences) {
+        blocks = TinyPdf::Internal::ParseMarkdown(source);
+        const TinyPdf::Internal::Block* fenced = nullptr;
+        for (const TinyPdf::Internal::Block& block : blocks) {
+            if (block.type == TinyPdf::Internal::BlockType::Code) fenced = &block;
+        }
+        if (fenced == nullptr || fenced->text != text) {
+            std::cerr << "fenced code text mismatch: " << source << std::endl;
+            return false;
+        }
+    }
 
     // "<not-an-email>" would be an HTML tag (a custom element), which is left out as on GitHub.
     const std::string invalidAutolinks = "<1-not-an-email> and <user@localhost>";
@@ -975,6 +994,7 @@ size_t PeakRssBytes() {
 #include "hardening_tests.inc"
 #include "dialect_tests.inc"
 #include "embeds_tests.inc"
+#include "path_tests.inc"
 #include "mermaid_tests.inc"
 #include "long_page_tests.inc"
 #include "print_tests.inc"
@@ -3053,6 +3073,37 @@ bool CheckExactMath() {
     return failures == 0;
 }
 
+// Threads that each build documents and end, as batch workers and the GUI's build threads do: the
+// per-thread buffers of the parser and renderers (links, bullets, tables, HTML tags, compression,
+// print colours) must be destroyed at thread exit without touching freed thread storage. With
+// MinGW's emulated TLS their thread_local destructors ran on freed memory (thread_object.h), and
+// such a thread crashed as it ended; under Wine every `--batch --workers=4` run did.
+bool CheckThreadExit() {
+    const std::string documents[] = {
+        "# Links\n\n[one](https://example.com/one), [two](#links) and <b>bold</b> <i>html</i>.\n\n- a\n  - b\n    - c\n\n"
+        "| a | b |\n|---|---|\n| 1 | [x](https://example.com/x) |\n\n```cpp\nint main() { return 0; }\n```\n\nNote[^n].\n\n[^n]: A note.\n",
+        u8"# Za\u017C\u00F3\u0142\u0107\n\nG\u0119\u015Bl\u0105 [ja\u017A\u0144](https://example.com) \u65E5\u672C.\n\n- x\n- y\n" };
+    std::atomic<int> built{ 0 };
+    for (int round = 0; round < 4; round++) {
+        std::vector<std::thread> threads;
+        for (int index = 0; index < 8; index++) {
+            threads.emplace_back([&documents, &built, index] {
+                TinyPdf::PdfOptions options;
+                options.compress = index % 2 == 0;
+                options.blackText = index % 3 == 0;
+                std::string pdf;
+                for (const std::string& markdown : documents) {
+                    if (TinyPdf::BuildPdf(markdown, options, pdf).Ok() && pdf.size() > 100) built++;
+                }
+            });
+        }
+        for (std::thread& thread : threads) thread.join();
+    }
+    if (built.load() == 4 * 8 * 2) return true;
+    std::cerr << "thread exit: " << built.load() << " of 64 builds" << std::endl;
+    return false;
+}
+
 // WriteAll overwrites an existing file in place on POSIX systems: a shorter content must cut off
 // the old tail, a longer one replace it all, and an empty one leave an empty file.
 bool CheckWriteAll() {
@@ -4126,6 +4177,8 @@ int main() {
     if (!mermaid_tests::CheckMermaid()) return 127;
     if (!long_page_tests::CheckLongPage()) return 129;
     if (!page_notes_tests::CheckPageNotes()) return 132;
+    if (!path_tests::CheckPathLayer()) return 135;
+    if (!CheckThreadExit()) return 136;
     if (!embeds_tests::CheckEmbeds()) return 130;
     if (!embeds_tests::CheckLinkedNotes()) return 131;
     if (!print_tests::CheckPrint()) return 128;

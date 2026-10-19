@@ -26,12 +26,14 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
-#include <system_error>
 #include <unordered_map>
 
 namespace TinyPdf::Internal {
 
-namespace fs = std::filesystem;
+using RayoMd::File::AppendPath;
+using RayoMd::File::FileNameOf;
+using RayoMd::File::Normalize;
+using RayoMd::File::ParentOf;
 using RayoMd::File::PathFromUtf8;
 using RayoMd::File::PathToUtf8;
 
@@ -73,172 +75,6 @@ bool IsMarkdownName(std::string_view name) {
     return true;
 }
 
-// The bytes of `path` that ".." never takes out: "/" (POSIX); a drive "C:" or a share's server
-// "\\server" and the separator after it (Windows); none for a relative path.
-size_t RootLength(std::string_view path) {
-#ifdef _WIN32
-    size_t length = 0;
-    if (path.size() >= 3 && IsSeparator(path[0]) && IsSeparator(path[1]) && !IsSeparator(path[2])) {
-        length = 2;
-        while (length < path.size() && !IsSeparator(path[length])) length++;
-    } else if (path.size() >= 2 && path[1] == ':') {
-        length = 2;
-    }
-    return length < path.size() && IsSeparator(path[length]) ? length + 1 : length;
-#else
-    return !path.empty() && path[0] == '/' ? 1 : 0;
-#endif
-}
-
-bool IsDotDot(const char* name, size_t length) {
-    return length == 2 && name[0] == '.' && name[1] == '.';
-}
-
-} // namespace
-
-// libstdc++'s lexically_normal step by step: a name is appended after a separator unless the text
-// ends in one; "." and a trailing empty name add a separator after a name; ".." takes out the name
-// before it (or the name before a trailing separator), is dropped at a root directory and kept
-// after another "..". Output never outruns the input, so it is written over it.
-void Normalize(std::string& path) {
-    if (path.empty()) return;
-    const size_t size = path.size();
-    const size_t rootLength = RootLength(path);
-    char* const text = path.data();
-    for (size_t at = 0; at < rootLength; at++) {
-        if (IsSeparator(text[at])) text[at] = kSeparator;
-    }
-    const bool rootDirectory = rootLength > 0 && text[rootLength - 1] == kSeparator;
-    size_t out = rootLength;
-    const auto nameStart = [&](size_t end) {
-        while (end > rootLength && text[end - 1] != kSeparator) end--;
-        return end;
-    };
-    const auto endsInName = [&]() { return out > rootLength && text[out - 1] != kSeparator; };
-    const auto append = [&](size_t start, size_t length) {
-        if (endsInName()) text[out++] = kSeparator;
-        std::memmove(text + out, text + start, length);
-        out += length;
-    };
-    for (size_t at = rootLength; at < size;) {
-        const size_t start = at;
-        while (at < size && !IsSeparator(text[at])) at++;
-        const size_t length = at - start;
-        const bool separated = at < size;
-        while (at < size && IsSeparator(text[at])) at++;
-        if (length == 1 && text[start] == '.') {
-            if (endsInName()) text[out++] = kSeparator;
-        } else if (IsDotDot(text + start, length)) {
-            if (endsInName()) {
-                const size_t name = nameStart(out);
-                if (IsDotDot(text + name, out - name)) append(start, 2);
-                else out = name;
-            } else if (out == rootLength) {
-                if (!rootDirectory) append(start, 2);
-            } else {
-                const size_t name = nameStart(out - 1);
-                if (IsDotDot(text + name, out - 1 - name)) append(start, 2);
-                else out = name;
-            }
-        } else if (length > 0) {
-            append(start, length);
-        }
-        // A separator ending the path is an empty last name.
-        if (separated && at == size && endsInName()) text[out++] = kSeparator;
-    }
-    if (out > rootLength && text[out - 1] == kSeparator) {
-        const size_t name = nameStart(out - 1);
-        if (IsDotDot(text + name, out - 1 - name)) out--;
-    }
-    if (out == 0) text[out++] = '.';
-    path.resize(out);
-}
-
-namespace {
-
-// A path's root ("C:\", "\\server\", "/"; root name and root directory) and its names after it, as
-// std::filesystem::path's iterator gives them: each name, then an empty one when separators end the
-// path after a name.
-struct PathNames {
-    std::string_view path;
-    size_t rootLength;
-    size_t at;
-    bool afterName = false;
-
-    explicit PathNames(std::string_view text) : path(text), rootLength(RootLength(text)), at(rootLength) {}
-    bool RootDirectory() const { return rootLength > 0 && IsSeparator(path[rootLength - 1]); }
-    std::string_view RootName() const { return path.substr(0, rootLength - RootDirectory()); }
-    bool Absolute() const {
-#ifdef _WIN32
-        return RootDirectory() && rootLength > 1;
-#else
-        return RootDirectory();
-#endif
-    }
-    bool Next(std::string_view& name) {
-        name = std::string_view();
-        if (at > path.size()) return false;
-        size_t start = at;
-        while (start < path.size() && IsSeparator(path[start])) start++;
-        if (start == path.size()) {
-            const bool trailing = afterName && start > at;
-            at = path.size() + 1;
-            return trailing;
-        }
-        at = start;
-        while (at < path.size() && !IsSeparator(path[at])) at++;
-        name = path.substr(start, at - start);
-        afterName = true;
-        return true;
-    }
-};
-
-} // namespace
-
-std::string RelativePath(std::string_view path, std::string_view base) {
-    PathNames from(path);
-    PathNames to(base);
-    std::string out;
-    if (from.RootName() != to.RootName() || from.Absolute() != to.Absolute() || (!from.RootDirectory() && to.RootDirectory())) return out;
-    // A root directory only `path` has (Windows: "\a" against "b") is a mismatch there, and
-    // appending it takes back the ".." before it.
-    const bool rooted = from.RootDirectory() && !to.RootDirectory();
-    std::string_view a, b;
-    bool hasA = from.Next(a);
-    bool hasB = to.Next(b);
-    while (!rooted && hasA && hasB && a == b) {
-        hasA = from.Next(a);
-        hasB = to.Next(b);
-    }
-    int up = 0;
-    for (; hasB; hasB = to.Next(b)) up += b == ".." ? -1 : !b.empty() && b != ".";
-    if (!rooted && up == 0 && a.empty()) return ".";
-    if (up < 0) return out;
-    // As the root directory is written (operator/= keeps it), then names with the platform's.
-    if (rooted) out += path[from.rootLength - 1];
-    for (; !rooted && up > 0; up--) out.append(out.empty() ? 0 : 1, kSeparator).append("..");
-    for (; hasA; hasA = from.Next(a)) {
-        if (!out.empty() && !IsSeparator(out.back())) out += kSeparator;
-        out.append(a);
-    }
-    return out;
-}
-
-std::string_view FileNameOf(std::string_view path) {
-    size_t start = path.size();
-    while (start > 0 && !IsSeparator(path[start - 1])) start--;
-    return path.substr(std::max(start, std::min(RootLength(path), path.size())));
-}
-
-std::string_view StemOf(std::string_view path) {
-    const std::string_view name = FileNameOf(path);
-    if (name == "." || name == "..") return name;
-    const size_t dot = name.rfind('.');
-    return dot == std::string_view::npos || dot == 0 ? name : name.substr(0, dot);
-}
-
-namespace {
-
 // Where `path` (normalized or resolved) continues below the resolved folder `root`: the offset of
 // its first component there; 0 when it does not lie in the root.
 size_t BelowRoot(std::string_view path, std::string_view root) {
@@ -255,76 +91,18 @@ size_t BelowRoot(std::string_view path, std::string_view root) {
 }
 
 bool IsRegularFile(const std::string& path) {
-    std::error_code ec;
-    return fs::is_regular_file(PathFromUtf8(path), ec);
+    return RayoMd::File::IsRegularFile(PathFromUtf8(path));
 }
 
 } // namespace
 
-#ifdef _WIN32
-fs::path ResolvedWidePath(const fs::path& path) {
-    const HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return fs::path();
-    std::wstring name(MAX_PATH, L'\0');
-    DWORD length = GetFinalPathNameByHandleW(handle, name.data(), (DWORD)name.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    if (length >= name.size()) {
-        name.resize(length + 1);
-        length = GetFinalPathNameByHandleW(handle, name.data(), (DWORD)name.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    }
-    CloseHandle(handle);
-    if (length == 0 || length >= name.size()) return fs::path();
-    name.resize(length);
-    // The answer begins "\\?\C:\" or "\\?\UNC\server\share\", which std::filesystem reads as a root
-    // name "\\?" and no call opens once lexically_normal made it "\?\": the path as the other
-    // Windows calls write it.
-    if (name.compare(0, 8, L"\\\\?\\UNC\\") == 0) name.replace(0, 8, L"\\\\");
-    else if (name.compare(0, 4, L"\\\\?\\") == 0) name.erase(0, 4);
-    return fs::path(std::move(name));
-}
-#endif
-
 std::string ResolvedPath(std::string_view path) {
 #ifdef _WIN32
-    const fs::path resolved = ResolvedWidePath(PathFromUtf8(path));
+    const RayoMd::File::Path resolved = RayoMd::File::Resolved(PathFromUtf8(path));
     return resolved.empty() ? std::string() : PathToUtf8(resolved);
 #else
-    // realpath(3): one call; std::filesystem::canonical splits and rebuilds the path a component at
-    // a time.
-    char* resolved = ::realpath(std::string(path).c_str(), nullptr);
-    if (resolved == nullptr) return std::string();
-    std::string canonical(resolved);
-    std::free(resolved);
-    return canonical;
+    return RayoMd::File::Resolved(std::string(path));
 #endif
-}
-
-std::string_view ParentOf(std::string_view path) {
-    const size_t rootLength = RootLength(path);
-    size_t end = path.size();
-    while (end > rootLength && !IsSeparator(path[end - 1])) end--;
-    while (end > rootLength && IsSeparator(path[end - 1])) end--;
-    return path.substr(0, end);
-}
-
-void AppendPath(std::string& base, std::string_view path) {
-    const size_t rootLength = RootLength(path);
-    const bool rootDirectory = rootLength > 0 && IsSeparator(path[rootLength - 1]);
-    const std::string_view rootName = path.substr(0, rootLength - rootDirectory);
-    const size_t baseRoot = RootLength(base);
-    const size_t baseName = baseRoot - (baseRoot > 0 && IsSeparator(base[baseRoot - 1]));
-#ifdef _WIN32
-    const bool absolute = rootDirectory && !rootName.empty();
-#else
-    const bool absolute = rootDirectory;
-#endif
-    if (absolute || (!rootName.empty() && rootName != std::string_view(base).substr(0, baseName))) {
-        base.assign(path);
-        return;
-    }
-    if (rootDirectory) base.resize(baseName);
-    else if (base.size() > baseRoot && !IsSeparator(base.back())) base += kSeparator;
-    base.append(path.substr(rootName.size()));
 }
 
 bool IsWithinRoot(std::string_view file, std::string_view root) {
@@ -336,12 +114,17 @@ bool IsWithinRoot(std::string_view file, std::string_view root) {
 // target's, and opens nothing beyond it); only a reparse point has its tag read from its entry.
 // FindFirstFileExW for every folder made each image of a document in a subfolder cost about
 // 20 µs a level and build on Windows (tester.md, three levels: +18 % a build).
-bool DirectPathHasLink(const fs::path& root, const fs::path& path) {
-    auto part = path.begin();
-    for (auto rootPart = root.begin(); rootPart != root.end() && part != path.end(); ++rootPart) ++part;
-    fs::path current = root;
-    for (; part != path.end() && std::next(part) != path.end(); ++part) {
-        current /= *part;
+bool DirectPathHasLink(const RayoMd::File::Path& root, const RayoMd::File::Path& path) {
+    // Each folder of `path` past the length of `root`, which it lies in by name, but its last name.
+    std::wstring current;
+    size_t at = std::min(root.size(), path.size());
+    for (;;) {
+        while (at < path.size() && IsSeparator(path[at])) at++;
+        size_t end = at;
+        while (end < path.size() && !IsSeparator(path[end])) end++;
+        if (end >= path.size()) return false;
+        current.assign(path, 0, end);
+        at = end;
         const DWORD attributes = GetFileAttributesW(current.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES) return true;
         if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) continue;
@@ -353,7 +136,6 @@ bool DirectPathHasLink(const fs::path& root, const fs::path& path) {
             return true;
         }
     }
-    return false;
 }
 #endif
 
@@ -616,7 +398,7 @@ FileIdentity IdentityOf(int fd) {
 }
 
 // The entries of the folder open at `folder` (its path below the root `relative`, '/'-ended, or
-// empty for the root; `depth` folders down), as std::filesystem::recursive_directory_iterator with
+// empty for the root; `depth` folders down), as the standard library's filesystem::recursive_directory_iterator with
 // skip_permission_denied visits them (a folder's type from its entry, links to folders neither
 // indexed nor entered), without a path object a name, into `index`, with what the folder is (one
 // fstat); closes `folder`. `entries` counts them: past `limit` the walk ends. `start`: when it began.
@@ -703,8 +485,7 @@ void ForgetNotes() {
 std::string CachedResolvedPath(std::string_view path, bool* directory) {
 #ifdef _WIN32
     std::string resolved = ResolvedPath(path);
-    std::error_code ec;
-    if (directory != nullptr) *directory = !resolved.empty() && fs::is_directory(PathFromUtf8(resolved), ec);
+    if (directory != nullptr) *directory = !resolved.empty() && RayoMd::File::IsDirectory(PathFromUtf8(resolved));
     return resolved;
 #else
     // A relative path is the working folder's.
@@ -942,7 +723,7 @@ bool Vault::Check(std::string& path) {
         if (cached > 0) path = hitPath;
         return cached > 0;
     }
-    const fs::path file = PathFromUtf8(path);
+    const RayoMd::File::Path file = PathFromUtf8(path);
     if (DirectPathHasLink(rootPath, file)) return false;
     const DWORD attributes = GetFileAttributesW(file.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
@@ -969,7 +750,7 @@ std::string Vault::Find(std::string_view from, std::string_view target, bool byN
     while (!target.empty() && (target.front() == ' ' || target.front() == '\t')) target.remove_prefix(1);
     while (!target.empty() && (target.back() == ' ' || target.back() == '\t' || target.back() == '\r')) target.remove_suffix(1);
     if (root.empty() || target.empty() || target.find('\0') != std::string_view::npos) return std::string();
-    // No absolute path, nor one of a drive (std::filesystem's root name "C:" on Windows).
+    // No absolute path, nor one of a drive (the standard library's filesystem's root name "C:" on Windows).
     if (target[0] == '/' || target[0] == '\\') return std::string();
 #ifdef _WIN32
     if (target.size() >= 2 && target[1] == ':') return std::string();
@@ -1056,25 +837,24 @@ void Vault::BuildIndex() {
         built->folders.emplace_back(std::move(relative), identity);
     };
     stamp(root, std::string());
-    std::error_code ec;
-    fs::recursive_directory_iterator it(rootPath, fs::directory_options::skip_permission_denied, ec);
-    for (const fs::recursive_directory_iterator end; !ec && it != end; it.increment(ec)) {
-        if (++entries > indexLimit) break;
-        const std::string name = PathToUtf8(it->path().filename());
-        std::error_code typeError;
-        const std::string path = PathToUtf8(it->path());
+    // Links to folders are not entered: a note through one is no note of the vault (Check).
+    using RayoMd::File::WalkStep;
+    const bool walked = RayoMd::File::Walk(rootPath, [&](const RayoMd::File::Entry& entry) {
+        if (++entries > indexLimit) return WalkStep::Stop;
+        const std::string name = PathToUtf8(RayoMd::File::Path(entry.name));
+        const std::string path = PathToUtf8(*entry.path);
         std::string relative = path.substr(BelowRoot(path, root));
         std::replace(relative.begin(), relative.end(), '\\', '/');
-        if (it->is_directory(typeError)) {
+        if (entry.type == RayoMd::File::FileType::Directory) {
             // Obsidian's settings, its trash, a repository's history: hidden folders hold no notes.
-            if ((!name.empty() && name[0] == '.') || it.depth() + 1 >= kMaxIndexDepth) it.disable_recursion_pending();
-            else stamp(path, relative + '/');
-            continue;
+            if (entry.link || (!name.empty() && name[0] == '.') || entry.depth + 1 >= kMaxIndexDepth) return WalkStep::Skip;
+            stamp(path, relative + '/');
+            return WalkStep::Enter;
         }
-        if (name.empty() || name[0] == '.' || !IsMarkdownName(name)) continue;
-        built->Add(relative, name.size(), (size_t)it.depth());
-    }
-    if (ec) built->keep = false;
+        if (!name.empty() && name[0] != '.' && IsMarkdownName(name)) built->Add(relative, name.size(), (size_t)entry.depth);
+        return WalkStep::Skip;
+    });
+    if (!walked) built->keep = false;
 #endif
     if (entries > indexLimit) return;
     NameIndex& names = *built;

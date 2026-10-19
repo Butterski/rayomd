@@ -15,6 +15,8 @@
 
 namespace TinyPdf::Internal {
 
+using RayoMd::File::ParentOf;
+
 namespace {
 
 using namespace std::string_view_literals;   // per-line tests: no strlen a literal at -Os
