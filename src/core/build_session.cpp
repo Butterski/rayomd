@@ -135,9 +135,10 @@ void LayoutTape::Clear() {
     contents.clear();
     numbers.clear();
     marks.clear();
-    content.clear();
+    pieces.clear();
+    buffers.clear();
     pageStarts.clear();
-    pageGaps.clear();
+    pageFree.clear();
     pageLinks.clear();
     headings.clear();
     ids.clear();
@@ -179,6 +180,12 @@ private:
     bool Same(size_t index, size_t old) const;
     // The end of the run of blocks from `index` (not known yet) that may be replayed, compared now.
     size_t RunFrom(size_t index);
+    // Appends the last build's content [from, to) (without gaps) to `content`, noting where it went.
+    void CopyContent(size_t from, size_t to, std::string& content);
+    // Moves the buffers no tape holds any more from `tape` to the spares.
+    void Recycle(LayoutTape& tape);
+    // A buffer of at least `bytes` bytes, empty: a spare one when there is one.
+    std::shared_ptr<std::string> Buffer(size_t bytes);
 
     std::unique_ptr<LayoutTape> last;        // the last build's tape, or null
     std::unique_ptr<LayoutTape> recording;   // the tape this build makes (the memory of an older one)
@@ -198,12 +205,27 @@ private:
     size_t oldTo = 0;
     std::vector<HeadingMark> movedHeadings;
     std::vector<HeadingMark> movedIds;
+    // The content replayed in this build: its place [start, end) in this build's content (on one
+    // page) and where it was in the last build's without gaps.
+    struct Copied {
+        size_t start;
+        size_t end;
+        size_t from;
+    };
+    std::vector<Copied> copied;
+    std::vector<uint32_t> bufferMap;   // EndLayout: the last tape's buffers in this one's
+    std::vector<std::shared_ptr<std::string>> spareBuffers;   // buffers no tape holds, for the next
 };
 
 void SessionLayout::Begin(uint8_t renderer, const void* const fonts[kLayoutCidSets], const std::vector<Block>& newBlocks,
     const std::vector<ContentsEntry>& contents, const std::vector<HeadingNumber>& numbers) {
-    if (!recording) recording = std::make_unique<LayoutTape>();
-    else recording->Clear();
+    if (!recording) {
+        recording = std::make_unique<LayoutTape>();
+    } else {
+        Recycle(*recording);
+        recording->Clear();
+    }
+    copied.clear();
     recording->renderer = renderer;
     std::copy(fonts, fonts + kLayoutCidSets, recording->fonts);
     active = true;
@@ -384,12 +406,12 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
     // The content page by page, each new page after the gap this build leaves before it (the last
     // build's gaps are not copied), so that it lies where BuildInto wants it.
     std::string& content = *target.content;
-    const auto pageEnd = [&](size_t page) { return old.pageStarts[page + 1] - old.pageGaps[page + 1]; };
-    content.append(old.content, before.content, (after.page == before.page ? after.content : pageEnd(before.page)) - before.content);
+    const auto gapless = [&](size_t at, size_t page) { return at - old.pageStarts[page] + old.pageFree[page]; };
+    CopyContent(gapless(before.content, before.page),
+        after.page == before.page ? gapless(after.content, after.page) : old.pageFree[before.page + 1], content);
     for (size_t page = before.page + 1; page <= after.page; page++) {
         target.startPage(content, *target.pageStarts);
-        const size_t stop = page == after.page ? after.content : pageEnd(page);
-        content.append(old.content, old.pageStarts[page], stop - old.pageStarts[page]);
+        CopyContent(old.pageFree[page], page == after.page ? gapless(after.content, page) : old.pageFree[page + 1], content);
     }
     std::vector<std::vector<LinkRect>>& links = *target.pageLinks;
     const std::vector<LinkRect>& firstLinks = old.pageLinks[before.page];
@@ -487,13 +509,136 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
     return state;
 }
 
+void SessionLayout::CopyContent(size_t from, size_t to, std::string& content) {
+    if (from == to) return;
+    const std::vector<LayoutTape::Piece>& pieces = last->pieces;
+    copied.push_back({ content.size(), content.size() + (to - from), from });
+    size_t piece = static_cast<size_t>(std::upper_bound(pieces.begin(), pieces.end(), from,
+        [](size_t at, const LayoutTape::Piece& it) { return at < it.at; }) - pieces.begin()) - 1;
+    while (from < to) {
+        const size_t stop = std::min(to, pieces[piece + 1].at);
+        content.append(pieces[piece].data + (from - pieces[piece].at), stop - from);
+        from = stop;
+        piece++;
+    }
+}
+
+void SessionLayout::Recycle(LayoutTape& tape) {
+    constexpr size_t kSpares = 4;
+    for (std::shared_ptr<std::string>& buffer : tape.buffers) {
+        if (buffer.use_count() == 1 && spareBuffers.size() < kSpares) spareBuffers.push_back(std::move(buffer));
+    }
+    tape.buffers.clear();
+}
+
+std::shared_ptr<std::string> SessionLayout::Buffer(size_t bytes) {
+    // The smallest spare that holds them, else the largest.
+    size_t best = spareBuffers.size();
+    for (size_t index = 0; index < spareBuffers.size(); index++) {
+        const size_t capacity = spareBuffers[index]->capacity();
+        if (best == spareBuffers.size()) {
+            best = index;
+            continue;
+        }
+        const size_t current = spareBuffers[best]->capacity();
+        if (current >= bytes ? capacity >= bytes && capacity < current : capacity > current) best = index;
+    }
+    std::shared_ptr<std::string> buffer;
+    if (best < spareBuffers.size()) {
+        buffer = std::move(spareBuffers[best]);
+        spareBuffers.erase(spareBuffers.begin() + static_cast<ptrdiff_t>(best));
+    } else {
+        buffer = std::make_shared<std::string>();
+    }
+    buffer->clear();
+    buffer->reserve(bytes);
+    return buffer;
+}
+
 void SessionLayout::EndLayout(const LayoutTarget& target, std::vector<SourceBlock>* sourceMap) {
     if (!active) return;
     LayoutTape& tape = *recording;
-    tape.content.assign(*target.content);
-    tape.pageStarts = *target.pageStarts;
-    tape.pageGaps.resize(tape.pageStarts.size());
-    for (size_t page = 0; page < tape.pageGaps.size(); page++) tape.pageGaps[page] = target.gapBefore(page);
+    const std::string& content = *target.content;
+    const std::vector<size_t>& starts = *target.pageStarts;
+    const size_t pages = starts.size();
+    tape.pageStarts = starts;
+    const auto pageEnd = [&](size_t page) { return page + 1 < pages ? starts[page + 1] - target.gapBefore(page + 1) : content.size(); };
+    tape.pageFree.resize(pages + 1);
+    size_t total = 0;
+    for (size_t page = 0; page < pages; page++) {
+        tape.pageFree[page] = total;
+        total += pageEnd(page) - starts[page];
+    }
+    tape.pageFree[pages] = total;
+    // The content without gaps: what this build laid out in a buffer of its own, what it replayed
+    // where the last build's tape has it.
+    size_t replayed = 0;
+    for (const Copied& range : copied) replayed += range.end - range.start;
+    std::vector<LayoutTape::Piece>& pieces = tape.pieces;
+    pieces.clear();
+    tape.buffers.clear();
+    std::shared_ptr<std::string> fresh;
+    const auto add = [&](size_t at, const char* data, uint32_t buffer) {
+        if (!pieces.empty()) {
+            const LayoutTape::Piece& before = pieces.back();
+            if (before.buffer == buffer && before.data + (at - before.at) == data) return;
+        }
+        pieces.push_back({ at, data, buffer });
+    };
+    if (replayed != total) {
+        fresh = Buffer(total - replayed);
+        tape.buffers.push_back(fresh);
+    }
+    const size_t oldBuffers = last ? last->buffers.size() : 0;
+    bufferMap.assign(oldBuffers, UINT32_MAX);
+    size_t next = 0;
+    for (size_t page = 0; page < pages; page++) {
+        size_t at = starts[page];
+        const size_t end = pageEnd(page);
+        size_t gapless = tape.pageFree[page];
+        while (at < end) {
+            if (next < copied.size() && copied[next].start == at) {
+                const Copied& range = copied[next++];
+                const std::vector<LayoutTape::Piece>& from = last->pieces;
+                size_t source = range.from;
+                const size_t sourceEnd = source + (range.end - range.start);
+                size_t piece = static_cast<size_t>(std::upper_bound(from.begin(), from.end(), source,
+                    [](size_t value, const LayoutTape::Piece& it) { return value < it.at; }) - from.begin()) - 1;
+                while (source < sourceEnd) {
+                    const LayoutTape::Piece& it = from[piece];
+                    uint32_t& buffer = bufferMap[it.buffer];
+                    if (buffer == UINT32_MAX) {
+                        buffer = static_cast<uint32_t>(tape.buffers.size());
+                        tape.buffers.push_back(last->buffers[it.buffer]);
+                    }
+                    add(gapless, it.data + (source - it.at), buffer);
+                    const size_t stop = std::min(sourceEnd, from[piece + 1].at);
+                    gapless += stop - source;
+                    source = stop;
+                    piece++;
+                }
+                at = range.end;
+                continue;
+            }
+            const size_t stop = next < copied.size() && copied[next].start < end ? copied[next].start : end;
+            add(gapless, fresh->data() + fresh->size(), 0);
+            fresh->append(content, at, stop - at);
+            gapless += stop - at;
+            at = stop;
+        }
+    }
+    // Buffers of more than twice the content's bytes: all of it in one again.
+    size_t held = 0;
+    for (const std::shared_ptr<std::string>& buffer : tape.buffers) held += buffer->size();
+    if (held > 2 * total) {
+        pieces.clear();
+        tape.buffers.clear();
+        fresh = Buffer(total);
+        for (size_t page = 0; page < pages; page++) fresh->append(content, starts[page], pageEnd(page) - starts[page]);
+        pieces.push_back({ 0, fresh->data(), 0 });
+        tape.buffers.push_back(std::move(fresh));
+    }
+    pieces.push_back({ total, nullptr, 0 });
     for (size_t set = 0; set < kLayoutCidSets; set++) {
         const LayoutCids& cids = target.cids[set];
         if (cids.set != nullptr) tape.cids[set] = cids.recorded(cids.set);
@@ -539,7 +684,10 @@ void SessionLayout::Commit(LayoutTarget& target, std::vector<Block>& newBlocks, 
     tape.numbers = std::move(numbers);
     std::swap(last, recording);
     // The tape before goes now; its memory makes the next one.
-    if (recording) recording->Clear();
+    if (recording) {
+        Recycle(*recording);
+        recording->Clear();
+    }
     blocks = nullptr;
 }
 
@@ -547,6 +695,7 @@ void SessionLayout::Forget() {
     active = false;
     last.reset();
     recording.reset();
+    spareBuffers.clear();
     reuse = {};
 }
 

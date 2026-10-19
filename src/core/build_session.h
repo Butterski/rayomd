@@ -153,9 +153,9 @@ struct LayoutMark {
 
 // What a build laid out, kept for the next one: the state before each of its blocks and after the
 // last (marks; the blocks are the session's, SessionBlocks), the page content as laid out (before
-// --compress and --black-text), and what the renderer noted besides (pages, links, headings,
-// anchors, the table of contents' lines, the source map, the CIDs and formula glyphs drawn, long
-// pages' bottoms).
+// --compress and --black-text, without the gaps between pages, in pieces of buffers that later
+// tapes share), and what the renderer noted besides (pages, links, headings, anchors, the table of
+// contents' lines, the source map, the CIDs and formula glyphs drawn, long pages' bottoms).
 struct LayoutTape {
     uint8_t renderer = 0;                    // LayoutSession::Begin's `renderer`
     const void* fonts[kLayoutCidSets] = {};  // and its fonts
@@ -164,9 +164,17 @@ struct LayoutTape {
     std::vector<HeadingNumber> numbers;
     std::vector<const std::string*> blockNumbers;   // --number-headings: each block's, in `numbers`
     std::vector<LayoutMark> marks;           // before each block, and after the last
-    std::string content;
+    // The page content without the gaps: piece i holds its bytes [at, pieces[i + 1].at), from `data`
+    // in buffers[buffer]; a last piece with no data ends it.
+    struct Piece {
+        size_t at;
+        const char* data;
+        uint32_t buffer;
+    };
+    std::vector<Piece> pieces;
+    std::vector<std::shared_ptr<std::string>> buffers;
     std::vector<size_t> pageStarts;
-    std::vector<size_t> pageGaps;            // the gap left before each page's content (LeaveGaps)
+    std::vector<size_t> pageFree;            // where each page's content starts without the gaps; then its end
     std::vector<std::vector<LinkRect>> pageLinks;
     std::vector<HeadingMark> headings;
     std::vector<HeadingMark> ids;
