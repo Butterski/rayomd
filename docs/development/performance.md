@@ -995,8 +995,15 @@ Text and layout:
   Zen 2's `vpgatherdd` is microcoded); sixteen ASCII units a step looked up in a register (no
   gather): README -3.2 %, code-heavy -3.9 %, polish +1.0 % instructions, the function's cycles
   -9 % on code-heavy and +10 % on README; only runs of 32 units or more: table-heavy +1.6 %
-  instructions (inlining) and the same split of cycles. The scalar loop, a bit test and a store
-  a unit, stays.
+  instructions (inlining) and the same split of cycles. Four plain units tested together and
+  stored as one 8-byte word, scalar: README +1.9 %, code-heavy +3.2 %, table-heavy +1.5 %
+  instructions, cycles +1.6 to +2.1 %. The scalar loop, a bit test and a store a unit, stays.
+- `NeedsInlineParse`'s byte classes 32 bytes a step in AVX2 (2026-10-19): two pairs of nibble
+  tables (`vpshufb`) giving 13 blocks of bytes of one class, ORed over the text, for text from 64
+  bytes: instructions essay -2.3 %, README -0.3 %, and essay cycles -2.3 % in the release build,
+  but even (+0.15 %, 0.00 %, +0.27 %, 21 runs each) in builds with functions and loops aligned
+  (`-falign-functions=64 -falign-loops=32`): the table loop's loads overlap the work around them,
+  and the gain was the layout's. tester-noimg +0.3 to +1.1 % cycles. Not taken.
 - The highlight lexer's first tests of a byte (line feed, space, word) as a `switch` on a table of
   byte kinds (2026-10-19), so that a word not at a line start went straight to `Word`: code-heavy
   +1.7 % instructions, +2.2 to +2.6 % cycles. The tests one after another stay.
