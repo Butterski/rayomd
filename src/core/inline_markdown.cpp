@@ -1634,6 +1634,10 @@ WinAnsiReferences::~WinAnsiReferences() {
     tWinAnsiReferences = previous;
 }
 
+bool WinAnsiReferences::Active() {
+    return tWinAnsiReferences;
+}
+
 FootnoteLabels::FootnoteLabels(const std::unordered_map<std::string, int>& numbers)
     : previous(tFootnoteLabels), previousBytes(tFootnoteLabelBytes) {
     size_t longest = 0;

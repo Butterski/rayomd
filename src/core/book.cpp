@@ -9,11 +9,14 @@
 #include "markdown_parser.h"
 #include "vault.h"
 #include "../common/file_io.h"
+#include "../common/thread_object.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -591,18 +594,67 @@ using RayoMd::File::StemOf;
 BookFiles::BookFiles() = default;
 BookFiles::~BookFiles() = default;
 
+namespace {
+
+// A book's files are parsed on several threads once they hold this much text, a thread for each
+// kBookBytesPerThread of it: a parse costs about 7 ms a megabyte, starting a helper up to 0.3 ms.
+constexpr size_t kParallelBookBytes = 256 * 1024;
+constexpr size_t kBookBytesPerThread = 128 * 1024;
+
+// `parse(index)` for each file of the book, on `threads` threads (this one among them) that each
+// take the next file, until the build is abandoned; false then. Each helper parses under the
+// calling thread's parser state: its dialect, hidden tags and WinAnsi character references (the
+// embeds of a document never are a book's).
+template <class Parse>
+bool ForEachBookFile(size_t count, unsigned threads, const PdfOptions& options, Parse&& parse) {
+    std::atomic<size_t> next{ 0 };
+    std::atomic<bool> stopped{ false };
+    const auto work = [&]() {
+        for (size_t index; !stopped.load(std::memory_order_relaxed) && (index = next.fetch_add(1)) < count;) {
+            if (options.cancel != nullptr && options.cancel->load(std::memory_order_relaxed)) {
+                stopped.store(true, std::memory_order_relaxed);
+                return;
+            }
+            parse(index);
+        }
+    };
+    const MarkdownDialect dialect = ObsidianDialect() ? MarkdownDialect::Obsidian : MarkdownDialect::GitHub;
+    const bool hideTags = HiddenTags();
+    const bool winAnsi = WinAnsiReferences::Active();
+    std::vector<std::thread> helpers;
+    helpers.reserve(threads - 1);
+    for (unsigned helper = 1; helper < threads; helper++) {
+        helpers.emplace_back([&]() {
+            const DialectScope scope(dialect, hideTags);
+            if (!winAnsi) return work();
+            const WinAnsiReferences references;
+            work();
+        });
+    }
+    work();
+    for (std::thread& helper : helpers) helper.join();
+    return !stopped.load(std::memory_order_relaxed);
+}
+
+} // namespace
+
 void ParseBookFiles(const std::vector<BookChapter>& chapters, const std::vector<std::string>& texts,
     const std::vector<std::string>& titles, const PdfOptions& options, BookFiles& files) {
     const size_t count = chapters.size();
     files.blocks.resize(count);
     files.footnotes.resize(count);
-    bool marker = false;
-    for (size_t index = 0; index < count; index++) {
-        if (options.cancel != nullptr && options.cancel->load(std::memory_order_relaxed)) return;
-        if (chapters[index].part) continue;
+    std::vector<uint8_t> markers(count, 0);
+    size_t bytes = 0;
+    for (size_t index = 0; index < count; index++) bytes += chapters[index].part ? 0 : texts[index].size();
+    unsigned threads = 1;
+    if (bytes >= kParallelBookBytes && !EmbedsActive()) {
+        threads = (unsigned)std::min<size_t>({ RayoMd::Thread::UsableCpus(), 6, count, bytes / kBookBytesPerThread });
+    }
+    const bool parsed = ForEachBookFile(count, std::max(threads, 1u), options, [&](size_t index) {
+        if (chapters[index].part) return;
         std::vector<Block>& blocks = files.blocks[index];
         blocks = ParseMarkdown(texts[index], &files.footnotes[index]);
-        marker = MarkContents(blocks) || marker;
+        markers[index] = MarkContents(blocks);
         if (!titles[index].empty() && !BeginsWithTitle(blocks)) {
             Block title;
             title.type = BlockType::Heading;
@@ -611,6 +663,11 @@ void ParseBookFiles(const std::vector<BookChapter>& chapters, const std::vector<
             blocks.insert(blocks.begin(), std::move(title));
         }
         if (options.pageBreakBeforeLevel > 0) BreakBeforeHeadings(blocks, options.pageBreakBeforeLevel);
+    });
+    if (!parsed) return;
+    bool marker = false;
+    for (size_t index = 0; index < count; index++) {
+        marker = marker || markers[index] != 0;
         files.notes = files.notes || !files.footnotes[index].notes.empty();
     }
     if (!options.toc && !marker) return;

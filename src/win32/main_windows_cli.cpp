@@ -19,7 +19,6 @@
 #include <cstring>
 #include <set>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <chrono>
 
@@ -724,24 +723,6 @@ double MillisecondsSince(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
-unsigned ResolveWinWorkerCount(const WinExportOptions& options, const std::vector<WinBatchJob>& jobs) {
-    if (jobs.empty()) return 1;
-    unsigned workers = options.workers;
-    if (workers == 0) {
-        workers = std::thread::hardware_concurrency();
-        if (workers == 0) workers = 2;
-        workers = std::min(workers, 6u);
-    }
-    uintmax_t largestInput = 0;
-    for (const WinBatchJob& job : jobs) {
-        const uint64_t size = FileSize(job.inputPath);
-        if (size != UINT64_MAX) largestInput = std::max<uintmax_t>(largestInput, size);
-    }
-    if (largestInput > 64u * 1024u * 1024u) workers = 1;
-    else if (largestInput > 16u * 1024u * 1024u) workers = std::min(workers, 2u);
-    return std::max(1u, std::min(workers, static_cast<unsigned>(jobs.size())));
-}
-
 int ExecuteWinBatchJobs(std::vector<WinBatchJob>& jobs, const WinExportOptions& options, const char* label) {
     RayoMd::Batch::Report report;
     if (!OpenWinReport(report, options)) return 12;
@@ -752,32 +733,20 @@ int ExecuteWinBatchJobs(std::vector<WinBatchJob>& jobs, const WinExportOptions& 
         job.skipped = true;
         job.bytes = FileSize(job.outputPath);
     };
-    const unsigned workerCount = ResolveWinWorkerCount(options, jobs);
-    std::atomic<size_t> next{0};
-    std::vector<std::thread> workers;
-    workers.reserve(workerCount);
-    for (unsigned worker = 0; worker < workerCount; worker++) {
-        workers.emplace_back([&] {
-            std::string pdfBuffer;
-            pdfBuffer.reserve(1024 * 1024);
-            for (;;) {
-                size_t index = next.fetch_add(1, std::memory_order_relaxed);
-                if (index >= jobs.size()) break;
-                WinBatchJob& job = jobs[index];
-                if (job.result == 0 && upToDate(job)) {
-                    skip(job);
-                } else if (job.result == 0) {
-                    const auto start = std::chrono::steady_clock::now();
-                    job.result = ExportNativeFileWithBufferResult(job.inputPath, job.outputPath, options, pdfBuffer,
-                        &job.details);
-                    job.milliseconds = MillisecondsSince(start);
-                    if (job.result == 0) job.bytes = pdfBuffer.size();
-                }
-                if (report.IsOpen()) report.Write(WinRecordFor(job));
+    RayoMd::Batch::RunJobs(jobs.size(), options.workers, [&](size_t index) { return FileSize(jobs[index].inputPath); },
+        [&](size_t index, std::string& pdfBuffer) {
+            WinBatchJob& job = jobs[index];
+            if (job.result == 0 && upToDate(job)) {
+                skip(job);
+            } else if (job.result == 0) {
+                const auto start = std::chrono::steady_clock::now();
+                job.result = ExportNativeFileWithBufferResult(job.inputPath, job.outputPath, options, pdfBuffer,
+                    &job.details);
+                job.milliseconds = MillisecondsSince(start);
+                if (job.result == 0) job.bytes = pdfBuffer.size();
             }
+            if (report.IsOpen()) report.Write(WinRecordFor(job));
         });
-    }
-    for (std::thread& worker : workers) worker.join();
     const bool reported = report.Close();
     if (!reported) WriteStdoutLine("Error: could not write the report file: " + options.report);
 
@@ -811,16 +780,22 @@ int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, 
     std::vector<WinBatchJob> jobs;
     jobs.reserve(files.size());
     std::set<std::wstring> seenOutputs;
-    for (const RayoMd::Batch::File& file : files) {
-        WinBatchJob job(file.input, file.output);
-        // A subfolder's PDFs go to a subfolder of the output folder, made before the workers start.
-        const std::wstring folder(RayoMd::File::ParentOf(std::wstring_view(file.output)));
+    // A subfolder's PDFs go to a subfolder of the output folder, made before the workers start, once
+    // for each run of its files in the sorted list, not for every file.
+    std::wstring madeFolder;
+    for (RayoMd::Batch::File& file : files) {
+        WinBatchJob job(std::move(file.input), std::move(file.output));
+        const std::wstring_view folder = RayoMd::File::ParentOf(std::wstring_view(job.outputPath));
         if (!seenOutputs.insert(OutputPathKey(job.outputPath)).second) {
             job.result = 12;
             job.error = "Error: multiple inputs map to the same output PDF: " + WideToUtf8(job.outputPath);
-        } else if (options.recursive && !EnsureDirectoryRecursive(folder)) {
-            job.result = 12;
-            job.error = "Error: could not create output folder: " + WideToUtf8(folder);
+        } else if (options.recursive && (madeFolder.empty() || folder != madeFolder)) {
+            if (EnsureDirectoryRecursive(std::wstring(folder))) {
+                madeFolder.assign(folder);
+            } else {
+                job.result = 12;
+                job.error = "Error: could not create output folder: " + WideToUtf8(std::wstring(folder));
+            }
         }
         jobs.push_back(std::move(job));
     }

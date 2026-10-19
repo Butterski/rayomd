@@ -507,6 +507,11 @@ Important image/link details:
   what one document may have (`kMaxBookBytes`), and a SUMMARY.md that lists a file again under
   any name (a link, letter case, `x/../`) is refused: files are told apart by their identity
   (`RayoMd::File::FileIdentity`, device and inode or volume and file index), not their names.
+  From 256 KiB of text `ParseBookFiles` parses the files on up to six threads (`ForEachBookFile`,
+  one a usable CPU), each helper under the calling thread's dialect, hidden tags and WinAnsi
+  character references (`WinAnsiReferences::Active`); a new thread-local the parser reads must be
+  handed to them there too, or a large book parses differently from a small one (`CheckBook`,
+  core check 96, builds a 400 KB book with references and Obsidian's syntax on all CPUs and on one).
 
 - `src/core/print_colors.h` and `src/core/print_colors.cpp`
   `--black-text`'s rewrite of finished content (`PrintColors`): 64 bytes a step in AVX2 (two
@@ -720,8 +725,12 @@ Important image/link details:
   What both command lines share for batch export: the JSON Lines report (one
   line per document, written by the worker that finished it), the up-to-date
   check behind `--skip-unchanged` (PDF newer than its Markdown and ending in
-  `%%EOF`) and the recursive collection behind `--recursive` (sorted by name as indices: a sort
-  of the files themselves, two paths each, was 20 KB of code).
+  `%%EOF`), the recursive collection behind `--recursive` (sorted by name as indices: a sort
+  of the files themselves, two paths each, was 20 KB of code) and the workers (`RunJobs`: one a
+  usable CPU, at most 6, unless `--workers`; they take the inputs' sizes for the 16/64 MiB limits
+  between them before they build). Keep per-file work off the thread that starts them: three stats
+  a file there were 16 ms before the first build of 2,000 notes. Output folders are made once a
+  run of their files.
 
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single

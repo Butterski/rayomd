@@ -52,7 +52,6 @@
 #else
 #include <cerrno>
 #include <fcntl.h>
-#include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -2498,25 +2497,6 @@ private:
     uint64_t left = kDecodeBudgetPixels;
 };
 
-// The CPUs this process may run on: its affinity mask, which taskset or a container narrows,
-// where std::thread::hardware_concurrency counts the machine's.
-RAYOMD_COLD static unsigned UsableCpus() {
-#ifdef _WIN32
-    DWORD_PTR process = 0;
-    DWORD_PTR system = 0;
-    if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process != 0) {
-        unsigned count = 0;
-        for (; process != 0; process &= process - 1) count++;
-        return count;
-    }
-#elif defined(__linux__)
-    cpu_set_t set;
-    CPU_ZERO(&set);
-    if (sched_getaffinity(0, sizeof(set), &set) == 0) return (unsigned)CPU_COUNT(&set);
-#endif
-    return std::thread::hardware_concurrency();
-}
-
 // With `metadata` false the caller writes the XMP metadata, with the reversible profile's
 // properties: a PDF/A file has one packet for both.
 static void AddReversibleSource(PdfObjects& pdf, std::string& catalog, const std::string& markdown, bool metadata = true) {
@@ -3860,7 +3840,7 @@ static bool BuildDecodedPngImage(const PngInfo& png, PdfImage& image, bool fast)
     const std::vector<uint8_t> zeros(std::max(rowBytes, colorRow), 0);
     const std::vector<uint8_t> opaqueRow(width, 255);
 
-    static const unsigned cpus = UsableCpus();
+    static const unsigned cpus = RayoMd::Thread::UsableCpus();
     static std::atomic<unsigned> decoding{ 0 };
     const unsigned decodes = ++decoding;
     struct Leave {

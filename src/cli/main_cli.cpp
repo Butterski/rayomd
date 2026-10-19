@@ -21,7 +21,6 @@
 #include <set>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 #ifndef _WIN32
@@ -660,56 +659,23 @@ bool OpenReport(RayoMd::Batch::Report& report, const CliExportOptions& options) 
     return false;
 }
 
-unsigned ResolveWorkerCount(const CliExportOptions& options, const std::vector<BatchJob>& jobs) {
-    if (jobs.empty()) return 1;
-    unsigned workers = options.workers;
-    if (workers == 0) {
-        workers = std::thread::hardware_concurrency();
-        if (workers == 0) workers = 2;
-        workers = std::min(workers, 6u);
-    }
-
-    uintmax_t largestInput = 0;
-    for (const BatchJob& job : jobs) {
-        const uint64_t size = FileSize(job.inputPath);
-        if (size != UINT64_MAX) largestInput = std::max<uintmax_t>(largestInput, size);
-    }
-    if (largestInput > 64u * 1024u * 1024u) workers = 1;
-    else if (largestInput > 16u * 1024u * 1024u) workers = std::min(workers, 2u);
-    return std::max(1u, std::min(workers, static_cast<unsigned>(jobs.size())));
-}
-
 int ExecuteBatchJobs(std::vector<BatchJob>& jobs, const CliExportOptions& options, const char* label) {
     RayoMd::Batch::Report report;
     if (!OpenReport(report, options)) return 12;
-    const unsigned workerCount = ResolveWorkerCount(options, jobs);
-    std::atomic<size_t> next{0};
-    std::vector<std::thread> workers;
-    workers.reserve(workerCount);
-    for (unsigned worker = 0; worker < workerCount; worker++) {
-        workers.emplace_back([&] {
-            std::string pdfBuffer;
-            pdfBuffer.reserve(1024 * 1024);
-            for (;;) {
-                size_t index = next.fetch_add(1, std::memory_order_relaxed);
-                if (index >= jobs.size()) break;
-                BatchJob& job = jobs[index];
-                if (job.result == 0 && options.skipUnchanged &&
-                    RayoMd::Batch::OutputUpToDate(job.inputPath, job.outputPath)) {
-                    job.skipped = true;
-                    job.bytes = FileSize(job.outputPath);
-                } else if (job.result == 0) {
-                    const auto start = std::chrono::steady_clock::now();
-                    job.result = BuildNativePdfFile(job.inputPath, job.outputPath, options, pdfBuffer, &job.error,
-                        &job.details);
-                    job.milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-                    if (job.result == 0) job.bytes = pdfBuffer.size();
-                }
-                if (report.IsOpen()) report.Write(RecordFor(job));
+    RayoMd::Batch::RunJobs(jobs.size(), options.workers, [&](size_t index) { return FileSize(jobs[index].inputPath); },
+        [&](size_t index, std::string& pdfBuffer) {
+            BatchJob& job = jobs[index];
+            if (job.result == 0 && options.skipUnchanged && RayoMd::Batch::OutputUpToDate(job.inputPath, job.outputPath)) {
+                job.skipped = true;
+                job.bytes = FileSize(job.outputPath);
+            } else if (job.result == 0) {
+                const auto start = std::chrono::steady_clock::now();
+                job.result = BuildNativePdfFile(job.inputPath, job.outputPath, options, pdfBuffer, &job.error, &job.details);
+                job.milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+                if (job.result == 0) job.bytes = pdfBuffer.size();
             }
+            if (report.IsOpen()) report.Write(RecordFor(job));
         });
-    }
-    for (std::thread& worker : workers) worker.join();
     const bool reported = report.Close();
 
     int failures = 0;
@@ -746,13 +712,20 @@ int RunBatchExport(const Path& inputDir, const Path& outputDir, const CliExportO
     }
     std::vector<BatchJob> jobs;
     jobs.reserve(files.size());
+    // A subfolder's PDFs go to a subfolder of the output folder, made before the workers start, once
+    // for each run of its files in the sorted list, not for every file (two stats each).
+    Path madeFolder;
     for (RayoMd::Batch::File& file : files) {
         BatchJob job{ std::move(file.input), std::move(file.output) };
-        // A subfolder's PDFs go to a subfolder of the output folder, made before the workers start.
-        const Path folder(RayoMd::File::ParentOf(RayoMd::File::PathView(job.outputPath)));
-        if (options.recursive && folder != outputDir && !EnsureDirectoryPortable(folder, fsError)) {
-            job.result = 12;
-            job.error = "Error: could not create output folder: " + PathToUtf8(folder);
+        const RayoMd::File::PathView folder = RayoMd::File::ParentOf(RayoMd::File::PathView(job.outputPath));
+        if (options.recursive && folder != outputDir && folder != madeFolder) {
+            const Path made(folder);
+            if (EnsureDirectoryPortable(made, fsError)) {
+                madeFolder = made;
+            } else {
+                job.result = 12;
+                job.error = "Error: could not create output folder: " + PathToUtf8(made);
+            }
         }
         jobs.push_back(std::move(job));
     }
