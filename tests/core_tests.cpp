@@ -1306,20 +1306,22 @@ bool CheckOutputBufferReuse() {
     // Each page's content is rendered after the gap the thread's last build had before it, so a
     // document built again keeps its content in place, and an edit that changes what lies between
     // pages moves the pages after it towards either end. Every build must equal one on a new
-    // thread, which leaves no gaps, in its bytes and its source map, also in both renderers.
+    // thread, which leaves no gaps, in its bytes and its source map, in both renderers and under
+    // every option that writes around the pages: PDF/UA's marked content (which reads the byte
+    // before it), PDF/A, a theme's bands and cover, the table of contents and page numbers, notes
+    // at the foot of the page, long pages, the reversible profile, and books. The warm thread goes
+    // from profile to profile, so it also builds after gaps of other options.
     std::string pages;
     for (int i = 0; i < 120; i++) {
         if (i % 7 == 0) pages += "## Part " + std::to_string(i) + "\n\n";
         pages += "Paragraph " + std::to_string(i) + " has words that fill the page, line after line.\n\n";
+        if (i % 29 == 0) pages += "Noted[^n" + std::to_string(i) + "] and [linked](https://example.com/" + std::to_string(i) + ").\n\n";
+        if (i % 41 == 0) pages += "| a | b |\n|---|---|\n| 1 | **2** |\n| 3 | `4` |\n\n- item\n- [ ] task\n\n> quoted\n\n";
     }
+    for (int i = 0; i < 120; i += 29) pages += "[^n" + std::to_string(i) + "]: Note " + std::to_string(i) + ".\n";
     const std::string unicodePages = u8"Zażółć\n\n" + pages;
     const std::string edits[] = { pages, pages, "[a](https://a.example) " + pages, pages + "[b](https://b.example)\n",
         "x\n\n" + pages, unicodePages, unicodePages, "[c](https://c.example)\n\n" + unicodePages, documents[3] + pages, pages };
-    const auto mapped = [](const std::string& markdown, std::string& pdf, std::vector<TinyPdf::SourceBlock>& map) {
-        TinyPdf::PdfOptions options;
-        options.sourceMap = &map;
-        return TinyPdf::BuildPdf(markdown, options, pdf).Ok();
-    };
     const auto sameMaps = [](const std::vector<TinyPdf::SourceBlock>& a, const std::vector<TinyPdf::SourceBlock>& b) {
         if (a.size() != b.size()) return false;
         for (size_t i = 0; i < a.size(); i++) {
@@ -1328,17 +1330,67 @@ bool CheckOutputBufferReuse() {
         }
         return true;
     };
+    struct GapProfile {
+        const char* name;
+        void (*set)(TinyPdf::PdfOptions&);
+    };
+    const GapProfile profiles[] = {
+        { "default", [](TinyPdf::PdfOptions&) {} },
+        { "pdfua", [](TinyPdf::PdfOptions& o) { o.pdfua = true; } },
+        { "pdfua page numbers", [](TinyPdf::PdfOptions& o) { o.pdfua = true; o.pageNumbers = true; o.toc = true; } },
+        { "pdfa", [](TinyPdf::PdfOptions& o) { o.pdfa = true; o.pageNumbers = true; } },
+        { "theme", [](TinyPdf::PdfOptions& o) {
+            o.theme.headerLeft = "{title}";
+            o.theme.footerRight = "{page} / {pages}";
+            o.theme.cover = true;
+            o.theme.accentColor = 0xF2A900;
+        } },
+        { "toc", [](TinyPdf::PdfOptions& o) { o.toc = true; o.pageNumbers = true; o.numberHeadings = 2; } },
+        { "page notes", [](TinyPdf::PdfOptions& o) { o.footnotes = TinyPdf::FootnotePlacement::Page; } },
+        { "page notes pdfua", [](TinyPdf::PdfOptions& o) { o.footnotes = TinyPdf::FootnotePlacement::Page; o.pdfua = true; } },
+        { "long pages", [](TinyPdf::PdfOptions& o) { o.pageSize = TinyPdf::PdfPageSize{ 420.0, 595.0, true }; o.pageNumbers = true; } },
+        { "reversible", [](TinyPdf::PdfOptions& o) { o.embedSource = true; } },
+    };
     std::string warm;
-    for (size_t i = 0; i < sizeof(edits) / sizeof(edits[0]); i++) {
-        std::vector<TinyPdf::SourceBlock> warmMap, coldMap;
-        std::string cold;
-        bool coldOk = false;
-        std::thread thread([&]() { coldOk = mapped(edits[i], cold, coldMap); });
-        thread.join();
-        if (!mapped(edits[i], warm, warmMap) || !coldOk || warm != cold || !sameMaps(warmMap, coldMap) ||
-            CountOccurrences(cold, "/Type /Page ") < 3) {
-            std::cerr << "buffer reuse: edit " << i << " differs from a build on a new thread" << std::endl;
-            return false;
+    for (const GapProfile& profile : profiles) {
+        TinyPdf::PdfOptions options;
+        profile.set(options);
+        const auto mapped = [&options](const std::string& markdown, std::string& pdf, std::vector<TinyPdf::SourceBlock>& map) {
+            TinyPdf::PdfOptions withMap = options;
+            withMap.sourceMap = &map;
+            return TinyPdf::BuildPdf(markdown, withMap, pdf).Ok();
+        };
+        for (size_t i = 0; i < sizeof(edits) / sizeof(edits[0]); i++) {
+            std::vector<TinyPdf::SourceBlock> warmMap, coldMap;
+            std::string cold;
+            bool coldOk = false;
+            std::thread thread([&]() { coldOk = mapped(edits[i], cold, coldMap); });
+            thread.join();
+            const bool warmOk = mapped(edits[i], warm, warmMap);
+            // PDF/A and PDF/UA fail without a font; then both must. A long page holds the document.
+            if (warmOk != coldOk || (coldOk && (warm != cold || !sameMaps(warmMap, coldMap) ||
+                CountOccurrences(cold, "/Type /Page ") < (options.pageSize.autoHeight ? 1u : 3u)))) {
+                std::cerr << "buffer reuse: " << profile.name << " edit " << i << " differs from a build on a new thread ("
+                    << warm.size() << " and " << cold.size() << " bytes)" << std::endl;
+                return false;
+            }
+        }
+        TinyPdf::Book book;
+        book.title = "Gaps";
+        book.chapters.push_back({ pages, "a.md", "A", 0, false });
+        book.chapters.push_back({ "", "", "Part", 0, true });
+        book.chapters.push_back({ unicodePages + "[back](a.md)\n", "b.md", "B", 1, false });
+        for (int round = 0; round < 2; round++) {
+            if (round == 1) book.chapters[0].markdown = "x\n\n" + pages;
+            std::string cold;
+            bool coldOk = false;
+            std::thread thread([&]() { coldOk = TinyPdf::BuildBookPdf(book, options, cold).Ok(); });
+            thread.join();
+            if (TinyPdf::BuildBookPdf(book, options, warm).Ok() != coldOk || (coldOk && warm != cold)) {
+                std::cerr << "buffer reuse: " << profile.name << " book " << round << " differs from a build on a new thread"
+                    << std::endl;
+                return false;
+            }
         }
     }
 
