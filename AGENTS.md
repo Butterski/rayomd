@@ -953,6 +953,12 @@ GitHub CI entry points:
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document
   libraries to the native package.
 - Reuse output buffers in batch/server paths where practical.
+- A per-thread object with a destructor is `RAYOMD_THREAD_OBJECT(Type, name)`
+  (`src/common/thread_object.h`), never a plain `static thread_local`: MinGW's emulated TLS frees
+  a thread's storage before the C++ thread_local destructors run (GCC PR 80816), which crashed
+  every batch worker and build thread as it ended. Elsewhere the macro is the same `static
+  thread_local`; on MinGW the object lives on the heap and a fiber-local storage callback destroys
+  it. Trivially destructible thread_locals (flags, pointers) need nothing. Core check 136.
 - Be careful with per-line/per-span heap allocation in `tiny_pdf.cpp`.
 - Page content is rendered straight into the caller's output buffer and
   `PdfObjects::BuildInto` assembles the file in place around it. Do not go back

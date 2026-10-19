@@ -4,6 +4,7 @@
 #include "html.h"
 #include "../common/text_utils.h"
 #include "../common/compiler.h"
+#include "../common/thread_object.h"
 
 #include <algorithm>
 #include <cctype>
@@ -872,7 +873,7 @@ RAYOMD_NOINLINE size_t WriteHtmlTag(InlineScanner& scan, RunWriter& writer, Inli
     using Html::Tag;
     // Kept from tag to tag: ScanTag clears only what the last tag set, where a new token would be
     // cleared whole (168 bytes) for every tag.
-    static thread_local Html::TagToken token;
+    RAYOMD_THREAD_OBJECT(Html::TagToken, token);
     const uint32_t length = scan.Tag(at, token);
     if (length == 0) return 0;
     const size_t end = at + length;
@@ -880,7 +881,7 @@ RAYOMD_NOINLINE size_t WriteHtmlTag(InlineScanner& scan, RunWriter& writer, Inli
     writer.Flush(bold, italic, strike);
     HtmlInline& html = writer.html;
     html.active = true;
-    const auto count = [](uint16_t& counter) {
+    const auto count = [&](uint16_t& counter) {
         if (token.closing) {
             if (counter != 0) counter--;
         } else if (!token.selfClosing && counter != 0xFFFF) {

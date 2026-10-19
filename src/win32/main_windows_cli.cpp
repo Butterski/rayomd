@@ -35,6 +35,7 @@
 #include "../common/profiling.h"
 #include "../core/book.h"
 #include "../core/export_options.h"
+#include "../common/thread_object.h"
 #endif
 
 thread_local int g_nativePdfLastError = 0;
@@ -306,7 +307,7 @@ bool BuildNativePdfBytes(const std::string& markdown, const WinExportOptions& ex
 bool ExportNativePdf(const std::string& markdown, const std::wstring& outputPath,
     const WinExportOptions& exportOptions, const std::wstring& sourcePath = L"") {
     const auto profileBefore = RayoMd::Profiling::Capture();
-    static thread_local std::string pdfBytes;
+    RAYOMD_THREAD_OBJECT(std::string, pdfBytes);
     pdfBytes.clear();
     pdfBytes.reserve(1024 * 1024);
     bool ok = BuildNativePdfBytes(markdown, exportOptions, pdfBytes, sourcePath);

@@ -11,6 +11,7 @@
 #include "../common/exact_math.h"
 #include "../common/text_utils.h"
 #include "../common/compiler.h"
+#include "../common/thread_object.h"
 #include "book.h"
 #include "cff.h"
 #include "image_cache.h"
@@ -1079,7 +1080,7 @@ public:
 
 private:
     static T& Slot() {
-        static thread_local T slot;
+        RAYOMD_THREAD_OBJECT(T, slot);
         return slot;
     }
 };
@@ -1158,7 +1159,7 @@ struct WrapMeasure {
 // paragraph's lines are drawn, trade it for a spare (SwapFootBuffers); a renderer that ends gives
 // one grown past kKeptBufferBytes back to the allocator (ReleaseWrapScratch).
 static WrapMeasure& WrapScratch() {
-    static thread_local WrapMeasure scratch;
+    RAYOMD_THREAD_OBJECT(WrapMeasure, scratch);
     return scratch;
 }
 
@@ -1565,7 +1566,7 @@ RAYOMD_COLD static void MakeBulletMarker(BulletMarker& marker, double size, int 
 
 // The marker of a bullet list item at nesting `depth`, beside text of `size` on `baseline` from x.
 static void AppendBulletMarker(std::string& content, double x, double baseline, double size, int depth) {
-    static thread_local BulletMarker markers[3];
+    RAYOMD_THREAD_OBJECT(BulletMarker[3], markers);
     if (depth > 2) depth = 2;
     BulletMarker& marker = markers[depth];
     if (marker.size != size) MakeBulletMarker(marker, size, depth);
@@ -1704,7 +1705,7 @@ private:
         bool busy = false;
     };
     static Slot& ThreadSlot() {
-        static thread_local Slot slot;
+        RAYOMD_THREAD_OBJECT(Slot, slot);
         return slot;
     }
     UsedCidSet* set = nullptr;
@@ -2204,7 +2205,7 @@ struct FlateWork {
 };
 
 RAYOMD_COLD static FlateWork& ThreadFlateWork() {
-    static thread_local FlateWork work;
+    RAYOMD_THREAD_OBJECT(FlateWork, work);
     return work;
 }
 
