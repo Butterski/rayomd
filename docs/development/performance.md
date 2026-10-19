@@ -53,14 +53,26 @@ linked notes) identical.
   wrapping no longer finds a word's end by a byte loop that mispredicts at every word. One pass
   marks the white space of 64 bytes, takes the edges of those bits and writes them as positions a
   mask byte at a time from a table (eight instructions a byte, no branch on the text); another
-  gathers the AFM advances eight at a time into prefix sums, so a word's width is one subtraction,
-  the same integer the byte loop summed. `BreakAsciiWords` (one copy for every `WrapAsciiWords`,
+  sums the AFM advances into prefix sums, so a word's width is one subtraction, the same integer the
+  byte loop summed (first gathered eight at a time in AVX2; see the gate exception below). `BreakAsciiWords` (one copy for every `WrapAsciiWords`,
   which then only hands its lines out) and `WrapAsciiInline` read the words from there;
   `WrapAsciiInline` also joins the words that follow in its segment one space apart to its run and
   the pending text without a call each. Texts under 16 bytes keep the byte loop: a table cell
   costs more to measure apart than to read. Instructions: essay -19.1 %, native_math -4.4 %,
   notes -0.0 %, others +0.07 to +0.15 % (README +0.15 %, `tiny_pdf.cpp`'s inlining of a
   `push_back`); time: essay -13.9 %, native_math -4.9 %. Text +6.0 KB.
+- **The advance sums a byte at a time again: a deliberate exception to the instruction gate.**
+  `MeasureWords` gathered the advances with AVX2's `vpgatherdd`, microcoded on Zen 2 (and slow on
+  many other cores): perf showed about 15 % of the essay's cycles stalled on it. The scalar prefix
+  sum (two loads, an add and a store a byte) against the gather, perf `cycles:u` in 11 to 15
+  alternating runs: essay -6.6 to -8.5 % cycles at +7.2 % instructions, notes -6.5 % cycles at
+  +0.4 %, table-heavy -1.7 % at 0.0 %, native_math -0.8 to +0.2 % (noise) at +2.0 %. A third
+  variant, the advances of ASCII bytes looked up in registers (eight `vpshufb` a byte plane on
+  XOR-chained nibble tables, no gather): essay +5.9 % instructions and about the scalar loop's
+  cycles, for 256 bytes of tables a font and more code; not taken. The integrator accepted the
+  instruction increase: cycles and time are what users get. The Unicode renderer's gather of
+  widths from the font's 64K-entry cache stays: without it (its scalar path) README +4.9 % cycles,
+  table-heavy +2.8 %.
 - **Line feeds by bit scans** (`SplitLineViews`): 64 bytes a step and a bit scan a line feed,
   where a loop stepped over the mask's bits one at a time: -0.2 to -1.2 % instructions everywhere.
 - **Lines classified by their first byte** (`ClassifyLine`): each block marker starts with bytes

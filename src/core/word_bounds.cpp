@@ -3,8 +3,9 @@
 // Word bounds and advance sums for the standard renderer's wrapping (word_bounds.h). A step takes
 // 64 bytes: a bit for each white-space byte, then the bits where that changes, which are where
 // words start and end, written as positions; so a paragraph costs a few branches a step instead
-// of one that mispredicts at the end of each word. The advances are gathered eight at a time and
-// summed in the vector. Every load ends inside the text: the last step's loads end at its end and
+// of one that mispredicts at the end of each word. The advances are summed a byte at a time: AVX2's
+// gather (vpgatherdd) is microcoded on Zen 2 and slower than the loads, as on many other cores
+// (performance.md). Every load ends inside the text: the last step's loads end at its end and
 // overlap the bytes before, so no text is copied and no byte past it read.
 
 #include "word_bounds.h"
@@ -241,36 +242,6 @@ RAYOMD_AVX2 inline size_t FlattenTable(uint32_t* bounds, size_t k, uint64_t chan
     return static_cast<size_t>(at - bounds);
 }
 
-// The sums of bytes[at, at + 8) on `before` (the sum of the bytes before them, in every lane),
-// stored at prefix + at + 1: gathered as 32 bits at twice the byte (the advance and the next,
-// which the mask drops), summed across the lanes in three additions.
-RAYOMD_AVX2 inline __m256i SumStep(const unsigned char* bytes, size_t at, const uint16_t* advances, uint32_t* prefix,
-    __m256i before) {
-    const __m256i index = _mm256_cvtepu8_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(bytes + at)));
-    __m256i units = _mm256_and_si256(
-        _mm256_i32gather_epi32(reinterpret_cast<const int*>(advances), index, 2), _mm256_set1_epi32(0xFFFF));
-    units = _mm256_add_epi32(units, _mm256_slli_si256(units, 4));
-    units = _mm256_add_epi32(units, _mm256_slli_si256(units, 8));
-    const __m256i lane = _mm256_shuffle_epi32(units, 0xFF);
-    units = _mm256_add_epi32(units, _mm256_permute2x128_si256(lane, lane, 0x08));
-    units = _mm256_add_epi32(units, before);
-    _mm256_storeu_si256(reinterpret_cast<__m256i*>(prefix + at + 1), units);
-    return units;
-}
-
-// Eight advances a step; the last eight bytes again on the sum before them, which leaves the
-// sums already written as they were. At least eight bytes, or none.
-RAYOMD_AVX2 inline void SumAvx2(const unsigned char* bytes, size_t n, const uint16_t* advances, uint32_t* prefix) {
-    if (n < 8) {
-        SumScalar(bytes, n, advances, prefix);
-        return;
-    }
-    __m256i sum = _mm256_set1_epi32(static_cast<int>(prefix[0]));
-    size_t i = 0;
-    for (; i + 8 <= n; i += 8) sum = _mm256_permutevar8x32_epi32(SumStep(bytes, i, advances, prefix, sum), _mm256_set1_epi32(7));
-    if (i < n) SumStep(bytes, n - 8, advances, prefix, _mm256_set1_epi32(static_cast<int>(prefix[n - 8])));
-}
-
 // Text of at least 16 bytes.
 RAYOMD_AVX2 size_t MeasureWordsAvx2(const char* text, size_t n, size_t summed, const uint16_t* advances,
     uint32_t* prefix, uint32_t* bounds) {
@@ -280,12 +251,8 @@ RAYOMD_AVX2 size_t MeasureWordsAvx2(const char* text, size_t n, size_t summed, c
         [](uint32_t* out, size_t k, uint64_t changes, uint32_t base, size_t bits) RAYOMD_AVX2 {
             return FlattenTable(out, k, changes, base, bits);
         });
-    SumAvx2(reinterpret_cast<const unsigned char*>(text), summed, advances, prefix);
+    SumScalar(reinterpret_cast<const unsigned char*>(text), summed, advances, prefix);
     return words;
-}
-
-RAYOMD_AVX2 void SumAdvancesAvx2(const char* text, size_t n, const uint16_t* advances, uint32_t* prefix) {
-    SumAvx2(reinterpret_cast<const unsigned char*>(text), n, advances, prefix);
 }
 
 // Eight code units widened to 32 bits.
@@ -426,12 +393,6 @@ size_t MeasureWideWords(const wchar_t* text, size_t n, const uint16_t* cache, Wi
 }
 
 void SumAdvances(const char* text, size_t n, const uint16_t* advances, uint32_t* prefix) {
-#if RAYOMD_WORDS_AVX2
-    if (n >= 8 && UseAvx2()) {
-        SumAdvancesAvx2(text, n, advances, prefix);
-        return;
-    }
-#endif
     SumScalar(reinterpret_cast<const unsigned char*>(text), n, advances, prefix);
 }
 

@@ -64,7 +64,6 @@ double StandardTextWidth(std::string_view text, double size, StandardTextFont fo
 struct StandardWordAdvances {
     uint16_t space;         // advance of ' ', AFM units (1/1000 em)
     uint16_t byte[256];     // advance of each byte, AFM units
-    uint16_t end;           // 0: SumAdvances (word_bounds.h) reads the entry after byte[255]
 };
 extern const std::array<StandardWordAdvances, 3> kStandardWordAdvances;
 

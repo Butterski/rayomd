@@ -7,8 +7,8 @@
 
 // The words of a paragraph and the advances of its bytes, for the standard renderer's wrapping:
 // one pass finds where every word starts and ends (AVX2 where the CPU has it, else SSE2), another
-// sums the advances of all bytes (gathered eight at a time in AVX2), so a word's width is one
-// subtraction and no loop ends at each word.
+// sums the advances of all bytes, so a word's width is one subtraction and no loop ends at each
+// word.
 namespace TinyPdf::Internal {
 
 // Entries MeasureWords may write into `bounds` past the ones it returns.
@@ -19,8 +19,7 @@ constexpr size_t kWordBoundsSlack = 8;
 // into `bounds` (two entries a word; it holds n + 1 + kWordBoundsSlack). Also prefix[0] = 0 and
 // prefix[i + 1] = prefix[i] + advances[text[i]] for i in [0, summed), modulo 2^32 (summed <= n): the units of
 // text[a, b) are prefix[b] - prefix[a] while below 2^32, which words of fewer than
-// kPrefixWordBytes are with advances below 1,024. advances[256] must be readable (the vector code
-// reads two at a time). n is below 2^32. Returns the number of words. Texts under 16 bytes are
+// kPrefixWordBytes are with advances below 1,024. n is below 2^32. Returns the number of words. Texts under 16 bytes are
 // read a byte at a time: the callers measure those inline (a call costs more than the work).
 size_t MeasureWords(const char* text, size_t n, size_t summed, const uint16_t* advances, uint32_t* prefix,
     uint32_t* bounds);

@@ -583,7 +583,8 @@ Important image/link details:
 - `src/core/word_bounds.h` and `src/core/word_bounds.cpp`
   The standard renderer's word measuring (`MeasureWords`): every word's first byte and end as
   positions (a 64-byte step's white-space bits, their edges, flattened a mask byte at a time from a
-  table) and the prefix sums of the AFM advances (gathered eight at a time), so a word's width is
+  table) and the prefix sums of the AFM advances (a byte at a time: AVX2's gather costs more cycles
+  on Zen 2, see performance.md), so a word's width is
   `prefix[end] - prefix[begin]`, the same integer as summing it byte by byte. AVX2 where the CPU has
   it (asked once), else SSE2, else bytes; texts under 16 bytes always bytes. `BreakAsciiWords` and
   `WrapAsciiInline` in `tiny_pdf.cpp` wrap from them in the thread's `WrapScratch` (page footnotes
