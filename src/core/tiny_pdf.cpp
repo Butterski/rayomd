@@ -1505,6 +1505,10 @@ public:
     }
     RAYOMD_HOT_INLINE void Bytes(std::string_view text) { Bytes(text.data(), text.size()); }
     void Fixed(double value) { cursor = RayoMd::Text::WriteFixed2(cursor, value); }
+    RAYOMD_HOT_INLINE void Fixed(const RayoMd::Text::Fixed2Text& text) {
+        memcpy(cursor, text.bytes, RayoMd::Text::kFixed2MaxChars);
+        cursor += text.size;
+    }
     void Number(size_t value) { cursor = std::to_chars(cursor, cursor + 20, value).ptr; }
     char* cursor = nullptr;
 
@@ -1514,6 +1518,62 @@ private:
 
 // Room for one operand written by TailWriter::Fixed, with its separator.
 constexpr size_t kOperandBytes = RayoMd::Text::kFixed2MaxChars + 1;
+
+// The text of the font size a renderer wrote last, which the runs of a block repeat: formatted
+// again only when the size changes, compared by its bits (-0 is written "-0").
+class SizeMemo {
+public:
+    SizeMemo() {
+        text.bytes[0] = '0';
+        text.size = 1;
+    }
+    RAYOMD_HOT_INLINE const RayoMd::Text::Fixed2Text& Get(double size) {
+        uint64_t sizeBits;
+        memcpy(&sizeBits, &size, sizeof(sizeBits));
+        if (__builtin_expect(sizeBits != bits, 0)) {
+            bits = sizeBits;
+            text = RayoMd::Text::Fixed2Text(size);
+        }
+        return text;
+    }
+
+private:
+    uint64_t bits = 0;
+    RayoMd::Text::Fixed2Text text;
+};
+
+// The operands every line of a code block repeats, formatted once a block: its tiles' left edge,
+// width and heights (CodeTile: a page's first line's tile reaches 3 points higher, `pad`) and its
+// text's left edge. A line then formats only where its tile and its text stand.
+struct CodeBlockText {
+    CodeBlockText(double tileLeft, double tileWidth, double lh, double textLeft)
+        : left(tileLeft), width(tileWidth), height(lh + 2.0 + 0.0), firstHeight(lh + 2.0 + 3.0), x(textLeft),
+          xValue(textLeft) {}
+    RayoMd::Text::Fixed2Text left, width, height, firstHeight, x;
+    double xValue;
+};
+
+// The operands the cell borders of a table row repeat, formatted once a row (the column width once
+// a table): their bottom, width and height. A cell then formats only its left edge.
+struct CellBorderText {
+    CellBorderText(double top, const RayoMd::Text::Fixed2Text& columnWidth, double h)
+        : bottom(top - h), width(columnWidth), height(h) {}
+    RayoMd::Text::Fixed2Text bottom, width, height;
+};
+
+// A table cell's border from x in its row, grey and 0.45 wide, as both renderers stroke it.
+static void AppendCellBorder(std::string& content, double x, const CellBorderText& row) {
+    TailWriter out(content, 40 + kOperandBytes * 4);
+    out.Lit("q 0.72 0.72 0.72 RG 0.45 w ");
+    out.Fixed(x);
+    out.Lit(" ");
+    out.Fixed(row.bottom);
+    out.Lit(" ");
+    out.Fixed(row.width);
+    out.Lit(" ");
+    out.Fixed(row.height);
+    out.Lit(" re S Q\n");
+}
 
 // The checkbox of a task list item, a square `side` points wide standing on (x, bottom), with
 // a check mark when the task is done. Paths, not a glyph, so every font shows it.
@@ -5944,6 +6004,7 @@ RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& b
 
     double tableWidth = renderer.pageW - renderer.margin * 2.0;
     double colWidth = tableWidth / columns;
+    const RayoMd::Text::Fixed2Text columnWidth(colWidth);
     double size = 9.6;
     double lh = size * 1.32;
     double pad = 5.0;
@@ -6029,10 +6090,11 @@ RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& b
                 const double top = renderer.y;
                 const double boxHeight = sliceHeight + pad * 2.0;
                 if (r == 0) renderer.TableFill(renderer.margin, top, tableWidth, boxHeight);
+                const CellBorderText border(top, columnWidth, boxHeight);
                 bool remaining = false;
                 for (size_t c = 0; c < columns; c++) {
                     double cellX = renderer.margin + c * colWidth;
-                    renderer.TableStroke(cellX, top, colWidth, boxHeight);
+                    renderer.TableStroke(cellX, border);
                     int align = c < block.aligns.size() ? block.aligns[c] : -1;
                     renderer.TagCell(c, true);
                     paintLines(cells[c], next[c], end[c], cellX, top, align, r == 0);
@@ -6071,9 +6133,10 @@ RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& b
         renderer.TagTableRowStart(r, columns, r == 0 && resumeRow != 0);
         double top = renderer.y;
         if (r == 0) renderer.TableFill(renderer.margin, top, tableWidth, rowHeight);
+        const CellBorderText border(top, columnWidth, rowHeight);
         for (size_t c = 0; c < columns; c++) {
             double cellX = renderer.margin + c * colWidth;
-            renderer.TableStroke(cellX, top, colWidth, rowHeight);
+            renderer.TableStroke(cellX, border);
             int align = c < block.aligns.size() ? block.aligns[c] : -1;
             renderer.TagCell(c, true);
             paintLines(cells[c], 0, cells[c].Count(), cellX, top, align, r == 0);
@@ -6893,6 +6956,7 @@ private:
     int listDepth = 0;   // the list items the blocks being drawn are nested in
     // The page being rendered is the tail of `content`, so painting is a plain append.
     std::string& content;
+    SizeMemo sizeMemo;              // the font size the text written last had
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     RunLinkUrls runLinkUrls;        // the target of the last link a run drew (AddRunLink)
@@ -7464,7 +7528,11 @@ private:
     }
 
     void TableFill(double x, double top, double w, double h) { DrawRect(x, top, w, h, "0.91 0.93 0.95"); }
-    void TableStroke(double x, double top, double w, double h) { DrawStrokeRect(x, top, w, h); }
+    // A table cell's border, an artifact when tagged.
+    void TableStroke(double x, const CellBorderText& row) {
+        if (tags != nullptr) tags->Artifact();
+        AppendCellBorder(content, x, row);
+    }
     std::string_view TableTextColor(bool header) const { return header ? "0.04 0.04 0.04" : "0.10 0.10 0.10"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer in one style.
@@ -8132,7 +8200,7 @@ private:
         w.Lit("q ");
         w.Bytes(color);
         w.Lit(" rg BT /F1 ");
-        w.Fixed(size);
+        w.Fixed(sizeMemo.Get(size));
         w.Lit(" Tf 1 0 ");
         if (italic) w.Lit("0.18 ");
         else w.Lit("0 ");
@@ -8205,24 +8273,6 @@ private:
     void QuoteStrip(double height) {
         DrawRect(margin, y + 2.0, pageW - margin * 2.0, height, "0.94 0.95 0.96");
         DrawRect(margin, y + 2.0, 3.0, height, quoteBar);
-    }
-
-    void DrawStrokeRect(double x, double top, double w, double h, std::string_view color = "0.72 0.72 0.72", double lineWidth = 0.45) {
-        if (tags != nullptr) tags->Artifact();
-        TailWriter out(content, 24 + color.size() + kOperandBytes * 5);
-        out.Lit("q ");
-        out.Bytes(color);
-        out.Lit(" RG ");
-        out.Fixed(lineWidth);
-        out.Lit(" w ");
-        out.Fixed(x);
-        out.Lit(" ");
-        out.Fixed(top - h);
-        out.Lit(" ");
-        out.Fixed(w);
-        out.Lit(" ");
-        out.Fixed(h);
-        out.Lit(" re S Q\n");
     }
 
     void AddLink(double x, double baseline, double width, double size, const SharedUrl& url) {
@@ -9149,6 +9199,7 @@ private:
         double x = margin + 8.0;
         double width = pageW - margin * 2.0 - 16.0;
         const double scale = size * 0.001;
+        const CodeBlockText blockText(margin, pageW - margin * 2.0, lh, x);
         bool first = true;
         for (size_t start = 0;;) {
             size_t end = wide.find(L'\n', start);
@@ -9156,8 +9207,12 @@ private:
             if (last) end = wide.size();
             const size_t lineEnd = end > start && wide[end - 1] == L'\r' ? end - 1 : end;
             const auto draw = [&](size_t from, size_t to) {
-                CodeTile(lh, first, "0.95 0.95 0.93");
-                DrawTextLine(x, size, std::wstring_view(wide.data() + from, to - from), "0.12 0.12 0.12");
+                CodeTile(lh, first, "0.95 0.95 0.93", blockText);
+                // DrawTextLine's line in the colour of plain code, one run.
+                Ensure(lh);
+                const CodeRun plain{ static_cast<uint32_t>(to - from), 0 };
+                PaintCodeLine(blockText, y - size, size, std::wstring_view(wide.data() + from, to - from), &plain, 1);
+                y -= lh;
             };
             size_t piece = start;
             double pieceWidth = 0.0;
@@ -9184,12 +9239,26 @@ private:
     // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
     // points into the next, so that the block is one tint. Out of line: written into RenderCode,
     // it moved GCC's inlining of hot calls elsewhere (+0.3 % on baseline.md).
-    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color) {
+    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color, const CodeBlockText& block) {
         const size_t pages = pageStarts.size();
         Ensure(lh + 4.0);
         if (pageStarts.size() != pages) first = true;
         const double pad = first ? 3.0 : 0.0;
-        DrawRect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color);
+        // DrawRect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color), with all but the
+        // bottom formatted once a block.
+        if (tags != nullptr) tags->Artifact();
+        TailWriter out(content, 24 + color.size() + kOperandBytes * 4);
+        out.Lit("q ");
+        out.Bytes(color);
+        out.Lit(" rg ");
+        out.Fixed(block.left);
+        out.Lit(" ");
+        out.Fixed((y + pad) - (lh + 2.0 + pad));
+        out.Lit(" ");
+        out.Fixed(block.width);
+        out.Lit(" ");
+        out.Fixed(first ? block.firstHeight : block.height);
+        out.Lit(" re f Q\n");
         first = false;
     }
 
@@ -9236,6 +9305,7 @@ private:
         const double x = margin + 8.0;
         const double width = pageW - margin * 2.0 - 16.0;
         const double scale = size * 0.001;
+        const CodeBlockText blockText(margin, pageW - margin * 2.0, lh, x);
         bool first = true;
         // A line whose exact width in 1/1000 em, times the scale and a margin for rounding, is
         // narrower than `width` is drawn whole, as the loop below would draw it: each of that loop's
@@ -9249,8 +9319,10 @@ private:
             const size_t lineEnd = end > start && wide[end - 1] == L'\r' ? end - 1 : end;   // as SplitLines
             const std::string_view tile = Internal::CodeLineTile(lineEnd > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
             auto draw = [&](size_t from, size_t to) {
-                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93");
-                PaintCodeRuns(x, y - size, size, std::wstring_view(wide.data() + from, to - from), codeClasses.data() + from);
+                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93", blockText);
+                const std::wstring_view shown(wide.data() + from, to - from);
+                const size_t runCount = SplitCodeRuns(shown.data(), shown.size(), codeClasses.data() + from, codeRuns);
+                PaintCodeLine(blockText, y - size, size, shown, codeRuns.data(), runCount);
                 y -= lh;
             };
             bool whole = false;
@@ -9290,27 +9362,30 @@ private:
         y -= 8.0;
     }
 
-    // A line of highlighted code at (x, baseline): as PaintText when it is one colour, otherwise
-    // one text object with each run after its colour.
-    RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::wstring_view text, const uint8_t* classes) {
-        const size_t runCount = SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
-        if (runCount == 1) {
-            PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color));
-            return;
+    // A line of code from the block's left edge (CodeBlockText): one text object with each of its
+    // `runCount` runs after its colour, which for one run is the text object PaintText writes.
+    // Tagged, a line of one colour is PaintText's, which marks it as content.
+    RAYOMD_SHARED void PaintCodeLine(const CodeBlockText& block, double baseline, double size, std::wstring_view text,
+        const CodeRun* runs, size_t runCount) {
+        if (tags != nullptr) {
+            if (runCount == 1) {
+                PaintText(block.xValue, baseline, size, text, Internal::CodeColor(runs[0].color));
+                return;
+            }
+            tags->Content();
         }
-        if (tags != nullptr) tags->Content();
         TailWriter w(content, 64 + kOperandBytes * 3 + text.size() * 4 + runCount * 32);
         size_t begin = 0;
         for (size_t index = 0; index < runCount; index++) {
-            const CodeRun& run = codeRuns[index];
+            const CodeRun& run = runs[index];
             const std::string_view color = Internal::CodeColor(run.color);
-            if (begin == 0) {
+            if (index == 0) {
                 w.Lit("q ");
                 w.Bytes(color);
                 w.Lit(" rg BT /F1 ");
-                w.Fixed(size);
+                w.Fixed(sizeMemo.Get(size));
                 w.Lit(" Tf 1 0 0 1 ");
-                w.Fixed(x);
+                w.Fixed(block.x);
                 w.Lit(" ");
                 w.Fixed(baseline);
                 w.Lit(" Tm ");
@@ -9502,6 +9577,7 @@ private:
 
         double tableWidth = pageW - margin * 2.0;
         double colWidth = tableWidth / columns;
+        const RayoMd::Text::Fixed2Text columnWidth(colWidth);
         double size = 9.6;
         double lh = size * 1.32;
         double pad = 5.0;
@@ -9549,10 +9625,10 @@ private:
                 rowHeight = count * lh + pad * 2.0;
                 double top = y;
                 if (r == 0) DrawRect(margin, top, tableWidth, rowHeight, "0.91 0.93 0.95");
-
+                const CellBorderText border(top, columnWidth, rowHeight);
                 for (size_t c = 0; c < columns; c++) {
                     double cellX = margin + c * colWidth;
-                    DrawStrokeRect(cellX, top, colWidth, rowHeight);
+                    TableStroke(cellX, border);
 
                     TagCell(c, true);
                     int align = c < aligns.size() ? aligns[c] : -1;
@@ -10686,6 +10762,7 @@ private:
     int listDepth = 0;   // the list items the blocks being drawn are nested in
     // The page being rendered is the tail of `content`, so painting is a plain append.
     std::string& content;
+    SizeMemo sizeMemo;              // the font size the text written last had
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     RunLinkUrls runLinkUrls;        // the target of the last link a run drew (AddRunLink)
@@ -11349,7 +11426,7 @@ private:
     }
 
     void TableFill(double x, double top, double w, double h) { Rect(x, top, w, h, "0.91 0.93 0.95"); }
-    void TableStroke(double x, double top, double w, double h) { Rect(x, top, w, h, "0.72 0.72 0.72", true); }
+    void TableStroke(double x, const CellBorderText& row) { AppendCellBorder(content, x, row); }
     std::string_view TableTextColor(bool) const { return "0.08 0.08 0.08"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer, in the
@@ -11963,7 +12040,7 @@ private:
         out.Lit(" rg BT /");
         out.Bytes(fontName);
         out.Lit(" ");
-        out.Fixed(size);
+        out.Fixed(sizeMemo.Get(size));
         out.Lit(" Tf 1 0 0 1 ");
         out.Fixed(x);
         out.Lit(" ");
@@ -12444,6 +12521,7 @@ private:
         double x = margin + 8.0;
         double width = pageW - margin * 2.0 - 16.0;
         const size_t perLine = (size_t)std::max<uint64_t>(1, MaxUnits(width, size) / WordAdvances(StandardTextFont::Mono).space);
+        const CodeBlockText blockText(margin, pageW - margin * 2.0, lh, x);
         bool first = true;
         for (size_t start = 0;;) {
             size_t end = text.find('\n', start);
@@ -12464,8 +12542,14 @@ private:
             size_t piece = 0;
             do {
                 const size_t count = std::min(perLine, line.size() - piece);
-                CodeTile(lh, first, "0.95 0.95 0.93");
-                DrawTextLine(x, size, line.substr(piece, count), "F3", "0.12 0.12 0.12", true);
+                CodeTile(lh, first, "0.95 0.95 0.93", blockText);
+                // DrawTextLine's line in the colour of plain code, one run; an empty one draws nothing.
+                Ensure(lh);
+                if (count != 0) {
+                    const CodeRun plain{ static_cast<uint32_t>(count), 0 };
+                    PaintCodeLine(blockText, y - size, size, line.substr(piece, count), &plain, 1);
+                }
+                y -= lh;
                 piece += count;
             } while (piece < line.size());
             if (last || BuildCancelled()) break;
@@ -12479,12 +12563,25 @@ private:
     // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
     // points into the next, so that the block is one tint. Out of line: written into RenderCode,
     // it moved GCC's inlining of hot calls elsewhere (+0.3 % on baseline.md).
-    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color) {
+    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color, const CodeBlockText& block) {
         const size_t pages = pageStarts.size();
         Ensure(lh + 4.0);
         if (pageStarts.size() != pages) first = true;
         const double pad = first ? 3.0 : 0.0;
-        Rect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color);
+        // Rect(margin, y + pad, pageW - margin * 2.0, lh + 2.0 + pad, color), with all but the
+        // bottom formatted once a block.
+        TailWriter out(content, 32 + color.size() + kOperandBytes * 4);
+        out.Lit("q ");
+        out.Bytes(color);
+        out.Lit(" rg ");
+        out.Fixed(block.left);
+        out.Lit(" ");
+        out.Fixed((y + pad) - (lh + 2.0 + pad));
+        out.Lit(" ");
+        out.Fixed(block.width);
+        out.Lit(" ");
+        out.Fixed(first ? block.firstHeight : block.height);
+        out.Lit(" re f Q\n");
         first = false;
     }
 
@@ -12499,6 +12596,7 @@ private:
         const double lh = size * 1.35;
         const double x = margin + 8.0;
         const double width = pageW - margin * 2.0 - 16.0;
+        const CodeBlockText blockText(margin, pageW - margin * 2.0, lh, x);
         // WrapAsciiLiteral's lines: as many Courier characters as fit, and at least one.
         const size_t perLine = (size_t)std::max<uint64_t>(1, MaxUnits(width, size) / WordAdvances(StandardTextFont::Mono).space);
         bool first = true;
@@ -12529,8 +12627,11 @@ private:
             size_t piece = 0;
             do {
                 const size_t count = std::min(perLine, line.size() - piece);
-                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93");
-                PaintCodeRuns(x, y - size, size, line.substr(piece, count), lineClasses + piece);
+                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93", blockText);
+                if (count != 0) {
+                    const size_t runCount = SplitCodeRuns(line.data() + piece, count, lineClasses + piece, codeRuns);
+                    PaintCodeLine(blockText, y - size, size, line.substr(piece, count), codeRuns.data(), runCount);
+                }
                 y -= lh;
                 piece += count;
             } while (piece < line.size());
@@ -12540,27 +12641,23 @@ private:
         y -= 8.0;
     }
 
-    // A line of highlighted code at (x, baseline) in Courier: as Text when it is one colour,
-    // otherwise one text object with each run after its colour.
-    RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::string_view text, const uint8_t* classes) {
-        if (text.empty()) return;
-        const size_t runCount = SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
-        if (runCount == 1) {
-            Text(x, baseline, size, text, "F3", Internal::CodeColor(codeRuns[0].color));
-            return;
-        }
+    // A line of highlighted code at the block's left edge (CodeBlockText) in Courier: one text
+    // object with each of its `runCount` runs after its colour, which for one run is the text
+    // object Text writes.
+    RAYOMD_SHARED void PaintCodeLine(const CodeBlockText& block, double baseline, double size, std::string_view text,
+        const CodeRun* runs, size_t runCount) {
         TailWriter out(content, 48 + kOperandBytes * 3 + text.size() * 2 + runCount * 32);
         size_t begin = 0;
         for (size_t index = 0; index < runCount; index++) {
-            const CodeRun& run = codeRuns[index];
+            const CodeRun& run = runs[index];
             const std::string_view color = Internal::CodeColor(run.color);
-            if (begin == 0) {
+            if (index == 0) {
                 out.Lit("q ");
                 out.Bytes(color.data(), color.size());
                 out.Lit(" rg BT /F3 ");
-                out.Fixed(size);
+                out.Fixed(sizeMemo.Get(size));
                 out.Lit(" Tf 1 0 0 1 ");
-                out.Fixed(x);
+                out.Fixed(block.x);
                 out.Lit(" ");
                 out.Fixed(baseline);
                 out.Lit(" Tm (");
@@ -12718,6 +12815,7 @@ private:
 
         double tableWidth = pageW - margin * 2.0;
         double colWidth = tableWidth / columns;
+        const RayoMd::Text::Fixed2Text columnWidth(colWidth);
         double size = 9.6;
         double lh = size * 1.32;
         double pad = 5.0;
@@ -12770,9 +12868,10 @@ private:
                 rowHeight = count * lh + pad * 2.0;
                 double top = y;
                 if (r == 0) Rect(margin, top, tableWidth, rowHeight, "0.91 0.93 0.95");
+                const CellBorderText border(top, columnWidth, rowHeight);
                 for (size_t c = 0; c < columns; c++) {
                     double cellX = margin + c * colWidth;
-                    Rect(cellX, top, colWidth, rowHeight, "0.72 0.72 0.72", true);
+                    TableStroke(cellX, border);
                     int align = c < aligns.size() ? aligns[c] : -1;
                     if (styled[c]) {
                         const AsciiRuns& cellRuns = tableCells[c];
