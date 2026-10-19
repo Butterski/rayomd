@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "file_io.h"
+#include "compiler.h"
 
 #include <algorithm>
 #include <climits>
@@ -40,8 +41,9 @@ intptr_t OpenRegular(const std::filesystem::path& path, uint64_t& size) {
 #else
 namespace {
 
-// OpenRegular, with what its fstat said.
-int OpenStat(const std::filesystem::path& path, struct stat& info) {
+// OpenRegular, with what its fstat said. Out of line: inlined into each ReadAll it added 137
+// bytes to each.
+RAYOMD_NOINLINE int OpenStat(const std::filesystem::path& path, struct stat& info) {
     // Non-blocking, as opening a FIFO without a writer waits for one; made blocking again once
     // fstat says it is a regular file, where O_NONBLOCK means nothing anyway.
     const int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);

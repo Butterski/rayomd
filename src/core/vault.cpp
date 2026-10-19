@@ -404,8 +404,9 @@ constexpr size_t kMaxKeptRoots = 256;
 constexpr size_t kMaxKeptIndexes = 4;
 
 struct KeptNote {
-    std::string path;   // Windows: the path its key resolves to
-    std::shared_ptr<const std::string> text;
+    std::string key;    // the path Check takes
+    std::string path;   // Windows: the path `key` resolves to
+    std::shared_ptr<const std::string> text;   // null for a free slot
     FileIdentity identity;
     uint64_t used = 0;
 };
@@ -417,11 +418,15 @@ struct KeptRoot {
     bool directory = false;
 };
 
+// The maps are the unordered_map<std::string, int> the parser's footnotes and the image registry
+// use (no code of their own), each to a slot of a vector plus one (0: a key just added).
 struct Kept {
     std::mutex mutex;
-    std::unordered_map<std::string, KeptNote> notes;   // by the path Check takes
-    std::unordered_map<std::string, KeptRoot> roots;   // by the working folder (relative paths) and path
-    std::vector<std::shared_ptr<const NameIndex>> indexes;   // the least recently used first
+    std::unordered_map<std::string, int> notes;   // by KeptNote::key
+    std::vector<KeptNote> noteSlots;
+    std::unordered_map<std::string, int> roots;   // by the working folder (relative paths) and path
+    std::vector<KeptRoot> rootSlots;
+    std::shared_ptr<const NameIndex> indexes[kMaxKeptIndexes];   // the most recently used first
     size_t bytes = 0;
     uint64_t clock = 0;
 };
@@ -484,8 +489,8 @@ bool Unchanged(const FileIdentity& kept, const FileIdentity& now) {
     return kept.size == now.size && kept.modified == now.modified && kept.changed == now.changed;
 }
 
-size_t CostOf(const std::string& key, const KeptNote& note) {
-    return 2 * key.size() + note.path.size() + note.text->size() + 160;
+size_t CostOf(const KeptNote& note) {
+    return 3 * note.key.size() + note.path.size() + note.text->size() + 160;
 }
 
 // `text`, read from the file of `identity` from `start` on, kept for `key` (Check's path) and
@@ -495,32 +500,56 @@ void Keep(const std::string& key, const std::string& path, const std::shared_ptr
     if (text->size() != identity.size || text->size() > kMaxKeptNoteBytes || !Settled(identity, start)) return;
     Kept& kept = TheKept();
     const std::lock_guard<std::mutex> lock(kept.mutex);
-    KeptNote& note = kept.notes[key];
-    if (note.text) kept.bytes -= CostOf(key, note);
+    int& slot = kept.notes[key];
+    if (slot == 0) {
+        // A new slot while none is free (every slot holds a note of the map, the new key aside),
+        // else the first free one.
+        if (kept.notes.size() <= kept.noteSlots.size()) {
+            while (kept.noteSlots[slot].text != nullptr) slot++;
+        } else {
+            slot = (int)kept.noteSlots.size();
+        }
+        if ((size_t)slot == kept.noteSlots.size()) kept.noteSlots.emplace_back();
+        slot++;
+    }
+    KeptNote& note = kept.noteSlots[slot - 1];
+    if (note.text != nullptr) kept.bytes -= CostOf(note);
+    note.key = key;
     note.path = path;
     note.text = text;
     note.identity = identity;
     note.used = ++kept.clock;
-    kept.bytes += CostOf(key, note);
+    kept.bytes += CostOf(note);
     while (kept.bytes > kMaxNoteCacheBytes || kept.notes.size() > kMaxKeptNotes) {
-        auto oldest = kept.notes.begin();
-        for (auto at = kept.notes.begin(); at != kept.notes.end(); ++at) {
-            if (at->second.used < oldest->second.used) oldest = at;
+        KeptNote* oldest = nullptr;
+        for (KeptNote& candidate : kept.noteSlots) {
+            if (candidate.text != nullptr && (oldest == nullptr || candidate.used < oldest->used)) oldest = &candidate;
         }
-        kept.bytes -= CostOf(oldest->first, oldest->second);
-        kept.notes.erase(oldest);
+        kept.bytes -= CostOf(*oldest);
+        kept.notes.erase(kept.notes.find(oldest->key));
+        oldest->text = nullptr;
     }
 }
 
+// `index` first among the kept name indexes (moved up, or added, the last one given up).
+void KeepIndex(const std::shared_ptr<const NameIndex>& index) {
+    Kept& kept = TheKept();
+    const std::lock_guard<std::mutex> lock(kept.mutex);
+    size_t at = 0;
+    while (at + 1 < kMaxKeptIndexes && kept.indexes[at] != index) at++;
+    for (; at > 0; at--) kept.indexes[at] = std::move(kept.indexes[at - 1]);
+    kept.indexes[0] = index;
+}
+
 // The name index kept for `key` while every folder it read is as it was then (one stat each),
-// most recently used last; null without one.
+// then made the most recently used; null without one.
 std::shared_ptr<const NameIndex> KeptIndex(const std::string& key, const std::string& root) {
     Kept& kept = TheKept();
     std::shared_ptr<const NameIndex> index;
     {
         const std::lock_guard<std::mutex> lock(kept.mutex);
         for (const auto& candidate : kept.indexes) {
-            if (candidate->key == key) index = candidate;
+            if (candidate != nullptr && candidate->key == key) index = candidate;
         }
     }
     if (index == nullptr) return nullptr;
@@ -544,19 +573,15 @@ std::shared_ptr<const NameIndex> KeptIndex(const std::string& key, const std::st
         unchanged = now.opened == then.opened && (!now.opened || Unchanged(then, now));
 #endif
     }
-    const std::lock_guard<std::mutex> lock(kept.mutex);
-    const auto found = std::find(kept.indexes.begin(), kept.indexes.end(), index);
-    if (found != kept.indexes.end()) kept.indexes.erase(found);
-    if (!unchanged) return nullptr;
-    kept.indexes.push_back(index);
+    if (!unchanged) {
+        const std::lock_guard<std::mutex> lock(TheKept().mutex);
+        for (auto& candidate : TheKept().indexes) {
+            if (candidate == index) candidate = nullptr;
+        }
+        return nullptr;
+    }
+    KeepIndex(index);
     return index;
-}
-
-void KeepIndex(const std::shared_ptr<const NameIndex>& index) {
-    Kept& kept = TheKept();
-    const std::lock_guard<std::mutex> lock(kept.mutex);
-    if (kept.indexes.size() >= kMaxKeptIndexes) kept.indexes.erase(kept.indexes.begin());
-    kept.indexes.push_back(index);
 }
 
 #ifndef _WIN32
@@ -667,8 +692,10 @@ void ForgetNotes() {
     Kept& kept = TheKept();
     const std::lock_guard<std::mutex> lock(kept.mutex);
     kept.notes.clear();
+    kept.noteSlots.clear();
     kept.roots.clear();
-    kept.indexes.clear();
+    kept.rootSlots.clear();
+    for (auto& index : kept.indexes) index = nullptr;
     kept.bytes = 0;
 }
 
@@ -696,7 +723,7 @@ std::string CachedResolvedPath(std::string_view path, bool* directory) {
         const std::lock_guard<std::mutex> lock(kept.mutex);
         const auto at = kept.roots.find(key);
         if (at != kept.roots.end()) {
-            known = at->second;
+            known = kept.rootSlots[at->second - 1];
             found = true;
         }
     }
@@ -718,8 +745,16 @@ std::string CachedResolvedPath(std::string_view path, bool* directory) {
     known.directory = S_ISDIR(status.st_mode);
     if (directory != nullptr) *directory = known.directory;
     const std::lock_guard<std::mutex> lock(kept.mutex);
-    if (kept.roots.size() >= kMaxKeptRoots) kept.roots.clear();
-    return (kept.roots[key] = known).resolved;
+    if (kept.roots.size() >= kMaxKeptRoots) {
+        kept.roots.clear();
+        kept.rootSlots.clear();
+    }
+    int& slot = kept.roots[key];
+    if (slot == 0) {
+        kept.rootSlots.emplace_back();
+        slot = (int)kept.rootSlots.size();
+    }
+    return (kept.rootSlots[slot - 1] = known).resolved;
 #endif
 }
 
@@ -792,6 +827,28 @@ int Vault::OpenBeneath(const char* relative) {
 }
 #endif
 
+#ifndef _WIN32
+// `path`, `below` bytes into it below the root (0: not in it), opened beneath the root and left
+// open for Read: 1, 0 when it is no regular file there, -1 when it must be checked by resolved path.
+int Vault::Open(const std::string& path, size_t below) {
+    if (below == 0 || rootFd == -2) return -1;
+    const uint64_t start = Now();
+    const int fd = OpenBeneath(path.c_str() + below);
+    if (fd < 0) return fd == -1 ? 0 : -1;
+    const FileIdentity opened = IdentityOf(fd);
+    if (!opened.opened) {
+        ::close(fd);
+        return 0;
+    }
+    if (openFd >= 0) ::close(openFd);
+    openFd = fd;
+    openIdentity = opened;
+    openPath.assign(path);
+    openStart = start;
+    return 1;
+}
+#endif
+
 // 1 when the note kept for `key` is as its file is now (one stat), its text then the hit; -1 when
 // one is kept and the file is gone or no regular file; 0 when none is kept or it changed.
 int Vault::Cached(const std::string& key) {
@@ -801,8 +858,11 @@ int Vault::Cached(const std::string& key) {
         const std::lock_guard<std::mutex> lock(kept.mutex);
         const auto found = kept.notes.find(key);
         if (found == kept.notes.end()) return 0;
-        found->second.used = ++kept.clock;
-        note = found->second;
+        KeptNote& slot = kept.noteSlots[found->second - 1];
+        slot.used = ++kept.clock;
+        note.path = slot.path;
+        note.text = slot.text;
+        note.identity = slot.identity;
     }
     FileIdentity now;
     const int stamp = StampOf(key, now, false);
@@ -834,33 +894,19 @@ std::shared_ptr<const std::string> Vault::Read(const std::string& path, size_t m
         return identity.size <= maximum ? hitText : nullptr;
     }
 #ifndef _WIN32
-    if (openFd >= 0 && openPath == path) {
+    // The note Check left open, else opened now (ReadLinkedBook's first note).
+    const int opened = openFd >= 0 && openPath == path ? 1 : Open(path, BelowRoot(path, root));
+    if (opened == 0) {
+        identity = FileIdentity();
+        return nullptr;
+    }
+    if (opened > 0) {
         const int fd = openFd;
         openFd = -1;
         identity = openIdentity;
         std::shared_ptr<const std::string> text = ReadOpen(fd, identity, maximum);
         if (text != nullptr) Keep(path, std::string(), text, identity, openStart);
         return text;
-    }
-    if (rootFd != -2) {
-        const size_t below = BelowRoot(path, root);
-        if (below != 0) {
-            const uint64_t start = Now();
-            const int fd = OpenBeneath(path.c_str() + below);
-            identity = FileIdentity();
-            if (fd >= 0) {
-                identity = IdentityOf(fd);
-                if (!identity.opened) {
-                    ::close(fd);
-                    identity = FileIdentity();
-                    return nullptr;
-                }
-                std::shared_ptr<const std::string> text = ReadOpen(fd, identity, maximum);
-                if (text != nullptr) Keep(path, std::string(), text, identity, start);
-                return text;
-            }
-            if (fd == -1) return nullptr;
-        }
     }
 #endif
     std::shared_ptr<std::string> text = std::make_shared<std::string>();
@@ -881,24 +927,9 @@ bool Vault::Check(std::string& path) {
     if (rootFd != -2) {
         const size_t below = BelowRoot(path, root);
         if (below == 0) return false;
-        const uint64_t start = Now();
-        const int cached = Cached(path);
-        if (cached != 0) return cached > 0;
-        const int fd = OpenBeneath(path.c_str() + below);
-        if (fd >= 0) {
-            const FileIdentity opened = IdentityOf(fd);
-            if (!opened.opened) {
-                ::close(fd);
-                return false;
-            }
-            if (openFd >= 0) ::close(openFd);
-            openFd = fd;
-            openIdentity = opened;
-            openPath.assign(path);
-            openStart = start;
-            return true;
-        }
-        if (fd == -1) return false;
+        int found = Cached(path);
+        if (found == 0) found = Open(path, below);
+        if (found >= 0) return found > 0;
     }
 #else
     // In the root by name before anything is opened, and through no link below it (TryOpenDirect's
@@ -1046,13 +1077,24 @@ void Vault::BuildIndex() {
 #endif
     if (entries > indexLimit) return;
     NameIndex& names = *built;
-    std::sort(names.index.begin(), names.index.end(), [&names](const NameIndex::Named& a, const NameIndex::Named& b) {
+    const auto before = [&names](const NameIndex::Named& a, const NameIndex::Named& b) {
         if (a.key != b.key) return a.key < b.key;
         const std::string_view x = names.Name(a);
         const std::string_view y = names.Name(b);
         if (x != y) return x < y;
         return a.depth != b.depth ? a.depth < b.depth : names.Relative(a) < names.Relative(b);
-    });
+    };
+    // Shell sort (Gonnet's gaps): a total order (no two paths are equal), so the result is
+    // std::sort's, in a tenth of its code; at most 20,000 entries, once per change of the vault.
+    std::vector<NameIndex::Named>& sorted = names.index;
+    for (size_t gap = sorted.size() / 2; gap > 0; gap = gap == 2 ? 1 : gap * 5 / 11) {
+        for (size_t at = gap; at < sorted.size(); at++) {
+            const NameIndex::Named entry = sorted[at];
+            size_t to = at;
+            for (; to >= gap && before(entry, sorted[to - gap]); to -= gap) sorted[to] = sorted[to - gap];
+            sorted[to] = entry;
+        }
+    }
     if (built->keep) KeepIndex(built);
     index = built;
 }

@@ -160,6 +160,7 @@ private:
     // resolved-path checks then. The file Find opened last stays open for the Read that follows,
     // with what its fstat said and when Check began.
     int OpenBeneath(const char* relative);
+    int Open(const std::string& path, size_t below);
     int rootFd = -1;
     int openFd = -1;
     RayoMd::File::FileIdentity openIdentity;
