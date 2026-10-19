@@ -69,6 +69,35 @@ fixture.
 Against 5.2.4: the dynamic Linux binary 1,276,592 -> 1,264,280 (GCC 11 1,280,624 -> 1,272,408),
 `rayomd.exe` 1,588,224 -> 1,467,392.
 
+## Round 4 against 5.2.4: hot paths (opt4/hot4, 2026-10-19)
+
+Measured against 5.2.4 (`27cf8f0`), g++ 13.3 Release, Docker; instructions by `ab.sh
+--instructions` (callgrind, which counts each byte a `rep movsb` copies), cycles by `perf stat -e
+cycles:u` in alternating runs of builds with `-falign-functions=64 -falign-loops=32` (a busy host).
+Every step keeps the 2,875 PDFs of the byte check and the 5,936 and 6,044 feature-on exports.
+
+- **Page content rendered where it ends up** (`PdfObjects::LeaveGaps`, `StartPageContent`): each
+  page's content starts after the bytes the thread's last build put before it (the header and the
+  objects before the first page; between pages the page's objects and the next stream's head),
+  and `BuildInto` moves a payload only when its gap was wrong, towards either end (those towards
+  the front first, from the first). Builds of an unchanged layout move nothing. Callgrind
+  instructions code-heavy -5.4 %, table-heavy -5.3 %, README -4.1 %, tester-noimg -2.1 %, others
+  -0.1 to -0.5 %; perf (no byte counting): -0.1 to -0.5 %; aligned cycles table-heavy -2.6 to
+  -3.5 %, code-heavy -2.1 to -2.3 %, essay -1.3 %, native_math -0.7 %, others even. A first export
+  pays for keeping the gaps: +0.8 K instructions on a 200-byte note, +3 K on 15 to 33 KB. A first
+  try that added a parameter to `BuildInto` renamed it out of `src/hot.ld`'s list: notes and polish
+  +0.7 to +1.2 % cycles, L1i misses +25 %, at fewer instructions.
+- **Math control words looked up without a `strlen` a step** (`FindCommand`, math_parser.cpp): the
+  binary search compared the word with each entry through `string_view::compare(const char*)`, a
+  `strlen` and a `memcmp` at each of its nine steps (3 % of the cycles of a 1.4 MB build of
+  `tester.md` without images, the GUI's case); the entry is now read once up to the first
+  difference, and a static_assert checks the table's order. tester-noimg -2.0 % instructions,
+  -1.4 % cycles; others unchanged.
+- **Reference links resolved in runs** (`ResolveReferenceLinks`): in a document with link
+  definitions every paragraph with a '[' was copied a `push_back` a byte; the bytes up to the next
+  one that may be syntax (`FindByteClass`) are now appended at once. tester-noimg -1.4 %
+  instructions, -1.2 % time; others unchanged.
+
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
 Measured against 5.2.3 (`f28d74b`), g++ 13.3 Release, Docker; instructions by `ab.sh
@@ -815,8 +844,11 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
 
 - Page content is rendered straight into the caller's output buffer and the file
   is assembled in place around it in `BuildInto`: no string per page and no second
-  copy (7 to 15 % of a warm build on Windows when it was one). The move of every
-  page's content to its final place is the one copy left.
+  copy (7 to 15 % of a warm build on Windows when it was one). Each page's content is
+  rendered after the gap the thread's last build had before it (`LeaveGaps`), so a build
+  whose objects between the pages come out as long as last time (a preview being edited,
+  `--bench`, a batch of one layout) moves no content; otherwise the pages move as they all
+  did before, towards either end.
 - Operators are written through `TailWriter` straight into the end of the string: room
   for the operation's upper bound is reserved (one capacity test), the bytes are written
   through a pointer and the destructor sets the size. A std::string grows without filling
@@ -1042,9 +1074,9 @@ artifact before its TD: two marked-content sequences a cell, and the table fixtu
 takes 2.1 times its `--pdfa` time. Borders first, one artifact a row, would halve
 them, at a change of `RenderTable`'s loop that untagged documents must not pay for.
 
-**`BuildInto` moves every page's content once.** 2.6 to 4.7 % of a warm build.
-Placing content where it ends up needs another object order, which changes the
-bytes.
+**`BuildInto` moves every page's content once.** Done for repeated builds in round four
+(`LeaveGaps`, above). A first export, or one whose objects between pages changed length,
+still moves the pages after the change.
 
 **The ASCII word loop.** Done in round 2 (`MeasureWords`, above). Left: texts under 16 bytes
 keep the byte loop, and `WrapAsciiInline` still parses, builds segments and copies run text per
@@ -1069,10 +1101,14 @@ and `WrapMathCell`, the parser's 0xE2, '$' and "\("). A byte loop for the parser
 (below); one SSE2 pass a row giving its pipes as bits, and the formula byte known from the parse,
 are left.
 
-**`BuildInto`'s move of the page content (2026-10-19).** 5.4 % of README's and 5.8 % of
-code-heavy's instructions (backward 4-vector loops of `memmove`, bandwidth-bound): any layout that
-renders the content where it ends up needs the size of every object before it, which the
-annotations and images decide after layout.
+**Formulas at `-O2` (2026-10-19).** `math_parser.cpp` and `math_layout.cpp` are built at `-Os`.
+Both at `-O2`: tester-noimg -6.1 % instructions and -13.6 % time (ab.sh), other fixtures unchanged,
+for +52 KB of text (layout alone -3.4 % and -8.4 % for +33 KB, the parser alone -2.7 % and -4.2 %
+for +19 KB). Math is about a fifth of a build of `tester.md`, the GUI's test document. Not taken
+in round four: a size decision.
+
+**`BuildInto`'s move of the page content (2026-10-19).** Taken in round four for builds
+that follow one of the same layout on their thread (`LeaveGaps`).
 
 **Keeping the header row's wrapped cells.** A table that breaks wraps its header
 row again (about 0.3 % of the table fixture's 1.7 %); keeping them needs a second
@@ -1100,6 +1136,16 @@ Text and layout:
   divisions run once a table): table-heavy -0.5 % instructions, cycles even (median +0.8 %, min
   -0.2 %, 31 runs); the divisions overlap the work around them. `AsciiSegment` written in place
   instead of an aggregate copied from the stack: essay -0.02 % instructions, cycles even.
+- Round 4 (opt4/hot4, 2026-10-19): `UsedCidSet`'s plain bits as a 64 KB byte map (`IsPlain` one
+  load, no shift and `bt`): instructions README -2.1 %, code-heavy -4.0 %, table-heavy -1.5 %,
+  polish -1.6 %, but aligned cycles README +0.0 %, code-heavy -0.1 %, table-heavy -0.8 %,
+  tester-noimg +0.4 % (paired, 15 runs), the set 16 to 72 KB: `WriteCidText` is bound by the
+  stores and the loop's exit, not the test. Table rows split by one SSE2 pass each (the pipes as
+  16-bit masks, flags for '\\', '$' and the math text bytes or '&', so math tables skip
+  `EraseMathTextBytes`): 4 K fewer `memchr` calls a table-heavy build, but the pass costs more
+  (instructions table-heavy +0.8 %, README +0.9 %, notes +1.0 %; aligned cycles table-heavy
+  -0.1 %, README +0.8 %, notes +0.9 %); `SplitTableRowRaw` went out of line and `ClassifyLine`
+  lost 136 bytes of inlining.
 - Round 3, continued (opt3/next, 2026-10-19): the line classes in a vector `resize`d first, then
   classified into each slot: +0.02 to +0.25 % instructions (the fill loop); emplacing each slot is
   kept. The paragraph tests' pass without telling the parser about 0xE2 (`maySymbols`): essay

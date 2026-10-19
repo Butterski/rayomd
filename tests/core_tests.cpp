@@ -1302,6 +1302,45 @@ bool CheckOutputBufferReuse() {
         }
     }
 
+    // Each page's content is rendered after the gap the thread's last build had before it, so a
+    // document built again keeps its content in place, and an edit that changes what lies between
+    // pages moves the pages after it towards either end. Every build must equal one on a new
+    // thread, which leaves no gaps, in its bytes and its source map, also in both renderers.
+    std::string pages;
+    for (int i = 0; i < 120; i++) {
+        if (i % 7 == 0) pages += "## Part " + std::to_string(i) + "\n\n";
+        pages += "Paragraph " + std::to_string(i) + " has words that fill the page, line after line.\n\n";
+    }
+    const std::string unicodePages = u8"Zażółć\n\n" + pages;
+    const std::string edits[] = { pages, pages, "[a](https://a.example) " + pages, pages + "[b](https://b.example)\n",
+        "x\n\n" + pages, unicodePages, unicodePages, "[c](https://c.example)\n\n" + unicodePages, documents[3] + pages, pages };
+    const auto mapped = [](const std::string& markdown, std::string& pdf, std::vector<TinyPdf::SourceBlock>& map) {
+        TinyPdf::PdfOptions options;
+        options.sourceMap = &map;
+        return TinyPdf::BuildPdf(markdown, options, pdf).Ok();
+    };
+    const auto sameMaps = [](const std::vector<TinyPdf::SourceBlock>& a, const std::vector<TinyPdf::SourceBlock>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++) {
+            if (a[i].firstLine != b[i].firstLine || a[i].endLine != b[i].endLine || a[i].page != b[i].page ||
+                a[i].endPage != b[i].endPage || a[i].top != b[i].top || a[i].bottom != b[i].bottom) return false;
+        }
+        return true;
+    };
+    std::string warm;
+    for (size_t i = 0; i < sizeof(edits) / sizeof(edits[0]); i++) {
+        std::vector<TinyPdf::SourceBlock> warmMap, coldMap;
+        std::string cold;
+        bool coldOk = false;
+        std::thread thread([&]() { coldOk = mapped(edits[i], cold, coldMap); });
+        thread.join();
+        if (!mapped(edits[i], warm, warmMap) || !coldOk || warm != cold || !sameMaps(warmMap, coldMap) ||
+            CountOccurrences(cold, "/Type /Page ") < 3) {
+            std::cerr << "buffer reuse: edit " << i << " differs from a build on a new thread" << std::endl;
+            return false;
+        }
+    }
+
     // A buffer far larger than the file is given back instead of being kept.
     std::string oversized;
     oversized.reserve(48u * 1024u * 1024u);

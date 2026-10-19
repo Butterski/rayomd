@@ -26,12 +26,24 @@ constexpr uint8_t kFontSymbol = 5;
 constexpr uint8_t kPrimeCode = 0xA2;      // Symbol minute
 constexpr uint8_t kEllipsisCode = 0xBC;   // Times ellipsis
 
+// `name` against the NUL-terminated `entry`, ordered as std::string_view::compare orders them,
+// read once up to the first difference: compare() with a const char* took a strlen of the entry
+// at every step of the search (3 % of a build of formula-rich text, with the memcmp).
+constexpr int CompareCommandName(std::string_view name, const char* entry) {
+    for (size_t i = 0; i < name.size(); i++) {
+        const unsigned char have = static_cast<unsigned char>(name[i]);
+        const unsigned char want = static_cast<unsigned char>(entry[i]);
+        if (have != want) return want == 0 || have > want ? 1 : -1;
+    }
+    return entry[name.size()] == 0 ? 0 : -1;
+}
+
 constexpr int FindCommand(std::string_view name) {
     int low = 0;
     int high = kMathCommandCount - 1;
     while (low <= high) {
         const int middle = (low + high) / 2;
-        const int order = name.compare(kMathCommandNames + kMathCommands[middle].name);
+        const int order = CompareCommandName(name, kMathCommandNames + kMathCommands[middle].name);
         if (order == 0) return middle;
         if (order < 0) high = middle - 1;
         else low = middle + 1;
@@ -53,6 +65,17 @@ static_assert(kCommandCdots >= 0 && kCommandLdots >= 0 && kCommandIn >= 0 && kCo
 static_assert(kMathCommands[kCommandPrime].a == kPrimeCode && (kMathCommands[kCommandPrime].b & 7) == kFontSymbol &&
               kMathCommands[kCommandLdots].a == kEllipsisCode && (kMathCommands[kCommandLdots].b & 7) == kFontRoman,
               "the prime and ellipsis codes of the parser differ from math_symbols.inc");
+
+// Every control word of the table in strictly ascending order, so the search finds each one where
+// it is and no other name.
+constexpr bool CommandTableOrdered() {
+    for (int index = 1; index < kMathCommandCount; index++) {
+        const char* const entry = kMathCommandNames + kMathCommands[index].name;
+        if (CompareCommandName(entry, kMathCommandNames + kMathCommands[index - 1].name) <= 0) return false;
+    }
+    return true;
+}
+static_assert(CommandTableOrdered(), "kMathCommands is not ordered as FindCommand searches it");
 
 bool IsSpace(unsigned char c) { return c == ' ' || (c >= 0x09 && c <= 0x0D); }
 bool IsControl(unsigned char c) { return c == 0x7F || (c < 0x20 && !(c >= 0x09 && c <= 0x0D)); }

@@ -2024,19 +2024,48 @@ protected:
     ~PdfPayloadWriter() = default;
 };
 
+// The bytes left before each page's content as it is rendered (StartPageContent): the gaps the
+// thread's last build had BuildInto fill (the header and the objects before the first page, between
+// pages the objects of the page before and the next stream's head). Whenever these come out as long
+// again, as on every build of a preview being edited or of --bench, the content stays where it was
+// rendered; otherwise BuildInto moves it, as it moved every page's before. Off for --black-text and
+// --compress, which read the pages' streams as one run (PdfObjects::LeaveGaps).
+static thread_local const std::vector<size_t>* g_pageGaps = nullptr;
+
+// The gap left before page `page`'s content: its start less the end of the page before.
+static size_t PageGapBefore(size_t page) {
+    constexpr size_t kMaxPageGap = 64u * 1024u * 1024u;   // a guess, not a reason to hold that much
+    const std::vector<size_t>* const gaps = g_pageGaps;
+    return gaps != nullptr && page < gaps->size() && (*gaps)[page] <= kMaxPageGap ? (*gaps)[page] : 0;
+}
+
+// A new page's content starts after its gap (NewPage).
+static RAYOMD_HOT_INLINE void StartPageContent(std::string& content, std::vector<size_t>& pageStarts) {
+    const size_t gap = PageGapBefore(pageStarts.size());
+    if (gap != 0) ResizeForOverwrite(content, content.size() + gap);
+    pageStarts.push_back(content.size());
+}
+
 class PdfObjects {
 public:
-    // The object table is kept from export to export (KeptBuffer), emptied.
+    // The object table is kept from export to export (KeptBuffer), emptied, and so are the gaps.
     PdfObjects() {
         KeptBuffer<std::vector<Object>>::Take(objects);
+        KeptBuffer<std::vector<size_t>, 2>::Take(gaps);
         objects.clear();
     }
     ~PdfObjects() {
         objects.clear();
         KeptBuffer<std::vector<Object>>::Give(objects, KeptBytes(objects));
+        if (g_pageGaps == &gaps) g_pageGaps = nullptr;
+        KeptBuffer<std::vector<size_t>, 2>::Give(gaps, KeptBytes(gaps));
     }
     PdfObjects(const PdfObjects&) = delete;
     PdfObjects& operator=(const PdfObjects&) = delete;
+
+    // The pages rendered from now on on this thread leave the gaps the thread's last build that did
+    // this had before their content, and BuildInto keeps this build's for the next.
+    void LeaveGaps() { g_pageGaps = &gaps; }
 
     int Reserve() {
         objects.emplace_back();
@@ -2135,14 +2164,18 @@ public:
         return Add(std::move(body));
     }
 
-    // Assembles the file in `pdf`, which holds the in-place payloads and nothing else.
+    // Assembles the file in `pdf`, which holds the in-place payloads and nothing else but the
+    // gaps left before them (LeaveGaps).
     //
-    // Every object ends up at or after the place its payload was rendered to, because the
-    // header and the objects before it only add bytes in front. Writing the objects from
-    // the last to the first therefore moves each payload once, towards the end of the
-    // buffer, without ever overwriting one that has not been moved yet. A buffer the
-    // caller reuses for the next export is assembled without any allocation.
-    // With `fileId` the trailer gets an /ID of the file's body, which PDF/A requires.
+    // The in-place payloads lie in the order of their objects and so do their places in the file.
+    // Those that go towards the front are moved first, from the first to the last; then the file
+    // is written from its last object to its first, each in-place payload that goes towards the
+    // end moved before the text in front of it: none overwrites a payload that has not been moved
+    // yet. A payload whose gap was what the file puts before it does not move. A buffer the caller
+    // reuses for the next export is assembled without any allocation.
+    // With `fileId` the trailer gets an /ID of the file's body, which PDF/A requires. After
+    // LeaveGaps, `gaps` gets the bytes the file puts before each in-place payload after the one
+    // before it (before the first: from the file's start), which would have left it in place.
     void BuildInto(int rootId, int infoId, std::string& pdf, bool pdf20 = false, bool fileId = false) const {
         constexpr size_t kHeaderBytes = 15;
         constexpr size_t kObjectOpenBytes = 7;      // " 0 obj\n"
@@ -2153,19 +2186,24 @@ public:
         std::vector<size_t> offsets;    // kept from export to export (KeptBuffer)
         KeptBuffer<std::vector<size_t>, 1>::Take(offsets);
         offsets.assign(count + 1, 0);
+        std::vector<size_t>* const next = g_pageGaps == &gaps ? &gaps : nullptr;
+        if (next != nullptr) next->clear();
         size_t position = kHeaderBytes;
         size_t unmoved = 0;         // end of the in-place payloads of the objects seen so far
+        size_t placed = 0;          // and the end of their places in the file
         bool movable = true;
+        bool towardFront = false;   // an in-place payload goes to an earlier place
         for (size_t i = 0; i < count; i++) {
             const Object& object = objects[i];
             offsets[i + 1] = position;
             const size_t payloadAt = position + DecimalDigits(i + 1) + kObjectOpenBytes + object.head.size();
             if (object.inPlace) {
                 const size_t payloadEnd = object.inPlaceOffset + object.inPlaceBytes;
-                if (object.inPlaceOffset < unmoved || payloadAt < object.inPlaceOffset || payloadEnd > pdf.size()) {
-                    movable = false;
-                }
+                if (object.inPlaceOffset < unmoved || payloadEnd > pdf.size()) movable = false;
                 unmoved = payloadEnd;
+                towardFront = towardFront || payloadAt < object.inPlaceOffset;
+                if (next != nullptr) next->push_back(payloadAt - placed);
+                placed = payloadAt + object.inPlaceBytes;
             }
             position = payloadAt + PayloadBytes(object) + (object.stream ? kStreamCloseBytes : 0) + kObjectCloseBytes;
         }
@@ -2184,11 +2222,20 @@ public:
         if (relocate) {
             rendered.swap(pdf);
             pdf.reserve(wanted);
+            ResizeForOverwrite(pdf, total);     // every byte of it is written below
+        } else if (total > pdf.size()) {
+            ResizeForOverwrite(pdf, total);     // likewise; gaps larger than needed leave it longer
         }
-        ResizeForOverwrite(pdf, total);     // every byte of it is written below
         char* const base = &pdf[0];
-        const char* const payloads = relocate ? rendered.data() : base;
-        const size_t payloadLimit = relocate ? rendered.size() : total;
+        // Payloads that move towards the front, from the first.
+        if (towardFront && !relocate) {
+            for (size_t i = 0; i < count; i++) {
+                const Object& object = objects[i];
+                if (!object.inPlace) continue;
+                char* const payload = base + offsets[i + 1] + DecimalDigits(i + 1) + kObjectOpenBytes + object.head.size();
+                if (payload < base + object.inPlaceOffset) memmove(payload, base + object.inPlaceOffset, object.inPlaceBytes);
+            }
+        }
 
         WriteTail(base + xref, offsets, xref, rootId, infoId, fileId ? id : nullptr);
         for (size_t i = count; i-- > 0;) {
@@ -2197,12 +2244,16 @@ public:
             const size_t idDigits = DecimalDigits(i + 1);
             char* const payload = at + idDigits + kObjectOpenBytes + object.head.size();
             const size_t payloadBytes = PayloadBytes(object);
-            // The payload moves first: its old place may overlap the object's opening text.
             if (object.inPlace) {
-                if (object.inPlaceOffset + payloadBytes <= payloadLimit) {
-                    memmove(payload, payloads + object.inPlaceOffset, payloadBytes);
-                } else {
-                    memset(payload, ' ', payloadBytes);
+                if (relocate) {
+                    if (object.inPlaceOffset + payloadBytes <= rendered.size()) {
+                        memcpy(payload, rendered.data() + object.inPlaceOffset, payloadBytes);
+                    } else {
+                        memset(payload, ' ', payloadBytes);
+                    }
+                } else if (payload > base + object.inPlaceOffset) {
+                    // Towards the end; its old place may overlap the object's opening text.
+                    memmove(payload, base + object.inPlaceOffset, payloadBytes);
                 }
             } else if (object.writer) {
                 object.writer->Write(payload);
@@ -2220,6 +2271,7 @@ public:
             memcpy(cursor, "\nendobj\n", kObjectCloseBytes);
         }
         memcpy(base, pdf20 ? "%PDF-2.0\n%\xE2\xE3\xCF\xD3\n" : "%PDF-1.7\n%\xE2\xE3\xCF\xD3\n", kHeaderBytes);
+        if (pdf.size() != total) ResizeForOverwrite(pdf, total);
         if (fileId) {
             // The identifier is that of everything before the cross-reference table.
             Internal::FileIdentifier(std::string_view(base, xref), id);
@@ -2311,6 +2363,7 @@ private:
     }
 
     std::vector<Object> objects;
+    mutable std::vector<size_t> gaps;   // LeaveGaps: the last build's, then this one's
 };
 
 // --compress: a thread's encoder tables and output buffer, kept from export to export so a
@@ -6375,7 +6428,7 @@ RAYOMD_COLD static void NoteSourceBlock(std::vector<SourceBlock>& map, const Blo
     entry.firstLine = block.sourceLine;
     entry.endLine = block.sourceLine + block.sourceLines;
     if (start.page + 1 < pageStarts.size()) {
-        size_t textEnd = pageStarts[start.page + 1];
+        size_t textEnd = pageStarts[start.page + 1] - PageGapBefore(start.page + 1);
         if (notes != nullptr && notes->TextEnd(start.page) != Internal::PageNotes::kNoTextEnd) textEnd = notes->TextEnd(start.page);
         if (textEnd == start.content) {
             start.page++;
@@ -8264,7 +8317,7 @@ private:
         if (pageNotes != nullptr && pageNotes->pageEnds(this)) return;
         if (pageBottoms != nullptr) EndLongPage();
         if (tags != nullptr) tags->PageBreak();
-        pageStarts.push_back(content.size());
+        StartPageContent(content, pageStarts);
         pageLinks.push_back({});
         y = pageH - margin;
     }
@@ -11030,7 +11083,7 @@ private:
         // Page footnotes: the page's notes go at its foot first; none ends inside their own layout.
         if (pageNotes != nullptr && pageNotes->pageEnds(this)) return;
         if (pageBottoms != nullptr) EndLongPage();
-        pageStarts.push_back(content.size());
+        StartPageContent(content, pageStarts);
         pageLinks.push_back({});
         y = pageH - margin;
     }
@@ -13456,6 +13509,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     std::vector<Internal::HeadingNumber> numbers;   // --number-headings
     if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
     PdfObjects pdf;
+    if (!options.blackText && !options.compress) pdf.LeaveGaps();
     int pagesId = pdf.Reserve();
     // WinAnsiEncoding: without it the fonts' built-in StandardEncoding shows the straight
     // quote and the backtick as curly quotes, and transcoded Latin text has no codes above
@@ -13525,7 +13579,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     std::vector<int> pageIds;
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
-        const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
+        const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] - PageGapBefore(pageIndex + 1)
+            : pdfBytes.size();
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
@@ -14051,6 +14106,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
 
     PdfObjects pdf;
+    if (!options.blackText && !options.compress) pdf.LeaveGaps();
 
     int fontFileId = pdf.Reserve();
     int cidMapId = pdf.Reserve();
@@ -14194,7 +14250,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     std::vector<int> pageIds;
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
-        const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] : pdfBytes.size();
+        const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] - PageGapBefore(pageIndex + 1)
+            : pdfBytes.size();
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
