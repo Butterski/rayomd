@@ -998,6 +998,7 @@ size_t PeakRssBytes() {
 #include "mermaid_tests.inc"
 #include "long_page_tests.inc"
 #include "print_tests.inc"
+#include "session_tests.inc"
 
 // Heights of the filled rectangles drawn with the given fill colour ("r g b").
 std::vector<double> FillRectHeights(const std::string& pdf, std::string_view color) {
@@ -4221,6 +4222,7 @@ int main() {
     if (!embeds_tests::CheckEmbeds()) return 130;
     if (!embeds_tests::CheckLinkedNotes()) return 131;
     if (!print_tests::CheckPrint()) return 128;
+    if (!session_tests::CheckBuildSession()) return 137;
 #ifdef _WIN32
     if (!CheckDirectImageLinks()) return 123;
 #endif

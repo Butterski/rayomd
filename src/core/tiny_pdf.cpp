@@ -13,6 +13,7 @@
 #include "../common/compiler.h"
 #include "../common/thread_object.h"
 #include "book.h"
+#include "build_session.h"
 #include "cff.h"
 #include "image_cache.h"
 #include "image_encoder.h"
@@ -1764,6 +1765,10 @@ public:
         }
         return values;
     }
+    // BuildSession (build_session.h): whether `cid` is recorded, and the CIDs in the order they were,
+    // as they stay until Values() sorts them for the font.
+    bool Has(uint16_t cid) const { return ((bits[cid >> 6] >> (cid & 63)) & 1) != 0; }
+    const CidList& Recorded() const { return values; }
 
     // Empty again: the words of the CIDs it recorded, which hold every bit set, are cleared.
     void Clear() {
@@ -6387,15 +6392,6 @@ RAYOMD_COLD static std::string ImageRowText(const Block& block) {
     return text;
 }
 
-// Where an entry of the table of contents ends: the page, baseline and right end of its last line,
-// for the page number and the dots the builder adds to it (ContentsNumbers).
-struct ContentsLine {
-    size_t entry = 0;
-    size_t page = 0;
-    double baseline = 0.0;
-    double end = 0.0;
-};
-
 // A run of a line of highlighted code: where it ends, and the colour index of its characters
 // (Internal::kCodeColorOfClass).
 using CodeRun = Internal::ColorRun;
@@ -6442,15 +6438,17 @@ RAYOMD_COLD static void NoteSourceBlock(std::vector<SourceBlock>& map, const Blo
     map.push_back(entry);
 }
 
+// BuildSession's access to a renderer's state (RenderInSession).
 template <typename RendererType>
-static void RenderBlocks(RendererType& renderer, const std::vector<Block>& blocks) {
-    if (blocks.empty()) {
-        renderer.RenderParagraph("Empty document");
-        return;
-    }
-    bool pageBreakPending = false;
-    renderer.TagEnterBlocks();
-    for (const Block& block : blocks) {
+struct SessionAccess;
+
+// Blocks [first, last) of those that end at `end`, which the headings' keep looks ahead to; a
+// PageBreak block leaves `pageBreakPending` for the next. Also one block at a time (BuildSession).
+template <typename RendererType>
+static void RenderBlockRange(RendererType& renderer, const Block* first, const Block* last, const Block* end,
+    bool& pageBreakPending) {
+    for (const Block* at = first; at != last; at++) {
+        const Block& block = *at;
         if (renderer.StopRender() || BuildCancelled()) break;
         if (block.type == BlockType::PageBreak) { pageBreakPending = true; continue; }
         if (pageBreakPending) { renderer.RenderPageBreak(); pageBreakPending = false; }
@@ -6460,7 +6458,7 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
         if (mapped) start = { renderer.pageStarts.size() - 1, renderer.y, renderer.content.size() };
         switch (block.type) {
         case BlockType::Heading: {
-            const double keep = HeadingKeep(block, &block + 1, blocks.data() + blocks.size(), renderer.lineHeight, renderer.fullH);
+            const double keep = HeadingKeep(block, &block + 1, end, renderer.lineHeight, renderer.fullH);
             if (block.align >= 2 || renderer.numbers != nullptr) renderer.RenderAlignedHeading(block, keep, renderer.NumberOf(block));
             else renderer.RenderHeading(block, keep);
             break;
@@ -6489,6 +6487,18 @@ static void RenderBlocks(RendererType& renderer, const std::vector<Block>& block
                 renderer.pageNotes);
         }
     }
+}
+
+template <typename RendererType>
+static void RenderBlocks(RendererType& renderer, const std::vector<Block>& blocks) {
+    if (blocks.empty()) {
+        renderer.RenderParagraph("Empty document");
+        return;
+    }
+    bool pageBreakPending = false;
+    renderer.TagEnterBlocks();
+    const Block* const end = blocks.data() + blocks.size();
+    RenderBlockRange(renderer, blocks.data(), end, end, pageBreakPending);
     renderer.TagLeaveBlocks();
 }
 
@@ -7083,6 +7093,10 @@ public:
 private:
     template <typename RendererType>
     friend void RenderBlocks(RendererType&, const std::vector<Block>&);
+    template <typename RendererType>
+    friend void RenderBlockRange(RendererType&, const Block*, const Block*, const Block*, bool&);
+    template <typename RendererType>
+    friend struct SessionAccess;
     template <typename RendererType>
     friend void RenderMathTable(RendererType&, const Block&);
     template <typename RendererType>
@@ -10891,6 +10905,10 @@ private:
     template <typename RendererType>
     friend void RenderBlocks(RendererType&, const std::vector<Block>&);
     template <typename RendererType>
+    friend void RenderBlockRange(RendererType&, const Block*, const Block*, const Block*, bool&);
+    template <typename RendererType>
+    friend struct SessionAccess;
+    template <typename RendererType>
     friend void RenderMathTable(RendererType&, const Block&);
     template <typename RendererType>
     friend void RenderFootnoteSection(RendererType&, const Internal::Footnotes&, const Internal::PageNotes*);
@@ -13431,6 +13449,177 @@ RAYOMD_COLD static std::vector<std::vector<int>> AddBookLinkAnnotations(PdfObjec
     return AddLinkAnnotationObjects(pdf, links, winAnsi, targets, internalLinks, print);
 }
 
+#ifdef RAYOMD_BUILD_SESSION
+// BuildSession (build_session.h): a document laid out a top-level block at a time, the renderer's
+// state before each noted (LayoutSession::Mark), and each run of blocks that the session's last
+// build laid out from the same state taken from its tape instead of being laid out (Replay). Cold:
+// only the builds of a session come here, and only builds with RAYOMD_BUILD_SESSION (the engine
+// library and the tests, not the command lines) compile it.
+RAYOMD_COLD static bool SessionHasCid(const void* set, uint16_t cid) {
+    return static_cast<const UsedCidSet*>(set)->Has(cid);
+}
+RAYOMD_COLD static void SessionAddCid(void* set, uint16_t cid) {
+    static_cast<UsedCidSet*>(set)->Add(cid);
+}
+RAYOMD_COLD static const CidList& SessionCids(const void* set) {
+    return static_cast<const UsedCidSet*>(set)->Recorded();
+}
+RAYOMD_COLD static Internal::LayoutCids SessionCidSet(UsedCidSet* set) {
+    Internal::LayoutCids cids;
+    if (set == nullptr) return cids;
+    cids.set = set;
+    cids.has = SessionHasCid;
+    cids.add = SessionAddCid;
+    cids.recorded = SessionCids;
+    cids.missing = &set->missing;
+    cids.missingBmp = &set->missingBmp;
+    return cids;
+}
+
+template <typename RendererType>
+struct SessionAccess {
+    static constexpr bool kUnicode = std::is_same<RendererType, Renderer>::value;
+
+    // What blocks change and set back (margins of nested blocks, note sizes, a quote's bar, a table
+    // header's bold): a run may start or end only where these are as the layout began.
+    struct Settings {
+        double margin, bodySize, lineHeight, textBottom, pageH, fullH, fitH;
+        const char* quoteBar;
+        int listDepth;
+        bool wrapBold;
+
+        bool operator==(const Settings& other) const {
+            return margin == other.margin && bodySize == other.bodySize && lineHeight == other.lineHeight &&
+                textBottom == other.textBottom && pageH == other.pageH && fullH == other.fullH && fitH == other.fitH &&
+                quoteBar == other.quoteBar && listDepth == other.listDepth && wrapBold == other.wrapBold;
+        }
+    };
+    static Settings SettingsOf(const RendererType& r) {
+        Settings settings{ r.margin, r.bodySize, r.lineHeight, r.textBottom, r.pageH, r.fullH, r.fitH, r.quoteBar.data(),
+            r.listDepth, false };
+        if constexpr (kUnicode) settings.wrapBold = r.wrapBold;
+        return settings;
+    }
+    static void Fonts(const RendererType& r, const void* fonts[Internal::kLayoutCidSets]) {
+        if constexpr (kUnicode) {
+            fonts[0] = &r.font;
+            for (int face = 1; face < 4; face++) fonts[face] = r.faces[face];
+        }
+    }
+    static Internal::LayoutTarget Target(RendererType& r) {
+        Internal::LayoutTarget target;
+        target.content = &r.content;
+        target.pageStarts = &r.pageStarts;
+        target.pageLinks = &r.pageLinks;
+        target.headings = &r.headings;
+        target.ids = &r.ids;
+        target.contentsLines = &r.contentsLines;
+        target.pageBottoms = r.pageBottoms;
+        target.glyphs = r.math.GlyphUse();
+        if constexpr (kUnicode) {
+            target.cids[0] = SessionCidSet(&r.usedCids);
+            for (int face = 0; face < 3; face++) target.cids[face + 1] = SessionCidSet(r.faceCids[face].get());
+            target.probing = r.probing;
+        }
+        return target;
+    }
+    static void Probing(const RendererType& r, Internal::LayoutTarget& target) {
+        if constexpr (kUnicode) target.probing = r.probing;
+    }
+    static Internal::LayoutMark Mark(const RendererType& r, bool pageBreakPending, const Settings& start) {
+        Internal::LayoutMark mark;
+        mark.y = r.y;
+        mark.nextNumber = static_cast<uint32_t>(r.nextNumber);
+        if constexpr (!kUnicode) mark.facesUsed = r.facesUsed;
+        mark.flags = static_cast<uint8_t>((pageBreakPending ? Internal::LayoutMark::kPending : 0) |
+            (r.math.Active() ? Internal::LayoutMark::kMathActive : 0) | (r.math.Used() ? Internal::LayoutMark::kMathUsed : 0) |
+            (r.math.LaidOut() ? Internal::LayoutMark::kMathLaidOut : 0) |
+            (SettingsOf(r) == start ? Internal::LayoutMark::kResumable : 0));
+        return mark;
+    }
+    // The state after a replayed run, as laying it out would have left it. The formulas' boxes of
+    // the block before stay; only whether there are any (MathPool::Active) is read before a block
+    // clears them.
+    static void Resume(RendererType& r, const Internal::LayoutMark& mark) {
+        r.y = mark.y;
+        r.nextNumber = mark.nextNumber;
+        if constexpr (!kUnicode) r.facesUsed = mark.facesUsed;
+        if ((mark.flags & Internal::LayoutMark::kMathUsed) != 0) r.math.MarkUsed();
+        if ((mark.flags & Internal::LayoutMark::kMathLaidOut) != 0) r.math.MarkLaidOut();
+        if ((mark.flags & Internal::LayoutMark::kMathActive) == 0) {
+            if (r.math.Active()) r.math.Clear();
+        } else if (!r.math.Active()) {
+            r.math.MarkSourceShown();
+        }
+    }
+
+    // The top-level blocks in a session (Internal::CurrentLayoutSession): each laid out with
+    // RenderBlockRange as RenderBlocks lays it out, or taken from the session's last build in runs.
+    // Footnotes are laid out with the text, which the tape does not hold: such a document is laid
+    // out whole, and the session forgets its last build.
+    RAYOMD_COLD static void Render(RendererType& renderer, const std::vector<Block>& blocks,
+        const Internal::Footnotes& footnotes, const std::vector<Internal::ContentsEntry>& contents,
+        const std::vector<Internal::HeadingNumber>& numbers, bool notesAtFoot, Internal::LayoutSession& session, uint8_t kind) {
+        if (!footnotes.notes.empty() || blocks.empty()) {
+            session.Forget();
+            if (footnotes.notes.empty()) renderer.Render(blocks);
+            else RenderWithFootnotes(renderer, blocks, footnotes, notesAtFoot);
+            return;
+        }
+        const void* fonts[Internal::kLayoutCidSets] = {};
+        Fonts(renderer, fonts);
+        session.Begin(kind, fonts, blocks, contents, numbers);
+        std::vector<SourceBlock>* const sourceMap = renderer.sourceMap;
+        renderer.sourceMap = &session.SourceMap();
+        Internal::LayoutTarget target = Target(renderer);
+        const Settings start = SettingsOf(renderer);
+        const Block* const first = blocks.data();
+        const Block* const end = first + blocks.size();
+        bool pageBreakPending = false;
+        for (size_t index = 0;;) {
+            if (index < blocks.size() && (renderer.StopRender() || BuildCancelled())) break;
+            Internal::LayoutMark mark = Mark(renderer, pageBreakPending, start);
+            session.Mark(index, mark, target);
+            if (index == blocks.size()) break;
+            Probing(renderer, target);
+            const size_t run = session.Replayable(index, target);
+            if (run > index) {
+                const Internal::LayoutMark state = session.Replay(index, run, target);
+                Resume(renderer, state);
+                pageBreakPending = (state.flags & Internal::LayoutMark::kPending) != 0;
+                index = run;
+                continue;
+            }
+            RenderBlockRange(renderer, first + index, first + index + 1, end, pageBreakPending);
+            index++;
+        }
+        renderer.sourceMap = sourceMap;
+    }
+    RAYOMD_COLD static void RenderAny(void* renderer, const std::vector<Block>& blocks, const Internal::Footnotes& footnotes,
+        const std::vector<Internal::ContentsEntry>& contents, const std::vector<Internal::HeadingNumber>& numbers,
+        bool notesAtFoot, Internal::LayoutSession& session, uint8_t kind) {
+        Render(*static_cast<RendererType*>(renderer), blocks, footnotes, contents, numbers, notesAtFoot, session, kind);
+    }
+    // The layout of a session's build is done (before the builder compresses or recolours the content).
+    RAYOMD_COLD static void EndLayout(void* renderer, Internal::LayoutSession& session, std::vector<SourceBlock>* sourceMap) {
+        session.EndLayout(Target(*static_cast<RendererType*>(renderer)), sourceMap);
+    }
+    // A session's build is made: its tape takes the layout, the blocks and their tables.
+    RAYOMD_COLD static void Commit(void* renderer, Internal::LayoutSession& session, std::vector<Block>& blocks,
+        std::vector<Internal::ContentsEntry>& contents, std::vector<Internal::HeadingNumber>& numbers) {
+        Internal::LayoutTarget target = Target(*static_cast<RendererType*>(renderer));
+        session.Commit(target, blocks, contents, numbers);
+    }
+};
+
+// Only a BuildSession asks for these (build_session.cpp).
+RAYOMD_COLD Internal::SessionCalls Internal::SessionRendererCalls() {
+    return { { SessionAccess<StandardRenderer>::RenderAny, SessionAccess<Renderer>::RenderAny },
+        { SessionAccess<StandardRenderer>::EndLayout, SessionAccess<Renderer>::EndLayout },
+        { SessionAccess<StandardRenderer>::Commit, SessionAccess<Renderer>::Commit } };
+}
+#endif
+
 // Page content is rendered straight into the output buffer. A buffer the caller reuses
 // keeps its capacity; a new one starts at the size a document of this length usually
 // needs, so it does not grow several times while the pages are rendered.
@@ -13509,7 +13698,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     std::vector<Internal::HeadingNumber> numbers;   // --number-headings
     if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
     PdfObjects pdf;
-    if (!options.blackText && !options.compress) pdf.LeaveGaps();
+    // No gaps for a session build: it copies the last build's page content (build_session.h).
+    if (!options.blackText && !options.compress && Internal::CurrentLayoutSession() == nullptr) pdf.LeaveGaps();
     int pagesId = pdf.Reserve();
     // WinAnsiEncoding: without it the fonts' built-in StandardEncoding shows the straight
     // quote and the backtick as curly quotes, and transcoded Latin text has no codes above
@@ -13529,14 +13719,18 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         options.sourceMap->clear();
         renderer.SetSourceMap(options.sourceMap);
     }
+    // A build of a BuildSession lays its blocks out one at a time and takes those it can from the last.
+    Internal::LayoutSession* const session = book == nullptr ? Internal::CurrentLayoutSession() : nullptr;
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         const bool notesAtFoot = options.footnotes == FootnotePlacement::Page;
         if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover, notesAtFoot);
+        else if (session != nullptr) session->calls.render[0](&renderer, blocks, footnotes, contents, numbers, notesAtFoot, *session, winAnsi ? 1 : 0);
         else if (footnotes.notes.empty()) renderer.Render(blocks);
         else RenderWithFootnotes(renderer, blocks, footnotes, notesAtFoot);
     }
     if (BuildCancelled()) return CancelBuild();
+    if (session != nullptr) session->calls.endLayout[0](&renderer, *session, options.sourceMap);
     // The headings without their footnote references, for anchors, bookmarks and titles.
     std::vector<HeadingMark> titledHeadings;
     std::vector<std::string> headingTitles;
@@ -13660,6 +13854,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
     stats.pages = static_cast<uint32_t>(pageStarts.size() + (coverId != 0));
     stats.failedImages = imageRegistry.FailedImages();
+    if (session != nullptr) session->calls.commit[0](&renderer, *session, blocks, contents, numbers);
     return true;
 }
 
@@ -14106,7 +14301,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
 
     PdfObjects pdf;
-    if (!options.blackText && !options.compress) pdf.LeaveGaps();
+    // No gaps for a session build: it copies the last build's page content (build_session.h).
+    if (!options.blackText && !options.compress && Internal::CurrentLayoutSession() == nullptr) pdf.LeaveGaps();
 
     int fontFileId = pdf.Reserve();
     int cidMapId = pdf.Reserve();
@@ -14142,10 +14338,18 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         renderer.SetSourceMap(options.sourceMap);
     }
     if (check != nullptr && check->stopEarly) renderer.ProbeFallback(markdown);
+    // A build of a BuildSession lays its blocks out one at a time and takes those it can from the last;
+    // a tagged one is laid out whole, as the tape does not hold the structure tree.
+    Internal::LayoutSession* session = book == nullptr ? Internal::CurrentLayoutSession() : nullptr;
+    if (session != nullptr && tags) {
+        session->Forget();
+        session = nullptr;
+    }
     {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Render);
         const bool notesAtFoot = options.footnotes == FootnotePlacement::Page;
         if (book != nullptr) RenderBook(renderer, imageRegistry, *book, *bookParse, !book->title.empty() && !options.theme.cover, notesAtFoot);
+        else if (session != nullptr) session->calls.render[1](&renderer, blocks, footnotes, contents, numbers, notesAtFoot, *session, 2);
         else if (footnotes.notes.empty()) renderer.Render(blocks);
         else RenderWithFootnotes(renderer, blocks, footnotes, notesAtFoot);
     }
@@ -14155,6 +14359,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         check->guess = renderer.Guess();
         return true;
     }
+    if (session != nullptr) session->calls.endLayout[1](&renderer, *session, options.sourceMap);
     if (tags) tags->Finish();
     // The headings without their footnote references, for anchors, bookmarks and titles.
     std::vector<HeadingMark> titledHeadings;
@@ -14332,6 +14537,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource && !options.pdfa && !tags, options.pdfa);
     stats.pages = static_cast<uint32_t>(pageStarts.size() + (coverId != 0));
     stats.failedImages = imageRegistry.FailedImages();
+    if (session != nullptr) session->calls.commit[1](&renderer, *session, blocks, contents, numbers);
     return true;
 }
 

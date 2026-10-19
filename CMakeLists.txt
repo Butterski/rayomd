@@ -183,7 +183,8 @@ endfunction()
 # document, an HTML block is mapped once, the notes a document embeds or links to are read once,
 # the image encoder's threads only hand out segments that flate.cpp compresses, and the command
 # lines parse their arguments, list a batch and write its report once per run (--bench and
-# --serve only call the engine in their loops). Optimize these translation units for package size
+# --serve only call the engine in their loops), and a BuildSession compares and replays its tape
+# a run of blocks at a time (copies, not per-byte work). Optimize these translation units for package size
 # while leaving the performance-critical renderer and parser on the normal release flags.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
@@ -217,6 +218,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/embeds.cpp
         src/common/path.cpp
         src/common/thread_object.cpp
+        src/core/build_session.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
     # RayoMD's streams at half the code; the inflater, 1.5 % slower than -O3 at 8.9 KB of code
@@ -289,6 +291,10 @@ set(RAYOMD_CORE_SOURCES
     src/core/word_bounds.cpp
     src/common/path.cpp
     src/common/thread_object.cpp)
+# BuildSession (incremental builds for an editor's preview): only the engine library and the core
+# tests have it, compiled with RAYOMD_BUILD_SESSION; the command lines make no session and carry
+# none of its code (MinGW's linker kept 24 KB of it in rayomd.exe when it was there unused).
+set(RAYOMD_SESSION_SOURCES src/core/build_session.cpp)
 
 if(NOT WIN32)
     if(RAYOMD_USE_CURL)
@@ -298,9 +304,10 @@ endif()
 
 # The exporter as a static library for other programs (rayomd-gui adds this directory with
 # add_subdirectory). Not built by default; rayomd's own executables compile the sources directly.
-add_library(rayomd_engine STATIC EXCLUDE_FROM_ALL ${RAYOMD_CORE_SOURCES})
+add_library(rayomd_engine STATIC EXCLUDE_FROM_ALL ${RAYOMD_CORE_SOURCES} ${RAYOMD_SESSION_SOURCES})
 add_library(rayomd::engine ALIAS rayomd_engine)
 target_include_directories(rayomd_engine PUBLIC include src)
+target_compile_definitions(rayomd_engine PRIVATE RAYOMD_BUILD_SESSION)
 target_link_libraries(rayomd_engine PUBLIC Threads::Threads)
 if(WIN32)
     target_compile_definitions(rayomd_engine PUBLIC UNICODE _UNICODE)
@@ -407,9 +414,10 @@ if(RAYOMD_TOP_LEVEL)
     include(CTest)
     if(BUILD_TESTING)
         find_package(Python3 COMPONENTS Interpreter QUIET)
-        add_executable(rayomd-core-tests tests/core_tests.cpp ${RAYOMD_CORE_SOURCES})
+        add_executable(rayomd-core-tests tests/core_tests.cpp ${RAYOMD_CORE_SOURCES} ${RAYOMD_SESSION_SOURCES})
         target_include_directories(rayomd-core-tests PRIVATE include)
-        target_compile_definitions(rayomd-core-tests PRIVATE RAYOMD_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        target_compile_definitions(rayomd-core-tests PRIVATE RAYOMD_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+            RAYOMD_BUILD_SESSION)
         rayomd_libm(rayomd-core-tests)
         target_link_libraries(rayomd-core-tests PRIVATE rayomd_inflate Threads::Threads)
         if(WIN32)
