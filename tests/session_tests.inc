@@ -24,7 +24,8 @@ struct Random {
 
 // A document of `sections` sections of every kind of block; `text` is the script of its prose.
 std::string Document(size_t sections, const std::string& text) {
-    std::string out = "# A document of sections\n\nIntro " + text + " with a [link](https://example.com/a).\n\n";
+    std::string out = "---\ntitle: Sections\n---\n\n# A document of sections\n\nIntro " + text +
+        " with a [link](https://example.com/a).\n\n";
     for (size_t index = 0; index < sections; index++) {
         const std::string n = std::to_string(index);
         out += "## Section " + n + "\n\n";
@@ -44,7 +45,12 @@ std::string Document(size_t sections, const std::string& text) {
         if (index % 3 == 1) out += "<a id=\"anchor-" + n + "\"></a>\n\n### A heading after an anchor\n\n";
         if (index % 6 == 5) out += "![mascot](docs/assets/branding/rayomd.png)\n\n![missing](does-not-exist.png)\n\n";
         out += "    indented code " + n + "\n\n---\n\n";
-        out += "Closing words of section " + n + ", see [the start](#a-document-of-sections).\n\n";
+        // What the parse carries from line to line: definitions, setext underlines, lazy lines,
+        // fences of tildes, bracketed formulas, HTML blocks left open.
+        if (index % 4 == 3) out += "[def" + n + "]: https://example.com/" + n + " \"Title\"\n\n";
+        if (index % 3 == 2) out += "Setext " + text + "\n===\n\n- an item\nlazy " + text + "\n\n> a quote\nlazy\n\n";
+        if (index % 5 == 1) out += "~~~\nfence ``` " + n + "\n~~~\n\n\\[\nx_" + n + "\n\\]\n\n<details>\n\nopen " + n + "\n\n</details>\n\n";
+        out += "Closing words of section " + n + ", see [the start](#a-document-of-sections) and [def" + n + "].\n\n";
     }
     out += "[ref]: https://example.com/ref\n";
     return out;
@@ -57,6 +63,13 @@ const char* const kSnippets[] = { "a", " ", "\n", "\n\n", "word ", "**bold**", "
     "1. one\n", "\n<div style=\"page-break-after: always\"></div>\n", "![m](docs/assets/branding/rayomd.png)",
     "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor. " };
 
+// Lines that change how the lines after them parse (BuildSession's parse goes on from its last
+// build's only where they leave the parse as it was), put in at a line's start.
+const char* const kLines[] = { "[ref]: https://example.com/other\n", "[new]: <https://e.com/n>\n", "[^n]: A note.\n",
+    "---\n", "---\ntitle: T\n---\n", "```\n", "~~~\n", "    code\n", "<div align=\"center\">\n", "</div>\n", "<!--\n",
+    "-->\n", "<pre>\n", "</pre>\n", "  continued\n", ">\n", "lazy\n", "===\n", "| x | y |\n", "|---|---|\n", "$$\n",
+    "\\[\n", "\\]\n", "\n", "[TOC]\n", "\\newpage\n", "1) x\n" };
+
 size_t LineStart(const std::string& text, size_t at) {
     while (at > 0 && text[at - 1] != '\n') at--;
     return at;
@@ -67,13 +80,14 @@ size_t LineEnd(const std::string& text, size_t at) {
     return at;
 }
 
-// One edit at a random place: a snippet in, bytes out, a line out or twice, a range replaced, a letter.
+// One edit at a random place: a snippet in, bytes out, a line out or twice, a range replaced, a line
+// that changes how the lines after it parse, a letter.
 void Edit(Random& random, std::string& text, const std::string& script) {
     size_t at = random.Below(text.size() + 1);
     // Not inside a character of more than one byte: the document stays UTF-8.
     while (at < text.size() && (static_cast<unsigned char>(text[at]) & 0xC0) == 0x80) at++;
     const char* const snippet = kSnippets[random.Below(sizeof kSnippets / sizeof kSnippets[0])];
-    switch (random.Below(7)) {
+    switch (random.Below(8)) {
     case 0: text.insert(at, snippet); break;
     case 1: text.insert(at, script); break;
     case 2: {
@@ -98,6 +112,11 @@ void Edit(Random& random, std::string& text, const std::string& script) {
         size_t end = std::min(text.size(), at + random.Below(40));
         while (end < text.size() && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) end++;
         text.replace(at, end - at, snippet);
+        break;
+    }
+    case 6: {
+        const size_t start = LineStart(text, at);
+        text.insert(start, kLines[random.Below(sizeof kLines / sizeof kLines[0])]);
         break;
     }
     default: text.insert(at, 1, static_cast<char>('a' + random.Below(26))); break;
@@ -222,9 +241,31 @@ bool CheckBuildSession() {
             return false;
         }
         const TinyPdf::BuildSession::Reuse reuse = session.LastReuse();
-        if (reuse.replayed + reuse.laidOut != reuse.blocks || reuse.laidOut * 10 > reuse.blocks) {
-            std::cerr << "BuildSession laid out " << reuse.laidOut << " of " << reuse.blocks
-                      << " blocks after a typed letter" << std::endl;
+        if (reuse.replayed + reuse.laidOut != reuse.blocks || reuse.laidOut * 10 > reuse.blocks || reuse.parsed > 2) {
+            std::cerr << "BuildSession laid out " << reuse.laidOut << " and parsed " << reuse.parsed << " of "
+                      << reuse.blocks << " blocks after a typed letter" << std::endl;
+            return false;
+        }
+        // A fence opened in the middle takes the lines up to the next fence of the same kind, which
+        // closed a code block; the fences after it pair as they did, so the parse makes the one code
+        // block and goes on from the last build's after it. Taken out, the lines it took parse again.
+        const size_t middle = text.find("Closing words of section 20");
+        text.insert(middle, "```\n");
+        if (!session.Build(text, plain, pdf).Ok() || !TinyPdf::BuildPdf(text, plain, fresh).Ok() || pdf != fresh ||
+            session.LastReuse().parsed != 1) {
+            std::cerr << "BuildSession after an opened fence: parsed " << session.LastReuse().parsed << std::endl;
+            return false;
+        }
+        text.erase(middle, 4);
+        if (!session.Build(text, plain, pdf).Ok() || !TinyPdf::BuildPdf(text, plain, fresh).Ok() || pdf != fresh ||
+            session.LastReuse().parsed > 40) {
+            std::cerr << "BuildSession after a closed fence: parsed " << session.LastReuse().parsed << std::endl;
+            return false;
+        }
+        text.insert(text.find("Closing words of section 30") + 3, "y");
+        if (!session.Build(text, plain, pdf).Ok() || !TinyPdf::BuildPdf(text, plain, fresh).Ok() || pdf != fresh ||
+            session.LastReuse().parsed > 2) {
+            std::cerr << "BuildSession after a closed fence and a letter: parsed " << session.LastReuse().parsed << std::endl;
             return false;
         }
         // Other options: nothing taken from a layout made with the ones before.

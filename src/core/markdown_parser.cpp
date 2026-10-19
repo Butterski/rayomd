@@ -10,6 +10,9 @@
 #include "../common/text_utils.h"
 #include "../common/compiler.h"
 #include "../common/thread_object.h"
+#ifdef RAYOMD_BUILD_SESSION
+#include "session_parse.h"
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -1203,7 +1206,26 @@ static RAYOMD_NOINLINE void FenceText(const std::vector<std::string_view>& lines
     }
 }
 
+#ifdef RAYOMD_BUILD_SESSION
+static_assert(static_cast<uint8_t>(LineKind::Empty) == kEmptyLineKind, "session_parse.h's kEmptyLineKind");
+
+// BeginDocumentParse with the lines' classes, out of the block parser's way.
+RAYOMD_COLD static size_t BeginInSession(DocumentParse& session, const std::string& markdown,
+    const std::vector<std::string_view>& lines, const std::vector<LineInfo>& infos,
+    const std::vector<unsigned char>& suppressed, const ReferenceDefinitions& definitions, bool definitionSyntax,
+    size_t first, const FootnoteParse* notes) {
+    std::vector<uint8_t>& kinds = DocumentKinds(session);
+    kinds.resize(infos.size());
+    for (size_t index = 0; index < infos.size(); index++) kinds[index] = static_cast<uint8_t>(infos[index].kind);
+    return BeginDocumentParse(session, markdown, lines, suppressed, definitions, definitionSyntax, first, *notes);
+}
+#endif
+
 static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth, FootnoteParse* notes) {
+#ifdef RAYOMD_BUILD_SESSION
+    // A BuildSession's document (session_parse.h): its parse goes on from the last build's.
+    DocumentParse* const session = depth == 0 && notes != nullptr ? TakeDocumentParse() : nullptr;
+#endif
     LevelLines level(depth);
     std::vector<std::string_view>& lines = level.lines;
     std::vector<LineInfo>& infos = level.infos;
@@ -1274,6 +1296,9 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
     };
 
     std::vector<Block> blocks;
+#ifdef RAYOMD_BUILD_SESSION
+    if (session == nullptr)
+#endif
     blocks.reserve(std::min(lines.size(), std::max<size_t>(8, lines.size() / 2)));
     size_t i = 0;
     // The HTML elements HTML blocks left open at this level, and where each HTML block's blocks
@@ -1290,6 +1315,11 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         }
         if (frontMatterEnd < infos.size()) i = frontMatterEnd + 1;
     }
+#ifdef RAYOMD_BUILD_SESSION
+    if (session != nullptr) {
+        i = BeginInSession(*session, markdown, lines, infos, suppressed, definitions, definitionSyntax, i, notes);
+    }
+#endif
 
     const bool stampLines = depth == 0;
     size_t stamped = 0;
@@ -1299,6 +1329,9 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             if (blocks.size() > stamped) StampSourceLines(blocks, stamped, passStart, i);
             passStart = i;
         }
+#ifdef RAYOMD_BUILD_SESSION
+        if (session != nullptr && DocumentPass(*session, i, blocks.size(), htmlState.depth == 0)) break;
+#endif
         if (isSuppressed(i)) {
             i++;
             continue;
@@ -1683,6 +1716,9 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
     }
     if (stampLines && blocks.size() > stamped) StampSourceLines(blocks, stamped, passStart, i);
     if (!alignments.empty()) Html::ApplyAlignments(blocks, alignments);
+#ifdef RAYOMD_BUILD_SESSION
+    if (session != nullptr) return EndDocumentParse(*session, blocks, i, suppressed, definitions, *notes);
+#endif
 
     return blocks;
 }
@@ -1704,6 +1740,9 @@ static RAYOMD_NOINLINE std::vector<Block> ParseObsidian(const std::string& markd
 }
 
 std::vector<Block> ParseMarkdown(const std::string& markdown, Footnotes* footnotes) {
+#ifdef RAYOMD_BUILD_SESSION
+    if (footnotes != nullptr && SessionParses()) return ParseInSession(markdown, *footnotes);
+#endif
     if (ObsidianDialect()) return ParseObsidian(markdown, footnotes);
     const ParseBudget budget(markdown.size());
     return footnotes == nullptr ? ParseMarkdownImpl(markdown, 0, nullptr) : ParseWithFootnotes(markdown, *footnotes);

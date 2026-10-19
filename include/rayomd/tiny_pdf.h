@@ -271,11 +271,13 @@ public:
     void Clear();
 
     // What the last Build reused: its top-level blocks, those laid out and those taken from the build
-    // before (for tests and diagnostics). All laid out after a full build.
+    // before, and those its parse made (the others are the last build's, as the text around an edit
+    // is), for tests and diagnostics. All laid out and parsed after a full build.
     struct Reuse {
         uint32_t blocks = 0;
         uint32_t laidOut = 0;
         uint32_t replayed = 0;
+        uint32_t parsed = 0;
     };
     Reuse LastReuse() const;
 

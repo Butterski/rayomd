@@ -13666,7 +13666,13 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     const PdfOptions& options, std::string& pdfBytes, BuildResult& stats, const BookSource* book = nullptr) {
     // Character references come out as the WinAnsi codes the standard fonts show.
     const Internal::WinAnsiReferences references;
+#ifdef RAYOMD_BUILD_SESSION
+    // A BuildSession's builds parse into its blocks, which its next build's parse reuses.
+    std::vector<Block> ownBlocks;
+    std::vector<Block>& blocks = Internal::BuildBlocks(ownBlocks, book);
+#else
     std::vector<Block> blocks;
+#endif
     Internal::Footnotes footnotes;
     std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
     std::unique_ptr<BookParse> bookParse;   // a book's files: off the stack, which single documents keep as it was
@@ -14268,7 +14274,13 @@ RAYOMD_COLD static void ThemeFaceStyle(const TtfFont& face, int& flags, int& ita
 static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& font, const PdfOptions& options,
     std::string& pdfBytes, FallbackCheck* check, size_t& missingCharacters, BuildResult& stats,
     const BookSource* book = nullptr, const ThemeFaces* faces = nullptr) {
+#ifdef RAYOMD_BUILD_SESSION
+    // A BuildSession's builds parse into its blocks, which its next build's parse reuses.
+    std::vector<Block> ownBlocks;
+    std::vector<Block>& blocks = Internal::BuildBlocks(ownBlocks, book);
+#else
     std::vector<Block> blocks;
+#endif
     Internal::Footnotes footnotes;
     std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
     std::unique_ptr<BookParse> bookParse;   // a book's files: off the stack, which single documents keep as it was

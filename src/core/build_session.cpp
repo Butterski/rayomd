@@ -2,7 +2,11 @@
 
 #include "build_session.h"
 
+#include "dialect.h"
+#include "embeds.h"
+#include "footnotes.h"
 #include "highlight.h"
+#include "session_parse.h"
 
 #include <algorithm>
 #include <cstring>
@@ -126,7 +130,8 @@ LayoutSession* CurrentLayoutSession() {
 void LayoutTape::Clear() {
     renderer = 0;
     std::fill(std::begin(fonts), std::end(fonts), nullptr);
-    blocks.clear();
+    blockCount = 0;
+    blockNumbers.clear();
     contents.clear();
     numbers.clear();
     marks.clear();
@@ -183,7 +188,7 @@ private:
     size_t suffixStart = 0;                  // the first block shifted by the blocks added or removed
     bool contentsSame = false;
     std::vector<const std::string*> newNumbers;   // --number-headings: each block's number, if any
-    std::vector<const std::string*> oldNumbers;
+    const std::vector<const std::string*>* oldNumbers = nullptr;
     // For each block, the end of the run of blocks from it that the last build laid out the same way
     // (equal, no image, one shift); 0 where none starts, kUnknown where not compared yet.
     std::vector<uint32_t> runEnd;
@@ -207,16 +212,19 @@ void SessionLayout::Begin(uint8_t renderer, const void* const fonts[kLayoutCidSe
     runEnd.assign(blockCount, 0);
     suffixStart = blockCount;
     newNumbers.clear();
-    oldNumbers.clear();
+    oldNumbers = nullptr;
+    // The last build's blocks are the session's (SessionBlocks), as this build's parse left them.
     if (!last || last->renderer != renderer || !std::equal(fonts, fonts + kLayoutCidSets, last->fonts) ||
-        last->marks.size() != last->blocks.size() + 1) {
+        last->marks.size() != last->blockCount + 1 || store == nullptr || !store->parsed ||
+        store->OldCount() != last->blockCount) {
         return;
     }
-    oldCount = last->blocks.size();
+    oldCount = last->blockCount;
     contentsSame = SameContents(contents, last->contents);
     if (!numbers.empty() || !last->numbers.empty()) {
         newNumbers = NumbersOf(newBlocks, numbers);
-        oldNumbers = NumbersOf(last->blocks, last->numbers);
+        if (last->blockNumbers.size() != oldCount) last->blockNumbers.assign(oldCount, nullptr);
+        oldNumbers = &last->blockNumbers;
     }
     // The blocks before the first that changed keep their places. The others are compared only when
     // a layout reaches one in the state the last build had there, which after an edit that moved
@@ -236,10 +244,14 @@ void SessionLayout::Begin(uint8_t renderer, const void* const fonts[kLayoutCidSe
 
 bool SessionLayout::Same(size_t index, size_t old) const {
     const Block& block = (*blocks)[index];
-    if (!SameBlock(block, last->blocks[old]) || (block.type == BlockType::Contents && !contentsSame)) return false;
+    // The blocks this build's parse kept from the last are equal to themselves.
+    if ((!store->Kept(index, old) && !SameBlock(block, store->Old(old))) ||
+        (block.type == BlockType::Contents && !contentsSame)) {
+        return false;
+    }
     if (newNumbers.empty()) return true;
     const std::string* const a = newNumbers[index];
-    const std::string* const b = oldNumbers[old];
+    const std::string* const b = (*oldNumbers)[old];
     return a == nullptr ? b == nullptr : b != nullptr && *a == *b;
 }
 
@@ -340,7 +352,9 @@ size_t SessionLayout::Replayable(size_t index, const LayoutTarget& target) {
             if (place.offset != LayoutTape::MarkPlace::kNested) {
                 if (place.offset + heading.text.size() <= block.text.size()) text = block.text.data() + place.offset;
             } else {
-                text = Relocate(heading.text, last->blocks[place.block], block);
+                // A block the parse kept is the last build's: the mark's view is still good.
+                text = store->Kept(place.block - from + index, place.block) ? heading.text.data() :
+                    Relocate(heading.text, store->Old(place.block), block);
             }
             if (text == nullptr) return false;
             heading.text = std::string_view(text, heading.text.size());
@@ -508,7 +522,9 @@ void SessionLayout::Commit(LayoutTarget& target, std::vector<Block>& newBlocks, 
     };
     place(tape.headings, &LayoutMark::headings, tape.headingPlaces);
     place(tape.ids, &LayoutMark::ids, tape.idPlaces);
-    tape.blocks = std::move(newBlocks);
+    tape.blockCount = newBlocks.size();
+    if (!numbers.empty()) tape.blockNumbers = NumbersOf(newBlocks, numbers);
+    if (store != nullptr) CommitParse(*store);
     tape.contents = std::move(contents);
     tape.numbers = std::move(numbers);
     std::swap(last, recording);
@@ -522,6 +538,431 @@ void SessionLayout::Forget() {
     last.reset();
     recording.reset();
     reuse = {};
+}
+
+// The parse side (session_parse.h). A document's block loop reads the lines from where it is on,
+// never back (a pass reads at most the line after the one it ends at, an Empty line not even that),
+// and the state it carries from one pass to the next is the line, the HTML elements open, the
+// ParseBudget and what it made; the link definitions, the lines' classes (ResolveMathOpeners', the
+// definitions' marks) and the footnotes are made before it, from the whole text. So where two texts
+// have the same lines up to an Empty line at which the last parse started a pass with no HTML
+// element open, the passes before it are the last parse's, and from a pass this parse starts at
+// a line of the same text to the end, with the same classes, in the state the last parse had
+// there, the passes are the last parse's too: their blocks are taken, moved, not made again. A
+// text with footnotes or a contents marker is parsed whole (they change blocks after the loop),
+// and so is one whose definitions, front matter, classes' context or budgets differ.
+class DocumentParse {
+public:
+    DocumentParse(SessionBlocks& blocks, const ParseRecord* previous, ParseRecord& into) : store(blocks), last(previous), next(into) {}
+
+    SessionBlocks& store;
+    const ParseRecord* last;     // the parse to go on from, null for a whole one
+    ParseRecord& next;           // what this one leaves
+    ParseBudget* budget = nullptr;
+    size_t referenceStart = 0;   // the budget's when the loop began
+    size_t cellStart = 0;
+    bool reuse = false;          // the loop starts at a pass of the last parse's
+    bool ended = false;          // EndDocumentParse ran
+    bool failed = false;         // the last parse's blocks may not be taken after all: parse whole
+    bool valid = false;          // the next build may go on from this one
+    size_t from = 0;             // the last parse's pass the loop starts at
+    size_t front = 0;            // the blocks before it
+    size_t suffixLine = 0;       // the first line from which the text and classes are the last's
+    int64_t lineShift = 0;       // their lines less the last parse's
+    size_t cursor = 0;           // the last parse's pass at or after the line looked for
+    size_t resync = SIZE_MAX;    // the last parse's pass the loop stopped at
+};
+
+namespace {
+
+thread_local DocumentParse* g_documentParse = nullptr;
+
+// The first byte at which `a` and `b`, of `size` bytes each, differ; `size` for none.
+size_t FirstDifference(const char* a, const char* b, size_t size) {
+    constexpr size_t kChunk = 4096;
+    size_t at = 0;
+    while (at + kChunk <= size && std::memcmp(a + at, b + at, kChunk) == 0) at += kChunk;
+    while (at < size && a[at] == b[at]) at++;
+    return at;
+}
+
+// How many bytes `a` and `b` end with alike, at most `limit`.
+size_t CommonEnd(const char* aEnd, const char* bEnd, size_t limit) {
+    constexpr size_t kChunk = 4096;
+    size_t same = 0;
+    while (same + kChunk <= limit && std::memcmp(aEnd - same - kChunk, bEnd - same - kChunk, kChunk) == 0) same += kChunk;
+    while (same < limit && aEnd[-1 - static_cast<ptrdiff_t>(same)] == bEnd[-1 - static_cast<ptrdiff_t>(same)]) same++;
+    return same;
+}
+
+bool SameDefinitions(const ReferenceDefinitions& a, const ReferenceDefinitions& b) {
+    if (a.size() != b.size()) return false;
+    for (const auto& [label, definition] : a) {
+        const auto found = b.find(label);
+        if (found == b.end() || found->second.destination != definition.destination || found->second.title != definition.title) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether blocks [first, end) hold a paragraph that may be a contents marker ("[TOC]", "[[_TOC_]]"),
+// which PlaceContents makes a Contents block after the parse.
+bool MayHoldMarker(const std::vector<Block>& blocks, size_t first, size_t end) {
+    for (size_t index = first; index < end; index++) {
+        const Block& block = blocks[index];
+        if (block.type == BlockType::Paragraph && (block.text.size() == 5 || block.text.size() == 9) && block.text[0] == '[') {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Where BeginDocumentParse may start the loop of `parse`, which goes on from `last`: the line, or
+// SIZE_MAX to parse whole. Sets what DocumentPass and EndDocumentParse need.
+size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, const std::string& text,
+    const std::vector<std::string_view>& lines, const std::vector<unsigned char>& suppressed,
+    const ReferenceDefinitions& definitions, bool definitionSyntax, size_t first) {
+    constexpr size_t kNone = SIZE_MAX;
+    const ParseRecord& next = parse.next;
+    const size_t count = lines.size();
+    const size_t oldCount = last.kinds.size();
+    if (last.winAnsi != next.winAnsi || last.definitionSyntax != definitionSyntax || last.first != first ||
+        last.paddedCellsAtStart != parse.cellStart || count >= 0x7FFFFFFFu || oldCount >= 0x7FFFFFFFu ||
+        last.referenceLeft < kMaxReferenceDestinationBytes || suppressed.empty() != last.suppressed.empty() ||
+        parse.budget == nullptr || last.passes.empty() || last.passes[0].line != first ||
+        !SameDefinitions(last.definitions, definitions)) {
+        return kNone;
+    }
+    // The lines before the first byte that differs are the same, and so are those after the last.
+    const size_t oldSize = last.text.size();
+    const size_t size = text.size();
+    const size_t common = std::min(oldSize, size);
+    const size_t differs = FirstDifference(last.text.data(), text.data(), common);
+    const char* const base = text.data();
+    const auto lineStart = [&](size_t line) { return static_cast<size_t>(lines[line].data() - base); };
+    size_t changed = count;      // the first line that may differ
+    size_t suffix = count;       // the first of the lines after the change that are the last's
+    if (differs != common || oldSize != size) {
+        // The line that holds the first byte that differs (a line holds its line feed).
+        size_t low = 0;
+        size_t high = count;
+        while (low < high) {
+            const size_t middle = low + (high - low) / 2;
+            if (lineStart(middle) <= differs) low = middle + 1;
+            else high = middle;
+        }
+        changed = low == 0 ? 0 : low - 1;
+        // A line after it whose line feed before it is in the end both texts share.
+        const size_t same = CommonEnd(last.text.data() + oldSize, base + size, common - differs);
+        low = changed + 1;
+        high = count;
+        while (low < high) {
+            const size_t middle = low + (high - low) / 2;
+            if (lineStart(middle) >= size - same + 1) high = middle;
+            else low = middle + 1;
+        }
+        suffix = low;
+    }
+    const int64_t shift = static_cast<int64_t>(count) - static_cast<int64_t>(oldCount);
+    if (static_cast<int64_t>(suffix) - shift < 0 || static_cast<int64_t>(suffix) - shift > static_cast<int64_t>(oldCount)) {
+        return kNone;
+    }
+    // The lines' classes and definition marks, which their context gives, the same as well.
+    const std::vector<uint8_t>& kinds = next.kinds;
+    const auto sameLine = [&](size_t line, size_t old) {
+        return kinds[line] == last.kinds[old] && (suppressed.empty() || suppressed[line] == last.suppressed[old]);
+    };
+    for (size_t line = 0; line < changed; line++) {
+        if (!sameLine(line, line)) {
+            changed = line;
+            break;
+        }
+    }
+    for (size_t line = count; line > suffix; line--) {
+        if (!sameLine(line - 1, static_cast<size_t>(static_cast<int64_t>(line - 1) - shift))) {
+            suffix = line;
+            break;
+        }
+    }
+    const std::vector<ParsePass>& passes = last.passes;
+    if (changed == count) {
+        // The same text: every pass is the last parse's, and the loop starts past the end.
+        parse.reuse = true;
+        parse.from = passes.size();
+        parse.cursor = passes.size();
+        parse.front = last.blocks;
+        parse.suffixLine = count;
+        parse.lineShift = 0;
+        if (last.referenceBytes > parse.referenceStart) return kNone;
+        parse.budget->referenceBytes = parse.referenceStart - static_cast<size_t>(last.referenceBytes);
+        parse.next.passes.assign(passes.begin(), passes.end());
+        return count;
+    }
+    suffix = std::max(suffix, changed + 1);
+    // The pass to start at: the last one before the change at an Empty line with no element open
+    // (every pass before it read no further than that line), else the loop's first.
+    size_t from = 0;
+    {
+        size_t low = 0;
+        size_t high = passes.size();
+        while (low < high) {
+            const size_t middle = low + (high - low) / 2;
+            if (passes[middle].line < changed) low = middle + 1;
+            else high = middle;
+        }
+        for (size_t pass = low; pass-- > 1;) {
+            const ParsePass& at = passes[pass];
+            if (at.closed != 0 && last.kinds[at.line] == kEmptyLineKind) {
+                from = pass;
+                break;
+            }
+        }
+    }
+    const ParsePass& start = passes[from];
+    if (start.referenceBytes > parse.referenceStart || start.paddedCells > parse.cellStart) return kNone;
+    parse.reuse = true;
+    parse.from = from;
+    parse.cursor = from;
+    parse.front = start.blocks;
+    parse.suffixLine = suffix;
+    parse.lineShift = shift;
+    parse.budget->referenceBytes = parse.referenceStart - static_cast<size_t>(start.referenceBytes);
+    parse.budget->paddedCells = parse.cellStart - start.paddedCells;
+    parse.next.passes.assign(passes.begin(), passes.begin() + static_cast<ptrdiff_t>(from));
+    return start.line;
+}
+
+} // namespace
+
+DocumentParse* TakeDocumentParse() {
+    DocumentParse* const parse = g_documentParse;
+    g_documentParse = nullptr;
+    return parse;
+}
+
+std::vector<uint8_t>& DocumentKinds(DocumentParse& parse) {
+    return parse.next.kinds;
+}
+
+size_t BeginDocumentParse(DocumentParse& parse, const std::string& text, const std::vector<std::string_view>& lines,
+    const std::vector<unsigned char>& suppressed, const ReferenceDefinitions& definitions, bool definitionSyntax,
+    size_t first, const FootnoteParse& notes) {
+    ParseRecord& next = parse.next;
+    parse.budget = ParseBudget::Current();
+    parse.referenceStart = parse.budget != nullptr ? parse.budget->referenceBytes : 0;
+    parse.cellStart = parse.budget != nullptr ? parse.budget->paddedCells : 0;
+    next.first = first;
+    next.definitionSyntax = definitionSyntax;
+    next.winAnsi = WinAnsiReferences::Active();
+    next.paddedCellsAtStart = parse.cellStart;
+    next.passes.clear();
+    size_t start = first;
+    // The last parse had no footnotes (a record is kept only then); this one's prefix and suffix
+    // passes, the same as the last's, then define none and wait for none either.
+    (void)notes;
+    if (parse.last != nullptr) {
+        const size_t resumed = ResumeLine(parse, *parse.last, text, lines, suppressed, definitions, definitionSyntax, first);
+        if (resumed != SIZE_MAX) start = resumed;
+    }
+    next.text.assign(text);
+    return start;
+}
+
+bool DocumentPass(DocumentParse& parse, size_t line, size_t blocks, bool closed) {
+    const uint64_t references = parse.budget != nullptr ? parse.referenceStart - parse.budget->referenceBytes : 0;
+    const uint32_t cells = parse.budget != nullptr ? static_cast<uint32_t>(parse.cellStart - parse.budget->paddedCells) : 0;
+    if (parse.reuse && line >= parse.suffixLine) {
+        const std::vector<ParsePass>& passes = parse.last->passes;
+        const size_t old = static_cast<size_t>(static_cast<int64_t>(line) - parse.lineShift);
+        while (parse.cursor < passes.size() && passes[parse.cursor].line < old) parse.cursor++;
+        if (parse.cursor < passes.size()) {
+            const ParsePass& pass = passes[parse.cursor];
+            if (pass.line == old && pass.closed != 0 && closed && pass.paddedCells == cells) {
+                parse.resync = parse.cursor;
+                return true;
+            }
+        }
+    }
+    parse.next.passes.push_back({ static_cast<uint32_t>(line), static_cast<uint32_t>(parse.front + blocks), references, cells,
+        closed ? 1u : 0u });
+    return false;
+}
+
+std::vector<Block> EndDocumentParse(DocumentParse& parse, std::vector<Block>& blocks, size_t line,
+    std::vector<unsigned char>& suppressed, ReferenceDefinitions& definitions, const FootnoteParse& notes) {
+    (void)line;
+    parse.ended = true;
+    SessionBlocks& store = parse.store;
+    ParseRecord& next = parse.next;
+    const uint64_t used = parse.budget != nullptr ? parse.referenceStart - parse.budget->referenceBytes : 0;
+    size_t left = parse.budget != nullptr ? parse.budget->referenceBytes : 0;
+    // Footnotes number the blocks after the loop, and a marker becomes a Contents block.
+    const bool clean = notes.bodies.empty() && !notes.pending;
+    next.suppressed.swap(suppressed);
+    next.definitions.swap(definitions);
+    if (!parse.reuse) {
+        store.displaced.swap(store.blocks);
+        store.blocks.clear();
+        store.spliced = false;
+        next.blocks = blocks.size();
+        next.referenceBytes = used;
+        next.referenceLeft = left;
+        parse.valid = clean && !MayHoldMarker(blocks, 0, blocks.size());
+        store.made = blocks.size();
+        return std::move(blocks);
+    }
+    const ParseRecord& last = *parse.last;
+    const bool resynced = parse.resync != SIZE_MAX;
+    uint64_t total = used;
+    if (resynced) {
+        // The passes after it use what they used in the last parse.
+        const uint64_t after = last.referenceBytes - last.passes[parse.resync].referenceBytes;
+        total += after;
+        left = left >= after ? left - static_cast<size_t>(after) : 0;
+    }
+    // No reference was refused in either parse (every destination is shorter than what was left at
+    // the end), so that each pass used what it would in a whole parse of its text.
+    if (left < kMaxReferenceDestinationBytes) {
+        parse.failed = true;
+        return {};
+    }
+    const size_t oldEnd = resynced ? last.passes[parse.resync].blocks : last.blocks;
+    const size_t front = parse.front;
+    const size_t oldWindow = oldEnd - front;
+    const size_t newWindow = blocks.size();
+    std::vector<Block> out = std::move(store.blocks);
+    store.displaced.clear();
+    store.displaced.reserve(oldWindow);
+    for (size_t index = front; index < oldEnd; index++) store.displaced.push_back(std::move(out[index]));
+    const size_t common = std::min(oldWindow, newWindow);
+    for (size_t index = 0; index < common; index++) out[front + index] = std::move(blocks[index]);
+    if (newWindow < oldWindow) {
+        out.erase(out.begin() + static_cast<ptrdiff_t>(front + newWindow), out.begin() + static_cast<ptrdiff_t>(oldEnd));
+    } else if (newWindow > oldWindow) {
+        out.insert(out.begin() + static_cast<ptrdiff_t>(oldEnd), std::make_move_iterator(blocks.begin() + static_cast<ptrdiff_t>(common)),
+            std::make_move_iterator(blocks.end()));
+    }
+    // The blocks after it stand on lines moved by as many as the edit added.
+    const uint32_t shift = static_cast<uint32_t>(parse.lineShift);
+    if (shift != 0) {
+        for (size_t index = front + newWindow; index < out.size(); index++) out[index].sourceLine += shift;
+    }
+    store.spliced = true;
+    store.made = newWindow;
+    store.front = front;
+    store.oldWindow = oldWindow;
+    store.newWindow = newWindow;
+    store.lineShift = parse.lineShift;
+    if (resynced) {
+        const int64_t blockShift = static_cast<int64_t>(newWindow) - static_cast<int64_t>(oldWindow);
+        const uint64_t referenceShift = used - last.passes[parse.resync].referenceBytes;
+        next.passes.reserve(next.passes.size() + last.passes.size() - parse.resync);
+        for (size_t pass = parse.resync; pass < last.passes.size(); pass++) {
+            ParsePass moved = last.passes[pass];
+            moved.line = static_cast<uint32_t>(moved.line + shift);
+            moved.blocks = static_cast<uint32_t>(static_cast<int64_t>(moved.blocks) + blockShift);
+            moved.referenceBytes += referenceShift;
+            next.passes.push_back(moved);
+        }
+    }
+    next.blocks = out.size();
+    next.referenceBytes = total;
+    next.referenceLeft = left;
+    parse.valid = clean && !MayHoldMarker(out, front, front + newWindow);
+    return out;
+}
+
+bool SessionParses() {
+    return g_session != nullptr && g_session->store != nullptr;
+}
+
+std::vector<Block> ParseInSession(const std::string& markdown, Footnotes& footnotes) {
+    SessionBlocks& store = *g_session->store;
+    // A second parse of this build (in another font): from the last build's blocks again.
+    UndoParse(store);
+    store.parsed = true;
+    store.spliced = false;
+    store.displaced.clear();
+    const auto parse = [&](DocumentParse* document) {
+        g_documentParse = document;
+        std::vector<Block> blocks;
+        if (ObsidianDialect()) {
+            std::string converted;
+            const std::string& text = RewriteDocument(markdown, converted) ? converted : markdown;
+            const ParseBudget budget(text.size());
+            blocks = ParseWithFootnotes(text, footnotes);
+        } else {
+            const ParseBudget budget(markdown.size());
+            blocks = ParseWithFootnotes(markdown, footnotes);
+        }
+        g_documentParse = nullptr;
+        // A parse that did not reach the document's loop (embeds) keeps none of the last build's.
+        if (document == nullptr || !document->ended) {
+            store.displaced.swap(store.blocks);
+            store.blocks.clear();
+        }
+        return blocks;
+    };
+    // Embeds are spliced in after the parse: parsed whole, and nothing kept for the next build.
+    if (EmbedsActive()) {
+        store.pending.reset();
+        std::vector<Block> blocks = parse(nullptr);
+        store.made = blocks.size();
+        return blocks;
+    }
+    if (!store.pending) store.pending = store.spare ? std::move(store.spare) : std::make_unique<ParseRecord>();
+    const ParseRecord* const last = store.reusable ? store.record.get() : nullptr;
+    DocumentParse document(store, last, *store.pending);
+    std::vector<Block> blocks = parse(&document);
+    bool valid = document.ended && document.valid;
+    if (document.failed) {
+        DocumentParse whole(store, nullptr, *store.pending);
+        blocks = parse(&whole);
+        valid = whole.ended && whole.valid;
+    }
+    if (!valid || !store.reusable) store.spare = std::move(store.pending);
+    return blocks;
+}
+
+void CommitParse(SessionBlocks& session) {
+    if (!session.parsed) return;
+    session.parsed = false;
+    session.spliced = false;
+    session.displaced.clear();
+    // The record before goes; its memory makes a later one.
+    if (session.record) session.spare = std::move(session.record);
+    session.record = std::move(session.pending);
+}
+
+void UndoParse(SessionBlocks& session) {
+    if (!session.parsed) return;
+    session.parsed = false;
+    if (session.pending) session.spare = std::move(session.pending);
+    std::vector<Block>& blocks = session.blocks;
+    if (!session.spliced) {
+        blocks.swap(session.displaced);
+        session.displaced.clear();
+        return;
+    }
+    session.spliced = false;
+    const size_t front = session.front;
+    const size_t oldWindow = session.oldWindow;
+    const size_t newWindow = session.newWindow;
+    const uint32_t shift = static_cast<uint32_t>(session.lineShift);
+    if (shift != 0) {
+        for (size_t index = front + newWindow; index < blocks.size(); index++) blocks[index].sourceLine -= shift;
+    }
+    std::vector<Block>& displaced = session.displaced;
+    const size_t common = std::min(oldWindow, newWindow);
+    for (size_t index = 0; index < common; index++) blocks[front + index] = std::move(displaced[index]);
+    if (oldWindow < newWindow) {
+        blocks.erase(blocks.begin() + static_cast<ptrdiff_t>(front + oldWindow), blocks.begin() + static_cast<ptrdiff_t>(front + newWindow));
+    } else if (oldWindow > newWindow) {
+        blocks.insert(blocks.begin() + static_cast<ptrdiff_t>(front + newWindow),
+            std::make_move_iterator(displaced.begin() + static_cast<ptrdiff_t>(common)), std::make_move_iterator(displaced.end()));
+    }
+    displaced.clear();
 }
 
 } // namespace TinyPdf::Internal
@@ -574,6 +1015,8 @@ private:
 } // namespace
 
 struct BuildSession::State {
+    State() { layout.store = &blocks; }
+    Internal::SessionBlocks blocks;
     Internal::SessionLayout layout;
     PdfOptions options;     // the last build's, without its cancel flag and source map
     bool built = false;
@@ -588,18 +1031,39 @@ BuildResult BuildSession::Build(const std::string& markdown, const PdfOptions& o
     // The tape holds a layout made with the options the session has: other options, no tape.
     if (!session.built || !SameOptions(session.options, options)) {
         session.layout.Forget();
+        session.blocks.record.reset();
         session.options = options;
         session.options.cancel = nullptr;
         session.options.sourceMap = nullptr;
         session.built = true;
     }
+    // Blocks that the build changes after the parse (a table of contents put in, page breaks before
+    // headings) are not what a parse makes: the next build parses whole.
+    session.blocks.reusable = !options.toc && options.pageBreakBeforeLevel <= 0;
     session.layout.reuse = {};
-    const SessionScope scope(&session.layout);
-    return BuildPdf(markdown, options, pdfBytes);
+    BuildResult result;
+    {
+        const SessionScope scope(&session.layout);
+        result = BuildPdf(markdown, options, pdfBytes);
+    }
+    // A parse the layout did not commit: kept when the build was made (footnotes, PDF/UA, whose
+    // layout keeps no tape), else the last build's blocks are put back for the tape that is left.
+    if (session.blocks.parsed) {
+        if (result.error == BuildError::None) {
+            Internal::CommitParse(session.blocks);
+            session.layout.Forget();
+        } else {
+            Internal::UndoParse(session.blocks);
+        }
+    }
+    session.layout.reuse.parsed = static_cast<uint32_t>(session.blocks.made);
+    return result;
 }
 
 void BuildSession::Clear() {
     state->layout.Forget();
+    state->blocks = {};
+    state->layout.store = &state->blocks;
     state->built = false;
 }
 
