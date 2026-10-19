@@ -6882,9 +6882,11 @@ private:
     const Internal::Footnotes* footnotes = nullptr;
     NoteMarks noteMarks;
     MathFallbackFont mathFallback{};
-    // Highlighted code: whether to highlight it, a block's text as the lexer reads it, the
-    // classes of that text, and the runs of one colour of a line, kept from block to block.
+    // Highlighted code: whether to highlight it, the widest advance of an ASCII unit in `font` (0
+    // until a block needs it), a block's text as the lexer reads it, the classes of that text, and
+    // the runs of one colour of a line, kept from block to block.
     bool highlightCode = true;
+    uint16_t codeWidest = 0;
     std::string codeText;
     std::wstring codeWide;           // the block's text as drawn
     std::vector<uint8_t> codeClasses;
@@ -9161,12 +9163,19 @@ private:
         // The bytes the lexer reads, a unit of `wide` each: its line feeds are found there, in a
         // quarter of the bytes.
         std::string_view narrow = body;
+        // The widest advance a unit of an ASCII block can have: a line no longer than the width
+        // over it is drawn whole without summing its units (0 for other blocks: always summed).
+        uint64_t widest = 0;
         if (IsAllAscii(body)) {
             // The lexer reads the block as it is; the units drawn are its bytes, a tab as a space.
             wide.resize(body.size());
             for (size_t at = 0; at < body.size(); at++) wide[at] = body[at] == '\t' ? L' ' : (wchar_t)(unsigned char)body[at];
             codeClasses.resize(body.size());
             Internal::ClassifyCode(language, body, codeClasses.data());
+            if (codeWidest == 0) {
+                for (uint32_t unit = 0; unit < 0x80; unit++) codeWidest = std::max(codeWidest, font.CodepointWidth(unit));
+            }
+            widest = codeWidest;
         } else {
             wide.resize(body.size());
             wide.resize((size_t)(WriteUtf8Wide(&wide[0], body) - wide.data()));
@@ -9202,11 +9211,17 @@ private:
                 y -= lh;
             };
             bool whole = false;
-            if (lineEnd - start < 1000000) {
-                uint64_t units = 0;
-                size_t at = start;
-                for (; at < lineEnd && units <= limitUnits; at++) units += font.CodepointWidth((uint16_t)wide[at]);
-                whole = at == lineEnd && (double)units * scale * (1.0 + 1e-9) < width;
+            const size_t count = lineEnd - start;
+            if (count < 1000000) {
+                // A line of at most `count` units of `widest` is not wider: units <= count * widest.
+                if (widest != 0 && (double)(count * widest) * scale * (1.0 + 1e-9) < width) {
+                    whole = true;
+                } else {
+                    uint64_t units = 0;
+                    size_t at = start;
+                    for (; at < lineEnd && units <= limitUnits; at++) units += font.CodepointWidth((uint16_t)wide[at]);
+                    whole = at == lineEnd && (double)units * scale * (1.0 + 1e-9) < width;
+                }
             }
             if (whole) {
                 draw(start, lineEnd);
