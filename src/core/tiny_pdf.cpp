@@ -13977,12 +13977,6 @@ struct FallbackChoice {
 // Each candidate is read once, for the characters it covers; one stays in memory once it is
 // chosen, and is never freed then.
 RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, const CidList& used) {
-    // Control characters have no glyph anywhere: no reason to change fonts.
-    auto missingIn = [&](auto&& hasGlyph) {
-        size_t count = 0;
-        for (uint16_t cid : used) count += cid >= 0x20 && !hasGlyph(cid);
-        return count;
-    };
     auto hasLayoutChars = [](auto&& hasGlyph) {
         for (const uint16_t cid : kLayoutChars) {
             if (!hasGlyph(cid)) return false;
@@ -13990,8 +13984,34 @@ RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, con
         return true;
     };
     bool stable = hasLayoutChars([&](uint16_t cid) { return primary.HasGlyph(cid); });
-    size_t fewest = missingIn([&](uint16_t cid) { return primary.HasGlyph(cid); });
+    // Control characters have no glyph anywhere: no reason to change fonts. The others go into
+    // `wanted` as bits, in the words listed in `words`, so that a candidate's count takes a word at
+    // a time: a page of CJK has thousands of characters (each `used` CID comes once).
+    uint64_t wanted[1024];
+    uint16_t words[1024];
+    uint64_t touched[16] = {};
+    size_t wordCount = 0;
+    size_t fewest = 0;
+    for (const uint16_t cid : used) {
+        if (cid < 0x20) continue;
+        const uint32_t word = cid >> 6;
+        const uint64_t wordBit = 1ull << (word & 63);
+        if ((touched[word >> 6] & wordBit) == 0) {
+            touched[word >> 6] |= wordBit;
+            wanted[word] = 0;
+            words[wordCount++] = (uint16_t)word;
+        }
+        wanted[word] |= 1ull << (cid & 63);
+        fewest += !primary.HasGlyph(cid);
+    }
     if (fewest == 0) return { nullptr, stable };
+    const auto missingIn = [&](const std::vector<uint64_t>& coverage) {
+        size_t count = 0;
+        for (size_t index = 0; index < wordCount; index++) {
+            for (uint64_t missing = wanted[words[index]] & ~coverage[words[index]]; missing != 0; missing &= missing - 1) count++;
+        }
+        return count;
+    };
 
     struct Candidate {
         bool probed = false;
@@ -14019,7 +14039,7 @@ RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, con
         if (candidate.coverage.empty()) continue;
         const auto covers = [&](uint16_t cid) { return (candidate.coverage[cid >> 6] >> (cid & 63)) & 1; };
         stable = stable && hasLayoutChars(covers);
-        const size_t count = missingIn(covers);
+        const size_t count = missingIn(candidate.coverage);
         if (count < fewest) {
             best = index;
             fewest = count;
