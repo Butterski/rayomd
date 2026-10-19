@@ -150,11 +150,20 @@ bool CheckCancel() {
         // not stop; then the cancelled document again, whose image must not be taken for a failed
         // one. A try is inconclusive when the build ended before the flag (Windows sleeps whole
         // timer ticks of 15.6 ms) or a busy machine stalled its thread past the bound: up to three.
+        // The book's whole build runs on a thread too, as the cancelled one: under AddressSanitizer
+        // the main thread's took three times as long, and the cancelled one (its files parsed on
+        // several threads) ended before its flag.
         bool passed = false;
         for (int attempt = 0; attempt < 3 && !passed; attempt++) {
             std::string full;
             const auto start = std::chrono::steady_clock::now();
-            const TinyPdf::BuildResult whole = build(plain, full, 1);
+            TinyPdf::BuildResult whole;
+            if (item.book != nullptr) {
+                std::thread first([&]() { whole = build(plain, full, 1); });
+                first.join();
+            } else {
+                whole = build(plain, full, 1);
+            }
             const double fullMs = MillisecondsSince(start);
             cancel = false;
             TinyPdf::BuildResult cancelled;
