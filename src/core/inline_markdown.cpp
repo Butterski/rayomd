@@ -11,6 +11,15 @@
 #include <cstring>
 #include <memory>
 
+// The stop scan in AVX2 where GCC or Clang can compile it for one function: the build stays
+// baseline x86-64 and the CPU is asked once, as word_bounds.cpp does.
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+#include <atomic>
+#include <immintrin.h>
+#include "../common/cpu_features.h"
+#define RAYOMD_INLINE_AVX2 1
+#endif
+
 namespace TinyPdf::Internal {
 namespace {
 
@@ -1301,6 +1310,88 @@ void InlineScanner::BuildDestinationEnds(Tables& index) const {
     }
 }
 
+// The bytes at which ParseInlineRuns stops copying text: inline syntax, and the ':' or '@' at
+// which a bare URL or email address is found.
+constexpr unsigned char kStops = RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteAutolinkLead;
+
+#if RAYOMD_INLINE_AVX2
+// The stops as two tables of 16 bytes, looked up by a byte's low and high nibble (vpshufb): each
+// high nibble of a stop has a bit of its own, which the low-nibble entry of each stop with that
+// high nibble sets, so a byte is a stop when its two entries share a bit. Bytes from 0x80 look up
+// 0 in the low table (vpshufb's sign rule) and in the high one. Twelve compares a step in SSE2
+// (FindByteClass) are four instructions here.
+struct StopNibbles {
+    unsigned char low[16];
+    unsigned char high[16];
+};
+
+constexpr StopNibbles MakeStopNibbles() {
+    StopNibbles tables{};
+    unsigned char bitOfHigh[8] = {};
+    unsigned next = 0;
+    for (unsigned value = 0; value < 0x80; value++) {
+        if ((RayoMd::Text::Detail::kByteClasses[value] & kStops) == 0) continue;
+        if (bitOfHigh[value >> 4] == 0) bitOfHigh[value >> 4] = static_cast<unsigned char>(1u << next++);
+        tables.high[value >> 4] = bitOfHigh[value >> 4];
+        tables.low[value & 15] |= bitOfHigh[value >> 4];
+    }
+    return tables;
+}
+constexpr StopNibbles kStopNibbles = MakeStopNibbles();
+
+constexpr bool StopNibblesExact() {
+    for (unsigned value = 0; value < 256; value++) {
+        const bool stop = value < 0x80 && (kStopNibbles.low[value & 15] & kStopNibbles.high[value >> 4]) != 0;
+        if (stop != ((RayoMd::Text::Detail::kByteClasses[value] & kStops) != 0)) return false;
+    }
+    return true;
+}
+static_assert(StopNibblesExact(), "the nibble tables find exactly the stops");
+
+// The first stop in data[at, size) or size, for at least 32 bytes: 32 a step, the last step
+// reading the text's last 32 bytes again.
+__attribute__((target("avx2"))) RAYOMD_NOINLINE size_t FindStopsAvx2(const char* data, size_t at, size_t size) {
+    const __m256i low = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(kStopNibbles.low)));
+    const __m256i high = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(kStopNibbles.high)));
+    const __m256i nibble = _mm256_set1_epi8(0x0F);
+    const __m256i zero = _mm256_setzero_si256();
+    for (; at + 32 <= size; at += 32) {
+        const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + at));
+        const __m256i hits = _mm256_and_si256(_mm256_shuffle_epi8(low, chunk),
+            _mm256_shuffle_epi8(high, _mm256_and_si256(_mm256_srli_epi16(chunk, 4), nibble)));
+        const uint32_t bits = ~static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(hits, zero)));
+        if (bits != 0) return at + static_cast<size_t>(__builtin_ctz(bits));
+    }
+    if (at == size) return size;
+    const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + size - 32));
+    const __m256i hits = _mm256_and_si256(_mm256_shuffle_epi8(low, chunk),
+        _mm256_shuffle_epi8(high, _mm256_and_si256(_mm256_srli_epi16(chunk, 4), nibble)));
+    const uint32_t bits = ~static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(hits, zero))) >> (at + 32 - size);
+    return bits != 0 ? at + static_cast<size_t>(__builtin_ctz(bits)) : size;
+}
+
+// The CPU's answer, asked once: -1 until then (as word_bounds.cpp keeps it).
+std::atomic<signed char> avx2State{-1};
+
+RAYOMD_NOINLINE bool AskAvx2() {
+    const bool avx2 = RayoMd::Cpu::HasAvx2();
+    avx2State.store(avx2 ? 1 : 0, std::memory_order_relaxed);
+    return avx2;
+}
+#endif
+
+// The first stop (kStops) in `source` from `from` on, or source.size(): AVX2 from 32 bytes where
+// the CPU has it, else FindByteClass.
+inline size_t FindStops(std::string_view source, size_t from) {
+#if RAYOMD_INLINE_AVX2
+    if (source.size() - from >= 32) {
+        const signed char state = avx2State.load(std::memory_order_relaxed);
+        if (state > 0 || (state < 0 && AskAvx2())) return FindStopsAvx2(source.data(), from, source.size());
+    }
+#endif
+    return RayoMd::Text::FindByteClass<kStops>(source, from);
+}
+
 } // namespace
 
 RAYOMD_NOINLINE size_t MatchCharacterReference(std::string_view text, size_t at, uint32_t& codePoint) {
@@ -1662,9 +1753,8 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
         else writer.Math(match.display);
     };
     const auto& classes = RayoMd::Text::Detail::kByteClasses;
-    // A bare URL or email address is found at its ':' or '@'. Both are rare in text, and the
-    // stop costs less than looking for "://" and '@' in every text first.
-    constexpr unsigned char kStops = RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteAutolinkLead;
+    // A bare URL or email address is found at its ':' or '@' (kStops). Both are rare in text, and
+    // the stop costs less than looking for "://" and '@' in every text first.
     auto ordinary = [&](size_t index) {
         return (classes[(unsigned char)source[index]] & kStops) == 0;
     };
@@ -1672,7 +1762,7 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
     for (size_t i = 0; i < source.size();) {
         if (ordinary(i)) {
             // A run of bytes none of which can start inline syntax: taken in one append.
-            const size_t end = RayoMd::Text::FindByteClass<kStops>(source, i + 1);
+            const size_t end = FindStops(source, i + 1);
             text.append(source.data() + i, end - i);
             i = end;
             continue;

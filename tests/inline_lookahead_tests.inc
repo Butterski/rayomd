@@ -58,6 +58,23 @@ bool CheckInlineLookahead() {
         if (!SameEitherWay(text)) return false;
     }
 
+    // The scan for bytes that may start syntax (FindStops: AVX2 32 bytes a step, the last step
+    // reading the text's last 32 bytes again; SSE2 16) must stop at each of them wherever it lies:
+    // "*b*" after n letters, before m bytes of other text (non-ASCII ones too), is one italic b.
+    for (const char* filler : { "a", "\xC3\xA9", "(", " " }) {
+        for (size_t n = 0; n < 80; n++) {
+            for (size_t m = 0; m < 70; m += 3) {
+                const std::string text = "x" + Repeat("a", n) + "*b*" + Repeat(filler, m) + "z";
+                const std::vector<TinyPdf::Internal::InlineSpan> spans = TinyPdf::Internal::ParseInlineSpans(text);
+                if (spans.size() != 3 || spans[0].text != text.substr(0, n + 1) || spans[1].text != "b" ||
+                    !spans[1].italic || spans[2].italic || spans[2].text != text.substr(n + 4)) {
+                    std::cerr << "inline stop scan missed '*' after " << n + 1 << " bytes: " << text << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+
     // Long texts over small alphabets, in which openers, closers, escapes, code spans,
     // links and formulas keep meeting. The sequence is fixed, so a failure reproduces.
     const char* const alphabets[][10] = {
