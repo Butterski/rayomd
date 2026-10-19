@@ -81,6 +81,23 @@ struct InlineRuns {
     }
 };
 
+// Runs kept by the thread from parse to parse, for a caller that is done with them when it
+// returns (StripInlineMarkdown, for each table cell and list item): once grown, a parse into them
+// allocates nothing. A parse while another holds them gets runs of its own; runs grown past 1 MiB
+// go back to the allocator.
+class ScratchRuns {
+public:
+    ScratchRuns();
+    ~ScratchRuns();
+    ScratchRuns(const ScratchRuns&) = delete;
+    ScratchRuns& operator=(const ScratchRuns&) = delete;
+    InlineRuns& Runs() { return *runs; }
+
+private:
+    InlineRuns own;
+    InlineRuns* runs;
+};
+
 struct ReferenceDefinition {
     std::string destination;
     std::string title;

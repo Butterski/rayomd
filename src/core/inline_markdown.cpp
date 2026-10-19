@@ -2083,6 +2083,36 @@ std::string_view StripInlineMarkdownView(std::string_view input, InlineRuns& scr
     return TrimView(scratch.text);
 }
 
+namespace {
+struct ScratchSlot {
+    InlineRuns runs;
+    bool busy = false;
+};
+ScratchSlot& ThreadScratch() {
+    static thread_local ScratchSlot slot;
+    return slot;
+}
+RAYOMD_COLD void ReleaseRuns(InlineRuns& runs) {
+    runs = InlineRuns();
+}
+} // namespace
+
+ScratchRuns::ScratchRuns() : runs(&own) {
+    ScratchSlot& slot = ThreadScratch();
+    if (slot.busy) return;
+    slot.busy = true;
+    runs = &slot.runs;
+}
+
+ScratchRuns::~ScratchRuns() {
+    if (runs == &own) return;
+    constexpr size_t kKeptBytes = 1u << 20;
+    if (runs->text.capacity() + runs->urls.capacity() + runs->runs.capacity() * sizeof(InlineRun) > kKeptBytes) {
+        ReleaseRuns(*runs);
+    }
+    ThreadScratch().busy = false;
+}
+
 std::vector<InlineSpan> ParseInlineSpans(std::string_view input, bool recognizeMath, size_t lookaheadBudget) {
     InlineRuns runs;
     ParseInlineRuns(input, runs, recognizeMath, lookaheadBudget);

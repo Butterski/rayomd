@@ -446,9 +446,9 @@ std::string StripInlineMarkdown(std::string_view input, bool recognizeMath) {
         return ToString(TrimView(input));
     }
     // The parsed runs cover the text they were written to without a gap: it is the visible text.
-    InlineRuns runs;
-    ParseInlineRuns(input, runs, recognizeMath);
-    return Trim(std::move(runs.text));
+    ScratchRuns scratch;
+    ParseInlineRuns(input, scratch.Runs(), recognizeMath);
+    return ToString(TrimView(scratch.Runs().text));
 }
 
 static bool MayContainMath(std::string_view text) {
@@ -474,11 +474,12 @@ static void EraseMathTextBytes(std::string& text) {
 std::string StripInlineMarkdownKeepMath(std::string_view input, bool& hasMath) {
     hasMath = false;
     if (!MayContainMath(input)) return StripInlineMarkdown(input);
-    InlineRuns runs;
-    ParseInlineRuns(input, runs);
+    ScratchRuns scratch;
+    const InlineRuns& runs = scratch.Runs();
+    ParseInlineRuns(input, scratch.Runs());
     // A script (<sup>, <sub>) is text here; a formula or note keeps its bytes around it.
     for (const InlineRun& run : runs.runs) hasMath = hasMath || (run.math != InlineMath::None && !IsScript(run.math));
-    if (!hasMath) return Trim(std::move(runs.text));
+    if (!hasMath) return ToString(TrimView(runs.text));
     std::string visible;
     visible.reserve(input.size() + 8);
     for (const InlineRun& run : runs.runs) {
