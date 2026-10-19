@@ -1053,6 +1053,12 @@ and `WrapMathCell`, the parser's 0xE2, '$' and "\("). A byte loop for the parser
 (below); one SSE2 pass a row giving its pipes as bits, and the formula byte known from the parse,
 are left.
 
+**Formulas at `-O2` (2026-10-19).** `math_parser.cpp` and `math_layout.cpp` are built at `-Os`.
+Both at `-O2`: tester-noimg -6.1 % instructions and -13.6 % time (ab.sh), other fixtures unchanged,
+for +52 KB of text (layout alone -3.4 % and -8.4 % for +33 KB, the parser alone -2.7 % and -4.2 %
+for +19 KB). Math is about a fifth of a build of `tester.md`, the GUI's test document. Not taken
+in round four: a size decision.
+
 **`BuildInto`'s move of the page content (2026-10-19).** Taken in round four for builds
 that follow one of the same layout on their thread (`LeaveGaps`).
 
@@ -1082,6 +1088,16 @@ Text and layout:
   divisions run once a table): table-heavy -0.5 % instructions, cycles even (median +0.8 %, min
   -0.2 %, 31 runs); the divisions overlap the work around them. `AsciiSegment` written in place
   instead of an aggregate copied from the stack: essay -0.02 % instructions, cycles even.
+- Round 4 (opt4/hot4, 2026-10-19): `UsedCidSet`'s plain bits as a 64 KB byte map (`IsPlain` one
+  load, no shift and `bt`): instructions README -2.1 %, code-heavy -4.0 %, table-heavy -1.5 %,
+  polish -1.6 %, but aligned cycles README +0.0 %, code-heavy -0.1 %, table-heavy -0.8 %,
+  tester-noimg +0.4 % (paired, 15 runs), the set 16 to 72 KB: `WriteCidText` is bound by the
+  stores and the loop's exit, not the test. Table rows split by one SSE2 pass each (the pipes as
+  16-bit masks, flags for '\\', '$' and the math text bytes or '&', so math tables skip
+  `EraseMathTextBytes`): 4 K fewer `memchr` calls a table-heavy build, but the pass costs more
+  (instructions table-heavy +0.8 %, README +0.9 %, notes +1.0 %; aligned cycles table-heavy
+  -0.1 %, README +0.8 %, notes +0.9 %); `SplitTableRowRaw` went out of line and `ClassifyLine`
+  lost 136 bytes of inlining.
 - Round 3, continued (opt3/next, 2026-10-19): the line classes in a vector `resize`d first, then
   classified into each slot: +0.02 to +0.25 % instructions (the fill loop); emplacing each slot is
   kept. The paragraph tests' pass without telling the parser about 0xE2 (`maySymbols`): essay
