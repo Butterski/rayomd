@@ -103,7 +103,11 @@ linked notes) identical.
   farther out than its rounding reaches) and compares the units with those; only the units in
   between take the comparison in doubles. Instructions table-heavy -1.6 %, README -0.9 %, polish
   -0.5 %, tester-noimg and code-heavy -0.2 %; perf cycles table-heavy -1.3 %, README -0.3 %.
-  The generated documents (d1 to d7, 5,400; Serif and Sans Mono for 800) identical.
+  A third of the generated documents had carried options the CLI no longer has (`--style`,
+  `--margin`), so both binaries failed on them and they compared nothing; with those replaced by
+  themes (colours and headers; DejaVu Serif faces), `--number-headings`, `--toc`, `--black-text`
+  and `--page-size=a5`, all 5,800 (d1 to d8) and 3,200 of them in DejaVu Serif and Sans Mono give
+  the bytes 5.2.2 gives, every one a PDF.
 - **A table start ruled out by the next line** (`IsTableStart`): every paragraph line was searched
   for '|' before the line after it was looked at; a separator line starts with '|', '-' or ':'
   after its indent, so most next lines rule the table out by one byte. Instructions essay -0.6 %,
