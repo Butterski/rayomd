@@ -102,9 +102,15 @@ blocks move both with `Indent`/`RestoreMargin`, so `Ensure` keeps its size); `Ne
 `PageNotes::pageEnds` pointer: a direct call put it in a cycle with the paint paths and moved GCC's
 inlining of `MarkHeading`), the end of
 a document and of each book file paint them (`Paint`). The measuring layout writes into the
-stash (`PageNotes::content`, and `FootStash`'s links, headings and anchors,
-swapped for the renderer's while it runs; one `PageNotes::Info` a note holds its height, state and
-where its layout ended), and `Paint` replays a note from it (`ReplayNote`)
+stash (`PageNotes::content`, kept by the thread from export to export, and `FootStash`'s links,
+headings and anchors, swapped for the renderer's while it runs; one `PageNotes::Info` a note holds
+its height, state and where its layout ended). A note whose blocks after its first paragraph refer
+to no note (`MayCut`) is measured with its bottom at `PageNoteBase::cut`, half a page below where
+it is too tall for a page: once a page would end there below it, `Break` sets `stop`, at which
+`NoteHost::cancel` (the build's `g_cancel`) points meanwhile, so `BuildCancelled` ends its blocks
+and a note of many pages, which the end section lays out again, is not laid out whole twice; the
+half page is more than the room any layout keeps without filling it, so nothing changes in a note
+that fits. `Paint` replays a note from the stash (`ReplayNote`)
 under one `cm` translation, its links, marks and references moved by as much, instead
 of laying it out again; only under PDF/UA and for a note whose layout changed the images is it laid
 out a second time (`PageNotes::Replayed`), and only then is the renderer set aside (`FootScope`:

@@ -906,6 +906,17 @@ Text and layout:
   appends (2026-10-18): perf -0.14 % instructions on 306 notes, but the note's copy of unknown
   length in a cold function became `rep movsb` (callgrind 2.8 times the function's cost). The
   appends are kept.
+- Page footnotes, measuring a note taller than a page only as far as needed (2026-10-19): its
+  blocks laid out one at a time, each moved into a vector of one, stopping a point below the
+  height that no page holds (mixed-u, page over end, +3.34 % against +3.73 % for the stop kept, the
+  same build otherwise), but 1.7 KB of
+  code (`Block`'s move assignment and swap) and blocks that move while laid out; kept is a stop
+  through the cancel flag half a page lower (+0.5 KB). The notes' kept buffer in the slot of
+  `AddOutline`'s scratch, so that no second thread-local string is made: `KeptLocal` went out of
+  line in `AddOutline` too, a call on every export with headings; it has a slot of its own.
+  `TtfFont::IsComposite` always inlined, to keep 5.2.2's choice once the page-footnote templates
+  left `tiny_pdf.cpp` (+0.004 % on README there): on integ2, where GCC leaves it out of line, the
+  same cost polish +0.02 %, README +0.01 %.
 - Long pages (2026-10-18): a five-digit fast path in `WriteFixed2` for their coordinates up to
   14,400 moved GCC's inlining (+0.2 to +0.4 % instructions on fixed pages); their top is at 9,900
   instead (`kLongPageTop`). The renderers' page setup out of line (`SetPageSize`, the long-page

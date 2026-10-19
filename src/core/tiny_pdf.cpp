@@ -6152,12 +6152,15 @@ RAYOMD_COLD static uint64_t NoteImageMark(PageNoteBase& base) {
 // renderer's `slot` (its pageNotes) points at them meanwhile. One copy for both renderers.
 RAYOMD_COLD static void RenderPageNotes(const NoteHost& host, const std::vector<Block>& blocks,
     const Internal::Footnotes& footnotes, const NoteParts& parts, PageNoteState*& slot) {
+    KeptLocal<std::string, 4> kept;   // the notes' measured layouts, kept from export to export
     PageNoteState state(host, footnotes, parts);
+    state.content.swap(kept.value);
     slot = &state;
     PageNoteCore::Begin(state);
     host.call(host.renderer, NoteCall::Render, 0, &blocks);
     PageNoteCore::End(state);
     slot = nullptr;
+    state.content.swap(kept.value);
 }
 
 // Footnotes at the foot of the page (FootnotePlacement::Page): what page_notes.cpp's PageNoteCore,
@@ -6248,7 +6251,7 @@ struct PageNoteLayout {
         const NoteHost host{ &r, r.y, r.margin, r.textBottom, r.bodySize, r.lineHeight, r.pageW, r.pageH, r.fullH, r.listDepth,
             r.quoteBar, r.plainQuoteBar, r.ruleColor, r.sourceMap, r.content, r.pageLinks, r.headings, r.ids, r.noteMarks,
             r.pageStarts, r.pageBottoms, RendererType::kTagged, &Call, &SetNotesAside, &NoteImageMark, &AppendFootnoteRule,
-            g_cancel };
+            g_cancel, r.footnotes->notes };
         decltype(r.mathTableCells) mathTableCells;
         RenderPageNotes(host, blocks, footnotes, { r.images, r.contentsLines, &mathTableCells, &Break }, r.pageNotes);
     }

@@ -160,6 +160,9 @@ private:
 namespace TinyPdf {
 
 struct SourceBlock;
+namespace Internal {
+struct Block;
+}
 
 // Footnotes are set at this share of the body size.
 constexpr double kNoteTextFactor = 0.85;
@@ -259,7 +262,10 @@ struct NoteHost {
     bool (*measure)(PageNoteBase& notes, bool begin);
     uint64_t (*imageMark)(PageNoteBase& notes);   // the images and failed images so far
     void (*rule)(std::string& content, std::string_view color, double x, double y, double length);
-    const std::atomic<bool>* cancel;              // the build's PdfOptions::cancel (BuildCancelled), or nullptr
+    // The build's PdfOptions::cancel, which BuildCancelled reads (tiny_pdf.cpp's thread-local
+    // pointer, nullptr for none): a note's measuring layout points it at PageNoteBase::stop.
+    const std::atomic<bool>*& cancel;
+    const std::vector<Internal::Block>& noteBlocks;   // note N at [N - 1]
 };
 
 // A document's page footnotes: their account, the stash of their measuring layouts, the renderer.
@@ -268,6 +274,12 @@ struct PageNoteBase : Internal::PageNotes {
     ~PageNoteBase();
     FootStash stash;
     const NoteHost& host;
+    // While a note is measured that may stop (Measure): the y below which it is too tall for a page
+    // whatever follows, and what BuildCancelled reads meanwhile, set once its layout is below `cut`
+    // (Break), so that its blocks stop.
+    bool cutting = false;
+    double cut = 0.0;
+    std::atomic<bool> stop{ false };
 };
 
 // Footnotes at the foot of the page, for both renderers. Every note is laid out once before the
