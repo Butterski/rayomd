@@ -21,8 +21,6 @@ namespace {
 #include "math_font_metrics.inc"
 #include "math_glyphs.inc"
 
-using RayoMd::Text::AppendFixed2;
-
 // ---- draw list -----------------------------------------------------------------------------
 enum : uint8_t { kItemGlyph, kItemRule, kItemShape, kItemFallbackText };
 constexpr uint8_t kItemSlant = kGlyphSlant;       // text matrix 1 0 0.18 1
@@ -1197,74 +1195,127 @@ struct Layouter {
 };
 
 // ---- emission ---------------------------------------------------------------------------------
-void Number(std::string& out, double value) {
-    out += ' ';
-    AppendFixed2(out, value);
-}
+// The operators of a formula, written through a pointer into a buffer on the stack and appended to
+// the content stream a buffer at a time. Appended one piece at a time (a call each, and a strlen
+// for each literal), they cost 15 % of tester.md's build.
+class OpWriter {
+public:
+    explicit OpWriter(std::string& target) : out_(target) {}
+    ~OpWriter() { Flush(); }
+    OpWriter(const OpWriter&) = delete;
+    OpWriter& operator=(const OpWriter&) = delete;
+
+    template <size_t N>
+    RAYOMD_HOT_INLINE void Lit(const char (&text)[N]) {
+        Room(N - 1);
+        std::memcpy(at_, text, N - 1);
+        at_ += N - 1;
+    }
+    void Text(std::string_view text) {
+        if (text.size() > sizeof(buffer_)) {
+            Flush();
+            out_.append(text.data(), text.size());
+            return;
+        }
+        Room(text.size());
+        std::memcpy(at_, text.data(), text.size());
+        at_ += text.size();
+    }
+    RAYOMD_HOT_INLINE void Char(char c) {
+        Room(1);
+        *at_++ = c;
+    }
+    RAYOMD_HOT_INLINE void Chars(char a, char b) {
+        Room(2);
+        at_[0] = a;
+        at_[1] = b;
+        at_ += 2;
+    }
+    // " value", as AppendFixed2 writes it (which may write a byte past its end).
+    void Number(double value) {
+        Room(RayoMd::Text::kFixed2MaxChars + 2);
+        *at_++ = ' ';
+        at_ = RayoMd::Text::WriteFixed2(at_, value);
+    }
+    RAYOMD_NOINLINE void Flush() {
+        out_.append(buffer_, static_cast<size_t>(at_ - buffer_));
+        at_ = buffer_;
+    }
+
+private:
+    RAYOMD_HOT_INLINE void Room(size_t bytes) {
+        if (static_cast<size_t>(buffer_ + sizeof(buffer_) - at_) < bytes) Flush();
+    }
+
+    std::string& out_;
+    char* at_ = buffer_;
+    char buffer_[2048];
+};
 
 // Writes "<w> w" when the width, in 1/100 pt, differs from the last one written in this formula.
-void LineWidth(std::string& out, double width, long long& last) {
+void LineWidth(OpWriter& out, double width, long long& last) {
     const long long centi = std::max<long long>(1, RayoMd::ExactMath::LlRound(width * 100.0));
     if (centi == last) return;
     last = centi;
-    Number(out, static_cast<double>(centi) * 0.01);
-    out += " w";
+    out.Number(static_cast<double>(centi) * 0.01);
+    out.Lit(" w");
 }
 
 struct PathOut {
-    std::string& out;
+    OpWriter& out;
     double ox, oy, width;
     bool mirror, transpose;
 
     void Point(double x, double y) {
         if (mirror) x = width - x;
         if (transpose) std::swap(x, y);
-        Number(out, ox + x);
-        Number(out, oy + y);
+        out.Number(ox + x);
+        out.Number(oy + y);
     }
     void Move(double x, double y) {
         Point(x, y);
-        out += " m";
+        out.Lit(" m");
     }
     void Line(double x, double y) {
         Point(x, y);
-        out += " l";
+        out.Lit(" l");
     }
     void Curve(double x1, double y1, double x2, double y2, double x3, double y3) {
         Point(x1, y1);
         Point(x2, y2);
         Point(x3, y3);
-        out += " c";
+        out.Lit(" c");
     }
-    void Polygon(const double* xy, int count, const char* paint) {
+    template <size_t N>
+    void Polygon(const double* xy, int count, const char (&paint)[N]) {
         Move(xy[0], xy[1]);
         for (int i = 1; i < count; ++i) Line(xy[2 * i], xy[2 * i + 1]);
-        out += paint;
+        out.Lit(paint);
     }
 };
 
-void EmitRule(std::string& out, const MathItem& item, double ox, double oy, long long& lineWidth) {
+void EmitRule(OpWriter& out, const MathItem& item, double ox, double oy, long long& lineWidth) {
     const double x = ox + item.x, y = oy + item.y, w = item.a, h = item.b;
     if (std::min(w, h) > 1.0) {
-        Number(out, x);
-        Number(out, y);
-        Number(out, w);
-        Number(out, h);
-        out += " re f";
+        out.Number(x);
+        out.Number(y);
+        out.Number(w);
+        out.Number(h);
+        out.Lit(" re f");
         return;
     }
     // Thin rules are stroked along their longer side: viewers grey out thin fills.
     const bool horizontal = h <= w;
     LineWidth(out, horizontal ? h : w, lineWidth);
-    Number(out, horizontal ? x : x + w / 2.0);
-    Number(out, horizontal ? y + h / 2.0 : y);
-    out += " m";
-    Number(out, horizontal ? x + w : x + w / 2.0);
-    Number(out, horizontal ? y + h / 2.0 : y + h);
-    out += " l S";
+    out.Number(horizontal ? x : x + w / 2.0);
+    out.Number(horizontal ? y + h / 2.0 : y);
+    out.Lit(" m");
+    out.Number(horizontal ? x + w : x + w / 2.0);
+    out.Number(horizontal ? y + h / 2.0 : y + h);
+    out.Lit(" l S");
 }
 
-void EmitShape(std::string& out, const MathItem& item, double ox, double oy, long long& lineWidth) {
+void EmitShape(OpWriter& out, const MathItem& item, double ox, double oy, long long& lineWidth) {
     const double a = item.a, b = item.b, c = item.c;
     PathOut path{out, ox + item.x, oy + item.y, item.code == kShapeArrow ? a : b,
                  (item.flags & kShapeMirror) != 0, (item.flags & kShapeTranspose) != 0};
@@ -1291,7 +1342,7 @@ void EmitShape(std::string& out, const MathItem& item, double ox, double oy, lon
         path.Curve(ko, H - cy, ko, cy, xr - tt, 0.0);
         path.Line(xr, 0.0);
         path.Curve(ki, cy, ki, H - cy, xr, H);
-        out += " h f";
+        out.Lit(" h f");
         break;
     }
     case kShapeBracket:
@@ -1339,7 +1390,7 @@ void EmitShape(std::string& out, const MathItem& item, double ox, double oy, lon
             path.Curve(xl + 0.75 * (B - xl), Y(0.02 * q), B, Y(0.35 * q), B, Y(q));
             path.Line(B, Y(T - q));
             path.Curve(B, Y(T - 0.50 * q), B + 0.30 * (xr - B), Y(T - tt), xr, Y(T - tt));
-            out += " h f";
+            out.Lit(" h f");
         }
         break;
     }
@@ -1366,14 +1417,14 @@ void EmitShape(std::string& out, const MathItem& item, double ox, double oy, lon
         if (a > 0.08 * s) {
             path.Move(0.0, 0.0);
             path.Line(a - 0.08 * s, 0.0);
-            out += " S";
+            out.Lit(" S");
         }
         path.Move(a, 0.0);
         path.Curve(a - 0.06 * s, 0.01 * s, a - 0.12 * s, 0.05 * s, a - 0.17 * s, 0.085 * s);
         path.Line(a - 0.11 * s, 0.0);
         path.Line(a - 0.17 * s, -0.085 * s);
         path.Curve(a - 0.12 * s, -0.05 * s, a - 0.06 * s, -0.01 * s, a, 0.0);
-        out += " h f";
+        out.Lit(" h f");
         break;
     }
     case kShapeWideHat: {   // a = width, b = height
@@ -1383,11 +1434,11 @@ void EmitShape(std::string& out, const MathItem& item, double ox, double oy, lon
     }
     case kShapeWideTilde:
         LineWidth(out, 0.050 * s, lineWidth);
-        out += " 1 J";
+        out.Lit(" 1 J");
         path.Move(0.0, 0.25 * b);
         path.Curve(0.22 * a, 1.25 * b, 0.38 * a, 0.95 * b, 0.5 * a, 0.55 * b);
         path.Curve(0.62 * a, 0.15 * b, 0.78 * a, -0.15 * b, a, 0.85 * b);
-        out += " S 0 J";
+        out.Lit(" S 0 J");
         break;
     case kShapeFrame: {   // a = width, b = height, c = line width
         LineWidth(out, c, lineWidth);
@@ -1399,7 +1450,7 @@ void EmitShape(std::string& out, const MathItem& item, double ox, double oy, lon
         LineWidth(out, c, lineWidth);
         path.Move(0.0, 0.0);
         path.Line(a, b);
-        out += " S";
+        out.Lit(" S");
         break;
     default: {            // kShapeCircle: centre, a = radius, c = line width
         LineWidth(out, c, lineWidth);
@@ -1412,17 +1463,17 @@ void EmitShape(std::string& out, const MathItem& item, double ox, double oy, lon
             ex = nx;
             ey = ny;
         }
-        out += " h S";
+        out.Lit(" h S");
         break;
     }
     }
 }
 
 // One BT ... ET with every glyph: a run is a glyph item plus the joined items that follow it.
-void EmitText(std::string& out, const std::vector<MathItem>& items, double ox, double oy, long long& lineWidth,
+void EmitText(OpWriter& out, const std::vector<MathItem>& items, double ox, double oy, long long& lineWidth,
               MathGlyphUse* use) {
     static constexpr char kHex[] = "0123456789ABCDEF";
-    out += " BT";
+    out.Lit(" BT");
     unsigned font = 0, mode = 0;
     float size = -1.0f;
     long long lastX = 0, lastY = 0;
@@ -1444,53 +1495,51 @@ void EmitText(std::string& out, const std::vector<MathItem>& items, double ox, d
         if (head.font != font || head.a != size) {
             font = head.font;
             size = head.a;
-            out += " /M";
-            out += static_cast<char>('0' + font);
-            Number(out, size);
-            out += " Tf";
+            out.Lit(" /M");
+            out.Char(static_cast<char>('0' + font));
+            out.Number(size);
+            out.Lit(" Tf");
         }
         const unsigned wanted = (head.flags & kItemHeavy) ? 2 : (head.flags & kItemOutline) ? 1 : 0;
         if (wanted != mode) {
             mode = wanted;
-            out += ' ';
-            out += static_cast<char>('0' + mode);
-            out += " Tr";
+            out.Chars(' ', static_cast<char>('0' + mode));
+            out.Lit(" Tr");
         }
         if (mode != 0) LineWidth(out, (mode == 1 ? 0.025 : 0.03) * size, lineWidth);
         const long long x = RayoMd::ExactMath::LlRound((ox + head.x) * 100.0), y = RayoMd::ExactMath::LlRound((oy + head.y) * 100.0);
         const unsigned transform = head.flags >> 5;
         if ((head.flags & kItemSlant) || transform != 0 || transformed) {
             transformed = (head.flags & kItemSlant) || transform != 0;
-            out += ' ';
-            out += (head.flags & kItemSlant) ? "1 0 0.18 1" : kMathTransformOps[transform];
-            Number(out, static_cast<double>(x) * 0.01);
-            Number(out, static_cast<double>(y) * 0.01);
-            out += " Tm";
+            out.Char(' ');
+            if (head.flags & kItemSlant) out.Lit("1 0 0.18 1");
+            else out.Text(kMathTransformOps[transform]);
+            out.Number(static_cast<double>(x) * 0.01);
+            out.Number(static_cast<double>(y) * 0.01);
+            out.Lit(" Tm");
         } else {
-            Number(out, static_cast<double>(x - lastX) * 0.01);
-            Number(out, static_cast<double>(y - lastY) * 0.01);
-            out += " Td";
+            out.Number(static_cast<double>(x - lastX) * 0.01);
+            out.Number(static_cast<double>(y - lastY) * 0.01);
+            out.Lit(" Td");
         }
         lastX = x;
         lastY = y;
         bool hex = head.font == 5;
         for (size_t k = i; k < end; ++k) hex = hex || items[k].code < 0x20 || items[k].code > 0x7E;
-        out += hex ? " <" : " (";
+        if (hex) out.Lit(" <");
+        else out.Lit(" (");
         for (size_t k = i; k < end; ++k) {
             const unsigned char code = items[k].code;
             if (use != nullptr) use->bits[(head.font - 1u) % kMathFontCount][code >> 6] |= uint64_t(1) << (code & 63);
-            if (hex) {
-                out += kHex[code >> 4];
-                out += kHex[code & 15];
-            } else {
-                if (code == '(' || code == ')' || code == '\\') out += '\\';
-                out += static_cast<char>(code);
-            }
+            if (hex) out.Chars(kHex[code >> 4], kHex[code & 15]);
+            else if (code == '(' || code == ')' || code == '\\') out.Chars('\\', static_cast<char>(code));
+            else out.Char(static_cast<char>(code));
         }
-        out += hex ? "> Tj" : ") Tj";
+        if (hex) out.Lit("> Tj");
+        else out.Lit(") Tj");
         i = end;
     }
-    out += " ET";
+    out.Lit(" ET");
 }
 
 void AppendInt(std::string& out, int value) {
@@ -1691,8 +1740,8 @@ MathFormula MathFormula::LayoutParsed(const MathParseResult& parsed, std::string
     return formula;
 }
 
-void MathFormula::Emit(std::string& content, double x, double baseline, const char* rgb, MathGlyphUse* use) const {
-    if (rgb == nullptr) rgb = "0 0 0";
+void MathFormula::Emit(std::string& content, double x, double baseline, std::string_view rgb, MathGlyphUse* use) const {
+    if (rgb.empty()) rgb = "0 0 0";
     size_t glyphs = 0, paths = 0, fallbacks = 0;
     for (const MathItem& item : items_) {
         if (item.kind == kItemGlyph) ++glyphs;
@@ -1700,34 +1749,35 @@ void MathFormula::Emit(std::string& content, double x, double baseline, const ch
         else ++paths;
     }
     if (glyphs + paths != 0) {
-        content += "q ";
-        content += rgb;
-        content += " rg";
+        OpWriter out(content);
+        out.Lit("q ");
+        out.Text(rgb);
+        out.Lit(" rg");
         if (hasStroke_) {
-            content += ' ';
-            content += rgb;
-            content += " RG";
+            out.Char(' ');
+            out.Text(rgb);
+            out.Lit(" RG");
         }
         double ox = x, oy = baseline;
         if (scale_ != 1.0) {
             // The uniform fit scale; it also carries the placement.
-            Number(content, scale_);
-            content += " 0 0";
-            Number(content, scale_);
-            Number(content, x);
-            Number(content, baseline);
-            content += " cm";
+            out.Number(scale_);
+            out.Lit(" 0 0");
+            out.Number(scale_);
+            out.Number(x);
+            out.Number(baseline);
+            out.Lit(" cm");
             ox = oy = 0.0;
         }
         long long lineWidth = -1;
-        if (glyphs != 0) EmitText(content, items_, ox, oy, lineWidth, use);
+        if (glyphs != 0) EmitText(out, items_, ox, oy, lineWidth, use);
         if (paths != 0) {
             for (const MathItem& item : items_) {
-                if (item.kind == kItemRule) EmitRule(content, item, ox, oy, lineWidth);
-                else if (item.kind == kItemShape) EmitShape(content, item, ox, oy, lineWidth);
+                if (item.kind == kItemRule) EmitRule(out, item, ox, oy, lineWidth);
+                else if (item.kind == kItemShape) EmitShape(out, item, ox, oy, lineWidth);
             }
         }
-        content += " Q\n";
+        out.Lit(" Q\n");
     }
     if (fallbacks == 0 || fallback_ == nullptr || fallback_->emit == nullptr) return;
     for (const MathItem& item : items_) {

@@ -75,7 +75,7 @@ struct MathFallbackFont {
     void* context;
     double (*measure)(void* context, std::string_view utf8, double size);
     void (*emit)(void* context, std::string& content, std::string_view utf8,
-                 double x, double baseline, double size, const char* rgb);
+                 double x, double baseline, double size, std::string_view rgb);
     double ascent;    // ink height above the baseline (not the line ascent), in em of `size`
     double descent;   // ink depth below the baseline, in em of `size`, positive
 };
@@ -136,9 +136,9 @@ public:
     // [x, x + Width()] x [baseline - Descent(), baseline + Ascent()] covers everything drawn,
     // except that the first glyph may overhang the left edge by at most 0.19 em (italic f, j;
     // an accent wider than its letter); fallback text is boxed by the ascent and descent
-    // given, whatever its ink. Leaves the graphics state as found. With `use`, marks there the
-    // code of every glyph it paints.
-    void Emit(std::string& content, double x, double baseline, const char* rgb, MathGlyphUse* use = nullptr) const;
+    // given, whatever its ink. Leaves the graphics state as found. `rgb` is the fill colour's
+    // operands, "0 0 0" when empty. With `use`, marks there the code of every glyph it paints.
+    void Emit(std::string& content, double x, double baseline, std::string_view rgb, MathGlyphUse* use = nullptr) const;
 
 private:
     friend struct MathFormulaInspector;          // item access for the layout harness only

@@ -57,9 +57,15 @@ function(rayomd_release_flags target)
             # The C++ runtime is linked in, its unused sections dropped: a process starts 0.6 ms
             # sooner without loading and relocating libstdc++.so, and calls into it skip the PLT
             # (warm builds 5 % faster) for about 180 KB. The code uses no iostreams, which would
-            # pull in some 460 KB of locale and stream code here.
+            # pull in some 460 KB of locale and stream code here. No exceptions and no RTTI, as on
+            # Windows (the code catches nothing: an exception the runtime throws ends the process
+            # either way), and no unwind tables, which only that propagation read: 221 KB less.
             target_compile_options(${target} PRIVATE
                 $<$<CONFIG:Release>:-O3>
+                $<$<CONFIG:Release>:-fno-exceptions>
+                $<$<CONFIG:Release>:-fno-rtti>
+                $<$<CONFIG:Release>:-fno-asynchronous-unwind-tables>
+                $<$<CONFIG:Release>:-fno-unwind-tables>
                 $<$<CONFIG:Release>:-ffunction-sections>
                 $<$<CONFIG:Release>:-fdata-sections>)
             if(RAYOMD_STATIC)
@@ -173,11 +179,15 @@ endfunction()
 # PDF/A's metadata and the footnotes' numbering are made once per document, page footnotes keep
 # their account once per note, an OpenType font's CFF table is read once and subset once per
 # document, an HTML block is mapped once, the notes a document embeds or links to are read once,
-# and the image encoder's threads only hand out segments that flate.cpp compresses. Optimize these
-# translation units for package size while leaving the performance-critical renderer and parser
-# on the normal release flags.
+# the image encoder's threads only hand out segments that flate.cpp compresses, and the command
+# lines parse their arguments, list a batch and write its report once per run (--bench and
+# --serve only call the engine in their loops). Optimize these translation units for package size
+# while leaving the performance-critical renderer and parser on the normal release flags.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
+        src/cli/main_cli.cpp
+        src/win32/main_windows_cli.cpp
+        src/common/batch_report.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/image_cache.cpp
         src/core/image_encoder.cpp
@@ -210,6 +220,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(src/core/flate.cpp src/core/inflate.cpp src/core/highlight.cpp src/core/html.cpp
         src/core/dialect_rewrite.cpp src/core/print_colors.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
+    # The command lines' terminate handler rethrows the exception it reports.
+    set_source_files_properties(src/cli/terminate.cpp PROPERTIES COMPILE_OPTIONS "-fexceptions;$<$<CONFIG:Release>:-Os>")
 endif()
 
 # libdeflate's decompressor (third_party/libdeflate, v1.26, the files it needs and unchanged) is
@@ -313,6 +325,7 @@ if(RAYOMD_BUILD_CLI)
                 src/win32/delay_image_load.cpp
                 src/win32/delay_image_import_pointers.cpp)
             target_link_options(rayomd PRIVATE -Wl,--wrap=CommandLineToArgvW)
+            target_sources(rayomd PRIVATE src/cli/terminate.cpp)
         endif()
         target_compile_definitions(rayomd PRIVATE UNICODE _UNICODE)
         target_include_directories(rayomd PRIVATE include)
@@ -328,6 +341,9 @@ if(RAYOMD_BUILD_CLI)
         rayomd_experiments(rayomd)
     else()
         add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
+            target_sources(rayomd PRIVATE src/cli/terminate.cpp)
+        endif()
         if(RAYOMD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
             # No .eh_frame registration at startup: the unwinder reads PT_GNU_EH_FRAME (static_frames.cpp).
             target_sources(rayomd PRIVATE src/cli/static_frames.cpp)

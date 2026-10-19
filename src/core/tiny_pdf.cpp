@@ -1184,39 +1184,55 @@ public:
     T value;
 };
 
-// Lets one drawing operation write its operators through a raw pointer, then appends them to a
-// content stream in one piece. The per-span paint functions used a dozen small appends each;
-// this is one growth and no temporaries. An operation whose upper bound fits writes into a
-// buffer of the thread's own, which stays in L1, and only the bytes it wrote are appended:
-// growing the string by the bound zero-filled all of it first (std::string has no growth
-// without filling before C++23). A larger bound, a writer opened while another holds the
-// buffer, and Windows (where MinGW's thread_local is a call) grow the string by the bound and
-// trim what was not written. The buffer is not a member: a pointer into the writer itself kept
-// GCC from holding `cursor` in a register across calls. Constructor and destructor are always
-// inlined: left to GCC, the destructor went out of line and `Text` out of `PaintAsciiRuns`.
+// Growth of a std::string without filling it (C++23's resize_and_overwrite, which C++17 lacks):
+// with libstdc++ the length is set through its private `_M_set_length`, named in an explicit
+// instantiation, where access is not checked; the bytes between the old and the new size are left
+// as they are for the caller to write. Other libraries fill them (`resize`).
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
+#define RAYOMD_STRING_SET_LENGTH 1
+namespace {
+void SetStringLength(std::string& text, size_t size);
+template <void (std::string::*SetLength)(std::string::size_type)>
+struct StringLengthAccess {
+    friend void SetStringLength(std::string& text, size_t size) { (text.*SetLength)(size); }
+};
+template struct StringLengthAccess<&std::string::_M_set_length>;
+} // namespace
+#endif
+
+// Makes `text` `size` bytes long; what lies past its old size is the caller's to write.
+static RAYOMD_HOT_INLINE void ResizeForOverwrite(std::string& text, size_t size) {
+#ifdef RAYOMD_STRING_SET_LENGTH
+    if (size > text.capacity()) text.reserve(size);
+    SetStringLength(text, size);
+#else
+    text.resize(size);
+#endif
+}
+
+// Lets one drawing operation write its operators through a raw pointer straight into the end of
+// a content stream: room for `maxBytes` is made once (no fill, see ResizeForOverwrite), and the
+// destructor sets the string's size to where the writing ended. The per-span paint functions used
+// a dozen small appends each; this is one capacity test and no copy. Until it ends, nothing else
+// may change the string. Constructor and destructor are always inlined: left to GCC, the
+// destructor went out of line and `Text` out of `PaintAsciiRuns`.
 class TailWriter {
 public:
     RAYOMD_HOT_INLINE TailWriter(std::string& target, size_t maxBytes) : out(target) {
-#ifndef _WIN32
-        if (maxBytes <= sizeof(scratch) && !scratchBusy) {
-            scratchBusy = true;
-            start = scratch;
-            cursor = start;
-            return;
-        }
+        const size_t base = target.size();
+#ifdef RAYOMD_STRING_SET_LENGTH
+        if (target.capacity() - base < maxBytes) target.reserve(base + maxBytes);
+#else
+        target.resize(base + maxBytes);
 #endif
-        start = Grow(target, maxBytes);
-        cursor = start;
+        cursor = &target[0] + base;
     }
     RAYOMD_HOT_INLINE ~TailWriter() {
-#ifndef _WIN32
-        if (start == scratch) {
-            out.append(start, (size_t)(cursor - start));
-            scratchBusy = false;
-            return;
-        }
-#endif
+#ifdef RAYOMD_STRING_SET_LENGTH
+        SetStringLength(out, (size_t)(cursor - out.data()));
+#else
         out.resize((size_t)(cursor - out.data()));
+#endif
     }
     TailWriter(const TailWriter&) = delete;
     TailWriter& operator=(const TailWriter&) = delete;
@@ -1232,28 +1248,14 @@ public:
         memcpy(cursor, text, size);
         cursor += size;
     }
+    RAYOMD_HOT_INLINE void Bytes(std::string_view text) { Bytes(text.data(), text.size()); }
     void Fixed(double value) { cursor = RayoMd::Text::WriteFixed2(cursor, value); }
     void Number(size_t value) { cursor = std::to_chars(cursor, cursor + 20, value).ptr; }
     char* cursor = nullptr;
 
 private:
-    static char* Grow(std::string& target, size_t maxBytes) {
-        const size_t base = target.size();
-        target.resize(base + maxBytes);
-        return &target[base];
-    }
-
     std::string& out;
-    char* start = nullptr;
-#ifndef _WIN32
-    static thread_local char scratch[1024];
-    static thread_local bool scratchBusy;
-#endif
 };
-#ifndef _WIN32
-thread_local char TailWriter::scratch[1024];
-thread_local bool TailWriter::scratchBusy = false;
-#endif
 
 // Room for one operand written by TailWriter::Fixed, with its separator.
 constexpr size_t kOperandBytes = RayoMd::Text::kFixed2MaxChars + 1;
@@ -1854,7 +1856,7 @@ public:
             rendered.swap(pdf);
             pdf.reserve(wanted);
         }
-        pdf.resize(total);
+        ResizeForOverwrite(pdf, total);     // every byte of it is written below
         char* const base = &pdf[0];
         const char* const payloads = relocate ? rendered.data() : base;
         const size_t payloadLimit = relocate ? rendered.size() : total;
@@ -4439,7 +4441,7 @@ static void AppendUriLiteral(std::string& out, std::string_view url, bool winAns
     }
     static const char kHex[] = "0123456789ABCDEF";
     const size_t at = out.size();
-    out.resize(at + url.size() * 3);
+    ResizeForOverwrite(out, at + url.size() * 3);
     char* cursor = &out[at];
     for (const char ch : url) {
         const unsigned char byte = static_cast<unsigned char>(ch);
@@ -4454,7 +4456,7 @@ static void AppendUriLiteral(std::string& out, std::string_view url, bool winAns
         if (ch == '(' || ch == ')' || ch == '\\') *cursor++ = '\\';
         *cursor++ = ch;
     }
-    out.resize((size_t)(cursor - out.data()));
+    ResizeForOverwrite(out, (size_t)(cursor - out.data()));
 }
 
 // ---- Headings: the outline (bookmarks) and the targets of internal links -----------------
@@ -4858,10 +4860,10 @@ RAYOMD_COLD static std::string InfoDictionary(const char* producer, const Docume
     const auto field = [&info](std::string_view key, std::string_view value, bool valueWinAnsi) {
         if (value.empty()) return;
         const size_t at = info.size();
-        info.resize(at + key.size() + value.size() * 4 + 6);
+        ResizeForOverwrite(info, at + key.size() + value.size() * 4 + 6);
         memcpy(&info[at], key.data(), key.size());
         const char* const end = WriteTextString(&info[at + key.size()], value, valueWinAnsi);
-        info.resize((size_t)(end - info.data()));
+        ResizeForOverwrite(info, (size_t)(end - info.data()));
     };
     if (!metadata.title.empty()) {
         field(" /Title ", metadata.title, false);
@@ -5031,7 +5033,7 @@ constexpr double kNoteIndent = 16.0;
 // size of the text around it.
 constexpr double kScriptDropFactor = 0.18;
 // The fill behind HTML's <mark>: the yellow browsers draw.
-constexpr const char* kMarkFill = "1 0.973 0.773";
+constexpr std::string_view kMarkFill = "1 0.973 0.773";
 
 // Where the footnotes are drawn: note N's text and its first reference, at [N - 1]; a top of
 // kUnplaced where it is not drawn (not a negative one: a long page reaches below 0).
@@ -5070,7 +5072,7 @@ RAYOMD_COLD static int FootnoteNumber(const Internal::Footnotes* footnotes, cons
 }
 
 // The short rule above the footnotes, from (x, y) `length` to the right.
-RAYOMD_COLD static void AppendFootnoteRule(std::string& c, const char* color, double x, double y, double length) {
+RAYOMD_COLD static void AppendFootnoteRule(std::string& c, std::string_view color, double x, double y, double length) {
     AppendLit(c, "q ");
     c += color;
     AppendLit(c, " RG 0.5 w ");
@@ -5484,7 +5486,7 @@ public:
     }
     bool IsDisplay(int index) const { return items[(size_t)index].display; }
 
-    double Emit(int index, std::string& content, double x, double baseline, const char* rgb) {
+    double Emit(int index, std::string& content, double x, double baseline, std::string_view rgb) {
         used = true;
         items[(size_t)index].formula.Emit(content, x, baseline, rgb, &glyphUse);
         return items[(size_t)index].formula.Width();
@@ -6249,7 +6251,7 @@ struct PageNoteLayout {
         RendererType& r;
         const double y, margin, bottom, bodySize, lineHeight;
         const int listDepth;
-        const char* const quoteBar;
+        const std::string_view quoteBar;
         std::vector<SourceBlock>* const sourceMap;
     };
 
@@ -6590,6 +6592,10 @@ constexpr char kQuoteBars[][15] = { "0.45 0.62 0.72", "0.04 0.41 0.85", "0.10 0.
     "0.60 0.40 0.00", "0.82 0.14 0.18", "0.00 0.58 0.62", "0.50 0.50 0.50" };
 constexpr char kAlertTitles[][10] = { "", "Note", "Tip", "Important", "Warning", "Caution", "Tip", "Quote" };
 
+static std::string_view QuoteBar(int alert) {
+    return std::string_view(kQuoteBars[alert], sizeof(kQuoteBars[0]) - 1);
+}
+
 // An Obsidian callout (its title in Block::text) has content beyond its title.
 static bool CalloutHasBody(const Block& block) {
     return !block.children.empty() &&
@@ -6609,14 +6615,14 @@ public:
         : heading(Pick(theme.headingColor, "0.02 0.02 0.02", storage[0])),
           link(Pick(theme.linkColor, "0.05 0.30 0.68", storage[1])),
           rule(Pick(theme.accentColor, "0.68 0.68 0.68", storage[2])),
-          quoteBar(Pick(theme.accentColor, kQuoteBars[0], storage[3])) {}
+          quoteBar(Pick(theme.accentColor, QuoteBar(0), storage[3])) {}
     ThemePalette(const ThemePalette&) = delete;
     ThemePalette& operator=(const ThemePalette&) = delete;
 
 private:
     char storage[4][24] = {};   // first: the pointers below are made from it
 
-    static const char* Pick(int32_t rgb, const char* styleColor, char* buffer) {
+    static std::string_view Pick(int32_t rgb, std::string_view styleColor, char* buffer) {
         if (rgb < 0) return styleColor;
         char* out = buffer;
         for (int shift = 16; shift >= 0; shift -= 8) {
@@ -6624,14 +6630,14 @@ private:
             out = RayoMd::Text::WriteFixed2(out, ((rgb >> shift) & 0xFF) / 255.0);
         }
         *out = '\0';
-        return buffer;
+        return std::string_view(buffer, (size_t)(out - buffer));
     }
 
 public:
-    const char* const heading;
-    const char* const link;
-    const char* const rule;       // rules, in the accent colour
-    const char* const quoteBar;   // the bar beside a plain quote, in the accent colour
+    const std::string_view heading;
+    const std::string_view link;
+    const std::string_view rule;       // rules, in the accent colour
+    const std::string_view quoteBar;   // the bar beside a plain quote, in the accent colour
 };
 
 // Defined with the builders.
@@ -6819,11 +6825,11 @@ private:
     std::vector<HeadingMark> ids;   // where the HTML ids (Block::Anchor) are, for "#id" links
     // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
     // the alert it is in.
-    const char* const headingColor;
-    const char* const linkColor;
-    const char* const ruleColor;
-    const char* const plainQuoteBar;
-    const char* quoteBar;
+    const std::string_view headingColor;
+    const std::string_view linkColor;
+    const std::string_view ruleColor;
+    const std::string_view plainQuoteBar;
+    std::string_view quoteBar;
 
     // Notes where a heading's first line is drawn, for its outline entry and the links to it.
     // A line `firstLine` high that does not fit moves to the next page first, as drawing it
@@ -6903,7 +6909,7 @@ private:
     }
 
     static void EmitMathFallback(void* context, std::string& content, std::string_view utf8, double x,
-        double baseline, double size, const char* rgb) {
+        double baseline, double size, std::string_view rgb) {
         Renderer* self = static_cast<Renderer*>(context);
         content += "q ";
         content += rgb;
@@ -7070,7 +7076,7 @@ private:
     }
 
     // A script: its text in the body colour, raised as a note's number or lowered, no link.
-    RAYOMD_MATH_COLD double PaintScript(int index, double x, double baseline, const char* color) {
+    RAYOMD_MATH_COLD double PaintScript(int index, double x, double baseline, std::string_view color) {
         const double size = math.NoteSize(index);
         const double shift = math.Script(index) == 2 ? -size * kScriptDropFactor : size * kNoteRiseFactor;
         if (tags != nullptr) tags->LinkRun({});
@@ -7351,7 +7357,7 @@ private:
     }
 
     RAYOMD_MATH_COLD void PaintMathCellLine(const MathCell& cell, size_t i, double x, double baseline, double size,
-        const char* color, bool bold) {
+        std::string_view color, bool bold) {
         if (cell.formula) PaintMathTextLine(cell.formulaLines[i], x, baseline, size, color, bold);
         else PaintSpanText(x, baseline, size, cell.plain.Line(i), color, bold, false, false);
     }
@@ -7366,7 +7372,7 @@ private:
 
     // Paints a line of plain text and formulas in one colour (headings, table cells).
     RAYOMD_MATH_COLD void PaintMathTextLine(const std::vector<StyledSpan>& line, double x, double baseline, double size,
-        const char* color, bool bold) {
+        std::string_view color, bool bold) {
         double cursor = x;
         for (const StyledSpan& span : line) {
             if (span.math >= 0) {
@@ -7381,7 +7387,7 @@ private:
 
     void TableFill(double x, double top, double w, double h) { DrawRect(x, top, w, h, "0.91 0.93 0.95"); }
     void TableStroke(double x, double top, double w, double h) { DrawStrokeRect(x, top, w, h); }
-    const char* TableTextColor(bool header) const { return header ? "0.04 0.04 0.04" : "0.10 0.10 0.10"; }
+    std::string_view TableTextColor(bool header) const { return header ? "0.04 0.04 0.04" : "0.10 0.10 0.10"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer in one style.
     struct StyledRun {
@@ -7430,7 +7436,7 @@ private:
     std::vector<StyledRuns> tableCells;     // the wrapped cells of a table row, by column
 
     // Colors of text runs: plain text, code and the background of code.
-    struct RunColors { const char* text; const char* code; const char* codeFill; };
+    struct RunColors { std::string_view text; std::string_view code; std::string_view codeFill; };
     static constexpr RunColors kBodyRunColors{ "0.08 0.08 0.08", "0.18 0.18 0.17", "0.94 0.94 0.92" };
     static constexpr RunColors kQuoteRunColors{ "0.18 0.22 0.25", "0.16 0.16 0.15", "0.88 0.89 0.88" };
     static constexpr RunColors kHeaderCellRunColors{ "0.04 0.04 0.04", "0.18 0.18 0.17", "0.94 0.94 0.92" };
@@ -7439,7 +7445,7 @@ private:
     // The background of code `text`, which starts at x and is `width` wide, from its first
     // glyph on: the space shown before a code word stays clear, and so does the word before.
     void CodeBackground(double x, double top, double width, double lh, std::wstring_view text, double size,
-        const char* fill) {
+        std::string_view fill) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == L' ') spaces++;
         const double skip = spaces != 0 ? TextWidth(font, text.substr(0, spaces), size) : 0.0;
@@ -7449,7 +7455,7 @@ private:
     // HTML's <mark> behind a run of text (`mark`, painted before the text) or <u> under it (after
     // it, in the text's colour), from its first glyph: a space the run begins with stays clear.
     RAYOMD_COLD void PaintDecor(double x, double baseline, double width, double size, std::wstring_view text, bool mark,
-        const char* color) {
+        std::string_view color) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == L' ') spaces++;
         const double skip = spaces != 0 ? TextWidth(font, text.substr(0, spaces), size) : 0.0;
@@ -7487,7 +7493,7 @@ private:
             const bool measured = index + 1 < end || run.code || !run.url.empty() || run.decor != 0;
             const double spanWidth = measured ? TextWidth(font, runText, size) : 0.0;
             if (run.code) CodeBackground(x, top, spanWidth, lh, runText, size, colors.codeFill);
-            const char* color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
+            const std::string_view color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
             if (run.decor & Internal::kDecorMark) PaintDecor(x, baseline, spanWidth, size, runText, true, color);
             PaintText(x, baseline, size, runText, color, run.bold || bold, run.italic, run.strike);
             if (run.decor & Internal::kDecorUnderline) PaintDecor(x, baseline, spanWidth, size, runText, false, color);
@@ -7948,17 +7954,16 @@ private:
         else Ensure(needed);
     }
 
-    void PaintText(double x, double baseline, double size, std::wstring_view line, const char* color,
+    void PaintText(double x, double baseline, double size, std::wstring_view line, std::string_view color,
         bool fauxBold = false, bool italic = false, bool strike = false) {
         if (tags != nullptr) {
             PaintTaggedText(x, baseline, size, line, color, fauxBold, italic, strike);
             return;
         }
-        const size_t colorSize = strlen(color);
         const size_t textBytes = CidTextBytes(line);
-        TailWriter w(content, 96 + colorSize * 2 + kOperandBytes * 9 + textBytes * 2);
+        TailWriter w(content, 96 + color.size() * 2 + kOperandBytes * 9 + textBytes * 2);
         w.Lit("q ");
-        w.Bytes(color, colorSize);
+        w.Bytes(color);
         w.Lit(" rg BT /F1 ");
         w.Fixed(size);
         w.Lit(" Tf 1 0 ");
@@ -7989,7 +7994,7 @@ private:
         if (strike && !line.empty()) {
             double width = TextWidth(font, line, size);
             w.Lit(" ");
-            w.Bytes(color, colorSize);
+            w.Bytes(color);
             w.Lit(" RG 0.55 w ");
             w.Fixed(x);
             w.Lit(" ");
@@ -8004,7 +8009,7 @@ private:
     }
 
     // A line of text at x, `bold` (a theme's bold face draws headings) in the face for it.
-    void DrawTextLine(double x, double size, std::wstring_view line, const char* color = "0.08 0.08 0.08", bool bold = false) {
+    void DrawTextLine(double x, double size, std::wstring_view line, std::string_view color = "0.08 0.08 0.08", bool bold = false) {
         double lh = size * 1.35;
         Ensure(lh);
         if (bold) PaintSpanText(x, y - size, size, line, color, true, false, false);
@@ -8012,12 +8017,11 @@ private:
         y -= lh;
     }
 
-    void DrawRect(double x, double top, double w, double h, const char* color) {
+    void DrawRect(double x, double top, double w, double h, std::string_view color) {
         if (tags != nullptr) tags->Artifact();
-        const size_t colorSize = strlen(color);
-        TailWriter out(content, 24 + colorSize + kOperandBytes * 4);
+        TailWriter out(content, 24 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color, colorSize);
+        out.Bytes(color);
         out.Lit(" rg ");
         out.Fixed(x);
         out.Lit(" ");
@@ -8036,12 +8040,11 @@ private:
         DrawRect(margin, y + 2.0, 3.0, height, quoteBar);
     }
 
-    void DrawStrokeRect(double x, double top, double w, double h, const char* color = "0.72 0.72 0.72", double lineWidth = 0.45) {
+    void DrawStrokeRect(double x, double top, double w, double h, std::string_view color = "0.72 0.72 0.72", double lineWidth = 0.45) {
         if (tags != nullptr) tags->Artifact();
-        const size_t colorSize = strlen(color);
-        TailWriter out(content, 24 + colorSize + kOperandBytes * 5);
+        TailWriter out(content, 24 + color.size() + kOperandBytes * 5);
         out.Lit("q ");
-        out.Bytes(color, colorSize);
+        out.Bytes(color);
         out.Lit(" RG ");
         out.Fixed(lineWidth);
         out.Lit(" w ");
@@ -8084,7 +8087,7 @@ private:
     // (taken by value, so that the untagged path keeps its operands in registers). A list item's
     // label at its start is painted first, as the label's content. Bold text is painted once
     // (PaintStrokedBold): drawn twice, as PaintText draws it, a screen reader would read it twice.
-    RAYOMD_COLD void PaintTaggedText(double x, double baseline, double size, std::wstring_view line, const char* color,
+    RAYOMD_COLD void PaintTaggedText(double x, double baseline, double size, std::wstring_view line, std::string_view color,
         bool fauxBold, bool italic, bool strike) {
         Internal::StructTree* const tree = tags;
         const size_t label = std::min(tree->TakeLabel(), line.size());
@@ -8108,14 +8111,13 @@ private:
 
     // Bold text as PaintText draws it, but once: filled and outlined in its colour (2 Tr), as
     // thick as PaintText's second copy, 0.28 points to the right, makes it.
-    RAYOMD_COLD void PaintStrokedBold(double x, double baseline, double size, std::wstring_view line, const char* color,
+    RAYOMD_COLD void PaintStrokedBold(double x, double baseline, double size, std::wstring_view line, std::string_view color,
         bool italic, bool strike) {
-        const size_t colorSize = strlen(color);
-        TailWriter w(content, 112 + colorSize * 2 + kOperandBytes * 8 + CidTextBytes(line));
+        TailWriter w(content, 112 + color.size() * 2 + kOperandBytes * 8 + CidTextBytes(line));
         w.Lit("q ");
-        w.Bytes(color, colorSize);
+        w.Bytes(color);
         w.Lit(" rg ");
-        w.Bytes(color, colorSize);
+        w.Bytes(color);
         w.Lit(" RG 0.28 w 1 j BT /F1 ");
         w.Fixed(size);
         w.Lit(" Tf 2 Tr 1 0 ");
@@ -8144,7 +8146,7 @@ private:
     }
 
     // PaintText for text in a style: in the theme's face for it, when it has faces.
-    void PaintSpanText(double x, double baseline, double size, std::wstring_view line, const char* color, bool bold,
+    void PaintSpanText(double x, double baseline, double size, std::wstring_view line, std::string_view color, bool bold,
         bool italic, bool strike) {
         if (multiFace) PaintFaceText(ChooseFace(bold, italic), x, baseline, size, line, color, strike);
         else PaintText(x, baseline, size, line, color, bold, italic, strike);
@@ -8153,7 +8155,7 @@ private:
     // `line` in face `choice`: PaintText for `font`, else in the theme's face, its CIDs that face's.
     // Tagged as PaintTaggedText tags it: a list item's label first, bold drawn once.
     RAYOMD_COLD void PaintFaceText(FaceChoice choice, double x, double baseline, double size, std::wstring_view line,
-        const char* color, bool strike) {
+        std::string_view color, bool strike) {
         if (choice.face == 0) {
             PaintText(x, baseline, size, line, color, choice.fauxBold, choice.skew, strike);
             return;
@@ -8178,16 +8180,15 @@ private:
     // The text object of PaintFaceText: in /F2, /F4 or /F5, slanted with `skew`, bold drawn twice
     // (or `once`, filled and outlined, as PaintStrokedBold draws it) with `fauxBold`.
     RAYOMD_COLD void WriteFaceText(FaceChoice choice, double x, double baseline, double size, std::wstring_view line,
-        const char* color, bool strike, bool once) {
+        std::string_view color, bool strike, bool once) {
         const TtfFont& faceFont = FaceFont(choice.face);
-        const size_t colorSize = strlen(color);
-        TailWriter w(content, 160 + colorSize * 3 + kOperandBytes * 10 + CidTextBytes(line) * 2);
+        TailWriter w(content, 160 + color.size() * 3 + kOperandBytes * 10 + CidTextBytes(line) * 2);
         const bool stroked = choice.fauxBold && once;
         w.Lit("q ");
-        w.Bytes(color, colorSize);
+        w.Bytes(color);
         w.Lit(" rg ");
         if (stroked) {
-            w.Bytes(color, colorSize);
+            w.Bytes(color);
             w.Lit(" RG 0.28 w 1 j ");
         }
         w.Lit("BT ");
@@ -8222,7 +8223,7 @@ private:
         if (strike && !line.empty()) {
             const double width = TextWidth(faceFont, line, size);
             w.Lit(" ");
-            w.Bytes(color, colorSize);
+            w.Bytes(color);
             w.Lit(" RG 0.55 w ");
             w.Fixed(x);
             w.Lit(" ");
@@ -8246,7 +8247,7 @@ private:
             const FaceChoice choice = ChooseFace(run.bold || bold, run.italic);
             const double spanWidth = TextWidth(FaceFont(choice.face), runText, size);
             if (run.code) CodeBackground(x, top, spanWidth, lh, runText, size, colors.codeFill);
-            const char* color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
+            const std::string_view color = run.url.empty() ? (run.code ? colors.code : colors.text) : linkColor;
             if (run.decor & Internal::kDecorMark) PaintDecor(x, baseline, spanWidth, size, runText, true, color);
             PaintFaceText(choice, x, baseline, size, runText, color, run.strike);
             if (run.decor & Internal::kDecorUnderline) PaintDecor(x, baseline, spanWidth, size, runText, false, color);
@@ -8576,7 +8577,7 @@ private:
     // heading, at `level`, is noted once its first line has found its page, as `markText` when
     // that is given (the text without its number).
     RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, int level, double x, double width, double size,
-        const char* color, bool bold, bool quote, const std::string* markText = nullptr) {
+        std::string_view color, bool bold, bool quote, const std::string* markText = nullptr) {
         math.Clear();
         double lh = size * 1.35;
         bool marked = false;
@@ -8604,9 +8605,9 @@ private:
     // baseline, code backgrounds and link rectangles keep their usual offsets.
     RAYOMD_MATH_COLD void RenderMathLines(const std::vector<std::vector<StyledSpan>>& lines, double x, double width, bool quote,
         uint8_t align = 0) {
-        const char* textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
-        const char* codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
-        const char* codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
+        const std::string_view textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
+        const std::string_view codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
+        const std::string_view codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
         for (const auto& line : lines) {
             MathLineExtent extent = MeasureMathLine(math, line, bodySize, lineHeight);
             double extra = extent.above + extent.below;
@@ -8634,7 +8635,7 @@ private:
                 TagLinkRun(span.url);
                 double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
-                const char* color = span.url.empty() ? (span.code ? codeColor : textColor) : linkColor;
+                const std::string_view color = span.url.empty() ? (span.code ? codeColor : textColor) : linkColor;
                 if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                 PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 if (span.decor & Internal::kDecorUnderline) {
@@ -8682,7 +8683,7 @@ private:
                 TagLinkRun(span.url);
                 double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.94 0.94 0.92");
-                const char* color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
+                const std::string_view color = span.url.empty() ? (span.code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
                 if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                 PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 if (span.decor & Internal::kDecorUnderline) {
@@ -8735,7 +8736,7 @@ private:
                     TagLinkRun(span.url);
                     const double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                     if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, kBodyRunColors.codeFill);
-                    const char* color = span.url.empty() ? (span.code ? kBodyRunColors.code : kBodyRunColors.text) : linkColor;
+                    const std::string_view color = span.url.empty() ? (span.code ? kBodyRunColors.code : kBodyRunColors.text) : linkColor;
                     if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                     PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                     if (span.decor & Internal::kDecorUnderline) {
@@ -8770,7 +8771,7 @@ private:
     // A GitHub alert: a quote whose bar takes the alert's colour, under the alert's bold title
     // in that colour, which keeps the first line after it on its page.
     RAYOMD_COLD void RenderAlert(const Block& block) {
-        quoteBar = kQuoteBars[block.alert];
+        quoteBar = QuoteBar(block.alert);
         Ensure(lineHeight * 2.0 + 2.0);
         if (!block.text.empty()) {
             RenderCallout(block);
@@ -8835,7 +8836,7 @@ private:
             case BlockType::Quote: {
                 // A quote in an alert has a plain quote's bar, as on GitHub.
                 double savedMargin = margin;
-                const char* savedBar = quoteBar;
+                const std::string_view savedBar = quoteBar;
                 Indent(10.0);
                 quoteBar = plainQuoteBar;
                 RenderQuote(child);
@@ -8924,7 +8925,7 @@ private:
                 TagLinkRun(span.url);
                 double spanWidth = TextWidth(SpanFont(span.bold, span.italic), span.text, bodySize);
                 if (span.code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
-                const char* color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
+                const std::string_view color = span.url.empty() ? (span.code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
                 if (span.decor & Internal::kDecorMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, true, color);
                 PaintSpanText(cursor, baseline, bodySize, span.text, color, span.bold, span.italic, span.strike);
                 if (span.decor & Internal::kDecorUnderline) {
@@ -9016,7 +9017,7 @@ private:
     // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
     // points into the next, so that the block is one tint. Out of line: written into RenderCode,
     // it moved GCC's inlining of hot calls elsewhere (+0.3 % on baseline.md).
-    RAYOMD_SHARED void CodeTile(double lh, bool& first, const char* color) {
+    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color) {
         const size_t pages = pageStarts.size();
         Ensure(lh + 4.0);
         if (pageStarts.size() != pages) first = true;
@@ -9068,9 +9069,9 @@ private:
             const bool last = end == std::wstring::npos;
             if (last) end = wide.size();
             const size_t lineEnd = end > start && wide[end - 1] == L'\r' ? end - 1 : end;   // as SplitLines
-            const char* tile = Internal::CodeLineTile(lineEnd > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
+            const std::string_view tile = Internal::CodeLineTile(lineEnd > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
             auto draw = [&](size_t from, size_t to) {
-                CodeTile(lh, first, tile != nullptr ? tile : "0.95 0.95 0.93");
+                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93");
                 PaintCodeRuns(x, y - size, size, std::wstring_view(wide.data() + from, to - from), codeClasses.data() + from);
                 y -= lh;
             };
@@ -9110,7 +9111,7 @@ private:
     RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::wstring_view text, const uint8_t* classes) {
         SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
         if (codeRuns.size() == 1) {
-            PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color).data());
+            PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color));
             return;
         }
         if (tags != nullptr) tags->Content();
@@ -9120,7 +9121,7 @@ private:
             const std::string_view color = Internal::CodeColor(run.color);
             if (begin == 0) {
                 w.Lit("q ");
-                w.Bytes(color.data(), color.size());
+                w.Bytes(color);
                 w.Lit(" rg BT /F1 ");
                 w.Fixed(size);
                 w.Lit(" Tf 1 0 0 1 ");
@@ -9129,7 +9130,7 @@ private:
                 w.Fixed(baseline);
                 w.Lit(" Tm ");
             } else {
-                w.Bytes(color.data(), color.size());
+                w.Bytes(color);
                 w.Lit(" rg ");
             }
             w.cursor = WriteCidText(w.cursor, font, text.substr(begin, run.end - begin), usedCids);
@@ -9209,11 +9210,11 @@ private:
     // added after each character (Tc), and `bold` is the bold face, or draws it twice, a little
     // apart, as PaintText does.
     RAYOMD_COLD void AppendOverlayText(std::string& out, double x, double baseline, std::wstring_view text,
-        const char* color, bool bold, double spacing) {
+        std::string_view color, bool bold, double spacing) {
         const FaceChoice choice = multiFace ? ChooseFace(bold, false) : FaceChoice{ 0, bold, false };
-        TailWriter w(out, 128 + kOperandBytes * 6 + CidTextBytes(text) * 2);
+        TailWriter w(out, 128 + color.size() + kOperandBytes * 6 + CidTextBytes(text) * 2);
         w.Lit("q ");
-        w.Bytes(color, strlen(color));
+        w.Bytes(color);
         w.Lit(" rg BT ");
         w.Bytes(kFaceFonts[choice.face], 4);
         w.Fixed(bodySize);
@@ -10479,11 +10480,11 @@ private:
     std::vector<HeadingMark> ids;   // where the HTML ids (Block::Anchor) are, for "#id" links
     // The theme's colours, and that of the bar beside quoted text: a plain quote's, or that of
     // the alert it is in.
-    const char* const headingColor;
-    const char* const linkColor;
-    const char* const ruleColor;
-    const char* const plainQuoteBar;
-    const char* quoteBar;
+    const std::string_view headingColor;
+    const std::string_view linkColor;
+    const std::string_view ruleColor;
+    const std::string_view plainQuoteBar;
+    std::string_view quoteBar;
 
     // Notes where a heading's first line is drawn, for its outline entry and the links to it.
     // A line `firstLine` high that does not fit moves to the next page first, as drawing it
@@ -10530,12 +10531,12 @@ private:
     }
 
     static void EmitLatinMathFallback(void*, std::string& content, std::string_view utf8, double x,
-        double baseline, double size, const char* rgb) {
+        double baseline, double size, std::string_view rgb) {
         std::string text;
         RayoMd::Text::TranscodeToWinAnsiLossy(utf8, text);
-        TailWriter out(content, 48 + strlen(rgb) + kOperandBytes * 3 + text.size() * 2);
+        TailWriter out(content, 48 + rgb.size() + kOperandBytes * 3 + text.size() * 2);
         out.Lit("q ");
-        out.Bytes(rgb, strlen(rgb));
+        out.Bytes(rgb);
         out.Lit(" rg BT /F1 ");
         out.Fixed(size / kMathSizeFactor);
         out.Lit(" Tf 1 0 0 1 ");
@@ -10663,11 +10664,10 @@ private:
         else Ensure(needed);
     }
 
-    void Rect(double x, double top, double w, double h, const char* color, bool stroke = false) {
-        const size_t colorSize = strlen(color);
-        TailWriter out(content, 32 + colorSize + kOperandBytes * 4);
+    void Rect(double x, double top, double w, double h, std::string_view color, bool stroke = false) {
+        TailWriter out(content, 32 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color, colorSize);
+        out.Bytes(color);
         if (stroke) out.Lit(" RG 0.45 w ");
         else out.Lit(" rg ");
         out.Fixed(x);
@@ -10729,8 +10729,8 @@ private:
     }
     // /F1 Helvetica, /F2 Helvetica-Bold, /F4 Helvetica-Oblique, /F5 Helvetica-BoldOblique or
     // /F3 Courier. The oblique faces go into the PDF only when text was shown in them.
-    const char* StyleFontName(uint8_t styleBits) {
-        static const char* const kFaceNames[8] = { "F1", "F2", "F4", "F5", "F3", "F3", "F3", "F3" };
+    std::string_view StyleFontName(uint8_t styleBits) {
+        static constexpr std::string_view kFaceNames[8] = { "F1", "F2", "F4", "F5", "F3", "F3", "F3", "F3" };
         const unsigned face = styleBits & (kStyleBold | kStyleItalic | kStyleCode);
         facesUsed = static_cast<uint8_t>(facesUsed | (1u << face));
         return kFaceNames[face];
@@ -10740,7 +10740,7 @@ private:
     // The background of code `text`, which starts at x and is `width` wide, from its first
     // glyph on: the space shown before a code word stays clear, and so does the word before.
     void CodeBackground(double x, double top, double width, double lh, std::string_view text, double size,
-        const char* fill) {
+        std::string_view fill) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == ' ') spaces++;
         const double skip = UnitsToPoints(WordAdvances(StandardTextFont::Mono).space * spaces, size);
@@ -10750,15 +10750,14 @@ private:
     // A line through struck text, as the Unicode renderer draws it. A leading space of the
     // piece is not struck.
     RAYOMD_COLD void StrikeThrough(double x, double baseline, double width, double size, std::string_view text,
-        uint8_t styleBits, const char* color) {
+        uint8_t styleBits, std::string_view color) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == ' ') spaces++;
         const double skip = UnitsToPoints(StyleAdvances(styleBits).space * spaces, size);
         if (width <= skip) return;
-        const size_t colorSize = strlen(color);
-        TailWriter out(content, 32 + colorSize + kOperandBytes * 4);
+        TailWriter out(content, 32 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color, colorSize);
+        out.Bytes(color);
         out.Lit(" RG 0.55 w ");
         out.Fixed(x + skip);
         out.Lit(" ");
@@ -10773,7 +10772,7 @@ private:
     // HTML's <mark> behind a piece of text (`mark`, painted before the text) or <u> under it (after
     // it, in the text's colour), from its first glyph: a leading space of the piece stays clear.
     RAYOMD_COLD void PaintDecor(double x, double baseline, double width, double size, std::string_view text,
-        uint8_t styleBits, bool mark, const char* color) {
+        uint8_t styleBits, bool mark, std::string_view color) {
         size_t spaces = 0;
         while (spaces < text.size() && text[spaces] == ' ') spaces++;
         const double skip = UnitsToPoints(StyleAdvances(styleBits).space * spaces, size);
@@ -10878,7 +10877,7 @@ private:
     }
 
     // A script: its text in `color`, raised as a note's number or lowered, no link.
-    RAYOMD_MATH_COLD double PaintScript(int index, double x, double baseline, const char* color) {
+    RAYOMD_MATH_COLD double PaintScript(int index, double x, double baseline, std::string_view color) {
         const double size = math.NoteSize(index);
         const double shift = math.Script(index) == 2 ? -size * kScriptDropFactor : size * kNoteRiseFactor;
         Text(x, baseline + shift, size * kNoteSizeFactor, math.ScriptText(index), "F1", color);
@@ -11107,7 +11106,7 @@ private:
     }
 
     RAYOMD_MATH_COLD void PaintMathCellLine(const MathCell& cell, size_t i, double x, double baseline, double size,
-        const char* color, bool bold) {
+        std::string_view color, bool bold) {
         if (cell.formula) PaintMathTextLine(cell.formulaLines[i], x, baseline, size, color, bold);
         else Text(x, baseline, size, cell.plain.Text(i), bold ? "F2" : "F1", color);
     }
@@ -11122,7 +11121,7 @@ private:
 
     // Paints a line of plain text and formulas in one colour (headings, table cells).
     RAYOMD_MATH_COLD void PaintMathTextLine(const std::vector<AsciiSpan>& line, double x, double baseline, double size,
-        const char* color, bool bold) {
+        std::string_view color, bool bold) {
         double cursor = x;
         for (const AsciiSpan& span : line) {
             if (span.math >= 0) {
@@ -11137,7 +11136,7 @@ private:
 
     void TableFill(double x, double top, double w, double h) { Rect(x, top, w, h, "0.91 0.93 0.95"); }
     void TableStroke(double x, double top, double w, double h) { Rect(x, top, w, h, "0.72 0.72 0.72", true); }
-    const char* TableTextColor(bool) const { return "0.08 0.08 0.08"; }
+    std::string_view TableTextColor(bool) const { return "0.08 0.08 0.08"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer, in the
     // link, code and emphasis state of the span it came from.
@@ -11196,7 +11195,7 @@ private:
     std::vector<AsciiLines> tableLines;     // the other cells of a table row, by column
 
     // Colors of text runs: plain text, code and the background of code.
-    struct RunColors { const char* text; const char* code; const char* codeFill; };
+    struct RunColors { std::string_view text; std::string_view code; std::string_view codeFill; };
     static constexpr RunColors kBodyRunColors{ "0.08 0.08 0.08", "0.18 0.18 0.17", "0.94 0.94 0.92" };
     static constexpr RunColors kQuoteRunColors{ "0.18 0.22 0.25", "0.16 0.16 0.15", "0.88 0.89 0.88" };
 
@@ -11209,7 +11208,7 @@ private:
             const double spanWidth = runs.Width(run, size);
             const bool code = (run.style & kStyleCode) != 0;
             if (code) CodeBackground(x, top, spanWidth, lh, runs.Text(run), size, colors.codeFill);
-            const char* color = run.url.empty() ? (code ? colors.code : colors.text) : linkColor;
+            const std::string_view color = run.url.empty() ? (code ? colors.code : colors.text) : linkColor;
             if (run.style & kStyleMark) PaintDecor(x, baseline, spanWidth, size, runs.Text(run), run.style, true, color);
             Text(x, baseline, size, runs.Text(run), StyleFontName(run.style), color, runs.plain);
             if (run.style & kStyleStrike) StrikeThrough(x, baseline, spanWidth, size, runs.Text(run), run.style, color);
@@ -11707,16 +11706,14 @@ private:
     }
 
     // `plain`: the text holds no byte WriteEscapedLiteral would change (HasLiteralSpecial).
-    void Text(double x, double baseline, double size, std::string_view text, const char* fontName,
-        const char* color = "0.08 0.08 0.08", bool plain = false) {
+    void Text(double x, double baseline, double size, std::string_view text, std::string_view fontName,
+        std::string_view color = "0.08 0.08 0.08", bool plain = false) {
         if (text.empty()) return;
-        const size_t colorSize = strlen(color);
-        const size_t fontSize = strlen(fontName);
-        TailWriter out(content, 48 + colorSize + fontSize + kOperandBytes * 3 + text.size() * 2);
+        TailWriter out(content, 48 + color.size() + fontName.size() + kOperandBytes * 3 + text.size() * 2);
         out.Lit("q ");
-        out.Bytes(color, colorSize);
+        out.Bytes(color);
         out.Lit(" rg BT /");
-        out.Bytes(fontName, fontSize);
+        out.Bytes(fontName);
         out.Lit(" ");
         out.Fixed(size);
         out.Lit(" Tf 1 0 0 1 ");
@@ -11728,7 +11725,7 @@ private:
         out.Lit(") Tj ET Q\n");
     }
 
-    void DrawTextLine(double x, double size, std::string_view line, const char* fontName = "F1", const char* color = "0.08 0.08 0.08", [[maybe_unused]] bool mono = false) {
+    void DrawTextLine(double x, double size, std::string_view line, std::string_view fontName = "F1", std::string_view color = "0.08 0.08 0.08", [[maybe_unused]] bool mono = false) {
         double lh = size * 1.35;
         Ensure(lh);
         Text(x, y - size, size, line, fontName, color);
@@ -11789,7 +11786,7 @@ private:
     // heading, at `level`, is noted once its first line has found its page, as `markText` when
     // that is given (the text without its number).
     RAYOMD_MATH_COLD void RenderMathTextLines(const std::string& text, int level, double x, double width, double size,
-        const char* color, bool bold, bool quote, const std::string* markText = nullptr) {
+        std::string_view color, bool bold, bool quote, const std::string* markText = nullptr) {
         math.Clear();
         double lh = size * 1.35;
         bool marked = false;
@@ -11817,9 +11814,9 @@ private:
     // baseline, code backgrounds and link rectangles keep their usual offsets.
     RAYOMD_MATH_COLD void RenderMathLines(const std::vector<std::vector<AsciiSpan>>& lines, double x, double width, bool quote,
         uint8_t align = 0) {
-        const char* textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
-        const char* codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
-        const char* codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
+        const std::string_view textColor = quote ? "0.18 0.22 0.25" : "0.08 0.08 0.08";
+        const std::string_view codeColor = quote ? "0.16 0.16 0.15" : "0.18 0.18 0.17";
+        const std::string_view codeFill = quote ? "0.88 0.89 0.88" : "0.94 0.94 0.92";
         for (const auto& line : lines) {
             MathLineExtent extent = MeasureMathLine(math, line, bodySize, lineHeight);
             double extra = extent.above + extent.below;
@@ -11852,7 +11849,7 @@ private:
                 const bool code = (span.style & kStyleCode) != 0;
                 double spanWidth = MathTextWidth(span.text, bodySize, code, (span.style & kStyleBold) != 0);
                 if (code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, codeFill);
-                const char* color = span.url.empty() ? (code ? codeColor : textColor) : linkColor;
+                const std::string_view color = span.url.empty() ? (code ? codeColor : textColor) : linkColor;
                 if (span.style & kStyleMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
@@ -11901,7 +11898,7 @@ private:
                     const bool code = (span.style & kStyleCode) != 0;
                     double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
                     if (code) CodeBackground(cursor, y, spanWidth, lh, span.text, bodySize, "0.94 0.94 0.92");
-                    const char* color = span.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
+                    const std::string_view color = span.url.empty() ? (code ? "0.18 0.18 0.17" : "0.08 0.08 0.08") : linkColor;
                     if (span.style & kStyleMark) {
                         PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
                     }
@@ -11975,7 +11972,7 @@ private:
                 const bool code = (span.style & kStyleCode) != 0;
                 const double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
                 if (code) CodeBackground(cursor, y, spanWidth, lh, span.text, bodySize, kBodyRunColors.codeFill);
-                const char* color = span.url.empty() ? (code ? kBodyRunColors.code : kBodyRunColors.text) : linkColor;
+                const std::string_view color = span.url.empty() ? (code ? kBodyRunColors.code : kBodyRunColors.text) : linkColor;
                 if (span.style & kStyleMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
@@ -12005,7 +12002,7 @@ private:
     // A GitHub alert: a quote whose bar takes the alert's colour, under the alert's bold title
     // in that colour, which keeps the first line after it on its page.
     RAYOMD_COLD void RenderAlert(const Block& block) {
-        quoteBar = kQuoteBars[block.alert];
+        quoteBar = QuoteBar(block.alert);
         Ensure(lineHeight * 2.0 + 2.0);
         if (!block.text.empty()) {
             RenderCallout(block);
@@ -12066,7 +12063,7 @@ private:
             case BlockType::Quote: {
                 // A quote in an alert has a plain quote's bar, as on GitHub.
                 double savedMargin = margin;
-                const char* savedBar = quoteBar;
+                const std::string_view savedBar = quoteBar;
                 Indent(10.0);
                 quoteBar = plainQuoteBar;
                 RenderQuote(child);
@@ -12150,7 +12147,7 @@ private:
                 const bool code = (span.style & kStyleCode) != 0;
                 double spanWidth = AsciiTextWidth(span.text, bodySize, StyleFont(span.style));
                 if (code) CodeBackground(cursor, y, spanWidth, lineHeight, span.text, bodySize, "0.88 0.89 0.88");
-                const char* color = span.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
+                const std::string_view color = span.url.empty() ? (code ? "0.16 0.16 0.15" : "0.18 0.22 0.25") : linkColor;
                 if (span.style & kStyleMark) PaintDecor(cursor, baseline, spanWidth, bodySize, span.text, span.style, true, color);
                 Text(cursor, baseline, bodySize, span.text, StyleFontName(span.style), color);
                 if (span.style & kStyleStrike) StrikeThrough(cursor, baseline, spanWidth, bodySize, span.text, span.style, color);
@@ -12234,7 +12231,7 @@ private:
     // the descenders of the line before: drawn over them, it hid underscores. Each tile reaches 2
     // points into the next, so that the block is one tint. Out of line: written into RenderCode,
     // it moved GCC's inlining of hot calls elsewhere (+0.3 % on baseline.md).
-    RAYOMD_SHARED void CodeTile(double lh, bool& first, const char* color) {
+    RAYOMD_SHARED void CodeTile(double lh, bool& first, std::string_view color) {
         const size_t pages = pageStarts.size();
         Ensure(lh + 4.0);
         if (pageStarts.size() != pages) first = true;
@@ -12280,11 +12277,11 @@ private:
                 line = std::string_view(codeLine.data(), kept);
                 lineClasses = codeLineClasses.data();
             }
-            const char* tile = Internal::CodeLineTile(end > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
+            const std::string_view tile = Internal::CodeLineTile(end > start ? codeClasses[start] : (uint8_t)Internal::kCodePlain);
             size_t piece = 0;
             do {
                 const size_t count = std::min(perLine, line.size() - piece);
-                CodeTile(lh, first, tile != nullptr ? tile : "0.95 0.95 0.93");
+                CodeTile(lh, first, !tile.empty() ? tile : "0.95 0.95 0.93");
                 PaintCodeRuns(x, y - size, size, line.substr(piece, count), lineClasses + piece);
                 y -= lh;
                 piece += count;
@@ -12301,7 +12298,7 @@ private:
         if (text.empty()) return;
         SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
         if (codeRuns.size() == 1) {
-            Text(x, baseline, size, text, "F3", Internal::CodeColor(codeRuns[0].color).data());
+            Text(x, baseline, size, text, "F3", Internal::CodeColor(codeRuns[0].color));
             return;
         }
         TailWriter out(content, 48 + kOperandBytes * 3 + text.size() * 2 + codeRuns.size() * 32);
@@ -12386,12 +12383,12 @@ private:
     // Text at (x, baseline) in the body size and `fontName`, appended to `out`, a stream of its own;
     // `spacing` is added after each character (Tc).
     RAYOMD_COLD void AppendOverlayText(std::string& out, double x, double baseline, std::string_view text,
-        const char* fontName, const char* color, double spacing) const {
-        TailWriter w(out, 96 + kOperandBytes * 4 + text.size() * 2);
+        std::string_view fontName, std::string_view color, double spacing) const {
+        TailWriter w(out, 96 + color.size() + fontName.size() + kOperandBytes * 4 + text.size() * 2);
         w.Lit("q ");
-        w.Bytes(color, strlen(color));
+        w.Bytes(color);
         w.Lit(" rg BT /");
-        w.Bytes(fontName, strlen(fontName));
+        w.Bytes(fontName);
         w.Lit(" ");
         w.Fixed(bodySize);
         w.Lit(" Tf ");
