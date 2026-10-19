@@ -333,7 +333,12 @@ Important math details (contract: `docs/development/native_math.md`):
 Important image/link details:
 
 - Local image paths are resolved relative to `TinyPdf::BuildOptions::sourcePath`
-  when the caller provides an input file path.
+  when the caller provides an input file path. On POSIX a document's image found inside its root
+  is kept for the process by the joined path and root with the stamp of the file it resolved to
+  (`KeptImagePath` in `vault.cpp`, at most 4,096): a later build resolves it with one `stat`, whose
+  stamp the image caches then take, instead of `realpath`'s one call a path component and a
+  `stat`. Only the same file (size, times, device and inode) keeps the answer: a file that
+  changed, moved, or that the path now reaches through another link is resolved again.
 - URL images are controlled by `BuildOptions::enableUrlImages`.
 - Windows image support uses WinHTTP/WIC through the Win32 build. WIC sees only PNG and JPEG
   files (by their magic bytes) that RayoMD's own readers reject, once, through Microsoft's own
@@ -486,7 +491,8 @@ Important image/link details:
   The notes a document embeds or links to: a root folder (`Vault`), resolution relative to the
   note, the root, then by name (an index built once, bounded), confinement by resolved path, and
   on Windows `DirectPathHasLink` (shared with `tiny_pdf.cpp`'s direct image path); the process's
-  cache of notes, name indexes and resolved roots, and `ResolvedPath`/`IsWithinRoot` on UTF-8
+  cache of notes, name indexes, resolved roots and documents' image paths (`KeptImagePath`), and
+  `ResolvedPath`/`IsWithinRoot` on UTF-8
   paths. Its paths are UTF-8 strings joined and normalized by `src/common/path.h`'s lexical
   functions; on Windows a path that comes from a directory listing stays a wide
   `RayoMd::File::Path` until it is opened (a name with an unpaired surrogate has no UTF-8 form);

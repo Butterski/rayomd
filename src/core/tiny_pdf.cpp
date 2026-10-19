@@ -3057,10 +3057,12 @@ public:
 #endif
 
     // `embedBase`: ImageSource::base, the folder of a note the document embeds that the image is of.
-    bool Resolve(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t embedBase) {
+    // `stamp`: the file's (RayoMd::File::StampOf) as it is found, before anything reads it.
+    bool Resolve(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t embedBase,
+        RayoMd::File::Stamp& stamp) {
         if (src.empty() || IsHttpUrl(src)) return false;
-        if (embedBase != 0) return ResolveEmbedded(src, key, pathUtf8, embedBase);
-        if (allowUnsafe) return ResolveUnsafe(src, key, pathUtf8);
+        if (embedBase != 0) return ResolveEmbedded(src, key, pathUtf8, embedBase, stamp);
+        if (allowUnsafe) return ResolveUnsafe(src, key, pathUtf8, stamp);
         if (!hasSourcePath || IsUnsafeLocalImageSource(src)) return false;
 
         const RayoMd::File::Path& root = SafeRoot();
@@ -3074,12 +3076,25 @@ public:
             if (!chapterRootValid) return false;
             base = &chapterRoot;
         }
+        const RayoMd::File::Path joined = Joined(*base, PathFromUtf8(src));
+#ifndef _WIN32
+        // A file found in this root before, while it is the file found then: one stat, where
+        // resolving it takes one a component of its path (Internal::KeptImagePath).
+        pathUtf8 = Internal::KeptImagePath(joined, root, stamp);
+        if (!pathUtf8.empty()) {
+            key = "file:" + pathUtf8;
+            return true;
+        }
+#endif
         RayoMd::File::Path normalized;
-        if (!TryCanonicalForPolicy(Joined(*base, PathFromUtf8(src)), normalized) ||
-            !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
+        if (!TryCanonicalForPolicy(joined, normalized) || !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
 
         pathUtf8 = PathToUtf8(normalized);
         key = "file:" + pathUtf8;
+        stamp = RayoMd::File::StampOf(normalized);
+#ifndef _WIN32
+        Internal::KeepImagePath(joined, root, pathUtf8, stamp);
+#endif
         return true;
     }
 
@@ -3111,7 +3126,8 @@ private:
     }
 
     // An image of a note the document embeds: from that note's folder, inside the root.
-    RAYOMD_COLD bool ResolveEmbedded(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t base) {
+    RAYOMD_COLD bool ResolveEmbedded(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t base,
+        RayoMd::File::Stamp& stamp) {
         const std::string* folder = Internal::EmbedFolder(base);
         if (folder == nullptr || !hasSourcePath || (!allowUnsafe && IsUnsafeLocalImageSource(src))) return false;
         RayoMd::File::Path normalized;
@@ -3122,6 +3138,7 @@ private:
         }
         pathUtf8 = PathToUtf8(normalized);
         key = "file:" + pathUtf8;
+        stamp = RayoMd::File::StampOf(normalized);
         return true;
     }
 
@@ -3135,7 +3152,7 @@ private:
         return safeRoot;
     }
 
-    bool ResolveUnsafe(const std::string& src, std::string& key, std::string& pathUtf8) {
+    bool ResolveUnsafe(const std::string& src, std::string& key, std::string& pathUtf8, RayoMd::File::Stamp& stamp) {
         RayoMd::File::Path path = PathFromUtf8(src);
         if (!RayoMd::File::IsAbsolute(RayoMd::File::PathView(path)) && hasSourcePath) {
             PrepareBases();
@@ -3146,6 +3163,7 @@ private:
         if (!TryCanonicalForPolicy(path, normalized)) return false;
         pathUtf8 = PathToUtf8(normalized);
         key = "file:" + pathUtf8;
+        stamp = RayoMd::File::StampOf(normalized);
         return true;
     }
 
@@ -4377,6 +4395,8 @@ private:
 
         std::string key;
         std::string localPathUtf8;
+        // A local file is taken from the process's caches only while it is the file they read.
+        RayoMd::File::Stamp stamp;
 #ifdef _WIN32
         WinLocalImageFile localFile;
         bool directLocal = false;
@@ -4390,9 +4410,10 @@ private:
             DirectLocalImageResult direct = localPolicy.TryOpenDirect(src, key, localFile, base);
             if (direct == DirectLocalImageResult::Rejected) return false;
             directLocal = direct == DirectLocalImageResult::Opened;
-            if (!directLocal && !localPolicy.Resolve(src, key, localPathUtf8, base)) return false;
+            if (directLocal) stamp = localFile.stamp;
+            else if (!localPolicy.Resolve(src, key, localPathUtf8, base, stamp)) return false;
 #else
-            if (!localPolicy.Resolve(src, key, localPathUtf8, base)) return false;
+            if (!localPolicy.Resolve(src, key, localPathUtf8, base, stamp)) return false;
 #endif
         }
 
@@ -4403,13 +4424,6 @@ private:
             return true;
         }
 
-        // A local file is taken from the process's caches only while it is the file they read.
-        RayoMd::File::Stamp stamp;
-#ifdef _WIN32
-        if (directLocal) stamp = localFile.stamp;
-        else
-#endif
-        if (!isUrl) stamp = RayoMd::File::StampOf(PathFromUtf8(localPathUtf8));
         std::string keyStorage;
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
         if (sharedImage && !budget.Take(sharedImage->decodedPixels)) return false;

@@ -1216,6 +1216,37 @@ bool CheckEditedMedia() {
             }
         }
     }
+#ifndef _WIN32
+    // A folder on the way to an image that becomes a link elsewhere between two builds: an image it
+    // now leads to outside the document's folder is refused, as a fresh build refuses it, and one
+    // inside shows (the kept resolution, KeptImagePath, holds only for the file it found).
+    if (ok) {
+        const fs::path folder = root / "linked";
+        const fs::path outside = root / "outside";
+        for (const char* name : { "inA", "inB" }) fs::create_directories(folder / name);
+        fs::create_directories(outside);
+        ok = WriteFile(folder / "inA" / "p.png", pngs[0]) && WriteFile(folder / "inB" / "p.png", pngs[1]) &&
+            WriteFile(outside / "p.png", pngs[1]);
+        TinyPdf::PdfOptions options;
+        options.sourcePath = (folder / "doc.md").u8string();
+        const std::string markdown = "![p](sub/p.png)\n";
+        const auto linkTo = [&](const fs::path& target) {
+            std::error_code error;
+            fs::remove(folder / "sub", error);
+            fs::create_directory_symlink(target, folder / "sub", error);
+            return !error;
+        };
+        const auto build = [&](uint32_t failures, std::string& pdf) {
+            const TinyPdf::BuildResult result = TinyPdf::BuildPdf(markdown, options, pdf);
+            return result.Ok() && result.failedImages == failures;
+        };
+        std::string first, refused, other, again;
+        ok = ok && linkTo(folder / "inA") && build(0, first) && build(0, again) && again == first &&
+            linkTo(outside) && build(1, refused) && linkTo(folder / "inB") && build(0, other) && other != first &&
+            linkTo(folder / "inA") && build(0, again) && again == first;
+        if (!ok) std::cerr << "an image behind a folder link that changed was not resolved again" << std::endl;
+    }
+#endif
     fs::remove_all(root);
     return ok;
 }
