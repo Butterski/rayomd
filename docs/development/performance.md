@@ -126,6 +126,8 @@ linked notes) identical.
   does: table-heavy -2.6 % instructions, perf cycles -1.3 %). The Unicode renderer's
   `WrapMathCell`, which runs for every cell of such a table, is no longer cold (optimized for
   size): table-heavy -1.9 % instructions, cycles -2.4 %, ab time -2.2 %, its code +0.7 KB.
+  `RenderMathTable` itself, likewise: table-heavy -1.4 % instructions, cycles -0.4 %, ab time
+  -0.5 %, others +0.01 to +0.08 % (layout), text +4 KB.
 - **The lexer's words end by a bit scan** (`Text::WordEnd`, highlight.cpp): `CodeLexer::Run`'s and
   `Word`'s loops over word bytes ended at a branch that mispredicts at every word; SSE2 now tests
   sixteen bytes (letters, digits, '_', bytes from 0x80) and takes the first other one, while the
@@ -992,6 +994,14 @@ Text and layout:
 - The highlight lexer's first tests of a byte (line feed, space, word) as a `switch` on a table of
   byte kinds (2026-10-19), so that a word not at a line start went straight to `Word`: code-heavy
   +1.7 % instructions, +2.2 to +2.6 % cycles. The tests one after another stay.
+- `MeasureWideWords` without the gather (2026-10-19): the eight widths of a step loaded one at a
+  time from the cache, summed in a register, an uncached one sending the step to the unit loop:
+  cycles even (README -0.0 %, table-heavy -0.3 %, tester-noimg +0.2 %), instructions README
+  +3.1 %, table-heavy +2.8 %, polish +3.0 %. Unlike the standard renderer's sums the wide gather
+  stays.
+- Tables with formulas, cells read once for their byte classes (inline syntax, and control bytes
+  for the math text bytes) instead of `ContainsByteClass` then two `memchr`: table-heavy +0.9 %
+  instructions; a byte loop for the two math text bytes in place of the two `memchr`: +1.4 %.
 - Keeping the default font alive at exit: 1 to 2 % less CPU, no faster by the
   clock (ending the one-shot export with `_Exit`, which skips all of the teardown, is
   kept). Loading the cmap block by block: 10 of 156 faults, a test per glyph

@@ -5909,9 +5909,10 @@ template <typename RendererType>
 struct PageNoteLayout;
 
 // A table that contains formulas. Rows are as tall as their tallest cell; cells
-// without a formula wrap exactly as they do in RenderTable.
+// without a formula wrap exactly as they do in RenderTable. Not cold: its loops run for every
+// cell.
 template <typename RendererType>
-RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block& block) {
+RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& block) {
     const std::vector<std::vector<std::string>>& rows = block.rows;
     if (rows.empty()) return;
     size_t columns = 0;
