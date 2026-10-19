@@ -80,7 +80,8 @@ bool CollectMarkdown(const RayoMd::File::Path& inputDir, const RayoMd::File::Pat
     std::vector<File>& files, std::string& error);
 
 // The threads of a batch: `run(index, buffer)` for every index below `count`, each thread passing an
-// output buffer of its own, on `workers` threads (0: one a CPU, at most 6; never more than `count`).
+// output buffer of its own, on `workers` threads (0: one a CPU the process may run on, at most 6;
+// never more than `count`).
 // With more than one, the threads first take the inputs' sizes between them (`size(index)`,
 // UINT64_MAX for none), as an input over 16 MiB leaves the batch at most two threads and one over
 // 64 MiB one; a stat a file on one thread before was a serial part of every batch.

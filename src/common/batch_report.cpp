@@ -4,6 +4,7 @@
 
 #include "file_io.h"
 #include "text_utils.h"
+#include "thread_object.h"
 
 #include <algorithm>
 #include <atomic>
@@ -194,11 +195,8 @@ bool CollectMarkdown(const RayoMd::File::Path& inputDir, const RayoMd::File::Pat
 void RunJobs(size_t count, unsigned workers, uint64_t (*size)(void*, size_t),
     void (*run)(void*, size_t, std::string&), void* context) {
     if (count == 0) return;
-    if (workers == 0) {
-        workers = std::thread::hardware_concurrency();
-        if (workers == 0) workers = 2;
-        workers = std::min(workers, 6u);
-    }
+    // One a CPU the process may run on (a container's or taskset's, not the machine's), at most 6.
+    if (workers == 0) workers = std::min(RayoMd::Thread::UsableCpus(), 6u);
     workers = static_cast<unsigned>(std::min<size_t>(workers, count));
     std::atomic<size_t> sizing{ 0 };
     std::atomic<size_t> next{ 0 };
