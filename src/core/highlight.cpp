@@ -3,6 +3,7 @@
 #include "highlight.h"
 #include "../common/compiler.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -363,9 +364,11 @@ public:
         Add(base);
     }
 
-    // The word's kind (a class, kDefinerBit), or 0.
+    // The word's kind (a class, kDefinerBit), or 0. Most words of code are no keyword: those
+    // whose first byte and length no listed word has leave without a hash or a probe.
     uint8_t Find(const char* word, size_t length) const {
-        if (length < shortest || length > longest) return 0;
+        const unsigned first = (uint8_t)word[0];
+        if (first >= 128 || ((lengthsByFirst[first] >> std::min<size_t>(length, 31)) & 1) == 0) return 0;
         for (size_t at = Hash(word, length) & mask;; at = (at + 1) & mask) {
             const Slot& slot = slots[at];
             if (slot.length == 0) return 0;
@@ -426,14 +429,17 @@ private:
             if (slots[at].length == length && memcmp(slots[at].word, word, length) == 0) return;   // the first counts
         }
         slots[at] = Slot{ word, (uint8_t)length, kind };
-        if (length < shortest) shortest = length;
-        if (length > longest) longest = length;
+        const unsigned first = (uint8_t)word[0];
+        const uint32_t bit = 1u << std::min<size_t>(length, 31);
+        if (first < 128) lengthsByFirst[first] |= bit;
+        // A caseless language's words are listed in lower case and match either case.
+        if (caseless && first >= 'a' && first <= 'z') lengthsByFirst[first - 32] |= bit;
     }
 
     std::vector<Slot> slots;
     size_t mask = 0;
-    size_t shortest = 255;
-    size_t longest = 0;
+    // Bit n (n below 31; 31 for 31 and longer) of entry c: a listed word of n bytes starts with c.
+    uint32_t lengthsByFirst[128] = {};
     bool caseless;
 };
 
