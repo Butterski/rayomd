@@ -2090,7 +2090,7 @@ struct ScratchSlot {
     bool busy = false;
 };
 ScratchSlot& ThreadScratch() {
-    static thread_local ScratchSlot slot;
+    RAYOMD_THREAD_OBJECT(ScratchSlot, slot);   // never a plain thread_local: MinGW (thread_object.h)
     return slot;
 }
 RAYOMD_COLD void ReleaseRuns(InlineRuns& runs) {
