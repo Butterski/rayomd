@@ -1160,6 +1160,9 @@ Images and compression:
   relative relocations), 17 to 48 µs with `-z noseparate-code`, but the executable loses
   address randomisation, and RayoMD reads untrusted Markdown, SVG and PNG input. Not taken;
   the static edition is the fast-start option.
+- `src/hot.ld` regenerated after the second optimization round (2026-10-19, 999 sections):
+  warm time +0.38 % geomean (code-heavy +1.21 %, table-heavy +1.09 %, notes +1.08 %), fresh
+  exports +0.26 % against the list of `e4bdc54`, which stays.
 
 ## Keeping the release light
 
