@@ -560,6 +560,17 @@ Important image/link details:
   functions kept as the reference and the fallback; core check 99 compares the dispatched,
   the SSE2 and the scalar code with the textbook filters.
 
+- `src/core/word_bounds.h` and `src/core/word_bounds.cpp`
+  The standard renderer's word measuring (`MeasureWords`): every word's first byte and end as
+  positions (a 64-byte step's white-space bits, their edges, flattened a mask byte at a time from a
+  table) and the prefix sums of the AFM advances (gathered eight at a time), so a word's width is
+  `prefix[end] - prefix[begin]`, the same integer as summing it byte by byte. AVX2 where the CPU has
+  it (asked once), else SSE2, else bytes; texts under 16 bytes always bytes. `BreakAsciiWords` and
+  `WrapAsciiInline` in `tiny_pdf.cpp` wrap from them in the thread's `WrapScratch` (page footnotes
+  trade it in `SwapFootBuffers`); texts under `kShortAsciiText` (16) bytes, most table cells, are
+  read a byte at a time there, as the pass costs more than it saves. Core check 133 compares the
+  dispatched, SSE2 and portable code with a byte loop.
+
 - `src/common/file_io.cpp`
   Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows. On POSIX,
   `WriteAll` overwrites an existing file in place and cuts it to size (no `O_TRUNC`): truncating

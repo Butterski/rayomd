@@ -41,6 +41,27 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 2 against 5.2.2: layout and parsing (2026-10-19)
+
+Measured against 5.2.2 (`e4bdc54`), g++ 13.3 Release, Docker; instructions by `ab.sh
+--instructions` (callgrind, one warm build) and perf, time by `ab.sh` (11 rounds, CPU 3, a host
+shared with other jobs). Every step keeps the 2,875 PDFs of the byte check and the 11,980
+feature-on exports (`--black-text`, `--hide-tags`, `--footnotes=page`, PDF/UA, embeds and
+linked notes) identical.
+
+- **Words measured in vectors** (`word_bounds.cpp`, `MeasureWords`): the standard renderer's
+  wrapping no longer finds a word's end by a byte loop that mispredicts at every word. One pass
+  marks the white space of 64 bytes, takes the edges of those bits and writes them as positions a
+  mask byte at a time from a table (eight instructions a byte, no branch on the text); another
+  gathers the AFM advances eight at a time into prefix sums, so a word's width is one subtraction,
+  the same integer the byte loop summed. `BreakAsciiWords` (one copy for every `WrapAsciiWords`,
+  which then only hands its lines out) and `WrapAsciiInline` read the words from there;
+  `WrapAsciiInline` also joins the words that follow in its segment one space apart to its run and
+  the pending text without a call each. Texts under 16 bytes keep the byte loop: a table cell
+  costs more to measure apart than to read. Instructions: essay -19.1 %, native_math -4.4 %,
+  notes -0.0 %, others +0.07 to +0.15 % (README +0.15 %, `tiny_pdf.cpp`'s inlining of a
+  `push_back`); time: essay -13.9 %, native_math -4.9 %. Text +6.0 KB.
+
 ## After 4.6.1: formula fonts, tables, fallback fonts, images, code, static start
 
 Measured together on 2026-10-14 against 4.6.1, both built with g++ 13.3 (Release), CPU 3,
@@ -787,10 +808,9 @@ them, at a change of `RenderTable`'s loop that untagged documents must not pay f
 Placing content where it ends up needs another object order, which changes the
 bytes.
 
-**The ASCII word loop.** `WrapAsciiInline`'s byte loop (a table load, a zero test
-and a bound test per byte) mispredicts once per word: about 40 % of the essay's
-branch misses. Removing that took more instructions than it saved (see *Tried and
-rejected*); a cheaper branch-free sum of a word's advances would be needed.
+**The ASCII word loop.** Done in round 2 (`MeasureWords`, above). Left: texts under 16 bytes
+keep the byte loop, and `WrapAsciiInline` still parses, builds segments and copies run text per
+paragraph.
 
 **The Unicode word loop.** `ScanWideWord` is about 18 instructions a character, bound by its
 chain of `addsd`; `WrapStyledInline` spends about 120 more a word (run bookkeeping, line
@@ -842,6 +862,14 @@ Text and layout:
   essay (the tail switch mispredicts). Words of up to 8 bytes summed without a
   length branch (16 bytes compared, the rest blanked to spaces): -29 % branch
   misses, +11 % instructions, cycles even, L1i misses x2.7.
+- `MeasureWords` (2026-10-19), what did not make it: every text through the vector pass, short
+  ones in a path of their own behind the call (notes +1.36 % instructions: about 100 instructions
+  a table cell against the byte loop's 50; the byte loop below 16 bytes is kept); the byte loop up
+  to 32 bytes (notes +0.59 %) or 8 (+1.22 %); positions written eight at a time by `tzcnt` rounds
+  (5 instructions an edge, about 20 edges a 64-byte step of prose; the table, 8 a mask byte, is
+  kept: essay -1.2 % more); the short loop inside each `WrapAsciiWords` instantiation (four copies,
+  +5 KB, before `BreakAsciiWords`); the measure buffers a member of `AsciiRuns` (the standard
+  renderer's constructor went out of line, +6 KB; they are the thread's `WrapScratch`).
 - Keeping the default font alive at exit: 1 to 2 % less CPU, no faster by the
   clock (ending the one-shot export with `_Exit`, which skips all of the teardown, is
   kept). Loading the cmap block by block: 10 of 156 faults, a test per glyph

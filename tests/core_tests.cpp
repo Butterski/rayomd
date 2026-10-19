@@ -30,6 +30,7 @@
 #include "../src/core/mermaid.h"
 #include "../src/core/print_colors.h"
 #include "../src/core/theme.h"
+#include "../src/core/word_bounds.h"
 
 #include <algorithm>
 #include <array>
@@ -3626,6 +3627,90 @@ bool CheckLatinText() {
     return true;
 }
 
+// MeasureWords and SumAdvances (word_bounds.h) against a byte loop: every length from 0 to 300
+// and some longer, texts of words, runs of each white-space byte, bytes from 0x80 and tables
+// whose entry 256 is not 0 (which the vector sums must drop); the dispatched code (AVX2 where the
+// CPU has it), the SSE2 code and the portable code, a slice of a larger buffer each time, so a
+// read past its end would read other bytes.
+bool CheckWordBounds() {
+    using namespace TinyPdf::Internal;
+    uint32_t seed = 20261019u;
+    auto next = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 16;
+    };
+    std::array<uint16_t, 257> advances{};
+    for (size_t i = 0; i < 256; i++) advances[i] = static_cast<uint16_t>(1 + next() % 999);
+    for (const unsigned char white : { ' ', '\t', '\r', '\n' }) advances[white] = 0;
+    advances[256] = 0xBEEF;
+    std::vector<size_t> lengths;
+    for (size_t n = 0; n <= 300; n++) lengths.push_back(n);
+    lengths.insert(lengths.end(), { 511, 512, 513, 4095, 4096, 70000 });
+    std::string buffer;
+    for (size_t n : lengths) {
+        for (int pattern = 0; pattern < 6; pattern++) {
+            buffer.assign(n + 128, 'x');
+            const size_t offset = 64 + next() % 32;
+            buffer.resize(offset + n + 64, 'y');
+            char* const text = &buffer[offset];
+            for (size_t i = 0; i < n; i++) {
+                const uint32_t r = next();
+                switch (pattern) {
+                case 0: text[i] = r % 6 == 0 ? ' ' : static_cast<char>('a' + r % 26); break;   // words
+                case 1: text[i] = static_cast<char>(" \t\r\n"[r % 4]); break;                 // white only
+                case 2: text[i] = static_cast<char>(r); break;                                // any byte
+                case 3: text[i] = r % 3 == 0 ? static_cast<char>(" \t\r\n"[r % 4]) : static_cast<char>(0x80 | r); break;
+                case 4: text[i] = 'w'; break;                                                 // one word
+                default: text[i] = i % 64 < 32 ? ' ' : 'z'; break;                            // across steps
+                }
+            }
+            std::vector<uint32_t> bounds;
+            std::vector<uint32_t> sums(n + 1, 0);
+            bool inWord = false;
+            for (size_t i = 0; i < n; i++) {
+                const unsigned char c = static_cast<unsigned char>(text[i]);
+                sums[i + 1] = sums[i] + advances[c];
+                const bool white = c == ' ' || c == '\t' || c == '\r' || c == '\n';
+                if (white == inWord) {
+                    bounds.push_back(static_cast<uint32_t>(i));
+                    inWord = !white;
+                }
+            }
+            if (inWord) bounds.push_back(static_cast<uint32_t>(n));
+            const size_t summed = n - next() % (n + 1) / 2;
+            using Measure = size_t (*)(const char*, size_t, size_t, const uint16_t*, uint32_t*, uint32_t*);
+            std::vector<std::pair<const char*, Measure>> variants = { { "dispatched", MeasureWords },
+                { "portable", MeasureWordsPortable } };
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+            if (n >= 16) variants.push_back({ "SSE2", MeasureWordsSse2 });
+#endif
+            for (const auto& variant : variants) {
+                std::vector<uint32_t> gotBounds(n + 1 + kWordBoundsSlack, 0xFFFFFFFFu);
+                std::vector<uint32_t> gotSums(n + 1, 0xFFFFFFFFu);
+                const size_t words = variant.second(text, n, summed, advances.data(), gotSums.data(), gotBounds.data());
+                bool same = words * 2 == bounds.size() && std::equal(bounds.begin(), bounds.end(), gotBounds.begin()) &&
+                    std::equal(sums.begin(), sums.begin() + summed + 1, gotSums.begin());
+                for (size_t i = summed + 1; same && i <= n; i++) same = gotSums[i] == 0xFFFFFFFFu;
+                if (!same) {
+                    std::cerr << "MeasureWords (" << variant.first << ") wrong: " << n << " bytes, pattern " << pattern
+                              << ", " << summed << " summed" << std::endl;
+                    return false;
+                }
+            }
+            std::vector<uint32_t> gotSums(n + 1, 0xFFFFFFFFu);
+            gotSums[0] = 7;
+            SumAdvances(text, n, advances.data(), gotSums.data());
+            for (size_t i = 0; i <= n; i++) {
+                if (gotSums[i] != sums[i] + 7) {
+                    std::cerr << "SumAdvances wrong: " << n << " bytes, pattern " << pattern << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // The PNG row filters against the textbook definitions (PNG specification, section 9): the
 // residuals of every filter, the encoder heuristic's choice (least sum of residual magnitudes as
 // signed bytes, the lowest filter on ties), the dispatched code (AVX2 where the CPU has it) and
@@ -3906,6 +3991,7 @@ int main() {
     if (!CheckSvg()) return 97;
     if (!CheckTaggedPdf()) return 98;
     if (!CheckPngFilters()) return 99;
+    if (!CheckWordBounds()) return 133;
     if (!CheckChangedImageFiles()) return 100;
     if (!CheckCidStrings()) return 101;
     if (!CheckWriteAll()) return 102;

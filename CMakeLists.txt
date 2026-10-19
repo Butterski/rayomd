@@ -266,7 +266,8 @@ set(RAYOMD_CORE_SOURCES
     src/core/page_notes.cpp
     src/core/vault.cpp
     src/core/embeds.cpp
-    src/core/print_colors.cpp)
+    src/core/print_colors.cpp
+    src/core/word_bounds.cpp)
 
 if(NOT WIN32)
     if(RAYOMD_USE_CURL)

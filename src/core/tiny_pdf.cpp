@@ -34,6 +34,7 @@
 #include "tagged.h"
 #include "theme.h"
 #include "vault.h"
+#include "word_bounds.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -7662,10 +7663,12 @@ private:
         out.wide.resize(bytes);     // room for one code unit a byte
         wchar_t* const wideBegin = &out.wide[0];
         wchar_t* wideEnd = wideBegin;
-        out.wideEnds.clear();
-        for (const Internal::InlineRun& span : parsed) {
-            wideEnd = WriteUtf8Wide(wideEnd, out.parsed.Text(span));
-            out.wideEnds.push_back(static_cast<uint32_t>(wideEnd - wideBegin));
+        // Sized to the runs, written by index: only grows from paragraph to paragraph.
+        if (out.wideEnds.size() < parsed.size()) out.wideEnds.resize(parsed.size());
+        uint32_t* const wideEnds = out.wideEnds.data();
+        for (size_t index = 0; index < parsed.size(); index++) {
+            wideEnd = WriteUtf8Wide(wideEnd, out.parsed.Text(parsed[index]));
+            wideEnds[index] = static_cast<uint32_t>(wideEnd - wideBegin);
         }
         out.wide.resize(static_cast<size_t>(wideEnd - wideBegin));
         const std::wstring_view source = out.wide;
@@ -10167,6 +10170,83 @@ static double AsciiTextWidth(std::string_view text, double size, StandardTextFon
     return UnitsToPoints(units, size);
 }
 
+// Texts under this many bytes are wrapped without MeasureWords (AsciiMeasure).
+constexpr size_t kShortAsciiText = 16;
+
+// The words of a text and the AFM units of its bytes (word_bounds.h) for the wrapping below, so
+// a word's width is prefix[end] - prefix[begin]: one buffer, kept from text to text, that only
+// grows.
+struct AsciiMeasure {
+    std::vector<uint32_t> buffer;
+    struct View {
+        uint32_t* prefix;   // prefix[i]: the units of the bytes before i, modulo 2^32
+        uint32_t* bounds;   // each word's first byte and one past its last (MeasureWords)
+    };
+    // Room for a text of n bytes.
+    RAYOMD_HOT_INLINE View Size(size_t n) {
+        if (buffer.size() < n * 2 + 2 + Internal::kWordBoundsSlack) Grow(n);
+        return { buffer.data(), buffer.data() + n + 1 };
+    }
+    RAYOMD_NOINLINE void Grow(size_t n) { buffer.resize(n * 2 + 2 + Internal::kWordBoundsSlack); }
+    size_t Bytes() const { return KeptBytes(buffer) + KeptBytes(breaks); }
+
+    // The lines BreakAsciiWords made: text[start, end), `units` wide.
+    struct Break {
+        uint32_t start;
+        uint32_t end;
+        uint64_t units;
+        bool singleSpaced;      // its words exactly one space apart
+    };
+    std::vector<Break> breaks;
+
+    // MeasureWords (word_bounds.h) of text[0, n) in `advances`; a short text's bytes from `summed`
+    // on are summed too (the caller's sums overwrite them). A text under kShortAsciiText bytes, a
+    // table cell or a short list item, is read here a byte at a time: the vector pass costs more
+    // than it saves there. A byte ends a word where its advance is 0, which every table gives
+    // exactly the white space MeasureWords looks for.
+    static RAYOMD_NOINLINE size_t Words(const char* text, size_t n, size_t summed, const uint16_t* advances,
+        View view) {
+        if (n >= kShortAsciiText) return Internal::MeasureWords(text, n, summed, advances, view.prefix, view.bounds);
+        uint32_t sum = 0;
+        size_t k = 0;
+        bool inWord = false;
+        view.prefix[0] = 0;
+        for (size_t i = 0; i < n; i++) {
+            const unsigned units = advances[static_cast<unsigned char>(text[i])];
+            view.prefix[i + 1] = sum += units;
+            if ((units != 0) != inWord) {
+                view.bounds[k++] = static_cast<uint32_t>(i);
+                inWord = !inWord;
+            }
+        }
+        if (inWord) view.bounds[k++] = static_cast<uint32_t>(n);
+        return k / 2;
+    }
+};
+
+// The AsciiMeasure every ASCII wrap of the thread works in: no renderer holds one, as a member made
+// the standard renderer's constructor too large to inline. Page footnotes, laid out while a
+// paragraph's lines are drawn, trade it for a spare (SwapFootBuffers); a renderer that ends gives
+// one grown past kKeptBufferBytes back to the allocator (ReleaseWrapScratch).
+static AsciiMeasure& WrapScratch() {
+    static thread_local AsciiMeasure scratch;
+    return scratch;
+}
+
+RAYOMD_COLD static void ReleaseWrapScratch() {
+    AsciiMeasure& scratch = WrapScratch();
+    if (scratch.Bytes() <= kKeptBufferBytes) return;
+    std::vector<uint32_t>().swap(scratch.buffer);
+    std::vector<AsciiMeasure::Break>().swap(scratch.breaks);
+}
+
+// AFM units of text[begin, end) in `advances`, for a word too long for the prefix sums.
+RAYOMD_COLD static uint64_t LongWordUnits(const char* text, size_t begin, size_t end, const uint16_t* advances) {
+    uint64_t units = 0;
+    for (size_t at = begin; at < end; at++) units += advances[static_cast<unsigned char>(text[at])];
+    return units;
+}
+
 // Wrapped lines of plain text, kept in one buffer that is reused from cell to cell.
 struct AsciiLines {
     struct Line { uint32_t end; double width; };
@@ -10194,53 +10274,68 @@ static void AppendSingleSpaced(std::string& out, std::string_view text) {
     }
 }
 
-// Greedy word wrap of text without inline syntax, shown in `font`: emit(line, width) receives
-// every line. A line is the piece of `text` from its first to its last word; only when two of
-// its words are not exactly one space apart is it rebuilt in a scratch string. The view
-// passed to emit is valid until emit returns.
-template <typename Emit>
-static void WrapAsciiWords(std::string_view text, double maxWidth, double size, StandardTextFont font, Emit emit) {
-    const StandardWordAdvances& advances = WordAdvances(font);
+// Greedy word wrap of text without inline syntax in `advances`, into measure.breaks: a line is the
+// piece of `text` from its first to its last word, with the units of its words and one space
+// between each two, and whether they are exactly one space apart; a word wider than the line is cut
+// by character. Always at least one line, an empty one for text without a word. A text of
+// kShortAsciiText bytes or more is measured first (MeasureWords); a shorter one, a table cell or a
+// list item, is read a byte at a time: the measuring pass costs more than it saves there. One copy
+// for every WrapAsciiWords.
+static RAYOMD_NOINLINE void BreakAsciiWords(std::string_view text, uint64_t maxUnits, const StandardWordAdvances& advances) {
+    AsciiMeasure& measure = WrapScratch();
     const uint64_t spaceUnits = advances.space;
-    const uint64_t maxUnits = MaxUnits(maxWidth, size);
-    std::string respaced;
+    std::vector<AsciiMeasure::Break>& breaks = measure.breaks;
+    breaks.clear();
     size_t lineStart = 0;
     size_t lineEnd = 0;         // the line is text[lineStart, lineEnd); empty when they are equal
     bool singleSpaced = true;
     uint64_t lineUnits = 0;
-    bool emitted = false;
-    auto flush = [&]() RAYOMD_HOT_LAMBDA {
-        std::string_view line = text.substr(lineStart, lineEnd - lineStart);
-        if (!singleSpaced) {
-            respaced.clear();
-            AppendSingleSpaced(respaced, line);
-            line = respaced;
-        }
-        emit(line, UnitsToPoints(lineUnits, size));
-        emitted = true;
-    };
-    auto startLine = [&](size_t start, size_t end, uint64_t units) {
+    const auto startLine = [&](size_t start, size_t end, uint64_t units) RAYOMD_HOT_LAMBDA {
         lineStart = start;
         lineEnd = end;
         lineUnits = units;
         singleSpaced = true;
     };
 
-    size_t i = 0;
-    while (i < text.size()) {
-        while (i < text.size() && advances.byte[static_cast<unsigned char>(text[i])] == 0) i++;
-        const size_t start = i;
-        uint64_t wordUnits = 0;
-        for (; i < text.size(); i++) {
-            const unsigned charUnits = advances.byte[static_cast<unsigned char>(text[i])];
-            if (charUnits == 0) break;
-            wordUnits += charUnits;
+    const char* const bytes = text.data();
+    const size_t n = text.size();
+    const bool small = n < kShortAsciiText;
+    const uint32_t* prefix = nullptr;
+    const uint32_t* bounds = nullptr;
+    size_t words = 0;
+    if (!small) {
+        const AsciiMeasure::View measured = measure.Size(n);
+        prefix = measured.prefix;
+        bounds = measured.bounds;
+        words = Internal::MeasureWords(bytes, n, n, advances.byte, measured.prefix, measured.bounds);
+    }
+    size_t next = 0;            // a short text's bytes read so far
+    for (size_t word = 0;; word++) {
+        size_t start;
+        size_t i;               // one past the word's last byte
+        uint64_t wordUnits;
+        if (small) {
+            while (next < n && advances.byte[static_cast<unsigned char>(bytes[next])] == 0) next++;
+            if (next == n) break;
+            start = next;
+            wordUnits = 0;
+            for (; next < n; next++) {
+                const unsigned charUnits = advances.byte[static_cast<unsigned char>(bytes[next])];
+                if (charUnits == 0) break;
+                wordUnits += charUnits;
+            }
+            i = next;
+        } else {
+            if (word == words) break;
+            start = bounds[word * 2];
+            i = bounds[word * 2 + 1];
+            wordUnits = i - start < Internal::kPrefixWordBytes ? static_cast<uint32_t>(prefix[i] - prefix[start])
+                : LongWordUnits(bytes, start, i, advances.byte);
         }
-        if (i == start) continue;
         const bool lineEmpty = lineEnd == lineStart;
 
         if (!lineEmpty && lineUnits + spaceUnits + wordUnits <= maxUnits) {
-            if (start - lineEnd != 1 || text[lineEnd] != ' ') singleSpaced = false;
+            if (start - lineEnd != 1 || bytes[lineEnd] != ' ') singleSpaced = false;
             lineEnd = i;
             lineUnits += spaceUnits + wordUnits;
             continue;
@@ -10250,7 +10345,7 @@ static void WrapAsciiWords(std::string_view text, double maxWidth, double size, 
             continue;
         }
         if (!lineEmpty) {
-            flush();
+            breaks.push_back({ static_cast<uint32_t>(lineStart), static_cast<uint32_t>(lineEnd), lineUnits, singleSpaced });
             lineStart = lineEnd = 0;
             lineUnits = 0;
         }
@@ -10263,10 +10358,9 @@ static void WrapAsciiWords(std::string_view text, double maxWidth, double size, 
         size_t partStart = start;
         uint64_t partUnits = 0;
         for (size_t at = start; at < i; at++) {
-            const unsigned charUnits = advances.byte[static_cast<unsigned char>(text[at])];
+            const unsigned charUnits = advances.byte[static_cast<unsigned char>(bytes[at])];
             if (at > partStart && partUnits + charUnits > maxUnits) {
-                emit(text.substr(partStart, at - partStart), UnitsToPoints(partUnits, size));
-                emitted = true;
+                breaks.push_back({ static_cast<uint32_t>(partStart), static_cast<uint32_t>(at), partUnits, true });
                 partStart = at;
                 partUnits = 0;
             }
@@ -10274,8 +10368,32 @@ static void WrapAsciiWords(std::string_view text, double maxWidth, double size, 
         }
         startLine(partStart, i, partUnits);
     }
-    if (lineEnd != lineStart) flush();
-    if (!emitted) emit(std::string_view(""), 0.0);
+    if (lineEnd != lineStart || breaks.empty()) {
+        breaks.push_back({ static_cast<uint32_t>(lineStart), static_cast<uint32_t>(lineEnd), lineUnits, singleSpaced });
+    }
+}
+
+// Greedy word wrap of text without inline syntax, shown in `font` (BreakAsciiWords): emit(line,
+// width) receives every line. Only when two of a line's words are not exactly one space apart is
+// it rebuilt in a scratch string. The view passed to emit is valid until emit returns. emit may
+// lay out other text only with the wrap scratch traded (WrapScratch).
+template <typename Emit>
+static void WrapAsciiWords(std::string_view text, double maxWidth, double size, StandardTextFont font, Emit emit) {
+    BreakAsciiWords(text, MaxUnits(maxWidth, size), WordAdvances(font));
+    const AsciiMeasure& measure = WrapScratch();
+    std::string respaced;
+    const AsciiMeasure::Break* const lines = measure.breaks.data();
+    const size_t count = measure.breaks.size();
+    for (size_t index = 0; index < count; index++) {
+        const AsciiMeasure::Break& line = lines[index];
+        std::string_view shown = text.substr(line.start, line.end - line.start);
+        if (!line.singleSpaced) {
+            respaced.clear();
+            AppendSingleSpaced(respaced, shown);
+            shown = respaced;
+        }
+        emit(shown, UnitsToPoints(line.units, size));
+    }
 }
 
 // Wraps text the parser already stripped. It is read a second time, with math delimiters
@@ -10379,6 +10497,7 @@ public:
         size_t lineBytes = KeptBytes(tableLines);
         for (const AsciiLines& cell : tableLines) lineBytes += cell.Bytes();
         KeptBuffer<std::vector<AsciiLines>>::Give(tableLines, lineBytes);
+        ReleaseWrapScratch();
     }
     StandardRenderer(const StandardRenderer&) = delete;
     StandardRenderer& operator=(const StandardRenderer&) = delete;
@@ -11219,13 +11338,25 @@ private:
         }
     }
 
-    // AFM units of parsed text [begin, end) in the font of `segment`.
-    static uint64_t AsciiUnits(const AsciiSegment& segment, const char* source, size_t begin, size_t end) {
-        const uint16_t* advances = StyleAdvances(segment.style).byte;
+    // AFM units of parsed text [begin, end) from segment `first` on, each byte in the font of its
+    // segment: a word too long for the prefix sums (AsciiMeasure).
+    RAYOMD_COLD static uint64_t LongRunUnits(const AsciiRuns& out, size_t first, size_t begin, size_t end) {
+        const char* const source = out.parsed.text.data();
         uint64_t units = 0;
-        for (size_t at = begin; at < end; at++) units += advances[static_cast<unsigned char>(source[at])];
+        for (size_t piece = first; begin < end; piece++) {
+            const size_t stop = std::min<size_t>(end, out.segments[piece].end);
+            const uint16_t* advances = StyleAdvances(out.segments[piece].style).byte;
+            for (; begin < stop; begin++) units += advances[static_cast<unsigned char>(source[begin])];
+        }
         return units;
     }
+
+    // What PlaceWideAsciiWord hands back: by value, so WrapAsciiInline keeps them in registers.
+    struct AsciiLineState {
+        char* cursor;
+        size_t lineStart;
+        uint64_t lineUnits;
+    };
 
     // Appends `length` bytes of parsed text at `from`, `units` wide, in link and style state
     // `url` and `style`, to the line whose first run is `lineStart`, after a space `spaceUnits`
@@ -11269,8 +11400,8 @@ private:
 
     // A word wider than a whole line, cut by character where the line is full; the last part
     // stays open for the words after it. The line is empty when this is called.
-    RAYOMD_COLD static void PlaceWideAsciiWord(AsciiRuns& out, char*& cursor, size_t& lineStart, uint64_t& lineUnits,
-        size_t firstSegment, size_t wordStart, size_t wordEnd, uint64_t maxUnits) {
+    RAYOMD_COLD static AsciiLineState PlaceWideAsciiWord(AsciiRuns& out, char* cursor, size_t lineStart,
+        uint64_t lineUnits, size_t firstSegment, size_t wordStart, size_t wordEnd, uint64_t maxUnits) {
         char* const textBegin = &out.text[0];
         const char* const source = out.parsed.text.data();
         const char* pending = source;
@@ -11304,6 +11435,7 @@ private:
             begin = end;
         }
         FlushAsciiRunText(cursor, pending, pendingLength);
+        return { cursor, lineStart, lineUnits };
     }
 
     // Wraps `text` into `out` with the line breaks and span boundaries of WrapAsciiLinks. A word
@@ -11358,92 +11490,113 @@ private:
         size_t lineStart = 0;       // index of the first run of the line being filled
         uint64_t lineUnits = 0;
         const uint64_t maxUnits = MaxUnits(width, size);
-        const StandardWordAdvances& regular = WordAdvances(StandardTextFont::Regular);
 
+        // The units of every byte in the font of its segment, and the words, one pass each: a
+        // word is one subtraction, and the loop below takes a line's words without a branch that
+        // mispredicts at each word's end.
         const size_t segmentCount = out.segments.size();
+        const AsciiSegment* const segments = out.segments.data();
         const size_t total = segmentCount != 0 ? out.segments.back().end : 0;
-        size_t at = 0;
-        for (size_t segment = 0; segment < segmentCount; segment++) {
-            const uint8_t styleBits = out.segments[segment].style;
-            const std::string_view url = out.segments[segment].url;
-            const size_t segmentEnd = out.segments[segment].end;
-            if (styleBits & kStyleBreak) {
-                // A <br> is one space: the line ends there, and each one more after it leaves an
-                // empty line.
-                for (; at < segmentEnd; at++) {
-                    if (out.runs.size() == lineStart && out.lineEnds.empty()) continue;
-                    out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
-                    lineStart = out.runs.size();
-                    lineUnits = 0;
+        const AsciiMeasure::View measured = WrapScratch().Size(total);
+        const uint32_t* const prefix = measured.prefix;
+        const size_t firstEnd = segmentCount != 0 ? std::min<size_t>(segments[0].end, total) : 0;
+        uint32_t* const bounds = measured.bounds;
+        const size_t words =
+            AsciiMeasure::Words(source, total, firstEnd, StyleAdvances(segmentCount != 0 ? segments[0].style : 0).byte, measured);
+        bounds[words * 2] = static_cast<uint32_t>(total);   // past the last word: the end
+        for (size_t segment = 1, begin = firstEnd; segment < segmentCount; segment++) {
+            const size_t end = segments[segment].end;
+            if (end <= begin) continue;
+            Internal::SumAdvances(source + begin, end - begin, StyleAdvances(segments[segment].style).byte,
+                measured.prefix + begin);
+            begin = end;
+        }
+
+        size_t segment = 0;
+        size_t segmentStart = 0;    // where the bytes of `segment` begin: the end of the one before
+        for (size_t word = 0;; word++) {
+            // The segment of the word's first byte (past the last word, the end); a <br> passed
+            // on the way is one space: the line ends there, and each one more after it leaves an
+            // empty line.
+            const size_t wordStart = bounds[word * 2];
+            while (segment < segmentCount && segments[segment].end <= wordStart) {
+                if (segments[segment].style & kStyleBreak) {
+                    for (size_t count = segments[segment].end - segmentStart; count != 0; count--) {
+                        if (out.runs.size() == lineStart && out.lineEnds.empty()) continue;
+                        out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+                        lineStart = out.runs.size();
+                        lineUnits = 0;
+                    }
+                }
+                segmentStart = segments[segment].end;
+                segment++;
+            }
+            if (word == words) break;
+            size_t wordEnd = bounds[word * 2 + 1];
+            const AsciiSegment& current = segments[segment];
+            const uint32_t segmentSpace = StyleAdvances(current.style).space;
+            // A word that reaches past the end of its segment goes on in the segments after it:
+            // "[link](u)." and "`code`s" are one word each.
+            const bool pieces = wordEnd > current.end;
+            const uint64_t wordUnits = wordEnd - wordStart < Internal::kPrefixWordBytes
+                ? static_cast<uint32_t>(prefix[wordEnd] - prefix[wordStart]) : LongRunUnits(out, segment, wordStart, wordEnd);
+
+            uint32_t spaceUnits = out.runs.size() != lineStart ? segmentSpace : 0;
+            if (spaceUnits != 0 && lineUnits + spaceUnits + wordUnits > maxUnits) {
+                out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
+                lineStart = out.runs.size();
+                lineUnits = 0;
+                spaceUnits = 0;
+            }
+            if (wordUnits > maxUnits) {
+                FlushAsciiRunText(cursor, pending, pendingLength);
+                const AsciiLineState state = PlaceWideAsciiWord(out, cursor, lineStart, lineUnits, segment, wordStart, wordEnd, maxUnits);
+                cursor = state.cursor;
+                lineStart = state.lineStart;
+                lineUnits = state.lineUnits;
+                continue;
+            }
+            lineUnits += spaceUnits + wordUnits;
+            if (pieces) {
+                // In one piece per segment the word touches.
+                for (size_t piece = segment, begin = wordStart; begin < wordEnd; piece++) {
+                    const AsciiSegment& part = segments[piece];
+                    const size_t end = std::min<size_t>(wordEnd, part.end);
+                    if (end <= begin) continue;
+                    const uint64_t units = end - begin < Internal::kPrefixWordBytes
+                        ? static_cast<uint32_t>(prefix[end] - prefix[begin]) : LongRunUnits(out, piece, begin, end);
+                    AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, part.style, part.url,
+                        source + begin, end - begin, static_cast<uint32_t>(units), spaceUnits);
+                    spaceUnits = 0;
+                    begin = end;
                 }
                 continue;
             }
-            const StandardWordAdvances& font = StyleAdvances(styleBits);
-            const uint16_t* const advances = font.byte;
-            const uint32_t segmentSpace = font.space;
-            while (at < segmentEnd) {
-                if (regular.byte[static_cast<unsigned char>(source[at])] == 0) {
-                    at++;
-                    continue;
-                }
-                const size_t wordStart = at;
-                uint64_t wordUnits = 0;
-                for (; at < segmentEnd; at++) {
-                    const unsigned charUnits = advances[static_cast<unsigned char>(source[at])];
-                    if (charUnits == 0) break;
-                    wordUnits += charUnits;
-                }
-                // A word that reaches the end of its segment goes on in the segments after it
-                // unless white space follows: "[link](u)." and "`code`s" are one word each.
-                size_t lastSegment = segment;
-                if (at == segmentEnd && at < total && regular.byte[static_cast<unsigned char>(source[at])] != 0) {
-                    do {
-                        const AsciiSegment& next = out.segments[++lastSegment];
-                        const uint16_t* const nextAdvances = StyleAdvances(next.style).byte;
-                        for (; at < next.end; at++) {
-                            const unsigned charUnits = nextAdvances[static_cast<unsigned char>(source[at])];
-                            if (charUnits == 0) break;
-                            wordUnits += charUnits;
-                        }
-                    } while (at == out.segments[lastSegment].end && at < total &&
-                        regular.byte[static_cast<unsigned char>(source[at])] != 0);
-                }
-                const size_t wordEnd = at;
-
-                uint32_t spaceUnits = out.runs.size() != lineStart ? segmentSpace : 0;
-                if (spaceUnits != 0 && lineUnits + spaceUnits + wordUnits > maxUnits) {
-                    out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
-                    lineStart = out.runs.size();
-                    lineUnits = 0;
-                    spaceUnits = 0;
-                }
-                if (wordUnits > maxUnits) {
-                    FlushAsciiRunText(cursor, pending, pendingLength);
-                    PlaceWideAsciiWord(out, cursor, lineStart, lineUnits, segment, wordStart, wordEnd, maxUnits);
-                } else {
-                    lineUnits += spaceUnits + wordUnits;
-                    if (lastSegment == segment) {
-                        AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, styleBits, url,
-                            source + wordStart, wordEnd - wordStart, static_cast<uint32_t>(wordUnits), spaceUnits);
-                    } else {
-                        // In one piece per segment the word touches.
-                        for (size_t piece = segment, begin = wordStart; begin < wordEnd; piece++) {
-                            const AsciiSegment& part = out.segments[piece];
-                            const size_t end = std::min<size_t>(wordEnd, part.end);
-                            if (end == begin) continue;
-                            AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, part.style,
-                                part.url, source + begin, end - begin,
-                                static_cast<uint32_t>(AsciiUnits(part, source, begin, end)), spaceUnits);
-                            spaceUnits = 0;
-                            begin = end;
-                        }
-                    }
-                }
-                if (lastSegment != segment) {
-                    segment = lastSegment - 1;  // go on in the segment that holds the end of the word
+            AppendAsciiRunText(out, textBegin, cursor, pending, pendingLength, lineStart, current.style, current.url,
+                source + wordStart, wordEnd - wordStart, static_cast<uint32_t>(wordUnits), spaceUnits);
+            // The words after it in its segment one space apart, as long as they fit, join its
+            // run and the pending text, which ends where the word does.
+            const size_t joinedFrom = wordEnd;
+            const size_t segmentEnd = current.end;
+            uint64_t joinedUnits = 0;
+            while (word + 1 < words) {
+                const size_t nextStart = bounds[word * 2 + 2];
+                const size_t nextEnd = bounds[word * 2 + 3];
+                if (nextStart != wordEnd + 1 || nextEnd > segmentEnd || source[wordEnd] != ' ' ||
+                    nextEnd - nextStart >= Internal::kPrefixWordBytes) {
                     break;
                 }
+                const uint64_t units = segmentSpace + static_cast<uint64_t>(static_cast<uint32_t>(prefix[nextEnd] - prefix[nextStart]));
+                if (lineUnits + units > maxUnits) break;
+                lineUnits += units;
+                joinedUnits += units;
+                wordEnd = nextEnd;
+                word++;
             }
+            AsciiRun& run = out.runs.back();
+            run.widthUnits += static_cast<uint32_t>(joinedUnits);
+            run.end += static_cast<uint32_t>(wordEnd - joinedFrom);
+            pendingLength += wordEnd - joinedFrom;
         }
 
         FlushAsciiRunText(cursor, pending, pendingLength);
@@ -11747,9 +11900,8 @@ private:
             return;
         }
         MarkHeading(level, block.text, size * 1.35);
-        ForEachWrappedAsciiLine(block.text, pageW - margin * 2.0, size, StandardTextFont::Bold, [&](std::string_view line, double) {
-            DrawTextLine(margin, size, line, "F2", headingColor);
-        });
+        ForEachWrappedAsciiLine(block.text, pageW - margin * 2.0, size, StandardTextFont::Bold,
+            [&](std::string_view line, double) { DrawTextLine(margin, size, line, "F2", headingColor); });
         y -= level <= 2 ? 8.0 : 5.0;
     }
 
@@ -11770,9 +11922,10 @@ private:
             RenderMathTextLines(shown, level, margin, width, size, headingColor, true, false, &block.text);
         } else {
             MarkHeading(level, block.text, size * 1.35);
-            ForEachWrappedAsciiLine(shown, width, size, StandardTextFont::Bold, [&](std::string_view line, double used) {
-                DrawTextLine(margin + AlignShift(width, used, block.align), size, line, "F2", headingColor);
-            });
+            ForEachWrappedAsciiLine(shown, width, size, StandardTextFont::Bold,
+                [&](std::string_view line, double used) {
+                    DrawTextLine(margin + AlignShift(width, used, block.align), size, line, "F2", headingColor);
+                });
         }
         y -= level <= 2 ? 8.0 : 5.0;
     }
@@ -12640,9 +12793,13 @@ private:
         std::vector<uint8_t> codeLineClasses;
         std::vector<CodeRun> codeRuns;
         RunLinkUrls runLinkUrls;
+        AsciiMeasure wrap;
     };
     RAYOMD_COLD void SwapFootBuffers() {
         FootBuffers& spare = pageNotes->spare;
+        AsciiMeasure& wrap = WrapScratch();
+        wrap.buffer.swap(spare.wrap.buffer);
+        wrap.breaks.swap(spare.wrap.breaks);
         paragraphRuns.Swap(KeptBuffer<AsciiRuns>::Held());
         tableCells.swap(KeptBuffer<std::vector<AsciiRuns>>::Held());
         tableLines.swap(KeptBuffer<std::vector<AsciiLines>>::Held());
