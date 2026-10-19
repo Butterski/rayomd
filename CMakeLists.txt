@@ -213,6 +213,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/core/page_notes.cpp
         src/core/vault.cpp
         src/core/embeds.cpp
+        src/common/path.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
     # RayoMD's streams at half the code; the inflater, 1.5 % slower than -O3 at 8.9 KB of code
@@ -282,7 +283,8 @@ set(RAYOMD_CORE_SOURCES
     src/core/vault.cpp
     src/core/embeds.cpp
     src/core/print_colors.cpp
-    src/core/word_bounds.cpp)
+    src/core/word_bounds.cpp
+    src/common/path.cpp)
 
 if(NOT WIN32)
     if(RAYOMD_USE_CURL)
