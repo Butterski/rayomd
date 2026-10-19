@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// The release CLI's C++ exception runtime (dynamic Linux and MinGW): a throw ends the process.
+// The release CLI's C++ exception runtime (Linux, dynamic and static, and MinGW): a throw ends
+// the process.
 // RayoMD is built without exceptions and catches nothing, so what libstdc++ throws
 // (std::bad_alloc, a std::length_error) ended it before, after unwinding the stack for a handler
 // that is not there. That search linked libgcc's unwinder, the personality routine and the
@@ -112,6 +113,26 @@ void __verbose_terminate_handler() {
 extern "C" void _Unwind_Resume(_Unwind_Exception*) {
     Fail("terminate called without an active exception\n");
 }
+
+#ifndef __SEH__
+// The static build: glibc's libc.a has cleanup regions in its stdio, run by C's personality
+// routine during an unwind, and unwinds a thread in pthread_exit and at a cancellation
+// (_Unwind_ForcedUnwind, _Unwind_GetCFA). RayoMD neither exits nor cancels a thread and nothing
+// unwinds, so with these libgcc's unwinder (libgcc_eh.a) and the unwind tables it would read are
+// not linked there either. The dynamic build's libc unwinds through libgcc_s.so, which it loads.
+extern "C" _Unwind_Reason_Code __gcc_personality_v0(int, _Unwind_Action, _Unwind_Exception_Class,
+    _Unwind_Exception*, _Unwind_Context*) {
+    Fail("terminate called without an active exception\n");
+}
+
+extern "C" _Unwind_Reason_Code _Unwind_ForcedUnwind(_Unwind_Exception*, _Unwind_Stop_Fn, void*) {
+    Fail("rayomd: a thread exited or was cancelled, which needs an unwinder\n");
+}
+
+extern "C" _Unwind_Word _Unwind_GetCFA(_Unwind_Context*) {
+    Fail("rayomd: a thread exited or was cancelled, which needs an unwinder\n");
+}
+#endif
 
 #ifndef RAYOMD_ENABLE_PROFILING
 // As libstdc++'s operator new: the new-handler is called while malloc fails; without one, null.

@@ -51,11 +51,11 @@ release runners make them. Every build keeps the 2,875 PDFs of the byte check an
 |---|---:|---:|---:|
 | Linux dynamic, GCC 13 | 1,268,376 | 1,251,992 | -16,384 |
 | Linux dynamic, GCC 11 | 1,280,600 | 1,264,216 | -16,384 |
-| Linux static, GCC 13 | 2,285,824 | 2,269,440 | -16,384 |
-| Linux static, GCC 11 | 2,378,336 | 2,361,952 | -16,384 |
+| Linux static, GCC 13 | 2,285,824 | 2,162,448 | -123,376 |
+| Linux static, GCC 11 | 2,378,336 | 2,254,960 | -123,376 |
 | `rayomd.exe` (MinGW GCC 13) | 1,473,536 | 1,457,152 | -16,384 |
 | `linux-x64.tar.gz` | 727,256 | 692,879 | -34,377 |
-| `linux-x64-static.tar.gz` | 1,178,766 | 1,122,006 | -56,760 |
+| `linux-x64-static.tar.gz` | 1,178,766 | 1,078,377 | -100,389 |
 | `windows-x64.zip` (5.2.5: zlib level 6 standing for Compress-Archive) | 820,313 | 782,953 | -37,360 |
 
 - **No padding before jump targets** (`-falign-jumps=1`, GCC release builds): GCC pads a target
@@ -72,6 +72,15 @@ release runners make them. Every build keeps the 2,875 PDFs of the byte check an
   formats. 5.2.5's binaries: `linux-x64.tar.gz` -29,404, the static archive -52,109, the zip
   -32,498 (against zlib level 6). `pigz` is installed with the build dependencies; 7-Zip is part
   of the Windows runner image.
+- **No unwinder in the static build either** (`no_unwind.cpp` for static Release builds too, with
+  `no_unwind.ld`): glibc's libc.a calls three more unwinder entry points, C's personality routine
+  for stdio's cleanup regions and `_Unwind_ForcedUnwind`/`_Unwind_GetCFA` for a thread's exit or
+  cancellation, which RayoMD never does; defined there (they abort), libgcc_eh.a is not linked,
+  and the unwind tables of libc.a and libstdc++ go: static GCC 13 2,269,440 -> 2,162,448, GCC 11
+  2,361,952 -> 2,254,960 (-106,992 each). `static_frames.cpp`, which kept GCC 13's unwinder from
+  sorting the FDEs at start, is gone with the unwinder. Static byte check 2,875: 0 differ; ctest
+  and `verify_cli.py` pass; fresh exports (`fresh.sh`, 128 runs, against the static build of the
+  step before) geomean -1.26 %.
 
 Measured and not taken:
 
