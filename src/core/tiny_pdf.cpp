@@ -8162,14 +8162,11 @@ private:
         DrawRect(margin, y + 2.0, 3.0, height, quoteBar);
     }
 
-    void DrawStrokeRect(double x, double top, double w, double h, std::string_view color = "0.72 0.72 0.72", double lineWidth = 0.45) {
+    // A table cell's border, grey and 0.45 wide (the only stroked rectangle), as literal operands.
+    void DrawStrokeRect(double x, double top, double w, double h) {
         if (tags != nullptr) tags->Artifact();
-        TailWriter out(content, 24 + color.size() + kOperandBytes * 5);
-        out.Lit("q ");
-        out.Bytes(color);
-        out.Lit(" RG ");
-        out.Fixed(lineWidth);
-        out.Lit(" w ");
+        TailWriter out(content, 40 + kOperandBytes * 4);
+        out.Lit("q 0.72 0.72 0.72 RG 0.45 w ");
         out.Fixed(x);
         out.Lit(" ");
         out.Fixed(top - h);
