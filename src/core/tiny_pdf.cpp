@@ -180,12 +180,55 @@ static std::wstring Utf8ToWide(std::string_view str) {
 }
 
 // Writes Utf8ToWide(str) at `out`, which has room for one code unit per byte, and returns the end.
-static RAYOMD_HOT_INLINE wchar_t* WriteUtf8Wide(wchar_t* out, std::string_view str) {
-    // ASCII, the usual case for a span or a table cell, needs no decoder.
+// ASCII, the usual case for a span or a table cell, needs no decoder: its bytes are tested and
+// widened in one pass, 16 a step in SSE2 (the last step widens the text's last 16 bytes again).
+// Text with a byte from 0x80 is decoded from its start. Out of line: one copy for its callers.
+static RAYOMD_NOINLINE wchar_t* WriteUtf8Wide(wchar_t* out, std::string_view str) {
+    const char* const bytes = str.data();
+    const size_t n = str.size();
+#if FAST_MD_SSE2
+    if (n >= 16) {
+        const __m128i zero = _mm_setzero_si128();
+        const auto widen = [out, zero](size_t at, __m128i chunk) RAYOMD_HOT_LAMBDA {
+            const __m128i low = _mm_unpacklo_epi8(chunk, zero);
+            const __m128i high = _mm_unpackhi_epi8(chunk, zero);
+            __m128i* const to = reinterpret_cast<__m128i*>(out + at);
+            if constexpr (sizeof(wchar_t) == 4) {
+                _mm_storeu_si128(to, _mm_unpacklo_epi16(low, zero));
+                _mm_storeu_si128(to + 1, _mm_unpackhi_epi16(low, zero));
+                _mm_storeu_si128(to + 2, _mm_unpacklo_epi16(high, zero));
+                _mm_storeu_si128(to + 3, _mm_unpackhi_epi16(high, zero));
+            } else {
+                _mm_storeu_si128(to, low);
+                _mm_storeu_si128(to + 1, high);
+            }
+        };
+        size_t at = 0;
+        bool ascii = true;
+        for (; at + 16 <= n; at += 16) {
+            const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes + at));
+            if (_mm_movemask_epi8(chunk) != 0) {
+                ascii = false;
+                break;
+            }
+            widen(at, chunk);
+        }
+        if (ascii && at < n) {
+            const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes + n - 16));
+            ascii = _mm_movemask_epi8(chunk) == 0;
+            if (ascii) widen(n - 16, chunk);
+        }
+        if (ascii) return out + n;
+    } else if (IsAllAscii(str)) {
+        for (size_t at = 0; at < n; at++) out[at] = (wchar_t)(unsigned char)bytes[at];
+        return out + n;
+    }
+#else
     if (IsAllAscii(str)) {
         for (const char ch : str) *out++ = (wchar_t)(unsigned char)ch;
         return out;
     }
+#endif
 #if defined(_WIN32)
     const int len = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), out, (int)str.size());
     return out + (len > 0 ? len : 0);
