@@ -54,9 +54,9 @@ release runners make them. Every build keeps the 2,875 PDFs of the byte check an
 | Linux static, GCC 13 | 2,285,824 | 2,269,440 | -16,384 |
 | Linux static, GCC 11 | 2,378,336 | 2,361,952 | -16,384 |
 | `rayomd.exe` (MinGW GCC 13) | 1,473,536 | 1,457,152 | -16,384 |
-| `linux-x64.tar.gz` (`tar -z`) | 727,256 | 722,037 | -5,219 |
-| `linux-x64-static.tar.gz` (`tar -z`) | 1,178,766 | 1,173,356 | -5,410 |
-| `windows-x64.zip` (zlib level 6 standing for Compress-Archive) | 820,313 | 814,821 | -5,492 |
+| `linux-x64.tar.gz` | 727,256 | 692,879 | -34,377 |
+| `linux-x64-static.tar.gz` | 1,178,766 | 1,122,006 | -56,760 |
+| `windows-x64.zip` (5.2.5: zlib level 6 standing for Compress-Archive) | 820,313 | 782,953 | -37,360 |
 
 - **No padding before jump targets** (`-falign-jumps=1`, GCC release builds): GCC pads a target
   only jumps reach to 16 bytes, up to 10 bytes of no-ops after an unconditional jump, which never
@@ -67,6 +67,11 @@ release runners make them. Every build keeps the 2,875 PDFs of the byte check an
   the other way -0.02 %, notes.md +1.3 and +1.8 % in both; with functions and loops pinned
   (`-falign-functions=64 -falign-loops=32` on both) geomean -0.12 % and notes.md -0.42 %: the
   release build's notes.md difference is placement. Fresh exports (`fresh.sh`, 128 runs) -0.01 %.
+- **Release archives at zopfli strength** (`release.yml`): `tar | pigz -11` instead of `tar -z`
+  (gzip -6) and 7-Zip's `-tzip -mx=9 -mfb=258 -mpass=15` instead of `Compress-Archive`; the same
+  formats. 5.2.5's binaries: `linux-x64.tar.gz` -29,404, the static archive -52,109, the zip
+  -32,498 (against zlib level 6). `pigz` is installed with the build dependencies; 7-Zip is part
+  of the Windows runner image.
 
 Measured and not taken:
 

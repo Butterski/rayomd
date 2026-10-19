@@ -946,8 +946,11 @@ GitHub CI entry points:
   and UBSan, and runs each target 60 s on the seed corpus; any crash, timeout or OOM fails it.
 
 - `.github/workflows/release.yml`
-  Packages default Linux, curl-enabled Linux, and Windows artifacts for matching version
-  bumps, `v<VERSION>` tags, and manual dispatch; keep `VERSION` and package contents aligned.
+  Packages default Linux, curl-enabled Linux, static Linux and Windows artifacts for matching
+  version bumps, `v<VERSION>` tags, and manual dispatch; keep `VERSION` and package contents
+  aligned. Archives are packed at zopfli strength (`pigz -11` for the `.tar.gz`, 7-Zip's
+  `-mx=9 -mpass=15` for the `.zip`): the same formats, 29 to 52 KB smaller each than `tar -z`
+  and zlib's level 6 (5.2.5's binaries).
 
 ## Benchmark And Documentation Rules
 
