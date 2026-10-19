@@ -7520,7 +7520,7 @@ private:
     // A table cell inside a table with formulas. A cell without a formula wraps
     // exactly as RenderTable wraps it.
     RAYOMD_MATH_COLD void WrapMathCell(const std::string& cell, double width, double size, bool bold, MathCell& out) {
-        out.formula = cell.find(Internal::kMathTextOpen) != std::string::npos;
+        out.formula = memchr(cell.data(), Internal::kMathTextOpen, cell.size()) != nullptr;
         if (out.formula) {
             out.formulaLines = WrapMathText(cell, width, size, bold);
             return;
@@ -11418,7 +11418,7 @@ private:
     // A table cell inside a table with formulas. A cell without a formula wraps
     // exactly as RenderTable wraps it.
     RAYOMD_MATH_COLD void WrapMathCell(const std::string& cell, double width, double size, bool bold, MathCell& out) {
-        out.formula = cell.find(Internal::kMathTextOpen) != std::string::npos;
+        out.formula = memchr(cell.data(), Internal::kMathTextOpen, cell.size()) != nullptr;
         if (out.formula) out.formulaLines = WrapMathText(cell, width, size, bold);
         else WrapAsciiTextCold(cell, width, size, bold ? StandardTextFont::Bold : StandardTextFont::Regular, out.plain);
     }

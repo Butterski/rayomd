@@ -462,7 +462,9 @@ static void AppendWithoutMathTextBytes(std::string& out, std::string_view text) 
 }
 
 static void EraseMathTextBytes(std::string& text) {
-    if (text.find(kMathTextOpen) == std::string::npos && text.find(kMathTextClose) == std::string::npos) return;
+    if (memchr(text.data(), kMathTextOpen, text.size()) == nullptr && memchr(text.data(), kMathTextClose, text.size()) == nullptr) {
+        return;   // memchr itself: std::string::find is a call of its own that calls it
+    }
     std::string cleaned;
     cleaned.reserve(text.size());
     AppendWithoutMathTextBytes(cleaned, text);
