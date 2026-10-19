@@ -137,6 +137,7 @@ void LayoutTape::Clear() {
     marks.clear();
     content.clear();
     pageStarts.clear();
+    pageGaps.clear();
     pageLinks.clear();
     headings.clear();
     ids.clear();
@@ -380,9 +381,15 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
     // Counts in this build: those of the last moved by what each had before the run.
     const auto move = [](uint32_t value, uint32_t from, uint32_t to) { return static_cast<uint32_t>(value - from + to); };
     const size_t pageShift = static_cast<size_t>(now.page) - before.page;   // modulo 2^64, as the pages' indices
-    target.content->append(old.content, before.content, after.content - before.content);
+    // The content page by page, each new page after the gap this build leaves before it (the last
+    // build's gaps are not copied), so that it lies where BuildInto wants it.
+    std::string& content = *target.content;
+    const auto pageEnd = [&](size_t page) { return old.pageStarts[page + 1] - old.pageGaps[page + 1]; };
+    content.append(old.content, before.content, (after.page == before.page ? after.content : pageEnd(before.page)) - before.content);
     for (size_t page = before.page + 1; page <= after.page; page++) {
-        target.pageStarts->push_back(old.pageStarts[page] - before.content + now.content);
+        target.startPage(content, *target.pageStarts);
+        const size_t stop = page == after.page ? after.content : pageEnd(page);
+        content.append(old.content, old.pageStarts[page], stop - old.pageStarts[page]);
     }
     std::vector<std::vector<LinkRect>>& links = *target.pageLinks;
     const std::vector<LinkRect>& firstLinks = old.pageLinks[before.page];
@@ -437,7 +444,8 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
         }
         if (at == oldTo) break;
         LayoutMark moved = mark;
-        moved.content = mark.content - before.content + now.content;
+        moved.content = mark.page == before.page ? mark.content - before.content + now.content :
+            mark.content - old.pageStarts[mark.page] + (*target.pageStarts)[mark.page + pageShift];
         moved.page = static_cast<uint32_t>(mark.page + pageShift);
         if (mark.page == before.page) moved.links = move(mark.links, before.links, now.links);
         moved.headings = move(mark.headings, before.headings, now.headings);
@@ -484,6 +492,8 @@ void SessionLayout::EndLayout(const LayoutTarget& target, std::vector<SourceBloc
     LayoutTape& tape = *recording;
     tape.content.assign(*target.content);
     tape.pageStarts = *target.pageStarts;
+    tape.pageGaps.resize(tape.pageStarts.size());
+    for (size_t page = 0; page < tape.pageGaps.size(); page++) tape.pageGaps[page] = target.gapBefore(page);
     for (size_t set = 0; set < kLayoutCidSets; set++) {
         const LayoutCids& cids = target.cids[set];
         if (cids.set != nullptr) tape.cids[set] = cids.recorded(cids.set);
@@ -574,8 +584,6 @@ public:
 };
 
 namespace {
-
-thread_local DocumentParse* g_documentParse = nullptr;
 
 // The first byte at which `a` and `b`, of `size` bytes each, differ; `size` for none.
 size_t FirstDifference(const char* a, const char* b, size_t size) {
@@ -735,14 +743,12 @@ size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, const std::stri
 
 } // namespace
 
-DocumentParse* TakeDocumentParse() {
-    DocumentParse* const parse = g_documentParse;
-    g_documentParse = nullptr;
-    return parse;
-}
-
 std::vector<uint8_t>& DocumentKinds(DocumentParse& parse) {
     return parse.next.kinds;
+}
+
+std::vector<unsigned char>& DocumentSuppressed(DocumentParse& parse) {
+    return parse.next.suppressed;
 }
 
 size_t BeginDocumentParse(DocumentParse& parse, const std::string& text, const std::vector<std::string_view>& lines,
@@ -789,8 +795,8 @@ bool DocumentPass(DocumentParse& parse, size_t line, size_t blocks, bool closed)
     return false;
 }
 
-std::vector<Block> EndDocumentParse(DocumentParse& parse, std::vector<Block>& blocks, size_t line,
-    std::vector<unsigned char>& suppressed, ReferenceDefinitions& definitions, const FootnoteParse& notes) {
+void EndDocumentParse(DocumentParse& parse, std::vector<Block>& blocks, size_t line, ReferenceDefinitions& definitions,
+    const FootnoteParse& notes) {
     (void)line;
     parse.ended = true;
     SessionBlocks& store = parse.store;
@@ -799,7 +805,6 @@ std::vector<Block> EndDocumentParse(DocumentParse& parse, std::vector<Block>& bl
     size_t left = parse.budget != nullptr ? parse.budget->referenceBytes : 0;
     // Footnotes number the blocks after the loop, and a marker becomes a Contents block.
     const bool clean = notes.bodies.empty() && !notes.pending;
-    next.suppressed.swap(suppressed);
     next.definitions.swap(definitions);
     if (!parse.reuse) {
         store.displaced.swap(store.blocks);
@@ -810,7 +815,7 @@ std::vector<Block> EndDocumentParse(DocumentParse& parse, std::vector<Block>& bl
         next.referenceLeft = left;
         parse.valid = clean && !MayHoldMarker(blocks, 0, blocks.size());
         store.made = blocks.size();
-        return std::move(blocks);
+        return;
     }
     const ParseRecord& last = *parse.last;
     const bool resynced = parse.resync != SIZE_MAX;
@@ -825,7 +830,8 @@ std::vector<Block> EndDocumentParse(DocumentParse& parse, std::vector<Block>& bl
     // the end), so that each pass used what it would in a whole parse of its text.
     if (left < kMaxReferenceDestinationBytes) {
         parse.failed = true;
-        return {};
+        blocks.clear();
+        return;
     }
     const size_t oldEnd = resynced ? last.passes[parse.resync].blocks : last.blocks;
     const size_t front = parse.front;
@@ -870,7 +876,7 @@ std::vector<Block> EndDocumentParse(DocumentParse& parse, std::vector<Block>& bl
     next.referenceBytes = total;
     next.referenceLeft = left;
     parse.valid = clean && !MayHoldMarker(out, front, front + newWindow);
-    return out;
+    blocks.swap(out);
 }
 
 bool SessionParses() {
@@ -885,7 +891,7 @@ std::vector<Block> ParseInSession(const std::string& markdown, Footnotes& footno
     store.spliced = false;
     store.displaced.clear();
     const auto parse = [&](DocumentParse* document) {
-        g_documentParse = document;
+        SetDocumentParse(document);
         std::vector<Block> blocks;
         if (ObsidianDialect()) {
             std::string converted;
@@ -896,7 +902,7 @@ std::vector<Block> ParseInSession(const std::string& markdown, Footnotes& footno
             const ParseBudget budget(markdown.size());
             blocks = ParseWithFootnotes(markdown, footnotes);
         }
-        g_documentParse = nullptr;
+        SetDocumentParse(nullptr);
         // A parse that did not reach the document's loop (embeds) keeps none of the last build's.
         if (document == nullptr || !document->ended) {
             store.displaced.swap(store.blocks);

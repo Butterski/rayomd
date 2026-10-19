@@ -41,6 +41,38 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 5: incremental builds, parse reuse (opt5/session, 2026-10-19)
+
+Against 5.2.5's `BuildSession` (`ac59556`), g++ 13.3 Release, the engine library linked into the lab
+harness; `perf stat -e cycles:u,instructions:u` on CPU 4 of a shared host, session builds alternating
+the text before and after the edit (the GUI's case), medians of 3 paired rounds. Design and rules:
+`incremental_builds.md` ("Parse reuse").
+
+- **The parse goes on from the last build's** (`ParseInSession`, `session_parse.h`): every line is
+  still split and classified, then the block loop starts at the last pass before the edit that the
+  last parse began at an Empty line with no HTML element open, and stops at the first pass after it
+  that the last parse began on the same line of the unchanged end in the same state; the blocks
+  before and after are the last build's, kept in place (`SessionBlocks`). A letter typed in the
+  middle: t700 273 -> 176 Mcycles (x1.55, instructions 262 -> 144 M), t70 27.4 -> 15.9 (x1.73),
+  e50 45.9 -> 34.8 (x1.32). The parse of t700 went from 149 M to 52 M instructions (callgrind), of
+  which classifying every line is now most.
+- **Page gaps in session builds** (`LeaveGaps` no longer off; `Replay` copies page by page, each new
+  page after `StartPageContent`'s gap, `LayoutTape::pageGaps`): `BuildInto` moves nothing on a
+  replayed layout. On top of the parse step: t700 x1.11 cycles, t70 x1.09, e50 x1.04, instructions
+  even (callgrind counted the move as 24 M a build of t700).
+- Open: in the engine library (`RAYOMD_BUILD_SESSION`), ordinary `BuildPdf` builds measure +0.41 to
+  +0.78 % instructions on notes, README and tester-noimg (callgrind, `--bench` of a CLI compiled
+  with the define): the hooks in `ParseMarkdownImpl` stop GCC inlining a string destructor
+  (`_M_dispose` out of line) and grow its self cost. Tried without effect: keeping NRVO of
+  `blocks` (a `return` of the hook's result had broken it: that part, a vector move, is gone), no
+  local for the session (thread-local tested at each hook), the definition marks passed as a
+  pointer, the reserve unconditional. With the hooks folded away the difference is +0.01 %. The
+  command line is unaffected: its `.text` is byte-identical to 5.2.5's.
+- Not done: classifying only the changed lines (record the line classes and the definition and
+  formula passes' states, about 35 M instructions of t700's session build), the tape's content
+  spliced instead of copied (`EndLayout`'s copy, 25 MB for t700), the first keystroke's fresh tape
+  (reserve from the last), footnote documents (replay the body when the numbers are equal).
+
 ## Round 4: package size (opt4/size2, 2026-10-19)
 
 Against 5.2.4 (`27cf8f0`): the dynamic Linux binary of GCC 13 (GCC 11, the release runners', in

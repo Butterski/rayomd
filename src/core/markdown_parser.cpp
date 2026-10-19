@@ -1209,23 +1209,39 @@ static RAYOMD_NOINLINE void FenceText(const std::vector<std::string_view>& lines
 #ifdef RAYOMD_BUILD_SESSION
 static_assert(static_cast<uint8_t>(LineKind::Empty) == kEmptyLineKind, "session_parse.h's kEmptyLineKind");
 
+// The document parse of a session's build on this thread (session_parse.h), which its depth-0
+// ParseMarkdownImpl takes up; null for every other parse. Tested where it is used, and the
+// definition marks handed over as a pointer: a local for it, or `suppressed` passed by reference
+// (its address escaping), moved GCC's code in ParseMarkdownImpl (+0.6 to 0.8 % on notes.md).
+static thread_local DocumentParse* tSessionDocument = nullptr;
+
+void SetDocumentParse(DocumentParse* parse) {
+    tSessionDocument = parse;
+}
+
 // BeginDocumentParse with the lines' classes, out of the block parser's way.
-RAYOMD_COLD static size_t BeginInSession(DocumentParse& session, const std::string& markdown,
-    const std::vector<std::string_view>& lines, const std::vector<LineInfo>& infos,
-    const std::vector<unsigned char>& suppressed, const ReferenceDefinitions& definitions, bool definitionSyntax,
-    size_t first, const FootnoteParse* notes) {
+RAYOMD_COLD static size_t BeginInSession(const std::string& markdown, const std::vector<std::string_view>& lines,
+    const std::vector<LineInfo>& infos, const unsigned char* suppressed, size_t suppressedSize,
+    const ReferenceDefinitions& definitions, bool definitionSyntax, size_t first, const FootnoteParse* notes) {
+    DocumentParse& session = *tSessionDocument;
     std::vector<uint8_t>& kinds = DocumentKinds(session);
     kinds.resize(infos.size());
     for (size_t index = 0; index < infos.size(); index++) kinds[index] = static_cast<uint8_t>(infos[index].kind);
-    return BeginDocumentParse(session, markdown, lines, suppressed, definitions, definitionSyntax, first, *notes);
+    std::vector<unsigned char>& marks = DocumentSuppressed(session);
+    marks.assign(suppressed, suppressed + suppressedSize);
+    return BeginDocumentParse(session, markdown, lines, marks, definitions, definitionSyntax, first, *notes);
+}
+
+// EndDocumentParse, after which the thread has no document parse.
+RAYOMD_COLD static void EndInSession(std::vector<Block>& blocks, size_t line, ReferenceDefinitions& definitions,
+    const FootnoteParse* notes) {
+    DocumentParse& session = *tSessionDocument;
+    tSessionDocument = nullptr;
+    EndDocumentParse(session, blocks, line, definitions, *notes);
 }
 #endif
 
 static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth, FootnoteParse* notes) {
-#ifdef RAYOMD_BUILD_SESSION
-    // A BuildSession's document (session_parse.h): its parse goes on from the last build's.
-    DocumentParse* const session = depth == 0 && notes != nullptr ? TakeDocumentParse() : nullptr;
-#endif
     LevelLines level(depth);
     std::vector<std::string_view>& lines = level.lines;
     std::vector<LineInfo>& infos = level.infos;
@@ -1297,7 +1313,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
 
     std::vector<Block> blocks;
 #ifdef RAYOMD_BUILD_SESSION
-    if (session == nullptr)
+    if (depth != 0 || tSessionDocument == nullptr)
 #endif
     blocks.reserve(std::min(lines.size(), std::max<size_t>(8, lines.size() / 2)));
     size_t i = 0;
@@ -1316,8 +1332,8 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
         if (frontMatterEnd < infos.size()) i = frontMatterEnd + 1;
     }
 #ifdef RAYOMD_BUILD_SESSION
-    if (session != nullptr) {
-        i = BeginInSession(*session, markdown, lines, infos, suppressed, definitions, definitionSyntax, i, notes);
+    if (depth == 0 && tSessionDocument != nullptr) {
+        i = BeginInSession(markdown, lines, infos, suppressed.data(), suppressed.size(), definitions, definitionSyntax, i, notes);
     }
 #endif
 
@@ -1330,7 +1346,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             passStart = i;
         }
 #ifdef RAYOMD_BUILD_SESSION
-        if (session != nullptr && DocumentPass(*session, i, blocks.size(), htmlState.depth == 0)) break;
+        if (depth == 0 && tSessionDocument != nullptr && DocumentPass(*tSessionDocument, i, blocks.size(), htmlState.depth == 0)) break;
 #endif
         if (isSuppressed(i)) {
             i++;
@@ -1717,7 +1733,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
     if (stampLines && blocks.size() > stamped) StampSourceLines(blocks, stamped, passStart, i);
     if (!alignments.empty()) Html::ApplyAlignments(blocks, alignments);
 #ifdef RAYOMD_BUILD_SESSION
-    if (session != nullptr) return EndDocumentParse(*session, blocks, i, suppressed, definitions, *notes);
+    if (depth == 0 && tSessionDocument != nullptr) EndInSession(blocks, i, definitions, notes);
 #endif
 
     return blocks;

@@ -157,6 +157,7 @@ struct LayoutTape {
     std::vector<LayoutMark> marks;           // before each block, and after the last
     std::string content;
     std::vector<size_t> pageStarts;
+    std::vector<size_t> pageGaps;            // the gap left before each page's content (LeaveGaps)
     std::vector<std::vector<LinkRect>> pageLinks;
     std::vector<HeadingMark> headings;
     std::vector<HeadingMark> ids;
@@ -203,6 +204,10 @@ struct LayoutTarget {
     MathGlyphUse* glyphs = nullptr;
     LayoutCids cids[kLayoutCidSets];
     bool probing = false;                         // Renderer::ProbeFallback
+    // A new page's content starts after the gap the builder leaves (tiny_pdf.cpp's StartPageContent),
+    // `gapBefore(page)` bytes long.
+    void (*startPage)(std::string& content, std::vector<size_t>& pageStarts) = nullptr;
+    size_t (*gapBefore)(size_t page) = nullptr;
 };
 
 class LayoutSession;

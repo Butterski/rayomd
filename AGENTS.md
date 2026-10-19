@@ -301,6 +301,13 @@ where a run starts, set where it ends), a new field of `Block` into `SameBlock`,
 on beyond its block and that state (as footnote numbers, image names, PDF/UA's tags) must make the
 session lay those blocks out, or the whole document. Ordinary builds pay one test of the thread's
 session per build. Core check 137 (`tests/session_tests.inc`) compares random edits built both ways.
+A session's parse goes on from its last build's (`ParseInSession`, `src/core/session_parse.h`): the
+builders parse into the session's blocks (`BuildBlocks`), and `ParseMarkdownImpl`'s block loop notes
+its state at every pass (`DocumentPass`). New state that the loop carries from one pass to the next
+(beyond the line, the open HTML elements and the ParseBudget) must go into `ParsePass` and be compared
+there, and anything a later pass reads before its own line, or a transformation of the blocks after
+the parse, must make the session parse whole; the hooks in `ParseMarkdownImpl` move GCC's code in
+the engine library (performance.md, round 5), so keep them as few as they are.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and

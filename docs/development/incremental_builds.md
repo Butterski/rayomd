@@ -75,7 +75,11 @@ the assembly) is the one `BuildPdf` takes. The builders lay a session's blocks o
 with `RAYOMD_BUILD_SESSION`, which the `rayomd_engine` library and the core tests set: the command lines
 make no session and carry none of it (unused, MinGW's linker kept 24 KB of it in `rayomd.exe`).
 
-1. **Parse** the whole text, as `BuildPdf` does.
+1. **Parse** (`ParseInSession`, `session_parse.h`): every line is split and classified as in a
+   fresh parse (with `ResolveMathOpeners` and the definitions' pass, so the link definitions and
+   each line's class are those of the whole text); then the block loop goes on from the last
+   build's parse (see "Parse reuse" below) and the blocks it did not make are the last build's,
+   kept in the session's vector (`SessionBlocks`), which the builders parse into.
 2. **Compare** the blocks with the tape's (`SessionLayout::Begin`, `Same`): the common prefix of
    equal blocks (`SameBlock`: every field the renderers read, not the source lines; a table of
    contents only with equal entries, a numbered heading only with its number). The blocks after it
@@ -97,7 +101,9 @@ make no session and carry none of it (unused, MinGW's linker kept 24 KB of it in
    offsets the tape noted), the CIDs and glyphs the run recorded added in their order, the counts
    advanced, and the renderer's state set to the tape's after the run. A run ends before a block
    whose keep would read past it (a heading or anchor last) unless both documents end there.
-   Other blocks are laid out by `RenderBlockRange`, the loop `RenderBlocks` itself runs.
+   Other blocks are laid out by `RenderBlockRange`, the loop `RenderBlocks` itself runs. A replayed
+   run's content is copied page by page, each new page after the gap the builder leaves before it
+   (`StartPageContent`, `LayoutTape::pageGaps`), so `BuildInto` moves nothing.
 4. **Keep the content** after the layout (`EndLayout`), before `--compress` or `--black-text`
    change it, with the CIDs in the order they were recorded (the font sorts them later).
 5. **Assemble** the whole PDF as `BuildPdf` does, then **commit** the tape (`Commit`): it takes the
@@ -184,17 +190,34 @@ engine library), every fixture within +0.06 %. The command line, built without t
 (`RenderBlocks`' loop is `RenderBlockRange`, which a session calls a block at a time), the file the
 same size.
 
+## Parse reuse
+
+The block loop of `ParseMarkdownImpl` reads lines only forward: a pass reads at most the line after
+the one it ends at, and nothing after an Empty line that ends it. What it carries from one pass to
+the next is the line, the HTML elements left open (`Html::HtmlState`, and with it the alignments of
+the blocks after them) and the `ParseBudget`; the link definitions, the lines' classes and the
+footnotes come from passes over the whole text before it. So a session's parse (`ParsePass` noted
+at every pass start, `ParseRecord`) starts its loop at the last pass the last parse began at an
+Empty line before the first line whose bytes, class or definition mark differ, with no element
+open, and stops at the first pass it begins on a line of the unchanged end (same bytes, class and
+mark to the end of the text) where the last parse began one with no element open and the same
+padded cells used; the blocks before and after are the last parse's (their source lines moved by
+the lines the edit added). It parses whole (and keeps nothing for the next) when the definitions,
+the front matter's end, `WinAnsiReferences`, the padded cells at the loop's start or "]:" differ,
+the last text had footnotes or a paragraph that may be a contents marker, the build has `--toc`,
+`--page-break-before` or embeds; and when a reference could have been refused (less than
+`kMaxReferenceDestinationBytes` of the reference budget left at either parse's end, so that every
+pass used what it would in a whole parse). A cancelled or failed build puts the last build's
+blocks back (`UndoParse`). An opened fence changes every line's class after it until the fences
+pair as before: the loop runs to there.
+
 ## Next
 
-- **Parse reuse**, now half of an incremental build of t700 and a third of e50's: the parser's top
-  level would have to note its state at block starts (the line, the blocks made, `HtmlState`, the
-  table-cell budget) and take the tape's blocks before the first changed line and after the point
-  where its state and every line's classes (with `ResolveMathOpeners`' pairs and the definitions
-  pre-pass's fences) are those of the last parse. A window parsed as a document of its own is not
-  provably the full parse's: link definitions, open HTML elements, `$$` pairs and fences cross it.
+- **Classify only the changed lines**: now about a quarter of t700's session build; the line
+  classes, `ResolveMathOpeners`' and the definitions pass' states would have to be noted per line
+  and resumed.
 - **Fewer copies**: the tape could keep the replayed content where it lies and splice in the new
-  bytes, and a session's replay could leave `BuildInto`'s gaps (opt4/hot4's page gaps) so the
-  content is not moved again.
+  bytes (`EndLayout` copies all of it), and a first edit's fresh tape could reserve the last's sizes.
 - **Footnotes**: the body could be replayed when the numbers are the same, with the references'
   first places (`NoteMarks::references`) noted per block; the notes section laid out again.
 - **Images**: an image block could be replayed when the registry, asked again, gives the same image

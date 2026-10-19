@@ -27,11 +27,13 @@ constexpr uint8_t kEmptyLineKind = 1;
 // One document-level parse of a session's build (build_session.cpp).
 class DocumentParse;
 
-// The document parse ParseInSession set up for the next depth-0 ParseMarkdownImpl on this thread,
-// which takes it; null for every other parse.
-DocumentParse* TakeDocumentParse();
-// Where the document's parse takes `kinds` (the class of each line after ResolveMathOpeners).
+// Sets the document parse of this thread's next depth-0 ParseMarkdownImpl with footnotes, the
+// document's (markdown_parser.cpp); null for none. Its block loop's end clears it.
+void SetDocumentParse(DocumentParse* parse);
+// Where the document's parse takes `kinds` (the class of each line after ResolveMathOpeners) and the
+// lines the definitions take (its `suppressed`).
 std::vector<uint8_t>& DocumentKinds(DocumentParse& parse);
+std::vector<unsigned char>& DocumentSuppressed(DocumentParse& parse);
 // The parser has read the document's lines (`lines`, views of `text`), their classes (in
 // DocumentKinds), the lines the definitions take (`suppressed`, empty without "]:"), the link
 // definitions and the footnotes defined at the top level; its block loop would start at line
@@ -41,14 +43,14 @@ std::vector<uint8_t>& DocumentKinds(DocumentParse& parse);
 size_t BeginDocumentParse(DocumentParse& parse, const std::string& text, const std::vector<std::string_view>& lines,
     const std::vector<unsigned char>& suppressed, const ReferenceDefinitions& definitions, bool definitionSyntax,
     size_t first, const FootnoteParse& notes);
-// The block loop starts a pass at line `line` with `blocks` blocks made since it began, no HTML
-// element open when `closed`: true when the last build's parse was there in the same state, so that
-// the blocks from there on are that parse's (the loop stops).
+// The document's block loop starts a pass at line `line` with `blocks` blocks made since it began,
+// no HTML element open when `closed`: true when the last build's parse was there in the same
+// state, so that the blocks from there on are that parse's (the loop stops).
 bool DocumentPass(DocumentParse& parse, size_t line, size_t blocks, bool closed);
-// The loop ended at line `line` with `blocks`: the document's blocks, those of the last build's
-// parse spliced around them. Takes `suppressed` and `definitions` for the next build's comparison.
-std::vector<Block> EndDocumentParse(DocumentParse& parse, std::vector<Block>& blocks, size_t line,
-    std::vector<unsigned char>& suppressed, ReferenceDefinitions& definitions, const FootnoteParse& notes);
+// The document's loop ended at line `line` with `blocks`: the document's blocks, in place, those of
+// the last build's parse spliced around them. Takes `definitions` for the next build's comparison.
+void EndDocumentParse(DocumentParse& parse, std::vector<Block>& blocks, size_t line, ReferenceDefinitions& definitions,
+    const FootnoteParse& notes);
 
 // Whether a BuildSession's build runs on this thread, whose ParseMarkdown is ParseInSession.
 bool SessionParses();
