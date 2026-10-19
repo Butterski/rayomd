@@ -3209,9 +3209,13 @@ static std::wstring ResolveRedirectUrl(const std::wstring& currentUrl, const std
     if ((parts.nScheme == INTERNET_SCHEME_HTTP && parts.nPort != 80) ||
         (parts.nScheme == INTERNET_SCHEME_HTTPS && parts.nPort != 443)) {
         base += L":";
-        wchar_t port[16];
-        swprintf(port, 16, L"%u", (unsigned)parts.nPort);
-        base += port;
+        // Digits by hand: swprintf links MinGW's printf (its pformat and gdtoa, 15 KB).
+        wchar_t digits[5];
+        size_t count = 0;
+        for (unsigned value = parts.nPort; value != 0 || count == 0; value /= 10) {
+            digits[count++] = static_cast<wchar_t>(L'0' + value % 10);
+        }
+        while (count != 0) base += digits[--count];
     }
 
     if (location[0] == L'/') return base + location;

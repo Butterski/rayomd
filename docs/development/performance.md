@@ -41,6 +41,34 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 4: package size (opt4/size2, 2026-10-19)
+
+Against 5.2.4 (`27cf8f0`): the dynamic Linux binary of GCC 13 (GCC 11, the release runners', in
+brackets) and MinGW's `rayomd.exe` (GCC 13, as the cross image builds it). Every step keeps the
+2,875 PDFs of the byte check, the 5,936 and 6,044 feature-on exports, and under Wine the 359
+documents in eight option sets of the MinGW build; `ab.sh --instructions` within +0.3 % on every
+fixture.
+
+- **libstdc++'s throws abort where they are made** (`src/cli/std_throws.cpp`): its one archive
+  member of `std::__throw_*` linked the exception classes, their copy-on-write strings and
+  `std::system_error`'s categories; the MinGW CLI also takes `no_unwind.cpp` (no SEH unwinder or
+  personality routine). Linux -12,312 (-8,216), `rayomd.exe` -51,712.
+- **MinGW's string members one by one** (`src/win32/string_instances.cpp`): GNU ld keeps every PE
+  function that has SEH unwind data (its scripts `KEEP` `.pdata`, binutils 2.47 too), so
+  `--gc-sections` drops no function of an object once one of its members is linked: the first
+  `std::string` member called linked all of `string-inst.o` and `wstring-inst.o`. Explicit
+  instantiations of the members the program calls: `rayomd.exe` -31,744. With a gc that drops
+  unreferenced functions with their unwind data, `rayomd.exe` would hold 30 KB less code, nearly
+  all of it those members (measured with `.pdata` and `.xdata` discarded).
+- **No printf on MinGW**: libstdc++ makes MinGW's `snprintf` and `swprintf` libmingwex's own
+  (`__mingw_pformat`, with gdtoa for `%f`); the batch report's numbers (an exact `%.3f`,
+  `AppendThousandths`, the same text as glibc's and MinGW's printf on 6.6 million doubles), the
+  temporary file's name and a URL's port are written by hand. `rayomd.exe` -30,208.
+- **The icon's PNG images recompressed** (zopflipng, the same pixels): `rayomd.exe` -7,168.
+
+Against 5.2.4: the dynamic Linux binary 1,276,592 -> 1,264,280 (GCC 11 1,280,624 -> 1,272,408),
+`rayomd.exe` 1,588,224 -> 1,467,392.
+
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
 Measured against 5.2.3 (`f28d74b`), g++ 13.3 Release, Docker; instructions by `ab.sh
@@ -700,6 +728,16 @@ tag names and Mermaid tables without relocations -4,096; the PNG filters' scalar
 no unwinder (`src/cli/no_unwind.cpp`, `no_unwind.ld`) -57,976: 1,292,976 (1,297,008). MinGW: no
 `-fdata-sections` (zero statics written as data) -316 KB, no string streams in the CLI -65 KB.
 
+MinGW's `src/win32/string_instances.cpp` lists the `std::string` and `std::wstring` members the
+program calls out of line. After code changes, or with another GCC, list them and compare (a
+member missing there links libstdc++'s whole `string-inst.o` again, 15 to 18 KB, without an
+error; the link map then shows it under "Archive member included"):
+
+```sh
+for f in $(find build/mingw/CMakeFiles/rayomd.dir -name '*.obj' ! -name 'string_instances*'); do
+  x86_64-w64-mingw32-nm -u -C "$f"; done | grep -E 'U std::__cxx11::basic_string<(char|wchar_t),[^(]*>::' | sort -u
+```
+
 Keep the candidate comparable to its baseline: same suite, seed, style, margin,
 image mode, worker count, compiler, build type, and storage. Linux release
 claims should use native/ext4 storage. Label WSL `/mnt/*` results explicitly.
@@ -850,6 +888,16 @@ case found so far took seconds for 40,000 to 200,000 openers).
 
 Findings that could make RayoMD faster later, with the evidence and the reason
 they were not taken yet. Add to this list when a change turns one up.
+
+**Never-run functions of `tiny_pdf.cpp` at -Os (size, round 4).** 140 KB of `tiny_pdf.cpp`'s
+out-of-line functions run in none of the eight warm fixtures (callgrind, default options): books,
+embeds, themes, image decoding and caches, the font folder scan, PDF/A and PDF/UA paths, math
+tables. Compiled at `-Os` the same functions are about 83 KB (`DecodeImageBytes` 9.8 -> 5.5 KB,
+`PdfImage`'s move 4.2 -> 0.4 KB, `BuildBookPdf` 3.1 -> 1.3 KB), plus 25 KB of functions `-Os`
+inlines elsewhere: an estimated 30 to 50 KB off both platforms. Agreed form: an attribute on whole
+cold functions only (cold, noinline, `optimize("Os")`), checked for GCC 11, with `symdiff.py` on
+the hot functions and the `ab.sh` gate; not measured yet. Image decoding and math tables are per
+pixel and per cell: keep them out.
 
 **`std::filesystem` out of the build (size).** MinGW's libstdc++.a has no per-function
 sections, and its `fs_path.o` and `fs_ops.o` pull the codecvt facets, the locale's
@@ -1220,6 +1268,23 @@ Binary size (2026-10-19):
 - Not measured, excluded by their requirements: `-Oz` for the `-Os` units (GCC 12 or newer; the
   release runners' GCC 11 rejects it) and `-z pack-relative-relocs` (DT_RELR, most of the 11 KB
   of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release runs on).
+- UCRT's own `strtod` for the page size and margin options on MinGW UCRT builds (round 4,
+  2026-10-19): libstdc++ makes `strtod` libmingwex's `__mingw_strtod` (its gdtoa), 18,944 bytes of
+  a UCRT-linked `rayomd.exe`. mingw-w64's headers call UCRT's conforming to C99, but Wine's
+  ucrtbase reads no hexadecimal (`0x10x0x20in` became an error), and whether Microsoft's rounds
+  every long decimal as gdtoa does could not be checked here: a page size could then change a PDF.
+- Linkers with identical code folding (round 4, 2026-10-19; GCC 13 and 11, dynamic): gold
+  (binutils 2.42) has no `INSERT` for `src/hot.ld` and keeps the unwind tables `no_unwind.ld`
+  drops, 1,276,952 bytes against bfd's 1,264,280; its `--icf=safe` and `--icf=all` -16,384 from
+  there, and gold is deprecated upstream. lld 14 (GCC 11): `--icf=safe` folds nothing (GCC emits
+  no address-significance tables), `--icf=all` -14,944, with `hot.ld` and `no_unwind.ld`
+  1,255,576 against bfd's 1,272,408, but `all` may fold functions whose addresses are compared.
+  The release links with GNU ld; not switched.
+
+Considered and declined for security (round 4, 2026-10-19; RayoMD reads untrusted Markdown, SVG,
+PNG and fonts): Ubuntu's GCC hardening defaults stay. `-fno-stack-protector` (canaries in 715
+functions) would take 32,768 bytes off the dynamic GCC 13 binary, `-fcf-protection=return` (no
+IBT `endbr64`, SHSTK marking kept) 8,264.
 
 Note embeds and linked notes (2026-10-19; per embed against the same text inline, perf stat,
 100 embeds of small notes: warm 10.2 K instructions and 4.9 µs before the process's note cache,

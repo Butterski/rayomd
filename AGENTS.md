@@ -708,18 +708,29 @@ Important image/link details:
   runs once a run (`--bench` and `--serve` only call the engine in their loops).
 
 - `src/cli/terminate.cpp`
-  Both command lines' terminate handler in place of libstdc++'s (whose demangler is 61 KB):
-  the same message with the exception's type as the ABI names it (`St9bad_alloc`), then
-  `abort()`. Not part of the engine library.
+  The terminate handler in place of libstdc++'s (whose demangler is 61 KB) where `no_unwind.cpp`
+  is not linked (the static Linux build, Debug builds): the same message with the exception's
+  type as the ABI names it (`St9bad_alloc`), then `abort()`. Not part of the engine library.
+
+- `src/cli/std_throws.cpp`
+  The release CLIs' `std::__throw_*` functions (Linux and MinGW): the error libstdc++ would throw
+  is reported as the terminate handler reported it and the process aborts. libstdc++ defines them
+  all in one archive member, which links the exception classes, the copy-on-write string of their
+  `what()` and `std::system_error`'s categories (45 KB of `rayomd.exe`, 6 KB on Linux). Every one
+  the program refers to must be defined there: a missing one links the member, and the link then
+  fails on the duplicate definitions.
 
 - `src/cli/no_unwind.cpp` and `src/cli/no_unwind.ld`
-  The dynamic Linux release CLI's exception runtime: `__cxa_throw` prints the terminate
-  message and aborts, so libgcc's unwinder, the personality routine and the emergency exception
-  pool (a 73 KB allocation at every start) are never linked, and the linker script drops the
-  unwind and exception tables nothing reads then (58 KB in all). The nothrow `operator new`
-  is its own (malloc and the new-handler, null when both fail; libstdc++'s caught a throw).
-  Release builds only, as only they compile without exceptions; not the static build, whose
-  libc.a links the unwinder for thread cancellation, nor the engine library.
+  The exception runtime of the dynamic Linux and the MinGW release CLIs: `__cxa_throw` prints
+  the terminate message and aborts, so libgcc's unwinder, the personality routine (`_v0`, on
+  MinGW `_seh0`) and the emergency exception pool (a 73 KB allocation at every start) are never
+  linked, and on Linux the linker script drops the unwind and exception tables nothing reads then
+  (58 KB in all). Its terminate handler takes `terminate.cpp`'s place (no exception is ever
+  active). The nothrow `operator new` is its own (malloc and the new-handler, null when both
+  fail; libstdc++'s caught a throw). Release builds only, as only they compile without
+  exceptions; not the static Linux build, whose libc.a links the unwinder for thread
+  cancellation, nor the engine library. Windows keeps its SEH tables (`.pdata`, `.xdata`): the
+  x64 ABI requires them of every function that calls or saves registers.
 
 - `src/win32/main_windows_cli.cpp`
   The Windows CLI: wide paths, `CommandLineToArgvW`, a console program. Its modes mirror
@@ -731,6 +742,13 @@ Important image/link details:
   System DLLs loaded on first use in GNU and Clang builds: `delay_load.cpp` for
   `CommandLineToArgvW`; `delay_image_*.cpp` for the engine's own Windows imports (OLE,
   Winsock, WinHTTP), which are also linked into `rayomd_engine`.
+
+- `src/win32/string_instances.cpp`
+  The `std::string`/`std::wstring` members the MinGW CLI (GCC) calls out of line, instantiated one
+  by one: GNU ld keeps every PE function that has SEH unwind data, so libstdc++'s whole
+  `string-inst.o` and `wstring-inst.o` were linked for the first member called (32 KB). A member
+  not listed links them again without an error; `performance.md` ("Regression and size gate") has
+  the command that lists what the objects call.
 
 - `src/win32/rayomd.rc`
   Windows manifest and app icon resources. Keep resource changes localized here.
@@ -926,14 +944,20 @@ GitHub CI entry points:
   starts 0.6 ms sooner and warm builds run 5 % faster than with `libstdc++.so`. Keep
   iostreams (`<iostream>`, `<fstream>`, `<sstream>`) out of the CLI and the core: they
   pull about 460 KB of locale and stream code into that build. Use `RayoMd::File` and
-  C stdio.
+  C stdio, without the printf family (`snprintf`, `swprintf`, `fprintf`) in code the Windows build
+  links: libstdc++ makes them MinGW's own formatter and gdtoa (30 KB of `rayomd.exe`); write
+  numbers with `std::to_chars` or by hand (`std::to_string` and `to_chars` for integers are
+  header code). `strtod` links MinGW's too (gdtoa's parser, 17 KB): it is in `export_options.cpp`
+  only.
 - Release builds compile without exceptions and RTTI on Windows and Linux, on Linux also without
   unwind tables (221 KB of the 1.74 MB binary): never write `try`, `catch`, `throw`,
   `dynamic_cast` or `typeid`. An
   exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before: in the
-  dynamic Linux release at the throw, without unwinding (`src/cli/no_unwind.cpp`), elsewhere
-  through the command lines' own terminate handler (`src/cli/terminate.cpp`, the only
-  `-fexceptions` file; libstdc++'s links the C++ demangler, 61 KB). A call-graph profile with
+  release command lines where it is made (`src/cli/std_throws.cpp` for libstdc++'s
+  `std::__throw_*`, `src/cli/no_unwind.cpp`'s `__cxa_throw` for the rest, dynamic Linux and MinGW),
+  in the static Linux build through the command lines' own terminate handler
+  (`src/cli/terminate.cpp`, the only `-fexceptions` file; libstdc++'s links the C++ demangler,
+  61 KB). A call-graph profile with
   `perf --call-graph=dwarf` needs a build with `-fasynchronous-unwind-tables`, and without
   `src/cli/no_unwind.ld`, which drops the unwind tables of the dynamic release.
 - Fonts are mapped read-only (`FileBytes`); read font data in place instead of copying
