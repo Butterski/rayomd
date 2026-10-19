@@ -607,7 +607,7 @@ Important image/link details:
   doubles otherwise: a change to how widths are summed or compared must keep both paths. Core check
   133 compares the dispatched, SSE2 and portable code with byte and unit loops. `SplitColorRuns`
   splits a line of highlighted code into runs of one colour sixteen characters a step (AVX2, else
-  the loop `SplitColorRunsScalar`) for both renderers' `PaintCodeRuns`; core check 134.
+  the loop `SplitColorRunsScalar`) for both renderers' `PaintCodeLine`; core check 134.
 
 - `src/common/file_io.cpp`
   Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows. On POSIX,

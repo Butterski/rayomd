@@ -748,6 +748,14 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
   patterns); in the engine -0.35 to -2.08 % instructions and -0.1 to -2.2 % time on every
   fixture. A fully branch-free integer part (four digits shifted by their leading zeros) took as
   many instructions as the branches and more time (scratch benchmark on 191,870 logged inputs).
+- Operands that repeat are formatted once (round three, 2026-10-19; `Fixed2Text`, the
+  operand's `kFixed2MaxChars` bytes copied in two moves with `WriteFixed2`'s room): the font size
+  while it stays the same (`SizeMemo`, compared by its bits), a code block's tile edges, width and
+  heights and its text's left edge (`CodeBlockText`; `PaintCodeLine` writes a line of one colour
+  as `PaintText`/`Text` did), a table row's border bottom and height and the table's column width
+  (`CellBorderText`, `AppendCellBorder`), and the border's colour and 0.45 width as literals.
+  Against 5.2.3, callgrind instructions: code-heavy -4.2 %, table-heavy -3.0 %, essay -1.3 %,
+  native_math -1.6 %, README -1.6 %, notes -1.3 %, polish -0.3 %, tester-noimg -0.5 %.
 - A paragraph is asked once whether its text needs escaping in a PDF literal
   (`HasLiteralSpecial`, SSE2; the plain-text path reuses the classes
   `NeedsInlineParse` summed); its runs are then copied as they are.
@@ -980,7 +988,16 @@ Text and layout:
 - A branchless `WriteFixed2` (+1.84 % instructions, +0.72 % time) and
   `WriteFixed2` forced inline (+1.19 %, +1.81 %). Copying a repeated operand (the
   font size, the baseline) from a cache instead of formatting it: -1.5 % essay
-  instructions, +0.4 to +1.5 % cycles (the hit test mispredicts).
+  instructions, +0.4 to +1.5 % cycles (the hit test mispredicts). The size alone, which changes
+  only between blocks, is kept (`SizeMemo`, round three).
+- A line's baseline formatted once for all its runs (round three, 2026-10-19): passed to
+  `PaintText` and `Text` as a parameter, `PaintText` took 10.7 instructions more a call (its
+  arguments spill to the stack; table-heavy +0.61 %, the math-table lines have one text span);
+  through a renderer member set around each call, essay +0.19 %, table-heavy +0.29 % (GCC took
+  `WriteFixed2` out of `PaintAsciiRuns`' text); only bold text's second baseline copied from the
+  first (`TailWriter::Again`), table-heavy +0.12 %, polish +0.06 % (the pointer stays live across
+  `WriteCidText`). Most lines are one run: 888 text objects of README on 464 baselines, the
+  essay's 1,026 on 722.
 - Word ends in `WrapAsciiInline` and `WrapAsciiWords` found with SSE2 and the
   advances summed with four accumulators: +9 % instructions, +7 % cycles on the
   essay (the tail switch mispredicts). Words of up to 8 bytes summed without a
