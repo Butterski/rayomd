@@ -1510,6 +1510,28 @@ struct CodeBlockText {
     double xValue;
 };
 
+// The operands the cell borders of a table row repeat, formatted once a row (the column width once
+// a table): their bottom, width and height. A cell then formats only its left edge.
+struct CellBorderText {
+    CellBorderText(double top, const RayoMd::Text::Fixed2Text& columnWidth, double h)
+        : bottom(top - h), width(columnWidth), height(h) {}
+    RayoMd::Text::Fixed2Text bottom, width, height;
+};
+
+// A table cell's border from x in its row, grey and 0.45 wide, as both renderers stroke it.
+static void AppendCellBorder(std::string& content, double x, const CellBorderText& row) {
+    TailWriter out(content, 40 + kOperandBytes * 4);
+    out.Lit("q 0.72 0.72 0.72 RG 0.45 w ");
+    out.Fixed(x);
+    out.Lit(" ");
+    out.Fixed(row.bottom);
+    out.Lit(" ");
+    out.Fixed(row.width);
+    out.Lit(" ");
+    out.Fixed(row.height);
+    out.Lit(" re S Q\n");
+}
+
 // The checkbox of a task list item, a square `side` points wide standing on (x, bottom), with
 // a check mark when the task is done. Paths, not a glyph, so every font shows it.
 static void AppendCheckbox(std::string& content, double x, double bottom, double side, bool done) {
@@ -5939,6 +5961,7 @@ RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& b
 
     double tableWidth = renderer.pageW - renderer.margin * 2.0;
     double colWidth = tableWidth / columns;
+    const RayoMd::Text::Fixed2Text columnWidth(colWidth);
     double size = 9.6;
     double lh = size * 1.32;
     double pad = 5.0;
@@ -6024,10 +6047,11 @@ RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& b
                 const double top = renderer.y;
                 const double boxHeight = sliceHeight + pad * 2.0;
                 if (r == 0) renderer.TableFill(renderer.margin, top, tableWidth, boxHeight);
+                const CellBorderText border(top, columnWidth, boxHeight);
                 bool remaining = false;
                 for (size_t c = 0; c < columns; c++) {
                     double cellX = renderer.margin + c * colWidth;
-                    renderer.TableStroke(cellX, top, colWidth, boxHeight);
+                    renderer.TableStroke(cellX, border);
                     int align = c < block.aligns.size() ? block.aligns[c] : -1;
                     renderer.TagCell(c, true);
                     paintLines(cells[c], next[c], end[c], cellX, top, align, r == 0);
@@ -6066,9 +6090,10 @@ RAYOMD_SHARED static void RenderMathTable(RendererType& renderer, const Block& b
         renderer.TagTableRowStart(r, columns, r == 0 && resumeRow != 0);
         double top = renderer.y;
         if (r == 0) renderer.TableFill(renderer.margin, top, tableWidth, rowHeight);
+        const CellBorderText border(top, columnWidth, rowHeight);
         for (size_t c = 0; c < columns; c++) {
             double cellX = renderer.margin + c * colWidth;
-            renderer.TableStroke(cellX, top, colWidth, rowHeight);
+            renderer.TableStroke(cellX, border);
             int align = c < block.aligns.size() ? block.aligns[c] : -1;
             renderer.TagCell(c, true);
             paintLines(cells[c], 0, cells[c].Count(), cellX, top, align, r == 0);
@@ -7458,7 +7483,11 @@ private:
     }
 
     void TableFill(double x, double top, double w, double h) { DrawRect(x, top, w, h, "0.91 0.93 0.95"); }
-    void TableStroke(double x, double top, double w, double h) { DrawStrokeRect(x, top, w, h); }
+    // A table cell's border, an artifact when tagged.
+    void TableStroke(double x, const CellBorderText& row) {
+        if (tags != nullptr) tags->Artifact();
+        AppendCellBorder(content, x, row);
+    }
     std::string_view TableTextColor(bool header) const { return header ? "0.04 0.04 0.04" : "0.10 0.10 0.10"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer in one style.
@@ -8199,21 +8228,6 @@ private:
     void QuoteStrip(double height) {
         DrawRect(margin, y + 2.0, pageW - margin * 2.0, height, "0.94 0.95 0.96");
         DrawRect(margin, y + 2.0, 3.0, height, quoteBar);
-    }
-
-    // A table cell's border, grey and 0.45 wide (the only stroked rectangle), as literal operands.
-    void DrawStrokeRect(double x, double top, double w, double h) {
-        if (tags != nullptr) tags->Artifact();
-        TailWriter out(content, 40 + kOperandBytes * 4);
-        out.Lit("q 0.72 0.72 0.72 RG 0.45 w ");
-        out.Fixed(x);
-        out.Lit(" ");
-        out.Fixed(top - h);
-        out.Lit(" ");
-        out.Fixed(w);
-        out.Lit(" ");
-        out.Fixed(h);
-        out.Lit(" re S Q\n");
     }
 
     void AddLink(double x, double baseline, double width, double size, const SharedUrl& url) {
@@ -9505,6 +9519,7 @@ private:
 
         double tableWidth = pageW - margin * 2.0;
         double colWidth = tableWidth / columns;
+        const RayoMd::Text::Fixed2Text columnWidth(colWidth);
         double size = 9.6;
         double lh = size * 1.32;
         double pad = 5.0;
@@ -9552,10 +9567,10 @@ private:
                 rowHeight = count * lh + pad * 2.0;
                 double top = y;
                 if (r == 0) DrawRect(margin, top, tableWidth, rowHeight, "0.91 0.93 0.95");
-
+                const CellBorderText border(top, columnWidth, rowHeight);
                 for (size_t c = 0; c < columns; c++) {
                     double cellX = margin + c * colWidth;
-                    DrawStrokeRect(cellX, top, colWidth, rowHeight);
+                    TableStroke(cellX, border);
 
                     TagCell(c, true);
                     int align = c < aligns.size() ? aligns[c] : -1;
@@ -11353,7 +11368,7 @@ private:
     }
 
     void TableFill(double x, double top, double w, double h) { Rect(x, top, w, h, "0.91 0.93 0.95"); }
-    void TableStroke(double x, double top, double w, double h) { Rect(x, top, w, h, "0.72 0.72 0.72", true); }
+    void TableStroke(double x, const CellBorderText& row) { AppendCellBorder(content, x, row); }
     std::string_view TableTextColor(bool) const { return "0.08 0.08 0.08"; }
 
     // One piece of a wrapped line: text[begin, end) of the paragraph's run buffer, in the
@@ -12742,6 +12757,7 @@ private:
 
         double tableWidth = pageW - margin * 2.0;
         double colWidth = tableWidth / columns;
+        const RayoMd::Text::Fixed2Text columnWidth(colWidth);
         double size = 9.6;
         double lh = size * 1.32;
         double pad = 5.0;
@@ -12794,9 +12810,10 @@ private:
                 rowHeight = count * lh + pad * 2.0;
                 double top = y;
                 if (r == 0) Rect(margin, top, tableWidth, rowHeight, "0.91 0.93 0.95");
+                const CellBorderText border(top, columnWidth, rowHeight);
                 for (size_t c = 0; c < columns; c++) {
                     double cellX = margin + c * colWidth;
-                    Rect(cellX, top, colWidth, rowHeight, "0.72 0.72 0.72", true);
+                    TableStroke(cellX, border);
                     int align = c < aligns.size() ? aligns[c] : -1;
                     if (styled[c]) {
                         const AsciiRuns& cellRuns = tableCells[c];
