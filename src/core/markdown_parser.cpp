@@ -447,9 +447,9 @@ std::string StripInlineMarkdown(std::string_view input, bool recognizeMath) {
         return ToString(TrimView(input));
     }
     // The parsed runs cover the text they were written to without a gap: it is the visible text.
-    InlineRuns runs;
-    ParseInlineRuns(input, runs, recognizeMath);
-    return Trim(std::move(runs.text));
+    ScratchRuns scratch;
+    ParseInlineRuns(input, scratch.Runs(), recognizeMath);
+    return ToString(TrimView(scratch.Runs().text));
 }
 
 static bool MayContainMath(std::string_view text) {
@@ -475,11 +475,12 @@ static void EraseMathTextBytes(std::string& text) {
 std::string StripInlineMarkdownKeepMath(std::string_view input, bool& hasMath) {
     hasMath = false;
     if (!MayContainMath(input)) return StripInlineMarkdown(input);
-    InlineRuns runs;
-    ParseInlineRuns(input, runs);
+    ScratchRuns scratch;
+    const InlineRuns& runs = scratch.Runs();
+    ParseInlineRuns(input, scratch.Runs());
     // A script (<sup>, <sub>) is text here; a formula or note keeps its bytes around it.
     for (const InlineRun& run : runs.runs) hasMath = hasMath || (run.math != InlineMath::None && !IsScript(run.math));
-    if (!hasMath) return Trim(std::move(runs.text));
+    if (!hasMath) return ToString(TrimView(runs.text));
     std::string visible;
     visible.reserve(input.size() + 8);
     for (const InlineRun& run : runs.runs) {
@@ -914,12 +915,13 @@ static RAYOMD_NOINLINE bool ClassifyHtmlLine(std::string_view line, LineInfo& in
     return true;
 }
 
-static LineInfo ClassifyLine(std::string_view line) {
-    LineInfo info;
+// Classifies `line` into `info`, which holds a default LineInfo: the caller's slot, so that the
+// lines' classes are written where they stay instead of copied there.
+static void ClassifyLine(std::string_view line, LineInfo& info) {
     info.trimmed = TrimView(line);
     if (info.trimmed.empty()) {
         info.kind = LineKind::Empty;
-        return info;
+        return;
     }
     // Each block marker starts with its own bytes (after the indent), so only the checks of the
     // line's first byte run, in the order that decides between them ("---" is a rule, "- x" an
@@ -933,51 +935,51 @@ static LineInfo ClassifyLine(std::string_view line) {
             info.kind = LineKind::Fence;
             info.text = fence;
         }
-        return info;
+        return;
     }
     case '$':
     case '\\':
-        if (ClassifyMathLine(info)) return info;
+        if (ClassifyMathLine(info)) return;
         if (IsPageBreakLine(info.trimmed)) info.kind = LineKind::PageBreak;
-        return info;
+        return;
     case '<':
         if (IsPageBreakLine(info.trimmed)) {
             info.kind = LineKind::PageBreak;
-            return info;
+            return;
         }
         ClassifyHtmlLine(line, info);
-        return info;
+        return;
     case '!':
     case '[':
         if (ParseStandaloneImage(info.trimmed, nullptr)) info.kind = LineKind::Image;
-        return info;
+        return;
     case '-':
     case '*':
     case '_':
         if (IsRuleLine(line)) {
             info.kind = LineKind::Rule;
-            return info;
+            return;
         }
         if (ParseBulletView(line, info.level, info.text)) info.kind = LineKind::Bullet;
-        return info;
+        return;
     case '+':
         if (ParseBulletView(line, info.level, info.text)) info.kind = LineKind::Bullet;
-        return info;
+        return;
     case '#':
         if (ParseHeadingView(line, info.level, info.text)) info.kind = LineKind::Heading;
-        return info;
+        return;
     case '>': {
         info.kind = LineKind::Quote;
         std::string_view text = info.trimmed.substr(1);
         if (!text.empty() && text[0] == ' ') text.remove_prefix(1);
         info.text = TrimView(text);
-        return info;
+        return;
     }
     default:
         if (info.trimmed[0] >= '0' && info.trimmed[0] <= '9' && ParseNumberedView(line, info.level, info.number, info.text)) {
             info.kind = LineKind::Numbered;
         }
-        return info;
+        return;
     }
 }
 
@@ -994,7 +996,9 @@ static bool IsSingleParagraphLine(std::string_view text) {
     if (text.empty() || IsSpace(text.front()) || IsSpace(text.back())) return false;
     if (text.find('\n') != std::string_view::npos || text.find("]:") != std::string_view::npos) return false;
     if (StartsWith(text, std::string_view("\xEF\xBB\xBF", 3))) return false;
-    return ClassifyLine(text).kind == LineKind::Plain;
+    LineInfo info;
+    ClassifyLine(text, info);
+    return info.kind == LineKind::Plain;
 }
 
 static Block& AppendBlock(std::vector<Block>& blocks, BlockType type) {
@@ -1178,6 +1182,27 @@ RAYOMD_NOINLINE static void StampSourceLines(std::vector<Block>& blocks, size_t&
     }
 }
 
+// The text of a fenced block's lines [first, end) into `text`, each followed by '\n' but the last
+// of `lines`: one copy of the source where the lines lie in it as they are (no '\r' was taken off
+// their ends), else an append a line. Out of line, as ParseMarkdownImpl's growth moves GCC's inlining.
+static RAYOMD_NOINLINE void FenceText(const std::vector<std::string_view>& lines, size_t first, size_t end,
+    std::string& text) {
+    if (first == end) return;
+    const char* const begin = lines[first].data();
+    const char* next = begin;
+    for (size_t index = first; index < end && next != nullptr; index++) {
+        next = lines[index].data() == next ? lines[index].data() + lines[index].size() + 1 : nullptr;
+    }
+    if (next != nullptr && (end == lines.size() || lines[end].data() == next)) {
+        text.assign(begin, static_cast<size_t>(next - begin) - (end == lines.size() ? 1 : 0));
+        return;
+    }
+    for (size_t index = first; index < end; index++) {
+        text.append(lines[index].data(), lines[index].size());
+        if (index + 1 < lines.size()) text += "\n";
+    }
+}
+
 static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int depth, FootnoteParse* notes) {
     LevelLines level(depth);
     std::vector<std::string_view>& lines = level.lines;
@@ -1187,8 +1212,9 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
     infos.reserve(lines.size());
     bool hasMathOpeners = false;
     for (std::string_view line : lines) {
-        infos.push_back(ClassifyLine(line));
-        hasMathOpeners = hasMathOpeners || infos.back().kind == LineKind::MathOpen;
+        LineInfo& info = infos.emplace_back();
+        ClassifyLine(line, info);
+        hasMathOpeners = hasMathOpeners || info.kind == LineKind::MathOpen;
     }
     if (hasMathOpeners) ResolveMathOpeners(lines, infos);
 
@@ -1347,13 +1373,8 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
             const std::string_view infoString = trimmed.substr(fence.size());
             const bool mathFence = IsMathFenceInfo(infoString);
             const size_t firstContent = i + 1;
-            std::string text;
             i++;
-            while (i < lines.size() && !IsMatchingClosingFence(infos[i], fence)) {
-                text.append(lines[i].data(), lines[i].size());
-                if (i + 1 < lines.size()) text += "\n";
-                i++;
-            }
+            while (i < lines.size() && !IsMatchingClosingFence(infos[i], fence)) i++;
             const size_t contentEnd = i;
             const bool closed = i < lines.size();
             if (i < lines.size()) i++;
@@ -1367,7 +1388,7 @@ static std::vector<Block> ParseMarkdownImpl(const std::string& markdown, int dep
                 }
             }
             Block& code = AppendBlock(blocks, BlockType::Code);
-            code.text = std::move(text);
+            FenceText(lines, firstContent, contentEnd, code.text);
             if (!infoString.empty()) code.codeLanguage = FenceLanguage(infoString);
             continue;
         }

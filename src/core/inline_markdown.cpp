@@ -1406,7 +1406,99 @@ inline size_t FindStops(std::string_view source, size_t from) {
     return RayoMd::Text::FindByteClass<kStops>(source, from);
 }
 
+// The bytes ParagraphRunsTest looks for, a bit each: the line feed, '$' and 0xE2 answer for
+// themselves; '\\' and '(', '[' and '^' are the halves of "\(" and "[^".
+enum ParagraphByteBit : unsigned char {
+    kBitLineFeed = 1, kBitDollar = 2, kBitSymbol = 4, kBitBackslash = 8, kBitParen = 16, kBitBracket = 32,
+    kBitCaret = 64
+};
+constexpr unsigned char kParagraphByteValues[7] = { '\n', '$', 0xE2, '\\', '(', '[', '^' };
+
+struct ParagraphTables {
+    unsigned char byte[256];        // the bit of each byte
+    unsigned char low[16];          // by low nibble: the bits of the bytes with that nibble
+    unsigned char high[16];         // by high nibble, likewise; a byte's bit is in both of its entries
+};
+
+constexpr ParagraphTables MakeParagraphTables() {
+    ParagraphTables tables{};
+    for (unsigned bit = 0; bit < 7; bit++) {
+        const unsigned char value = kParagraphByteValues[bit];
+        tables.byte[value] = static_cast<unsigned char>(1u << bit);
+        tables.low[value & 15] |= static_cast<unsigned char>(1u << bit);
+        tables.high[value >> 4] |= static_cast<unsigned char>(1u << bit);
+    }
+    return tables;
+}
+constexpr ParagraphTables kParagraphTables = MakeParagraphTables();
+
+constexpr bool ParagraphNibblesExact() {
+    for (unsigned value = 0; value < 256; value++) {
+        if ((kParagraphTables.low[value & 15] & kParagraphTables.high[value >> 4]) != kParagraphTables.byte[value]) return false;
+    }
+    return true;
+}
+static_assert(ParagraphNibblesExact(), "the nibble tables find exactly the paragraph bytes");
+
+#if RAYOMD_INLINE_AVX2
+// The bits of the 32 bytes at `at`.
+__attribute__((target("avx2"), always_inline)) inline __m256i ParagraphStepAvx2(const char* at, __m256i low, __m256i high,
+    __m256i nibble) {
+    const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(at));
+    return _mm256_and_si256(_mm256_shuffle_epi8(low, _mm256_and_si256(chunk, nibble)),
+        _mm256_shuffle_epi8(high, _mm256_and_si256(_mm256_srli_epi16(chunk, 4), nibble)));
+}
+
+// The bits of all bytes of data[0, size), size at least 32: 32 bytes a step, the last step reading
+// the last 32 bytes again (a bit seen twice is the same bit). Both nibbles are masked, so 0xE2
+// looks up its entries as any byte does.
+__attribute__((target("avx2"))) RAYOMD_NOINLINE unsigned ParagraphBitsAvx2(const char* data, size_t size) {
+    const __m256i low = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(kParagraphTables.low)));
+    const __m256i high = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(kParagraphTables.high)));
+    const __m256i nibble = _mm256_set1_epi8(0x0F);
+    __m256i seen = ParagraphStepAvx2(data + size - 32, low, high, nibble);
+    for (size_t at = 0; at + 32 < size; at += 32) seen = _mm256_or_si256(seen, ParagraphStepAvx2(data + at, low, high, nibble));
+    __m128i half = _mm_or_si128(_mm256_castsi256_si128(seen), _mm256_extracti128_si256(seen, 1));
+    half = _mm_or_si128(half, _mm_srli_si128(half, 8));
+    half = _mm_or_si128(half, _mm_srli_si128(half, 4));
+    uint32_t word = static_cast<uint32_t>(_mm_cvtsi128_si32(half));
+    word |= word >> 16;
+    word |= word >> 8;
+    return word & 0xFF;
+}
+#endif
+
 } // namespace
+
+unsigned ParagraphRunsTest(std::string_view text, bool notes) {
+    unsigned bits = 0;
+#if RAYOMD_INLINE_AVX2
+    if (text.size() >= 32) {
+        const signed char state = avx2State.load(std::memory_order_relaxed);
+        if (state > 0 || (state < 0 && AskAvx2())) {
+            bits = ParagraphBitsAvx2(text.data(), text.size());
+        } else {
+            bits = (text.find('\n') != std::string_view::npos ? kBitLineFeed : 0) |
+                (text.find('$') != std::string_view::npos ? kBitDollar : 0) |
+                (text.find('\xE2') != std::string_view::npos ? kBitSymbol : 0) |
+                (text.find('\\') != std::string_view::npos ? kBitBackslash | kBitParen : 0) |
+                (text.find('^') != std::string_view::npos ? kBitBracket | kBitCaret : 0);
+        }
+    } else
+#endif
+    {
+        for (const char ch : text) bits |= kParagraphTables.byte[static_cast<unsigned char>(ch)];
+    }
+    if (bits & (kBitLineFeed | kBitDollar)) return kParagraphGeneral;
+    // The pairs only where both of their bytes are, which is rare: a backslash, a caret.
+    if ((bits & (kBitBackslash | kBitParen)) == (kBitBackslash | kBitParen) && text.find("\\(") != std::string_view::npos) {
+        return kParagraphGeneral;
+    }
+    if (notes && (bits & (kBitBracket | kBitCaret)) == (kBitBracket | kBitCaret) && text.find("[^") != std::string_view::npos) {
+        return kParagraphGeneral;
+    }
+    return (bits & kBitSymbol) ? kParagraphSymbol : 0;
+}
 
 RAYOMD_NOINLINE size_t MatchCharacterReference(std::string_view text, size_t at, uint32_t& codePoint) {
     if (at + 3 > text.size() || text[at] != '&') return 0;
@@ -1736,11 +1828,11 @@ std::string NormalizeSymbols(std::string text) {
     return out;
 }
 
-void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath, size_t lookaheadBudget) {
+void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath, size_t lookaheadBudget, bool maySymbols) {
     // Only text with a status symbol needs a normalised copy; all other text is read in place.
     std::string normalized;
     std::string_view source = input;
-    if (input.find('\xE2') != std::string_view::npos) {
+    if (maySymbols && input.find('\xE2') != std::string_view::npos) {
         normalized = NormalizeSymbols(std::string(input));
         source = normalized;
     }
@@ -1990,6 +2082,36 @@ std::string_view StripInlineMarkdownView(std::string_view input, InlineRuns& scr
     }
     ParseInlineRuns(input, scratch, recognizeMath);
     return TrimView(scratch.text);
+}
+
+namespace {
+struct ScratchSlot {
+    InlineRuns runs;
+    bool busy = false;
+};
+ScratchSlot& ThreadScratch() {
+    static thread_local ScratchSlot slot;
+    return slot;
+}
+RAYOMD_COLD void ReleaseRuns(InlineRuns& runs) {
+    runs = InlineRuns();
+}
+} // namespace
+
+ScratchRuns::ScratchRuns() : runs(&own) {
+    ScratchSlot& slot = ThreadScratch();
+    if (slot.busy) return;
+    slot.busy = true;
+    runs = &slot.runs;
+}
+
+ScratchRuns::~ScratchRuns() {
+    if (runs == &own) return;
+    constexpr size_t kKeptBytes = 1u << 20;
+    if (runs->text.capacity() + runs->urls.capacity() + runs->runs.capacity() * sizeof(InlineRun) > kKeptBytes) {
+        ReleaseRuns(*runs);
+    }
+    ThreadScratch().busy = false;
 }
 
 std::vector<InlineSpan> ParseInlineSpans(std::string_view input, bool recognizeMath, size_t lookaheadBudget) {

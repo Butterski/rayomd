@@ -1505,6 +1505,19 @@ public:
         cursor += size;
     }
     RAYOMD_HOT_INLINE void Bytes(std::string_view text) { Bytes(text.data(), text.size()); }
+    // A colour's operands ("0.08 0.08 0.08"), 8 to 16 bytes: two overlapping moves of 8, where
+    // Bytes calls memcpy through the PLT; other lengths take memcpy.
+    RAYOMD_HOT_INLINE void Short(std::string_view text) {
+        const char* const from = text.data();
+        const size_t size = text.size();
+        if (size - 8 <= 8) {
+            memcpy(cursor, from, 8);
+            memcpy(cursor + size - 8, from + size - 8, 8);
+        } else {
+            memcpy(cursor, from, size);
+        }
+        cursor += size;
+    }
     void Fixed(double value) { cursor = RayoMd::Text::WriteFixed2(cursor, value); }
     RAYOMD_HOT_INLINE void Fixed(const RayoMd::Text::Fixed2Text& text) {
         memcpy(cursor, text.bytes, RayoMd::Text::kFixed2MaxChars);
@@ -7847,18 +7860,18 @@ private:
     // explicit line breaks, possible formulas or HTML scripts (<sup>, <sub>), and with a theme's
     // faces, which take the general path.
     bool WrapStyledRuns(const std::string& text, double width, double size, StyledRuns& out) {
-        if (multiFace || text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
-            text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
-            return false;
-        }
-        return WrapStyledInline(text, width, size, out, false) && !out.parsed.scripts;
+        if (multiFace) return false;
+        const unsigned test = Internal::ParagraphRunsTest(text, footnotes != nullptr);
+        if (test == Internal::kParagraphGeneral) return false;
+        return WrapStyledInline(text, width, size, out, false, test == Internal::kParagraphSymbol) && !out.parsed.scripts;
     }
 
     // WrapStyledRuns for one line of inline Markdown without formulas, such as a table cell.
     // Text too long for the run offsets gives one empty line and false. `recognizeMath` false
-    // (text without '$' and "\(") spares the parser its own search for them.
+    // (text without '$' and "\(") spares the parser its own search for them, `maySymbols` false
+    // (text without 0xE2) the search for status symbols.
     RAYOMD_SHARED bool WrapStyledInline(std::string_view text, double width, double size, StyledRuns& out,
-        bool recognizeMath = true) {
+        bool recognizeMath = true, bool maySymbols = true) {
         out.text.clear();
         out.runs.clear();
         out.lineEnds.clear();
@@ -7885,7 +7898,7 @@ private:
             return true;
         }
 
-        Internal::ParseInlineRuns(text, out.parsed, recognizeMath);
+        Internal::ParseInlineRuns(text, out.parsed, recognizeMath, Internal::kDefaultLookaheadBudget, maySymbols);
         out.parse = NextRunsParse();
         const std::vector<Internal::InlineRun>& parsed = out.parsed.runs;
         size_t bytes = 0;
@@ -8277,7 +8290,7 @@ private:
         const size_t textBytes = CidTextBytes(line);
         TailWriter w(content, 96 + color.size() * 2 + kOperandBytes * 9 + textBytes * 2);
         w.Lit("q ");
-        w.Bytes(color);
+        w.Short(color);
         w.Lit(" rg BT /F1 ");
         w.Fixed(sizeMemo.Get(size));
         w.Lit(" Tf 1 0 ");
@@ -8335,7 +8348,7 @@ private:
         if (tags != nullptr) tags->Artifact();
         TailWriter out(content, 24 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color);
+        out.Short(color);
         out.Lit(" rg ");
         out.Fixed(x);
         out.Lit(" ");
@@ -9328,7 +9341,7 @@ private:
         if (tags != nullptr) tags->Artifact();
         TailWriter out(content, 24 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color);
+        out.Short(color);
         out.Lit(" rg ");
         out.Fixed(block.left);
         out.Lit(" ");
@@ -9460,7 +9473,7 @@ private:
             const std::string_view color = Internal::CodeColor(run.color);
             if (index == 0) {
                 w.Lit("q ");
-                w.Bytes(color);
+                w.Short(color);
                 w.Lit(" rg BT /F1 ");
                 w.Fixed(sizeMemo.Get(size));
                 w.Lit(" Tf 1 0 0 1 ");
@@ -9469,7 +9482,7 @@ private:
                 w.Fixed(baseline);
                 w.Lit(" Tm ");
             } else {
-                w.Bytes(color);
+                w.Short(color);
                 w.Lit(" rg ");
             }
             w.cursor = WriteCidText(w.cursor, font, text.substr(begin, run.end - begin), usedCids);
@@ -11037,7 +11050,7 @@ private:
     void Rect(double x, double top, double w, double h, std::string_view color, bool stroke = false) {
         TailWriter out(content, 32 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color);
+        out.Short(color);
         if (stroke) out.Lit(" RG 0.45 w ");
         else out.Lit(" rg ");
         out.Fixed(x);
@@ -11694,22 +11707,21 @@ private:
     // and is cut by character only when it is wider than a whole line. Returns false for text
     // with explicit line breaks or possible formulas, which take the general path.
     bool WrapAsciiRuns(const std::string& text, double width, double size, AsciiRuns& out) {
-        if (text.find('\n') != std::string::npos || text.find('$') != std::string::npos ||
-            text.find("\\(") != std::string::npos || (footnotes != nullptr && text.find("[^") != std::string::npos)) {
-            return false;
-        }
+        const unsigned test = Internal::ParagraphRunsTest(text, footnotes != nullptr);
+        if (test == Internal::kParagraphGeneral) return false;
         // A paragraph with HTML scripts (<sup>, <sub>) takes the general path, which boxes them.
-        return WrapAsciiInline(text, width, size, 0, out, false) && !out.parsed.scripts;
+        return WrapAsciiInline(text, width, size, 0, out, false, test == Internal::kParagraphSymbol) && !out.parsed.scripts;
     }
 
     // WrapAsciiRuns for one line of inline Markdown without formulas, such as a table cell;
     // every run gets the style bits `baseStyle` too (a bold header). Returns false only for
     // text too long for the run offsets. `recognizeMath` false (text without '$' and "\(")
-    // spares the parser its own search for them.
+    // spares the parser its own search for them, `maySymbols` false (text without 0xE2) the
+    // search for status symbols.
     bool WrapAsciiInline(std::string_view text, double width, double size, uint8_t baseStyle, AsciiRuns& out,
-        bool recognizeMath = true) {
+        bool recognizeMath = true, bool maySymbols = true) {
         if (text.size() >= 0x40000000u) return false;
-        Internal::ParseInlineRuns(text, out.parsed, recognizeMath);
+        Internal::ParseInlineRuns(text, out.parsed, recognizeMath, Internal::kDefaultLookaheadBudget, maySymbols);
         out.parse = NextRunsParse();
         out.segments.clear();
         out.runs.clear();
@@ -12115,7 +12127,7 @@ private:
         if (text.empty()) return;
         TailWriter out(content, 48 + color.size() + fontName.size() + kOperandBytes * 3 + text.size() * 2);
         out.Lit("q ");
-        out.Bytes(color);
+        out.Short(color);
         out.Lit(" rg BT /");
         out.Bytes(fontName);
         out.Lit(" ");
@@ -12651,7 +12663,7 @@ private:
         // bottom formatted once a block.
         TailWriter out(content, 32 + color.size() + kOperandBytes * 4);
         out.Lit("q ");
-        out.Bytes(color);
+        out.Short(color);
         out.Lit(" rg ");
         out.Fixed(block.left);
         out.Lit(" ");
@@ -12732,7 +12744,7 @@ private:
             const std::string_view color = Internal::CodeColor(run.color);
             if (index == 0) {
                 out.Lit("q ");
-                out.Bytes(color.data(), color.size());
+                out.Short(color);
                 out.Lit(" rg BT /F3 ");
                 out.Fixed(sizeMemo.Get(size));
                 out.Lit(" Tf 1 0 0 1 ");
@@ -12741,7 +12753,7 @@ private:
                 out.Fixed(baseline);
                 out.Lit(" Tm (");
             } else {
-                out.Bytes(color.data(), color.size());
+                out.Short(color);
                 out.Lit(" rg (");
             }
             out.cursor = WriteEscapedLiteral(out.cursor, text.substr(begin, run.end - begin));

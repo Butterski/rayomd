@@ -75,6 +75,35 @@ bool CheckInlineLookahead() {
         }
     }
 
+    // A paragraph's tests in one pass (ParagraphRunsTest: AVX2 32 bytes a step, the last step
+    // reading the text's last 32 bytes again; a byte loop under 32) must answer as the searches for
+    // each did, wherever the byte or pair lies, also when only half of a pair is there.
+    const auto searched = [](std::string_view text, bool notes) -> unsigned {
+        constexpr size_t npos = std::string_view::npos;
+        if (text.find('\n') != npos || text.find('$') != npos || text.find("\\(") != npos ||
+            (notes && text.find("[^") != npos)) {
+            return TinyPdf::Internal::kParagraphGeneral;
+        }
+        return text.find('\xE2') != npos ? TinyPdf::Internal::kParagraphSymbol : 0;
+    };
+    for (const char* filler : { "a", "\xC3\xA9", "(", "[", "\\", "^" }) {
+        for (const char* piece : { "\n", "$", "\\(", "[^", "\xE2", "\\", "(", "[", "^", "x", "\\ (", "[ ^" }) {
+            for (size_t n = 0; n < 72; n++) {
+                for (size_t at = 0; at <= n; at++) {
+                    std::string text = Repeat(filler, n);
+                    text.insert(std::min(at, text.size()), piece);
+                    for (bool notes : { false, true }) {
+                        if (TinyPdf::Internal::ParagraphRunsTest(text, notes) != searched(text, notes)) {
+                            std::cerr << "paragraph test differs from the searches (notes " << notes << "): " << text
+                                << std::endl;
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Long texts over small alphabets, in which openers, closers, escapes, code spans,
     // links and formulas keep meeting. The sequence is fixed, so a failure reproduces.
     const char* const alphabets[][10] = {

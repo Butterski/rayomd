@@ -565,6 +565,24 @@ bool CheckClassicInlineExactness() {
         std::cerr << "code-block escape isolation mismatch" << std::endl;
         return false;
     }
+    // A fence's text is one copy of the source where its lines lie there as they are, and is
+    // joined line by line where a "\r" left a line's end: the same text either way.
+    const std::pair<const char*, const char*> fences[] = {
+        { "```\na\n\nb\n```\n", "a\n\nb\n" }, { "```\r\na\r\nb\r\n```\r\n", "a\nb\n" },
+        { "```\na\r\nb\n```", "a\nb\n" }, { "```\na\nb\r\n```", "a\nb\n" }, { "```\na\nb", "a\nb" },
+        { "```\na\nb\r", "a\nb" }, { "```\n```", "" }, { "```\n\n```\nx", "\n" }, { "x\n\n~~~ c\n a\t\n~~~", " a\t\n" },
+    };
+    for (const auto& [source, text] : fences) {
+        blocks = TinyPdf::Internal::ParseMarkdown(source);
+        const TinyPdf::Internal::Block* fenced = nullptr;
+        for (const TinyPdf::Internal::Block& block : blocks) {
+            if (block.type == TinyPdf::Internal::BlockType::Code) fenced = &block;
+        }
+        if (fenced == nullptr || fenced->text != text) {
+            std::cerr << "fenced code text mismatch: " << source << std::endl;
+            return false;
+        }
+    }
 
     // "<not-an-email>" would be an HTML tag (a custom element), which is left out as on GitHub.
     const std::string invalidAutolinks = "<1-not-an-email> and <user@localhost>";

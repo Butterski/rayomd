@@ -551,7 +551,10 @@ Important image/link details:
   link share its target (`SharedUrl`, `shared_url.h`), never a copy each. The parser copies text
   up to the next byte that may start syntax (`FindStops`: AVX2 nibble tables where the CPU has them,
   checked against `kByteClasses` by a static_assert; else `FindByteClass`'s SSE2): a new syntax byte
-  goes into `kByteInlineSyntax`, and the tables follow.
+  goes into `kByteInlineSyntax`, and the tables follow. A paragraph's run-path tests ('\n', '$',
+  "\(", "[^", 0xE2) are one pass, `ParagraphRunsTest` (nibble tables checked by a static_assert;
+  core check against the searches in `inline_lookahead_tests.inc`); `StripInlineMarkdown` parses into
+  the thread's `ScratchRuns`.
 
 - `src/core/math_parser.h` and `src/core/math_parser.cpp`
   Tokenizer, parser, error recovery, and limits for the TeX math subset; produces a
