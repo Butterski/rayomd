@@ -1591,8 +1591,9 @@ Binary size (2026-10-19):
 - `png_filter.cpp` at `-O2` without rewriting the row ends: 37 KB less, but the mascot's export
   +3.84 % instructions (callgrind): the scalar ends out of line in `FilterCosts::Add`, the Paeth
   pair loop +0.74 M. Kept only with the vector row ends and the peeled loop (-3.4 %).
-- `no_unwind.cpp` in the static build: glibc's libc.a links libgcc's unwinder for thread
-  cancellation, so `_Unwind_Resume` is defined twice. The static build keeps libstdc++'s runtime.
+- `no_unwind.cpp` in the static build as first tried: glibc's libc.a links libgcc's unwinder for
+  thread cancellation, so `_Unwind_Resume` was defined twice. Superseded in round 5: `no_unwind.cpp`
+  now also stubs the entry points libc.a calls, and the static build links no unwinder (-107 KB).
 - `-Oz` for the `-Os` units: GCC 13 -4,096 (round 5); GCC 12 or newer, the release runners'
   GCC 11 rejects it. Not measured, excluded by its requirement: `-z pack-relative-relocs` (DT_RELR,
   most of the 11 KB of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release
