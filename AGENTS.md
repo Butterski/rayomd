@@ -86,8 +86,12 @@ unit, where it moved GCC's inlining of the line classifier. A table with a refer
 shows its cells as plain text, as one with a formula does. Without definitions the
 PDF bytes stay as they are.
 `--footnotes=page` (`PdfOptions::footnotes`, `FootnotePlacement::Page`) sets each note at the foot
-of the page of its first reference (`PageNoteLayout` in `tiny_pdf.cpp`, its account in
-`page_notes.cpp`): every note is laid out once before the text (`Measure`, in `footMode`: no page
+of the page of its first reference. The steps are one copy for both renderers in `page_notes.cpp`
+(`PageNoteCore`, at `-Os`, beside the account `PageNotes`), which sees a renderer through a
+`NoteHost` (references to the fields both have, one `NoteCall` dispatch, `PageNoteLayout<R>::Call`,
+for what each does its own way); `tiny_pdf.cpp` keeps only that dispatch, the line and row hooks
+of the cold paths and `SetNotesAside`: every note is laid out once before the text (`Measure`, in
+`footMode`: no page
 breaks, the content, links, marks, images and glyph counts it made taken back) for its height and
 the notes it refers to; the cold paths that paint references (`RenderMathLines`,
 `RenderMathTextLines` with `EnsureNotes`, `RenderMathTable` rows) keep room below the line for its
@@ -98,16 +102,16 @@ blocks move both with `Indent`/`RestoreMargin`, so `Ensure` keeps its size); `Ne
 `PageNotes::pageEnds` pointer: a direct call put it in a cycle with the paint paths and moved GCC's
 inlining of `MarkHeading`), the end of
 a document and of each book file paint them (`Paint`). The measuring layout writes into the
-stash (`PageNotes::content` in `page_notes.cpp`, and `FootStash`'s links, headings and anchors,
+stash (`PageNotes::content`, and `FootStash`'s links, headings and anchors,
 swapped for the renderer's while it runs; one `PageNotes::Info` a note holds its height, state and
-where its layout ended), and `Paint` replays a note from it (`ReplayNote`, one copy for both
-renderers) under one `cm` translation, its links, marks and references moved by as much, instead
+where its layout ended), and `Paint` replays a note from it (`ReplayNote`)
+under one `cm` translation, its links, marks and references moved by as much, instead
 of laying it out again; only under PDF/UA and for a note whose layout changed the images is it laid
 out a second time (`PageNotes::Replayed`), and only then is the renderer set aside (`FootScope`:
-its shared buffers traded by `SwapFootBuffers`, so a paragraph or table row broken by the page goes
-on; the paragraph and table runs trade places with the thread's `KeptBuffer` slots, which the
-renderer emptied when it started, as a second destructor of those types moved GCC's inlining of
-the renderers' destructors). A note
+its shared buffers traded with `FootBuffers` by `SwapFootBuffers`, so a paragraph or table row
+broken by the page goes on; the paragraph and table runs trade places with the thread's
+`KeptBuffer` slots, which the renderer emptied when it started, as a second destructor of those
+types moved GCC's inlining of the renderers' destructors). A note
 only notes refer to (`Footnotes::referenced`) goes with the first that does, at most 8 deep; a
 cluster too tall for a page with its line stays in the end section, which then holds only such
 notes. Under PDF/UA a foot note is a Note of the Document opened over the open elements
