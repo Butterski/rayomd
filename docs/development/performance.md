@@ -65,6 +65,10 @@ Every step keeps the 2,875 PDFs of the byte check and the 5,936 and 6,044 featur
   `tester.md` without images, the GUI's case); the entry is now read once up to the first
   difference, and a static_assert checks the table's order. tester-noimg -2.0 % instructions,
   -1.4 % cycles; others unchanged.
+- **Reference links resolved in runs** (`ResolveReferenceLinks`): in a document with link
+  definitions every paragraph with a '[' was copied a `push_back` a byte; the bytes up to the next
+  one that may be syntax (`FindByteClass`) are now appended at once. tester-noimg -1.4 %
+  instructions, -1.2 % time; others unchanged.
 
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
