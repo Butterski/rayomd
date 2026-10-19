@@ -703,8 +703,12 @@ Important image/link details:
   What both command lines share for batch export: the JSON Lines report (one
   line per document, written by the worker that finished it), the up-to-date
   check behind `--skip-unchanged` (PDF newer than its Markdown and ending in
-  `%%EOF`) and the recursive collection behind `--recursive` (sorted by name as indices: a sort
-  of the files themselves, two paths each, was 20 KB of code).
+  `%%EOF`), the recursive collection behind `--recursive` (sorted by name as indices: a sort
+  of the files themselves, two paths each, was 20 KB of code) and the workers (`RunJobs`: one a
+  usable CPU, at most 6, unless `--workers`; they take the inputs' sizes for the 16/64 MiB limits
+  between them before they build). Keep per-file work off the thread that starts them: three stats
+  a file there were 16 ms before the first build of 2,000 notes. Output folders are made once a
+  run of their files.
 
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single

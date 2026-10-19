@@ -41,6 +41,45 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 4: the multi-document modes (opt4/batch, 2026-10-19)
+
+Measured against 5.2.4 (`27cf8f0`), g++ 13.3 Release, Docker on all 12 CPUs (Ryzen 5 PRO 4650GE,
+6 cores in two CCX of 3), outputs on ext4, inputs in tmpfs; a busy host, so medians of 7 to 9
+alternating runs. Corpora: the harness corpus (359 documents), 2,000 small notes in 40 folders,
+200 large documents (60 to 330 KB) in 10 folders, and both (2,200).
+
+Where a batch's time went before (perf, 2,000 notes): 16 ms on one thread before the first build
+(three stats a file: its PDF's folder made for every file, its size for the worker limits), the
+kernel 42 % of the cycles at any worker count (creating and writing the PDFs: `openat` 14 %,
+`write` 17 %, the page cache's zeroing), and, from one to six workers, user cycles +13 % at equal
+instructions (malloc and memmove, +31 to +129 % each: the two 4 MB L3s shared by three workers)
+and kernel cycles +42 %. Per-document CLI work is about 8 K instructions (read, options, write),
+1.5 to 5 % of a small note. The order of the jobs costs little: simulated from each document's
+time, largest first would save at most 1.5 % at six workers on the corpus, nothing on the others.
+
+- **Batch setup** (`RunJobs`, `batch_report.cpp`): each output folder made once a run of its files
+  instead of once a file, and the inputs' sizes taken by the workers between them before they
+  build, not at all with one worker. Time to the first build 16 -> 4.5 ms; 2,000 notes +23 %
+  documents/s at 6 workers, +30 % at 12; mixed +8 %.
+- **The automatic worker count from the affinity mask** (`RayoMd::Thread::UsableCpus`, shared
+  with the PNG decoder): six workers no longer share one or two CPUs of a container. Two CPUs:
+  -6 % time, max RSS 40 -> 21 MiB; one CPU 38 -> 17 MiB.
+- **A book's files parsed on several threads** (`ParseBookFiles`, from 256 KiB): parsing was 19 %
+  of a book's instructions. 2.5 MB book -11 %, 17 MB book -14 % wall time.
+
+Not taken (measured):
+- Files created as `O_TMPFILE` and linked into place (`linkat`), as twelve workers creating PDFs
+  in one folder spin on its lock (`osq_lock` and `rwsem_spin_on_owner` 37 % of the cycles of a
+  flat folder of 2,000 notes at 12 workers, 12 % at 6): a C prototype writing 2,000 files of 60 KB
+  was 68 -> 50 ms at 12 threads but 77 -> 82 ms at 6, the automatic count's maximum.
+- glibc tunables in batches (`trim_threshold`, `mmap_threshold`, `tcache_count=1024`): tcache
+  -3 % instructions, cycles within the host's noise (±7 %); not settable by `mallopt` anyway.
+- Largest documents first: see above; it would also reorder a one-worker report.
+
+Open: the per-document font subset (`SetTextFontObjects`, 20 % of a batch of small Unicode notes:
+`SubsetGlyphList::Get`, zero-filled strings) and malloc's share in batches (11 % of cycles on the
+mixed corpus, against about 2 % in a warm `--bench` of one document), both in `tiny_pdf.cpp`.
+
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
 Measured against 5.2.3 (`f28d74b`), g++ 13.3 Release, Docker; instructions by `ab.sh
