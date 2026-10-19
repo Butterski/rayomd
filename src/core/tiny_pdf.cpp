@@ -1176,14 +1176,31 @@ RAYOMD_COLD static void ReleaseWrapScratch() {
 // times the scale. Its wrapping is done in integer units instead, each comparison with a limit
 // decided by Above when the units are farther from the limit than that, which is the double
 // path's decision then; when they are closer (equal widths, or nearly), the text is laid out again
-// in doubles. The units have no chain of dependent floating-point additions.
+// in doubles. The units have no chain of dependent floating-point additions. Every comparison of
+// a text is with one limit, the line's width, so the units certainly below it (`below`) and
+// certainly above it (`above`) are worked out once, two units farther out than the rounding of
+// that division can reach, and only the units between take the comparison in doubles.
 struct WrapUnits {
     double scale;
     double slack;
-    WrapUnits(double size, size_t units) : scale(size * 0.001), slack(static_cast<double>(units * 4 + 16) * 0x1p-52) {}
-    // 1 when the double path's sum of `units` is above `limit`, 0 when it is not, -1 when the units
-    // are too close to `limit` to tell.
-    RAYOMD_HOT_INLINE int Above(uint64_t units, double limit) const {
+    double limit;
+    uint64_t below = 0;             // units under it are not above the limit
+    uint64_t above = UINT64_MAX;    // units from it on are
+    WrapUnits(double size, size_t units, double limitWidth)
+        : scale(size * 0.001), slack(static_cast<double>(units * 4 + 16) * 0x1p-52), limit(limitWidth) {
+        // Only for a positive scale and a limit of fewer than 2^40 units, where a unit is far
+        // wider than the rounding of the products below (a NaN limit fails the test too).
+        if (!(scale > 0.0) || !(limit >= 0.0) || !(limit < scale * 0x1p40)) return;
+        const double low = limit / (scale * (1.0 + slack));
+        const double high = limit / (scale * (1.0 - slack));
+        below = low >= 2.0 ? static_cast<uint64_t>(low) - 2 : 0;
+        above = static_cast<uint64_t>(high) + 3;
+    }
+    // 1 when the double path's sum of `units` is above the limit, 0 when it is not, -1 when the
+    // units are too close to the limit to tell.
+    RAYOMD_HOT_INLINE int Above(uint64_t units) const {
+        if (units < below) return 0;
+        if (units >= above) return 1;
         const double value = static_cast<double>(units) * scale;
         const double margin = value * slack;
         if (value - margin > limit) return 1;
@@ -1240,18 +1257,18 @@ static bool BreakWideWordsIn(const TtfFont& font, std::wstring_view raw, double 
     using Width = std::conditional_t<Exact, double, uint64_t>;
     breaks.clear();
     const double scale = size * 0.001;
-    const WrapUnits units(size, raw.size());
+    const WrapUnits units(size, raw.size(), maxWidth);
     // `width` > `limit` and `width` <= `limit` as the double path decides them (also for a NaN
     // limit, where neither holds); -1 when the units are too close to tell.
     const auto above = [&](Width width, double limit) RAYOMD_HOT_LAMBDA -> int {
         if constexpr (Exact) return width > limit;
-        else return units.Above(width, limit);
+        else return units.Above(width);
     };
     const auto atMost = [&](Width width, double limit) RAYOMD_HOT_LAMBDA -> int {
         if constexpr (Exact) {
             return width <= limit;
         } else {
-            const int over = units.Above(width, limit);
+            const int over = units.Above(width);
             return over < 0 ? -1 : 1 - over;
         }
     };
@@ -7887,7 +7904,7 @@ private:
         if constexpr (Exact) spaceWidth = TextWidth(font, L" ", size);
         else spaceWidth = font.CodepointWidth(' ');
         const double scale = size * 0.001;
-        const WrapUnits units(size, source.size());
+        const WrapUnits units(size, source.size(), width);
         // In units, the words of text of kShortWideText units or more come from MeasureWideWords.
         const bool measured = !Exact && source.size() >= kShortWideText;
         WrapMeasure::View view{};
@@ -7964,7 +7981,7 @@ private:
                 if (!lineEmpty) {
                     int full;
                     if constexpr (Exact) full = lineWidth + addWidth > width;
-                    else full = units.Above(lineWidth + addWidth, width);
+                    else full = units.Above(lineWidth + addWidth);
                     if (full < 0) return false;
                     if (full != 0) {
                         out.lineEnds.push_back(static_cast<uint32_t>(out.runs.size()));
@@ -7976,7 +7993,7 @@ private:
                 }
                 int wide;
                 if constexpr (Exact) wide = wordWidth > width;
-                else wide = units.Above(wordWidth, width);
+                else wide = units.Above(wordWidth);
                 if (wide != 0) {
                     if constexpr (Exact) {
                         FlushPendingWide(out, pending);
@@ -8034,7 +8051,7 @@ private:
                                     break;
                                 }
                                 const Width next = spanSpace + static_cast<uint32_t>(view.prefix[nextEnd] - view.prefix[nextStart]);
-                                if (units.Above(joinedWidth + next, width) != 0) break;
+                                if (units.Above(joinedWidth + next) != 0) break;
                                 joinedWidth += next;
                                 joinedEnd = nextEnd;
                                 word++;

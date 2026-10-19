@@ -98,6 +98,12 @@ linked notes) identical.
   paragraphs laid out twice, README +5 % instructions) and on 3,800 generated Unicode documents
   (scripts, surrogate pairs, combining marks, spaces of every kind, inline styles, narrow tables,
   page sizes; DejaVu Sans, Serif and Sans Mono): identical PDFs.
+  Then every comparison of a text is with one limit, the line's width, so `WrapUnits` works out
+  once which units are certainly below it and which certainly above (a division each, two units
+  farther out than its rounding reaches) and compares the units with those; only the units in
+  between take the comparison in doubles. Instructions table-heavy -1.6 %, README -0.9 %, polish
+  -0.5 %, tester-noimg and code-heavy -0.2 %; perf cycles table-heavy -1.3 %, README -0.3 %.
+  The generated documents (d1 to d7, 5,400; Serif and Sans Mono for 800) identical.
 - **A table start ruled out by the next line** (`IsTableStart`): every paragraph line was searched
   for '|' before the line after it was looked at; a separator line starts with '|', '-' or ':'
   after its indent, so most next lines rule the table out by one byte. Instructions essay -0.6 %,
