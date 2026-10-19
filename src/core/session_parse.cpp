@@ -378,10 +378,21 @@ ParseLines& ClassifyInSession(const std::string& markdown, bool definitionSyntax
     FootnoteParse& notes, LineChange& change) {
     DocumentParse& parse = *tSessionDocument;
     ParseRecord& next = NextRecord(parse);
-    if (!next.lines) next.lines.reset(new ParseLines());
-    ParseLines& out = *next.lines;
-    next.text.assign(markdown);
     const ParseRecord* const last = LastRecord(parse);
+    if (!next.lines) {
+        next.lines.reset(new ParseLines());
+        // A session's first records: as large as the last, so that they do not grow a step at a time.
+        if (last != nullptr && last->lines) {
+            const size_t count = last->lines->lines.size();
+            next.lines->lines.reserve(count + count / 16);
+            next.lines->infos.reserve(count + count / 16);
+            next.lines->fences.reserve(last->lines->fences.size() + 16);
+        }
+    }
+    ParseLines& out = *next.lines;
+    // Room for a text a sixteenth longer, so that each letter typed does not move it.
+    if (next.text.capacity() < markdown.size()) next.text.reserve(markdown.size() + markdown.size() / 16);
+    next.text.assign(markdown);
     change = {};
     if (last == nullptr || !last->lines || !ClassifyShifted(*last, next, out, definitions, definitionSyntax, change)) {
         change = {};

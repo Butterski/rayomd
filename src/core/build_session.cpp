@@ -152,6 +152,21 @@ void LayoutTape::Clear() {
     idPlaces.clear();
 }
 
+void LayoutTape::Reserve(const LayoutTape& like) {
+    marks.reserve(like.marks.size() + like.marks.size() / 16);
+    pieces.reserve(like.pieces.size() + like.pieces.size() / 16);
+    buffers.reserve(like.buffers.size() + 1);
+    pageStarts.reserve(like.pageStarts.size() + like.pageStarts.size() / 16);
+    pageFree.reserve(like.pageFree.size() + like.pageFree.size() / 16);
+    sourceMap.reserve(like.sourceMap.size() + like.sourceMap.size() / 16);
+    sourceMapBlocks.reserve(like.sourceMapBlocks.size() + like.sourceMapBlocks.size() / 16);
+    for (size_t set = 0; set < kLayoutCidSets; set++) cids[set].reserve(like.cids[set].size() + 64);
+    glyphs.reserve(like.glyphs.size() + 16);
+    pageBottoms.reserve(like.pageBottoms.size() + like.pageBottoms.size() / 16);
+    headingPlaces.reserve(like.headingPlaces.size() + like.headingPlaces.size() / 16);
+    idPlaces.reserve(like.idPlaces.size() + like.idPlaces.size() / 16);
+}
+
 // The LayoutSession of a BuildSession.
 class SessionLayout final : public LayoutSession {
 public:
@@ -221,6 +236,8 @@ void SessionLayout::Begin(uint8_t renderer, const void* const fonts[kLayoutCidSe
     const std::vector<ContentsEntry>& contents, const std::vector<HeadingNumber>& numbers) {
     if (!recording) {
         recording = std::make_unique<LayoutTape>();
+        // A session's first tapes: as large as the last, so that they do not grow a step at a time.
+        if (last) recording->Reserve(*last);
     } else {
         Recycle(*recording);
         recording->Clear();
@@ -1065,7 +1082,18 @@ std::vector<Block> ParseInSession(const std::string& markdown, Footnotes& footno
         store.made = blocks.size();
         return blocks;
     }
-    if (!store.pending) store.pending = store.spare ? std::move(store.spare) : std::make_unique<ParseRecord>();
+    if (!store.pending && store.spare) store.pending = std::move(store.spare);
+    if (!store.pending) {
+        store.pending = std::make_unique<ParseRecord>();
+        // A session's first records: as large as the last, so that they do not grow a step at a time.
+        if (store.record) {
+            const ParseRecord& like = *store.record;
+            store.pending->text.reserve(like.text.size() + like.text.size() / 16);
+            store.pending->kinds.reserve(like.kinds.size() + like.kinds.size() / 16);
+            store.pending->suppressed.reserve(like.suppressed.size() + like.suppressed.size() / 16);
+            store.pending->passes.reserve(like.passes.size() + like.passes.size() / 16);
+        }
+    }
     const ParseRecord* const last = store.reusable ? store.record.get() : nullptr;
     DocumentParse document(store, last, *store.pending);
     std::vector<Block> blocks = parse(&document);
@@ -1195,6 +1223,13 @@ BuildResult BuildSession::Build(const std::string& markdown, const PdfOptions& o
     // headings) are not what a parse makes: the next build parses whole.
     session.blocks.reusable = !options.toc && options.pageBreakBeforeLevel <= 0;
     session.layout.reuse = {};
+    // The builders reserve the output for the text's length and no more (tiny_pdf.cpp's
+    // PrepareOutput: at most 8 bytes a byte and 256 KiB, at most 64 MiB), so that a text a letter
+    // longer than the last moves it to a new buffer of twice the size, all of it memory the process
+    // has not touched (t700: 28 MB of page faults at the first keystroke). When it would, room for a
+    // text a sixteenth longer; what is not written takes no memory.
+    const auto expected = [](size_t bytes) { return std::min<size_t>(bytes * 8 + 256 * 1024, size_t{64} << 20); };
+    if (pdfBytes.capacity() < expected(markdown.size())) pdfBytes.reserve(expected(markdown.size() + markdown.size() / 16));
     BuildResult result;
     {
         const SessionScope scope(&session.layout);

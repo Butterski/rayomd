@@ -196,6 +196,8 @@ struct LayoutTape {
     std::vector<MarkPlace> idPlaces;
 
     void Clear();
+    // Room for what `like` holds, and some.
+    void Reserve(const LayoutTape& like);
 };
 
 // A renderer's CID set as the session sees it (tiny_pdf.cpp's UsedCidSet): null `set` for none.
