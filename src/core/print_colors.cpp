@@ -22,6 +22,8 @@
 // AVX2 (with BMI's bit operations) where GCC or Clang can compile it for one function: the build
 // stays baseline x86-64 and the CPU is asked once (UseAvx2), as png_filter.cpp does.
 #if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+#include "../common/cpu_features.h"
+
 #include <immintrin.h>
 #define RAYOMD_PRINT_AVX2 1
 #define RAYOMD_AVX2 __attribute__((target("avx2,bmi")))
@@ -309,7 +311,7 @@ struct Avx2 {
 };
 
 bool UseAvx2() {
-    static const bool avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("bmi");
+    static const bool avx2 = RayoMd::Cpu::HasAvx2(true);
     return avx2;
 }
 #endif

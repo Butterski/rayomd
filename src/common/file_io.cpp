@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "file_io.h"
+#include "compiler.h"
 
 #include <algorithm>
 #include <climits>
@@ -38,19 +39,43 @@ intptr_t OpenRegular(const std::filesystem::path& path, uint64_t& size) {
     return (intptr_t)file;
 }
 #else
-int OpenRegular(const std::filesystem::path& path, uint64_t& size) {
+namespace {
+
+// OpenRegular, with what its fstat said. Out of line: inlined into each ReadAll it added 137
+// bytes to each.
+RAYOMD_NOINLINE int OpenStat(const std::filesystem::path& path, struct stat& info) {
     // Non-blocking, as opening a FIFO without a writer waits for one; made blocking again once
     // fstat says it is a regular file, where O_NONBLOCK means nothing anyway.
     const int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
     if (fd < 0) return -1;
-    struct stat info {};
     const int flags = ::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size >= 0 ? ::fcntl(fd, F_GETFL) : -1;
     if (flags < 0 || ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) != 0) {
         ::close(fd);
         return -1;
     }
-    size = (uint64_t)info.st_size;
     return fd;
+}
+
+} // namespace
+
+int OpenRegular(const std::filesystem::path& path, uint64_t& size) {
+    struct stat info {};
+    const int fd = OpenStat(path, info);
+    if (fd >= 0) size = (uint64_t)info.st_size;
+    return fd;
+}
+
+void IdentityOf(const struct stat& info, FileIdentity& identity) {
+#ifdef __APPLE__
+    const struct timespec modified = info.st_mtimespec, changed = info.st_ctimespec;
+#else
+    const struct timespec modified = info.st_mtim, changed = info.st_ctim;
+#endif
+    identity.volume = (uint64_t)info.st_dev;
+    identity.index = (uint64_t)info.st_ino;
+    identity.size = (uint64_t)info.st_size;
+    identity.modified = (uint64_t)modified.tv_sec * 1000000000u + (uint64_t)modified.tv_nsec;
+    identity.changed = (uint64_t)changed.tv_sec * 1000000000u + (uint64_t)changed.tv_nsec;
 }
 #endif
 
@@ -199,18 +224,16 @@ bool ReadAll(const std::filesystem::path& path, size_t maximum, std::string& con
     }
     identity.volume = info.dwVolumeSerialNumber;
     identity.index = (uint64_t)info.nFileIndexHigh << 32 | info.nFileIndexLow;
+    identity.modified = (uint64_t)info.ftLastWriteTime.dwHighDateTime << 32 | info.ftLastWriteTime.dwLowDateTime;
+    identity.changed = (uint64_t)info.ftCreationTime.dwHighDateTime << 32 | info.ftCreationTime.dwLowDateTime;
     identity.opened = true;
     return ReadOpened((HANDLE)handle, identity.size, maximum, content);
 #else
-    const int fd = OpenRegular(path, identity.size);
-    if (fd < 0) return false;
+    // OpenStat's fstat is the identity's.
     struct stat info {};
-    if (::fstat(fd, &info) != 0) {
-        ::close(fd);
-        return false;
-    }
-    identity.volume = (uint64_t)info.st_dev;
-    identity.index = (uint64_t)info.st_ino;
+    const int fd = OpenStat(path, info);
+    if (fd < 0) return false;
+    IdentityOf(info, identity);
     identity.opened = true;
     return ReadOpened(fd, identity.size, maximum, content);
 #endif

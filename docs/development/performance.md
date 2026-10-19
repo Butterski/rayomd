@@ -568,6 +568,17 @@ but regresses larger documents, batch/serve throughput, memory, or package size
 must be fixed, isolated behind an opt-in/separate package, or documented as a
 deliberate tradeoff.
 
+Where the bytes go: relink without `-s` and with `-Wl,-Map,FILE`, then sum the input sections
+of the map per object (archive members show which runtime pieces a symbol pulled in, and why:
+"Archive member included to satisfy reference by file (symbol)"); `symdiff.py` for functions.
+The 2026-10-19 cuts, dynamic Linux binary with GCC 13 (GCC 11, the release runners' compiler,
+in brackets): 1,740,064 (1,727,720) bytes in 5.2.2; no exceptions, RTTI or unwind tables
+-221,176; libstdc++'s terminate handler (the demangler) -61,440; `__builtin_cpu_supports`
+(libgcc's cpuinfo) -4,096; the command lines at `-Os` and the batch sorted as indices -61,440;
+tag names and Mermaid tables without relocations -4,096; the PNG filters' scalar ends -36,864;
+no unwinder (`src/cli/no_unwind.cpp`, `no_unwind.ld`) -57,976: 1,292,976 (1,297,008). MinGW: no
+`-fdata-sections` (zero statics written as data) -316 KB, no string streams in the CLI -65 KB.
+
 Keep the candidate comparable to its baseline: same suite, seed, style, margin,
 image mode, worker count, compiler, build type, and storage. Linux release
 claims should use native/ext4 storage. Label WSL `/mnt/*` results explicitly.
@@ -647,13 +658,33 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
   is assembled in place around it in `BuildInto`: no string per page and no second
   copy (7 to 15 % of a warm build on Windows when it was one). The move of every
   page's content to its final place is the one copy left.
-- Operators are written through `TailWriter`: an operation whose upper bound fits
-  1 KB writes into a thread-local buffer and appends what it wrote (no zero-fill);
-  a larger bound, a nested writer and Windows (MinGW's `thread_local` is a call)
-  reserve the bound in the string, which zero-fills it. Numbers are formatted from
-  digit-pair tables (`WriteFixed2`), not library calls. Writing a whole outline
-  through one zero-filled tail evicted L1, so outline entries go through a scratch
-  buffer that stays in L1.
+- Operators are written through `TailWriter` straight into the end of the string: room
+  for the operation's upper bound is reserved (one capacity test), the bytes are written
+  through a pointer and the destructor sets the size. A std::string grows without filling
+  through `ResizeForOverwrite` (libstdc++'s `_M_set_length`, reached by an explicit
+  instantiation; other libraries `resize`), which `BuildInto` also uses for the file's
+  growth. Until 5.2.2 an operation wrote into a 1 KB thread-local buffer and appended it
+  (`_M_append` and a `memcpy` an operation), and Windows zero-filled the bound; writing
+  directly saved 1.2 to 3.4 % of a warm build's instructions and 0.8 to 4.2 % of its cycles
+  (perf stat; callgrind, which counts every byte of a fill, 3.2 to 18 %). Nothing
+  else may change the string while a writer is open on it. Numbers are formatted from
+  digit-pair tables (`WriteFixed2`), not library calls. Outline entries go through a
+  scratch buffer that stays in L1. Colour operands travel as `std::string_view` (the palette,
+  `RunColors`, `CodeColor`, `CodeLineTile`, the paint functions' parameters), so no paint runs
+  `strlen` on its colour or font name (-0.1 to -1.0 % instructions; `strlen` had 1.8 % of README's
+  cycles).
+- Formulas (`MathFormula::Emit`, `math_layout.cpp`) write their operators through `OpWriter`, a
+  2 KB stack buffer appended when full and at the end, never piece by piece (`push_back` a glyph
+  byte, `operator+=` with a `strlen` a literal: 15.7 % of tester-noimg's instructions, now 7.9 %).
+  Its small members are always inlined even at `-Os` (-1.5 % more on tester-noimg, 850 bytes).
+- `WriteFixed2` (2026-10-19): one range test (`< 999999.5` hundredths; the rest, NaN and
+  infinities in the cold `WriteFixed2Wide`, the code it had), an `int` conversion instead of the
+  unsigned 64-bit one (no sign fix-up), `-` written always and the pointer advanced by the sign
+  bit, and ".dd" always written with its length computed (0, 2 or 3 bytes). Identical on 32 M
+  test values (every hundredth to ±20,000 and its neighbours, the half-way points, random bit
+  patterns); in the engine -0.35 to -2.08 % instructions and -0.1 to -2.2 % time on every
+  fixture. A fully branch-free integer part (four digits shifted by their leading zeros) took as
+  many instructions as the branches and more time (scratch benchmark on 191,870 logged inputs).
 - A paragraph is asked once whether its text needs escaping in a PDF literal
   (`HasLiteralSpecial`, SSE2; the plain-text path reuses the classes
   `NeedsInlineParse` summed); its runs are then copied as they are.
@@ -690,6 +721,17 @@ case found so far took seconds for 40,000 to 200,000 openers).
 
 Findings that could make RayoMD faster later, with the evidence and the reason
 they were not taken yet. Add to this list when a change turns one up.
+
+**`std::filesystem` out of the build (size).** MinGW's libstdc++.a has no per-function
+sections, and its `fs_path.o` and `fs_ops.o` pull the codecvt facets, the locale's
+initialisation and with it every facet, `fstream`, `istream` and `ostream` (`copy_file` uses a
+`filebuf`): a MinGW program of one `std::wstring` is 214 KB, with one `std::filesystem::path`
+operation 1,247 KB, with one `file_size` 1,310 KB (GCC 13, `-O2 -static -Wl,--gc-sections`,
+2026-10-19). In `rayomd.exe` (2.32 MB) about 650 to 700 KB are that code. On Linux the same
+members are 69 KB (`fs_path.o` 35 KB, `fs_ops.o` 19.5 KB, `fs_dir.o` 14 KB). Taking it out
+means a small path and folder layer in `RayoMd::File` for every user of `std::filesystem`
+(`tiny_pdf.cpp`, `book.cpp`, `vault.*`, `file_io.*`, `batch_report.*`, `image_cache.cpp`, both
+command lines).
 
 **RayoMD's encoder against ISA-L.** Compressing the colour is the longest stage
 of a new image: 4.2 ms of the mascot's 8.7 on one CPU, where ISA-L's level 1
@@ -785,12 +827,11 @@ notices would save about 10 KB per Unicode PDF.
 to export (no growth after the first), so only a single export grows it; outline entries
 could format their consecutive object numbers once (about 250 instructions a heading).
 
-**`BuildInto` zero-fills what it then overwrites.** `pdf.resize(total)` fills the file's growth
-(polish.md: 31 KB, mostly the font subset copied in after) with zeros first: 1.7 % of a warm
-polish build. C++23's `resize_and_overwrite` would avoid it; C++17 has no growth without filling.
-The remaining per-export allocations are the parser's block strings, the dictionaries moved into
-`PdfObjects` (a head kept per object would need callers to write into it) and `WrapText`'s
-vector of lines for headings and image fallbacks.
+**Per-export allocations.** `BuildInto` grows the file without filling it now
+(`ResizeForOverwrite`, see *Buffers and the content stream*). The remaining per-export
+allocations are the parser's block strings, the dictionaries moved into `PdfObjects` (a head kept
+per object would need callers to write into it) and `WrapText`'s vector of lines for headings and
+image fallbacks.
 
 **Phase 2 items left open (2026-10-13).** The fresh-process leftovers (read() into the input
 string, the 1 MB buffer and font mapping left to exit) and the renderers in translation units of
@@ -961,6 +1002,38 @@ README.md, 18.8 % before and 3.9 % kept):
   line feeds from an SSE2 bit mask instead of a `memchr` a line, and plain lines in a loop of their
   own (57 K, +1.2 KB of code); `NextTag` inlined (a 5 KB note dense with tags 1.2 K a build cheaper,
   +490 bytes); the next tag taken from the next '#' found for each line (that note +0.6 %).
+
+Binary size (2026-10-19):
+
+- `png_filter.cpp` at `-O2` without rewriting the row ends: 37 KB less, but the mascot's export
+  +3.84 % instructions (callgrind): the scalar ends out of line in `FilterCosts::Add`, the Paeth
+  pair loop +0.74 M. Kept only with the vector row ends and the peeled loop (-3.4 %).
+- `no_unwind.cpp` in the static build: glibc's libc.a links libgcc's unwinder for thread
+  cancellation, so `_Unwind_Resume` is defined twice. The static build keeps libstdc++'s runtime.
+- Not measured, excluded by their requirements: `-Oz` for the `-Os` units (GCC 12 or newer; the
+  release runners' GCC 11 rejects it) and `-z pack-relative-relocs` (DT_RELR, most of the 11 KB
+  of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release runs on).
+
+Note embeds and linked notes (2026-10-19; per embed against the same text inline, perf stat,
+100 embeds of small notes: warm 10.2 K instructions and 4.9 µs before the process's note cache,
+10.5 K and 3.4 µs with it, of which about 6.8 K the resolver's lookups and copies, 3.4 K the note's
+own parse and 0.75 K its `<!---->` line in the document's):
+
+- The embed line as an empty line instead of `<!---->` (0.75 K an embed less): an empty line does
+  not end an indented code block, a list item followed by indented text, or an HTML block of
+  CommonMark's kinds 1 to 5, and a comment does; the bytes would change for such documents.
+- One parse of the document with every note's text in place of its embed line (no parse per
+  note, about 1.1 K an embed, no splice): each note's link definitions would apply to the others
+  and to the document, and a note that leaves a fence, an HTML block, a display formula or an
+  Obsidian comment open would swallow what follows it, which its own parse contains.
+- Skipping Obsidian's rewrite for notes without its syntax: `RewriteObsidian`'s first test,
+  `FindSyntaxPair` (SSE2), is that check, 0.4 K a note of 90 bytes.
+- The name index ordered by `std::sort`: 1.35 KB of instantiations against a Shell sort of the
+  same total order, which runs once per change of the vault.
+- The process cache's notes and roots in maps of their own value types: 1.2 KB more than slots of
+  a vector behind the `unordered_map<std::string, int>` the parser already instantiates.
+- A cold export pays for the cache: 2.2 K instructions a note more than without it (the copies of
+  its path and the slot), 0.9 µs; a warm build saves three of a note's four system calls.
 
 Images and compression:
 

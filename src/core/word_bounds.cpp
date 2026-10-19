@@ -22,6 +22,7 @@
 #if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
 #include <immintrin.h>
 #define RAYOMD_WORDS_AVX2 1
+#include "../common/cpu_features.h"
 #define RAYOMD_AVX2 __attribute__((target("avx2")))
 #endif
 #endif
@@ -348,7 +349,7 @@ RAYOMD_AVX2 size_t MeasureWideAvx2(const wchar_t* text, size_t n, const uint16_t
 std::atomic<signed char> avx2State{-1};
 
 RAYOMD_NOINLINE bool AskAvx2() {
-    const bool avx2 = __builtin_cpu_supports("avx2");
+    const bool avx2 = RayoMd::Cpu::HasAvx2();
     avx2State.store(avx2 ? 1 : 0, std::memory_order_relaxed);
     return avx2;
 }
