@@ -41,6 +41,86 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 5: images, SVGs and diagrams in the preview (opt5/media, 2026-10-19)
+
+Against 5.2.5 (`ac59556`). The GUI builds its preview on every key, on one worker thread, through
+`BuildSession`. A lab loop (`media_loop`, not in the repository) builds one document on a warm
+thread, 3 builds and then 10 measured ones, a letter typed at the end of the title each time,
+through `BuildPdf` or one `BuildSession`; each document is a few paragraphs around its media:
+four copies of an opaque 640x400 PNG (720 KB, its stream passed through), of a 480x320 PNG with
+transparency (re-encoded, kept by the process), of a JPEG (46 KB); two 2560x1600 screenshots
+(2 MB each, with and without transparency); eight SVG files (4 to 11 KB, shapes, gradients and
+text); three copies of an SVG with a 250 KB `data:` PNG; nine Mermaid diagrams; `native_math.md`.
+
+What a warm build did again for each kind in 5.2.5 (callgrind instructions a build, the standard
+fonts; kernel work from `perf stat`):
+
+| Document | BuildPdf | Session | Repeated each build |
+|---|---:|---:|---|
+| png-opaque | 1,567,660 | 818,885 | copying the 720 KB stream into the output; in BuildPdf once more, when the first page outgrew the gap left for the objects before it |
+| png-alpha | 500,932 | 286,187 | the same (192 KB); `realpath` (7 `readlink`) and a `stat` an image: 44 K kernel instructions |
+| jpeg | 178,391 | 152,338 | resolving the path, the stream copy |
+| shot | 1,096,731 | 594,995 | the stream copy (4.3 MB), twice in BuildPdf |
+| svg | 7,480,472 | 7,355,598 | reading and converting all eight files (95 %); 64 `readlink` a build, 0.8 M kernel instructions |
+| svg + `data:` | 39,316,744 | 39,163,688 | converting the SVGs: base64 by `push_back` a byte (18 %), SHA-256 of each image (46 % in callgrind's portable code; SHA-NI on the hosts) |
+| mermaid | 194,643 | 174,169 | nothing: diagrams are kept since 5.2 (their key and glyph replay, 10 K) |
+| math | 1,065,415 | 477,120 | in BuildPdf the formulas' layout; a session replays them |
+
+No decode, re-encode or font subsetting repeated: decoded PNGs and their failures were kept by
+file stamp already, the subset is cached by its CIDs. Kept steps:
+
+- **SVG forms kept for the process** (`ConvertSvgFile`, `TakeConvertedSvg`, `diagram_cache.cpp`'s
+  `ConvertedSvg`): by the file's key and stamp, the renderer's fonts and the index of its first
+  `data:` image; a hit registers its images again (charged to the decode budget) and replays its
+  text into the glyph sets as a kept diagram does. Not kept when the budget refused an image or the
+  build was cancelled. With it, **PrepareOutput reserves the first page's gap** (`PageGapBefore(0)`):
+  every image stream was copied once more per BuildPdf. BuildPdf svg 7.48 M -> 0.39 M, svg + `data:`
+  39.3 M -> 0.24 M, png-opaque 1.57 M -> 0.84 M, png-alpha 0.50 M -> 0.31 M, shot 1.10 M -> 0.61 M;
+  sessions svg 7.36 M -> 0.36 M, svg + `data:` 39.2 M -> 0.22 M.
+- **Known image paths resolved with one `stat`** (`KeptImagePath` in `vault.cpp`, POSIX): the
+  resolution inside the root is kept with the stamp of the file found, and the joined path is
+  taken again while it names a file of that stamp; the stamp then serves the image caches. A theme's
+  logo the same way (no root). Kernel instructions a build: svg 310 K -> 61 K, png-alpha 44 K ->
+  12 K, a theme logo 51 K -> 20 K.
+- **base64 decoded a group at a time** (`DecodeBase64`): a first conversion of svg + `data:`
+  60.3 M -> 49.3 M instructions.
+
+After them (callgrind a build; BuildPdf / session, the standard fonts and DejaVu Sans as theme):
+
+| Document | Standard 5.2.5 | Standard now | DejaVu 5.2.5 | DejaVu now |
+|---|---:|---:|---:|---:|
+| png-opaque | 1,567,660 / 818,885 | 839,462 / 813,657 | 1,747,609 / 918,141 | 992,693 / 913,044 |
+| png-alpha | 500,932 / 286,187 | 307,101 / 281,061 | 464,295 / 382,906 | 459,241 / 377,878 |
+| jpeg | 178,391 / 152,338 | 172,507 / 147,164 | 299,674 / 218,563 | 294,410 / 213,278 |
+| shot | 1,096,731 / 594,995 | 604,243 / 535,833 | 1,286,233 / 740,491 | 791,022 / 729,881 |
+| svg | 7,480,472 / 7,355,598 | 345,478 / 315,639 | 7,547,677 / 7,458,184 | 548,346 / 458,467 |
+| svg + `data:` | 39,316,744 / 39,163,688 | 239,632 / 214,930 | 39,336,274 / 39,260,634 | 387,338 / 311,661 |
+| mermaid | 194,643 / 174,169 | 195,292 / 175,099 | 360,101 / 291,346 | 360,753 / 292,148 |
+| math | 1,065,415 / 477,120 | 1,065,424 / 477,228 | 1,448,531 / 740,100 | 1,448,503 / 740,127 |
+
+Wall time a build (CPU 5 of a busy host, medians of three runs of 200; ms, BuildPdf / session,
+standard fonts): svg 2.16 / 2.04 -> 0.085 / 0.109, svg + `data:` 4.31 / 4.31 -> 0.029 / 0.028,
+png-opaque 0.086 / 0.067 -> 0.054 / 0.047, png-alpha 0.053 / 0.044 -> 0.032 / 0.033, jpeg 0.044 /
+0.041 -> 0.030 / 0.029, shot 1.18 / 0.76 -> 0.79 / 0.79; mermaid and math unchanged. DejaVu Sans:
+svg 2.01 / 2.03 -> 0.119 / 0.106, svg + `data:` 4.34 / 4.33 -> 0.049 / 0.042. The command lines'
+single exports are unchanged (byte gates, warm ab within +0.09 % instructions).
+
+Measured and not done:
+
+- **Replaying image and diagram blocks in a session** (an image resolving to the same registry
+  entry at the same index): the registry must still be asked for every image, in order, for the
+  XObjects and the decode budget, and that call is now most of such a block: in a session build
+  of svg an image block is 8.0 K instructions of which `ResolveSource` 6.8 K (the `stat`, keys and
+  lookups), a diagram block 2.3 K of which `AddDiagram` 1.1 K (DejaVu: 5.2 K and 4.0 K, the glyph
+  replay). A replay would save at most 3 to 5 % of such a build; `build_session.cpp` keeps laying
+  them out.
+- **The output buffer reused between builds**: no change at 0.7 and 4.3 MB of output (glibc
+  reuses the freed blocks). What is left of an image document's warm build is mostly copying its
+  streams into the PDF (png-opaque 727 K of 814 K instructions in a session, shot 510 K of 536 K).
+- A formula cache: a session lays formulas out only in the blocks an edit touched.
+- Windows: `TryOpenDirect` opens each local image every build (a handle, its final path, the
+  folders below the root); not changed here, as it needs MinGW and Wine runs.
+
 ## Round 4: package size (opt4/size2, 2026-10-19)
 
 Against 5.2.4 (`27cf8f0`): the dynamic Linux binary of GCC 13 (GCC 11, the release runners', in
