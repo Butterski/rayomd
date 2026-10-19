@@ -5,10 +5,11 @@
 // What both command lines share for batch export: the JSON Lines report, the up-to-date check
 // that lets a stopped batch go on, and the Markdown files of a folder tree.
 
+#include "path.h"
+
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
-#include <filesystem>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -64,17 +65,17 @@ void AppendJsonString(std::string& out, std::string_view text);
 
 // Whether `output` is a complete PDF at least as new as `input`, the check --skip-unchanged
 // makes, as make does. A PDF that a stopped run left cut short does not end with %%EOF.
-bool OutputUpToDate(const std::filesystem::path& input, const std::filesystem::path& output);
+bool OutputUpToDate(const RayoMd::File::Path& input, const RayoMd::File::Path& output);
 
 struct File {
-    std::filesystem::path input;
-    std::filesystem::path output;
+    RayoMd::File::Path input;
+    RayoMd::File::Path output;
 };
 
 // The .md files of `inputDir`, with `recursive` also those of its subfolders except hidden ones
 // (".git"), sorted by path, each with its PDF at the same relative place under `outputDir`.
 // False, with `error`, when the folder cannot be read.
-bool CollectMarkdown(const std::filesystem::path& inputDir, const std::filesystem::path& outputDir, bool recursive,
+bool CollectMarkdown(const RayoMd::File::Path& inputDir, const RayoMd::File::Path& outputDir, bool recursive,
     std::vector<File>& files, std::string& error);
 
 } // namespace RayoMd::Batch

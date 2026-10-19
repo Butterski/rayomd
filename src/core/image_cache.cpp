@@ -7,10 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cstring>
-#include <filesystem>
-#include <system_error>
 #include <vector>
 
 #ifdef _WIN32
@@ -26,7 +23,8 @@
 namespace TinyPdf::Internal {
 namespace {
 
-namespace fs = std::filesystem;
+using RayoMd::File::Path;
+using RayoMd::File::PathView;
 
 // The last two digits are the encoding's generation: raise them with any change to the bytes
 // BuildDecodedPngImage writes (the encoder, its image mode, the filter choice), so that no build
@@ -51,40 +49,54 @@ uint32_t ReadU32(const uint8_t* p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
-fs::path EntryPath(const std::string& directory, const std::string& digest, bool fast) {
-    return RayoMd::File::PathFromUtf8(directory) / (digest + (fast ? ".fast.rimg" : ".rimg"));
+Path EntryPath(const std::string& directory, const std::string& digest, bool fast) {
+    Path path = RayoMd::File::PathFromUtf8(directory);
+    RayoMd::File::AppendPath(path, RayoMd::File::PathOfAscii(digest + (fast ? ".fast.rimg" : ".rimg")));
+    return path;
+}
+
+// Whether the file name `name` ends in the extension `extension` (ASCII), as path::extension() reads it.
+bool HasExtension(PathView name, std::string_view extension) {
+    const PathView found = RayoMd::File::ExtensionOf(name);
+    return found.size() == extension.size() && std::equal(found.begin(), found.end(), extension.begin());
 }
 
 // Removes the least recently used entries until the directory holds 3/4 of kDirectoryBytes, and
 // temporary files an hour old, which a process that stopped while writing left.
-void Trim(const fs::path& directory) {
+void Trim(const Path& directory) {
     struct Entry {
-        fs::file_time_type time;
+        uint64_t time;
         uintmax_t size;
-        fs::path path;
+        Path path;
     };
     std::vector<Entry> entries;
     uintmax_t total = 0;
-    const auto staleBefore = fs::file_time_type::clock::now() - std::chrono::hours(1);
-    std::error_code error;
-    for (fs::directory_iterator it(directory, error), end; !error && it != end; it.increment(error)) {
-        std::error_code entryError;
-        const fs::path& path = it->path();
-        const auto time = it->last_write_time(entryError);
-        const uintmax_t size = it->file_size(entryError);
-        if (entryError) continue;
-        if (path.extension() == ".tmp") {
-            if (time < staleBefore) fs::remove(path, entryError);
-        } else if (path.extension() == ".rimg") {
-            entries.push_back({ time, size, path });
-            total += size;
+#ifdef _WIN32
+    constexpr uint64_t kHour = 3600ull * 10000000u;   // 100 ns
+#else
+    constexpr uint64_t kHour = 3600ull * 1000000000u;
+#endif
+    const uint64_t now = RayoMd::File::FileTimeNow();
+    const uint64_t staleBefore = now > kHour ? now - kHour : 0;
+    RayoMd::File::ForEachEntry(directory, [&](const RayoMd::File::Entry& entry) {
+        Path path = directory;
+        RayoMd::File::AppendPath(path, entry.name);
+        // A regular file's time and size (through a link, as stat gives them); nothing else has a size.
+        RayoMd::File::FileStatus status;
+        if (!RayoMd::File::StatusOf(path, status) || status.type != RayoMd::File::FileType::Regular) return true;
+        if (HasExtension(entry.name, ".tmp")) {
+            if (status.modified < staleBefore) RayoMd::File::Remove(path);
+        } else if (HasExtension(entry.name, ".rimg")) {
+            entries.push_back({ status.modified, status.size, std::move(path) });
+            total += status.size;
         }
-    }
+        return true;
+    });
     if (total <= kDirectoryBytes) return;
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.time < b.time; });
     for (const Entry& entry : entries) {
         if (total <= kDirectoryBytes / 4 * 3) break;
-        if (fs::remove(entry.path, error)) total -= entry.size;
+        if (RayoMd::File::Remove(entry.path)) total -= entry.size;
     }
 }
 
@@ -97,7 +109,7 @@ bool LoadCachedImage(const std::string& directory, const std::string& digest, ui
     const char* const magic = fast ? kFastMagic : kMagic;
     uint8_t head[sizeof(kMagic) + 1 + 255 + 5 * 4];
     if (header > sizeof(head)) return false;
-    const fs::path path = EntryPath(directory, digest, fast);
+    const Path path = EntryPath(directory, digest, fast);
     std::FILE* const file = RayoMd::File::Open(path, "rb");
     if (file == nullptr) return false;
     // The header, then the two streams straight into `color` and `mask`, then the checksum.
@@ -125,8 +137,7 @@ bool LoadCachedImage(const std::string& directory, const std::string& digest, ui
     adler = RayoMd::Flate::Adler32(reinterpret_cast<const uint8_t*>(color.data()), colorBytes, adler);
     adler = RayoMd::Flate::Adler32(reinterpret_cast<const uint8_t*>(mask.data()), maskBytes, adler);
     if (ReadU32(tail) != adler) return false;
-    std::error_code ignored;
-    fs::last_write_time(path, fs::file_time_type::clock::now(), ignored);
+    RayoMd::File::SetWriteTimeNow(path);
     return true;
 }
 
@@ -151,14 +162,13 @@ void StoreCachedImage(const std::string& directory, const std::string& digest, u
     file += mask;
     AppendU32(file, RayoMd::Flate::Adler32(reinterpret_cast<const uint8_t*>(file.data()), file.size()));
 
-    std::error_code error;
-    const fs::path path = EntryPath(directory, digest, fast);
+    const Path path = EntryPath(directory, digest, fast);
+    const Path folder(RayoMd::File::ParentOf(PathView(path)));
     // Only its user reads the cache: the directory RayoMD creates is 0700 and each entry 0600, as
     // the images of the documents exported are no one else's (POSIX; Windows inherits the ACL
     // of %LOCALAPPDATA%).
-    if (fs::create_directories(path.parent_path(), error)) {
-        fs::permissions(path.parent_path(), fs::perms::owner_all, fs::perm_options::replace, error);
-    }
+    bool created = false;
+    if (RayoMd::File::CreateDirectories(folder, nullptr, &created) && created) RayoMd::File::SetOwnerOnly(folder);
     static std::atomic<unsigned> stores{ 0 };
     const unsigned store = stores++;
 #ifdef _WIN32
@@ -166,15 +176,14 @@ void StoreCachedImage(const std::string& directory, const std::string& digest, u
 #else
     const unsigned long process = (unsigned long)getpid();
 #endif
-    fs::path temporary = path;
-    temporary.replace_extension("." + std::to_string(process) + "-" + std::to_string(store) + ".tmp");
+    Path temporary = path;
+    RayoMd::File::ReplaceExtension(temporary, RayoMd::File::PathOfAscii("." + std::to_string(process) + "-" + std::to_string(store) + ".tmp"));
     if (!RayoMd::File::WriteAll(temporary, file, true)) {
-        fs::remove(temporary, error);
+        RayoMd::File::Remove(temporary);
         return;
     }
-    fs::rename(temporary, path, error);
-    if (error) fs::remove(temporary, error);
-    if (store % 32 == 0) Trim(path.parent_path());
+    if (!RayoMd::File::Rename(temporary, path)) RayoMd::File::Remove(temporary);
+    if (store % 32 == 0) Trim(folder);
 }
 
 } // namespace TinyPdf::Internal

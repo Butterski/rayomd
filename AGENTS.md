@@ -464,13 +464,11 @@ Important image/link details:
   The notes a document embeds or links to: a root folder (`Vault`), resolution relative to the
   note, the root, then by name (an index built once, bounded), confinement by resolved path, and
   on Windows `DirectPathHasLink` (shared with `tiny_pdf.cpp`'s direct image path); the process's
-  cache of notes, name indexes and resolved roots; and the string path helpers `book.cpp` uses
-  instead of `std::filesystem` (`ResolvedPath`, `IsWithinRoot`, `ParentOf`, `AppendPath`,
-  `Normalize`, `RelativePath`, `FileNameOf`, `StemOf`: `operator/=`, `lexically_normal`,
-  `lexically_relative`, `filename` and `stem` as libstdc++ gives them, pinned by
-  `CheckPathHelpers`). On Windows a path that comes from a directory listing stays a wide
-  `std::filesystem::path` until it is opened (`ResolvedWidePath`; a name with an unpaired surrogate
-  has no UTF-8 form); only containment tests read it as UTF-8. Built at `-Os`.
+  cache of notes, name indexes and resolved roots, and `ResolvedPath`/`IsWithinRoot` on UTF-8
+  paths. Its paths are UTF-8 strings joined and normalized by `src/common/path.h`'s lexical
+  functions; on Windows a path that comes from a directory listing stays a wide
+  `RayoMd::File::Path` until it is opened (a name with an unpaired surrogate has no UTF-8 form);
+  only containment tests read it as UTF-8. Built at `-Os`.
 
 - `src/core/embeds.h` and `src/core/embeds.cpp`
   Obsidian's note embeds: reading them (`ResolveEmbeds`, bounded in count, depth, bytes read and
@@ -614,6 +612,21 @@ Important image/link details:
   `WriteAll` overwrites an existing file in place and cuts it to size (no `O_TRUNC`): truncating
   an ext4 file to zero made its close start writeback, 0.1 ms per export. Keep it so; the cost
   is that a crash can leave old and new bytes mixed.
+
+- `src/common/path.h` and `src/common/path.cpp`
+  The file-system layer in place of the C++17 filesystem library, which the engine and both
+  command lines no longer use (statically linked on MinGW it pulled the locale facets and file
+  streams: 779 KB of rayomd.exe; 65 KB on Linux). `RayoMd::File::Path` is the native string
+  (`std::wstring` on Windows, `std::string` elsewhere); the lexical functions (`AppendPath`,
+  `ParentOf`, `FileNameOf`, `StemOf`, `ExtensionOf`, `ReplaceExtension`, `Normalize`,
+  `RelativePath`, `IsAbsolute`, `RelativePart`, `RootLength`) take either kind and give what
+  libstdc++'s path members give on Linux, with Windows' separators and roots there (a share's
+  `\\server` is a root name, which MinGW's libstdc++ got wrong); the operations (`StatusOf`,
+  `CreateDirectories`, `Remove`, `Rename`, `SetWriteTimeNow`, `SetOwnerOnly`, `Absolute`,
+  `Resolved`, `TempDirectory`, `ForEachEntry`, `Walk`) answer as the library's did, `Walk` in
+  `recursive_directory_iterator`'s order with `skip_permission_denied`, never entering a link.
+  Core check 135 (`tests/path_tests.inc`) holds both to the library. Built at `-Os`. Keep
+  `<filesystem>` out of `src/` and `include/` (tests may use it).
 
 - `src/common/exact_math.h` and `src/common/exact_math.cpp`
   `ceil`, `floor`, `trunc`, `lround`, `llround`, `sqrt` and `fmod` without libm, bit for bit as
@@ -910,7 +923,7 @@ GitHub CI entry points:
   C stdio.
 - Release builds compile without exceptions and RTTI on Windows and Linux, on Linux also without
   unwind tables (221 KB of the 1.74 MB binary): never write `try`, `catch`, `throw`,
-  `dynamic_cast` or `typeid`, and call the `std::error_code` overloads of `std::filesystem`. An
+  `dynamic_cast` or `typeid`. An
   exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before: in the
   dynamic Linux release at the throw, without unwinding (`src/cli/no_unwind.cpp`), elsewhere
   through the command lines' own terminate handler (`src/cli/terminate.cpp`, the only

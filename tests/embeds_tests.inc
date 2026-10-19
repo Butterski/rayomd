@@ -306,75 +306,6 @@ bool CheckEmbeds() {
     return ok;
 }
 
-// The string path helpers (vault.h) against std::filesystem, which book.cpp used before: the
-// links between a book's files and the backlinks' targets must not change.
-bool CheckPathHelpers() {
-    using RayoMd::File::PathFromUtf8;
-    using RayoMd::File::PathToUtf8;
-    bool ok = true;
-    const auto expect = [&ok](const char* what, const std::string& input, const std::string& got, const std::string& want) {
-        if (got == want) return;
-        std::cerr << "path helpers: " << what << "(" << input << ") = \"" << got << "\", std::filesystem: \"" << want << "\"" << std::endl;
-        ok = false;
-    };
-    std::vector<std::string> normal = { "", ".", "..", "a", "a/", "a/.", "a/..", "a/../..", "./a", "../a", "a/./b", "a//b", "a/b/..",
-        "a/b/../", "a/b/../..", "a/b/../../..", "/", "/..", "/../a", "/a/./b/../c", "a/../../b/../c", "../..", ".././..", "../a/../..",
-        "a/b/c/../../d/", "x/y/.", "/a/b//", "///a/b", "a/.../b", "..a/b..", ".hidden/./x", "a/./", "./", "../", "a/../", "/a/..",
-        "/a/../..", "x/./../y", "./.././a/" };
-#ifdef _WIN32
-    for (const char* windows : { "C:\\a\\..\\b", "C:a\\..\\..", "C:\\..", "C:/x/./y", "\\a\\b", "C:", "C:\\", "c:a/b/", "a\\b/c" }) {
-        normal.push_back(windows);
-    }
-    // A share's server is a root name here, as for Windows; libstdc++ (MinGW) reads the two leading
-    // backslashes as a root directory, and its lexically_normal makes them one, a path on the
-    // current drive (base's books could not read a SUMMARY.md's chapters on a share).
-    const std::pair<const char*, const char*> shares[] = { { "\\\\srv\\share\\x\\..", "\\\\srv\\share\\" }, { "\\\\srv", "\\\\srv" },
-        { "//srv/s/./a", "\\\\srv\\s\\a" }, { "\\\\srv\\s\\..\\..", "\\\\srv\\" } };
-    for (const auto& [path, want] : shares) {
-        std::string got = path;
-        TinyPdf::Internal::Normalize(got);
-        expect("Normalize", path, got, want);
-    }
-#endif
-    for (const std::string& path : normal) {
-        std::string got = path;
-        TinyPdf::Internal::Normalize(got);
-        expect("Normalize", path, got, PathToUtf8(PathFromUtf8(path).lexically_normal()));
-    }
-    std::vector<std::pair<std::string, std::string>> relative = { { "/v/a.md", "/v" }, { "/v/a.md", "/v/sub" }, { "/v/sub/b.md", "/v" },
-        { "/v/x/b.md", "/v/y/z" }, { "a.md", "" }, { "b/a.md", "" }, { "a.md", "b" }, { "a.md", ".." }, { "../a.md", ".." },
-        { "../a.md", "" }, { "/a.md", "/" }, { "/v/a.md", "w" }, { "a.md", "/v" }, { "a/b", "a/b" }, { "a/b", "a/b/c" }, { "a", "a/b/.." },
-        { "a/b/c", "a/./b" }, { "a/b", "a/../a" }, { "x/y.md", "x/y.md/z" }, { "a/", "a" }, { "a/b/", "a" }, { "", "" }, { "a", "" },
-        { "", "a" }, { "../../a", "../b" }, { "/v/c d.md", "/v/sub/deep" } };
-#ifdef _WIN32
-    relative.insert(relative.end(), { { "C:\\v\\a.md", "C:\\v\\s" }, { "C:\\v\\a.md", "D:\\v" }, { "\\a\\b", "c" }, { "C:\\a", "C:b" },
-        { "\\a\\b", "" }, { "c:\\v\\a.md", "C:\\v" } });
-#endif
-    for (const auto& [path, base] : relative) {
-        expect("RelativePath", path + ", " + base, TinyPdf::Internal::RelativePath(path, base),
-            PathToUtf8(PathFromUtf8(path).lexically_relative(PathFromUtf8(base))));
-    }
-    for (const char* path : { "a.md", "a", ".md", "a.b.c", "a.", "/x/y.md", "x/", "/", ".", "..", "x/..", "x/.hidden", "dir.d/file",
-             "c d.md", "", "x/.", "..md" }) {
-        expect("StemOf", path, std::string(TinyPdf::Internal::StemOf(path)), PathToUtf8(PathFromUtf8(path).stem()));
-    }
-    for (const char* path : { "a/b.md", "/b.md", "b.md", "/a/b/c.md", "a/b/c", "a//b.md", "/a//b//c.md" }) {
-        expect("ParentOf", path, std::string(TinyPdf::Internal::ParentOf(path)), PathToUtf8(PathFromUtf8(path).parent_path()));
-    }
-    std::vector<std::pair<std::string, std::string>> joined = { { "a", "b" }, { "a/", "b" }, { "", "b" }, { "/", "b" }, { "a", "/b" },
-        { "/x", "../y" }, { "a", "" }, { "a/", "" }, { ".", "b" }, { "a", "b/" } };
-#ifdef _WIN32
-    joined.insert(joined.end(), { { "C:\\a", "\\b" }, { "C:\\a", "D:b" }, { "C:\\a", "C:b" }, { "C:", "b" }, { "C:\\a", "D:\\b" },
-        { "a", "C:\\x" } });
-#endif
-    for (const auto& [base, path] : joined) {
-        std::string got = base;
-        TinyPdf::Internal::AppendPath(got, path);
-        expect("AppendPath", base + ", " + path, got, PathToUtf8(PathFromUtf8(base) / PathFromUtf8(path)));
-    }
-    return ok;
-}
-
 // The files of a book that links name (BookFileOfLink): relative paths, folders by their README.md
 // or index.md, escapes, and in Obsidian's dialect names and path ends in any case; and the
 // backlinks' paragraphs (AddBacklinks): each linking file once in the book's order, its title or
@@ -388,7 +319,7 @@ bool CheckBookLinks() {
         chapters[index].path = files[index];
         chapters[index].part = chapters[index].path.empty();
         if (!chapters[index].part) {
-            paths[index] = RayoMd::File::PathToUtf8(RayoMd::File::PathFromUtf8(files[index]).lexically_normal());
+            paths[index] = RayoMd::File::PathToUtf8(fs::path(RayoMd::File::PathFromUtf8(files[index])).lexically_normal().native());
         }
     }
     constexpr size_t kNone = std::string::npos;
@@ -453,7 +384,7 @@ bool CheckBookLinks() {
 // two names), nothing missing or outside the vault, a note's name as its title, the backlinks'
 // links within the book, and the limit of notes.
 bool CheckLinkedNotes() {
-    if (!CheckPathHelpers() || !CheckBookLinks()) return false;
+    if (!CheckBookLinks()) return false;
     const fs::path root = fs::temp_directory_path() / "rayomd-test-linked";
     fs::remove_all(root);
     const fs::path vault = root / "vault";
@@ -474,7 +405,7 @@ bool CheckLinkedNotes() {
         std::string out;
         if (!RayoMd::Book::ReadLinkedBook(vault / "root.md", options, depth, book, leftOut, message)) return out;
         for (const TinyPdf::BookChapter& chapter : book.chapters) {
-            out += RayoMd::File::PathToUtf8(RayoMd::File::PathFromUtf8(chapter.path).stem()) + "=" + chapter.title + ";";
+            out += RayoMd::File::PathToUtf8(fs::path(RayoMd::File::PathFromUtf8(chapter.path)).stem().native()) + "=" + chapter.title + ";";
         }
         return out;
     };

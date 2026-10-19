@@ -4,14 +4,14 @@
 
 // The notes a document names (note embeds, embeds.h; linked notes, book.h): one resolver for both,
 // confined to a root folder, the vault. Paths are UTF-8 strings with the platform's separators, as
-// RayoMd::File::PathToUtf8 writes them; a std::filesystem::path is made only where a file is opened
-// on Windows. Built at -Os: it reads files, once per note.
+// RayoMd::File::PathToUtf8 writes them, joined and normalized by path.h's lexical functions; a
+// RayoMd::File::Path is made only where a file is opened on Windows. Built at -Os: it reads files,
+// once per note.
 
 #include "../common/file_io.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -20,40 +20,8 @@
 namespace TinyPdf::Internal {
 
 // The path (UTF-8) that `path` names with its links, junctions, "." and ".." resolved; empty when
-// it names nothing. On Windows the file system's own answer (GetFinalPathNameByHandleW, without
-// its "\\?\" prefix): the standard library there resolves no link.
+// it names nothing (RayoMd::File::Resolved).
 std::string ResolvedPath(std::string_view path);
-
-#ifdef _WIN32
-// ResolvedPath for a path that may hold a name with no UTF-8 form (an unpaired surrogate, which
-// NTFS allows): the resolved path as Windows gives it, empty when it names nothing.
-std::filesystem::path ResolvedWidePath(const std::filesystem::path& path);
-#endif
-
-// The folder of the file at `path`: up to its last separator, or its root ("/", "C:\"); empty for
-// a bare name. As std::filesystem::path::parent_path() gives it for a path that ends in a name.
-std::string_view ParentOf(std::string_view path);
-
-// `base` /= `path`, as std::filesystem::path::operator/= joins them: `path` alone when it is
-// absolute (or names another drive), after `base`'s root when it begins at a root directory, else
-// after a separator unless `base` is empty or ends in one.
-void AppendPath(std::string& base, std::string_view path);
-
-// `path` as std::filesystem::path::lexically_normal() writes it, in place: the platform's
-// separators, one between components, no "." component, each ".." with the component before it
-// taken out (one at the root dropped), a trailing separator kept, "." for an empty result. The
-// text only moves forward, so one pass does.
-void Normalize(std::string& path);
-
-// path.lexically_relative(base) of std::filesystem, as a string with the platform's separators:
-// empty when the two have different roots, or `base` leads above where `path` begins.
-std::string RelativePath(std::string_view path, std::string_view base);
-
-// path.filename() and path.stem() of std::filesystem: the last component (empty when `path` ends
-// in a separator or is a root), and that without its extension (a name that only begins with a
-// dot, "." and ".." have none).
-std::string_view FileNameOf(std::string_view path);
-std::string_view StemOf(std::string_view path);
 
 // Whether the resolved path `file` lies in the resolved folder `root`: `root` and then at least one
 // component more (so "/a/bc" is not in "/a/b"); on Windows with ASCII letters folded.
@@ -64,7 +32,7 @@ bool IsWithinRoot(std::string_view file, std::string_view root);
 // symbolic link, junction or mount point (name surrogates): they may lead off the root, to a
 // share even, and are checked here, never followed. Other reparse points, such as cloud-file
 // placeholders, are plain folders to this test. A missing directory counts as one.
-bool DirectPathHasLink(const std::filesystem::path& root, const std::filesystem::path& path);
+bool DirectPathHasLink(const RayoMd::File::Path& root, const RayoMd::File::Path& path);
 #endif
 
 // The process's notes: what a vault read, kept between builds (the GUI's preview on every edit,
@@ -148,7 +116,7 @@ private:
     std::shared_ptr<const std::string> hitText;
     RayoMd::File::FileIdentity hitIdentity;
 #ifdef _WIN32
-    std::filesystem::path rootPath;   // `root`, for the calls that take one
+    RayoMd::File::Path rootPath;      // `root`, for the calls that take one
     std::string checkedKey;           // the path Check accepted last, before it was resolved
     std::string checkedPath;          // and resolved
     uint64_t checkedStart = 0;        // when Check began

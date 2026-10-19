@@ -22,7 +22,6 @@
 #include <thread>
 #include <utility>
 #include <chrono>
-#include <filesystem>
 
 #ifndef RAYOMD_VERSION
 #define RAYOMD_VERSION "0.0.0"
@@ -32,6 +31,7 @@
 #include "rayomd/tiny_pdf.h"
 #include "../common/text_utils.h"
 #include "../common/batch_report.h"
+#include "../common/path.h"
 #include "../common/profiling.h"
 #include "../core/book.h"
 #include "../core/export_options.h"
@@ -478,10 +478,15 @@ std::wstring JoinPath(const std::wstring& a, const std::wstring& b) {
 
 bool EnsureDirectoryRecursive(const std::wstring& path) {
     if (path.empty()) return false;
-    std::error_code ec;
-    std::filesystem::create_directories(std::filesystem::path(path), ec);
-    if (!ec) return true;
-    return std::filesystem::exists(std::filesystem::path(path));
+    if (RayoMd::File::CreateDirectories(path)) return true;
+    RayoMd::File::FileStatus status;
+    return RayoMd::File::StatusOf(path, status);
+}
+
+// The size of the regular file at `path`, UINT64_MAX for none (as the standard library's file_size).
+uint64_t FileSize(const std::wstring& path) {
+    RayoMd::File::FileStatus status;
+    return RayoMd::File::StatusOf(path, status) && status.type == RayoMd::File::FileType::Regular ? status.size : UINT64_MAX;
 }
 
 void WriteStdoutLine(const std::string& line);
@@ -503,7 +508,7 @@ int WriteBookPdf(const TinyPdf::Book& book, const std::wstring& outputPath, cons
 }
 
 // --book: the files of a SUMMARY.md, a folder or the command line (RayoMd::Book::ReadBook) as one PDF.
-int RunBookExport(const std::vector<std::filesystem::path>& inputs, const std::wstring& outputPath,
+int RunBookExport(const std::vector<RayoMd::File::Path>& inputs, const std::wstring& outputPath,
     const WinExportOptions& exportOptions) {
     TinyPdf::Book book;
     std::string error;
@@ -520,7 +525,7 @@ int RunLinkedExport(const std::wstring& inputPath, const std::wstring& outputPat
     TinyPdf::Book book;
     std::string error;
     size_t leftOut = 0;
-    if (!RayoMd::Book::ReadLinkedBook(std::filesystem::path(inputPath), PdfOptionsFor(exportOptions, L""),
+    if (!RayoMd::Book::ReadLinkedBook(inputPath, PdfOptionsFor(exportOptions, L""),
             exportOptions.followLinks, book, leftOut, error)) {
         WriteStdoutLine("Error: " + error);
         return 3;
@@ -720,9 +725,8 @@ unsigned ResolveWinWorkerCount(const WinExportOptions& options, const std::vecto
     }
     uintmax_t largestInput = 0;
     for (const WinBatchJob& job : jobs) {
-        std::error_code error;
-        uintmax_t size = std::filesystem::file_size(std::filesystem::path(job.inputPath), error);
-        if (!error) largestInput = std::max(largestInput, size);
+        const uint64_t size = FileSize(job.inputPath);
+        if (size != UINT64_MAX) largestInput = std::max<uintmax_t>(largestInput, size);
     }
     if (largestInput > 64u * 1024u * 1024u) workers = 1;
     else if (largestInput > 16u * 1024u * 1024u) workers = std::min(workers, 2u);
@@ -736,9 +740,8 @@ int ExecuteWinBatchJobs(std::vector<WinBatchJob>& jobs, const WinExportOptions& 
         return options.skipUnchanged && RayoMd::Batch::OutputUpToDate(job.inputPath, job.outputPath);
     };
     const auto skip = [](WinBatchJob& job) {
-        std::error_code sizeError;
         job.skipped = true;
-        job.bytes = std::filesystem::file_size(std::filesystem::path(job.outputPath), sizeError);
+        job.bytes = FileSize(job.outputPath);
     };
     const unsigned workerCount = ResolveWinWorkerCount(options, jobs);
     std::atomic<size_t> next{0};
@@ -790,7 +793,7 @@ int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, 
     if (!EnsureDirectoryRecursive(outputDir)) return 12;
     std::vector<RayoMd::Batch::File> files;
     std::string listError;
-    if (!RayoMd::Batch::CollectMarkdown(std::filesystem::path(inputDir), std::filesystem::path(outputDir),
+    if (!RayoMd::Batch::CollectMarkdown(inputDir, outputDir,
             options.recursive, files, listError)) {
         WriteStdoutLine("Error: could not read input folder: " + WideToUtf8(inputDir) + " (" + listError + ")");
         return 3;
@@ -800,9 +803,9 @@ int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, 
     jobs.reserve(files.size());
     std::set<std::wstring> seenOutputs;
     for (const RayoMd::Batch::File& file : files) {
-        WinBatchJob job(file.input.wstring(), file.output.wstring());
+        WinBatchJob job(file.input, file.output);
         // A subfolder's PDFs go to a subfolder of the output folder, made before the workers start.
-        const std::wstring folder = file.output.parent_path().wstring();
+        const std::wstring folder(RayoMd::File::ParentOf(std::wstring_view(file.output)));
         if (!seenOutputs.insert(OutputPathKey(job.outputPath)).second) {
             job.result = 12;
             job.error = "Error: multiple inputs map to the same output PDF: " + WideToUtf8(job.outputPath);
@@ -1276,7 +1279,7 @@ int RunCommandLine() {
             if (options.embedSource) {
                 WriteStdoutLine("Error: --embed-source does not apply to --book: a book is not reversible.");
             } else {
-                result = RunBookExport(std::vector<std::filesystem::path>(argv + 2, argv + output), argv[output], options);
+                result = RunBookExport(std::vector<RayoMd::File::Path>(argv + 2, argv + output), argv[output], options);
             }
         }
         LocalFree(argv);

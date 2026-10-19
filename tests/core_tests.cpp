@@ -47,6 +47,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -975,6 +976,7 @@ size_t PeakRssBytes() {
 #include "hardening_tests.inc"
 #include "dialect_tests.inc"
 #include "embeds_tests.inc"
+#include "path_tests.inc"
 #include "mermaid_tests.inc"
 #include "long_page_tests.inc"
 #include "print_tests.inc"
@@ -4126,6 +4128,7 @@ int main() {
     if (!mermaid_tests::CheckMermaid()) return 127;
     if (!long_page_tests::CheckLongPage()) return 129;
     if (!page_notes_tests::CheckPageNotes()) return 132;
+    if (!path_tests::CheckPathLayer()) return 135;
     if (!embeds_tests::CheckEmbeds()) return 130;
     if (!embeds_tests::CheckLinkedNotes()) return 131;
     if (!print_tests::CheckPrint()) return 128;

@@ -8,8 +8,6 @@
 #include <algorithm>
 #include <string_view>
 
-namespace fs = std::filesystem;
-
 namespace RayoMd::Batch {
 
 Report::~Report() {
@@ -115,12 +113,13 @@ void AppendJsonString(std::string& out, std::string_view text) {
     }
 }
 
-bool OutputUpToDate(const fs::path& input, const fs::path& output) {
-    std::error_code error;
-    const auto outputTime = fs::last_write_time(output, error);
-    if (error) return false;
-    const auto inputTime = fs::last_write_time(input, error);
-    if (error || outputTime < inputTime) return false;
+bool OutputUpToDate(const RayoMd::File::Path& input, const RayoMd::File::Path& output) {
+    RayoMd::File::FileStatus outputStatus;
+    RayoMd::File::FileStatus inputStatus;
+    if (!RayoMd::File::StatusOf(output, outputStatus) || !RayoMd::File::StatusOf(input, inputStatus) ||
+        outputStatus.modified < inputStatus.modified) {
+        return false;
+    }
     std::FILE* file = RayoMd::File::Open(output, "rb");
     if (!file) return false;
     const long long size = RayoMd::File::SizeOf(file);
@@ -132,33 +131,45 @@ bool OutputUpToDate(const fs::path& input, const fs::path& output) {
     return read && std::string_view(bytes, static_cast<size_t>(tail)).find("%%EOF") != std::string_view::npos;
 }
 
-bool CollectMarkdown(const fs::path& inputDir, const fs::path& outputDir, bool recursive, std::vector<File>& files,
-    std::string& error) {
+bool CollectMarkdown(const RayoMd::File::Path& inputDir, const RayoMd::File::Path& outputDir, bool recursive,
+    std::vector<File>& files, std::string& error) {
+    using RayoMd::File::Entry;
+    using RayoMd::File::Path;
     files.clear();
-    std::error_code iterError;
-    const auto add = [&](const fs::directory_entry& entry) {
-        std::error_code entryError;
-        if (!entry.is_regular_file(entryError) || entryError || entry.path().extension() != ".md") return;
-        fs::path output = outputDir / entry.path().lexically_relative(inputDir);
-        output.replace_extension(".pdf");
-        files.push_back({ entry.path(), std::move(output) });
-    };
-    if (recursive) {
-        fs::recursive_directory_iterator it(inputDir, fs::directory_options::skip_permission_denied, iterError);
-        for (const fs::recursive_directory_iterator end; !iterError && it != end; it.increment(iterError)) {
-            std::error_code entryError;
-            if (it->is_directory(entryError)) {
-                const std::string name = RayoMd::File::PathToUtf8(it->path().filename());
-                if (!name.empty() && name[0] == '.') it.disable_recursion_pending();
-                continue;
-            }
-            add(*it);
+    // A regular file (through a link too) named *.md, its PDF at the same place below `outputDir`.
+    const auto add = [&](const Entry& entry, const Path& path) {
+        const RayoMd::File::PathView extension = RayoMd::File::ExtensionOf(entry.name);
+        if (entry.type != RayoMd::File::FileType::Regular || extension.size() != 3 || extension[0] != '.' ||
+            extension[1] != 'm' || extension[2] != 'd') {
+            return;
         }
+        Path output = outputDir;
+        RayoMd::File::AppendPath(output, RayoMd::File::RelativePath(path, inputDir));
+        RayoMd::File::ReplaceExtension(output, RayoMd::File::PathOfAscii(".pdf"));
+        files.push_back({ path, std::move(output) });
+    };
+    int code = 0;
+    bool listed;
+    if (recursive) {
+        listed = RayoMd::File::Walk(inputDir, [&](const Entry& entry) {
+            if (entry.type == RayoMd::File::FileType::Directory) {
+                // Hidden folders (".git") are not entered; Walk enters no link.
+                return entry.name[0] == '.' ? RayoMd::File::WalkStep::Skip : RayoMd::File::WalkStep::Enter;
+            }
+            add(entry, *entry.path);
+            return RayoMd::File::WalkStep::Skip;
+        }, &code);
     } else {
-        for (fs::directory_iterator it(inputDir, iterError), end; !iterError && it != end; it.increment(iterError)) add(*it);
+        Path path;
+        listed = RayoMd::File::ForEachEntry(inputDir, [&](const Entry& entry) {
+            path = inputDir;
+            RayoMd::File::AppendPath(path, entry.name);
+            add(entry, path);
+            return true;
+        }, &code);
     }
-    if (iterError) {
-        error = iterError.message();
+    if (!listed) {
+        error = RayoMd::File::ErrorText(code);
         return false;
     }
     // In the order of their UTF-8 names, each made once: sorted as indices, as a sort of the files
