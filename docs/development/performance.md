@@ -112,6 +112,9 @@ linked notes) identical.
   ab time code-heavy -4.4 %, README -1.5 %. 400 generated documents of code blocks (27 fence
   languages, deep indents, blank-filled lines, tabs, non-ASCII, `--black-text`, `--pdfua`,
   `--no-highlight`) identical. Core check 134 compares it with the loop. Text +4 KB.
+  Then the last step of a line overlaps the one before instead of ending a character at a time,
+  and the colours of the 16 classes are one table (`kCodeColorOfClass`, 16 entries), not copied
+  each call: code-heavy -1.5 % instructions, perf cycles -2.4 to -3.1 %, ab time -3.5 %.
 - **The lexer's words end by a bit scan** (`Text::WordEnd`, highlight.cpp): `CodeLexer::Run`'s and
   `Word`'s loops over word bytes ended at a branch that mispredicts at every word; SSE2 now tests
   sixteen bytes (letters, digits, '_', bytes from 0x80) and takes the first other one, while the

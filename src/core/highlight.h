@@ -47,8 +47,10 @@ void ClassifyCode(uint8_t language, std::string_view code, uint8_t* classes);
 
 // The colour of each class: classes of one colour share an index, so that the renderers paint
 // a stretch of them as one run. CodeColor gives the fill colour of an index as "r g b" operands,
-// a view of a null-terminated string.
-constexpr uint8_t kCodeColorOfClass[kCodeClassCount] = { 0, 1, 2, 3, 4, 3, 5, 3, 6, 7, 8, 9 };
+// a view of a null-terminated string. Sixteen entries, the classes' and 0s, for SplitColorRuns's
+// one-load lookup (word_bounds.h).
+constexpr uint8_t kCodeColorOfClass[16] = { 0, 1, 2, 3, 4, 3, 5, 3, 6, 7, 8, 9 };
+static_assert(kCodeClassCount <= 16, "SplitColorRuns looks the colours of 16 classes up");
 std::string_view CodeColor(uint8_t colorIndex);
 
 // The tile behind a line whose first byte has class `codeClass`: a diff's added and removed lines

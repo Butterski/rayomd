@@ -6175,8 +6175,7 @@ using CodeRun = Internal::ColorRun;
 template <typename Char>
 static size_t SplitCodeRuns(const Char* text, size_t length, const uint8_t* classes, std::vector<CodeRun>& runs) {
     if (runs.size() < length + 1) runs.resize(length + 1);
-    return Internal::SplitColorRuns(text, length, classes, Internal::kCodeColorOfClass, Internal::kCodeClassCount,
-        runs.data());
+    return Internal::SplitColorRuns(text, length, classes, Internal::kCodeColorOfClass, runs.data());
 }
 
 // Where a block's layout started: the page it began on, y there, and the content length.

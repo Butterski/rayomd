@@ -56,14 +56,14 @@ struct ColorRun {
 };
 
 // The runs of one colour of a line of code text[0, n), whose characters have the classes `classes`
-// (each below classCount, at most 16) and the colours colorOf[class] (each below 255): a run ends where a character
-// other than ' ' has another colour than the one before it that is not ' '; spaces take the colour
-// of the run they are in, leading ones that of the first run. The last run ends at n (colour 0 for
-// a line of spaces). Into `runs`, which holds n + 1; returns how many. AVX2 sixteen characters a
-// step (their colours looked up, carried over spaces, compared with the one before), else one at
-// a time.
-size_t SplitColorRuns(const char* text, size_t n, const uint8_t* classes, const uint8_t* colorOf, size_t classCount, ColorRun* runs);
-size_t SplitColorRuns(const wchar_t* text, size_t n, const uint8_t* classes, const uint8_t* colorOf, size_t classCount, ColorRun* runs);
+// (each below 16) and the colours colorOf[class] (16 entries, each below 255): a run ends where a
+// character other than ' ' has another colour than the one before it that is not ' '; spaces take
+// the colour of the run they are in, leading ones that of the first run. The last run ends at n
+// (colour 0 for a line of spaces). Into `runs`, which holds n + 1; returns how many. AVX2 sixteen
+// characters a step (their colours looked up, carried over spaces, compared with the one before;
+// the last step overlaps the one before), else, and for lines under 16 characters, one at a time.
+size_t SplitColorRuns(const char* text, size_t n, const uint8_t* classes, const uint8_t* colorOf, ColorRun* runs);
+size_t SplitColorRuns(const wchar_t* text, size_t n, const uint8_t* classes, const uint8_t* colorOf, ColorRun* runs);
 template <typename Char>
 size_t SplitColorRunsScalar(const Char* text, size_t n, const uint8_t* classes, const uint8_t* colorOf, ColorRun* runs,
     size_t from = 0, uint8_t color = 0xFF, size_t count = 0) {

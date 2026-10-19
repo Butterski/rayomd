@@ -3810,7 +3810,7 @@ bool CheckColorRunsOf(const char* name) {
             }
             std::vector<ColorRun> want(n + 1), got(n + 1, ColorRun{ 0xFFFFFFFFu, 0xEE });
             const size_t wantCount = SplitColorRunsScalar(text.data(), n, classes.data(), kCodeColorOfClass, want.data());
-            const size_t gotCount = SplitColorRuns(text.data(), n, classes.data(), kCodeColorOfClass, kCodeClassCount, got.data());
+            const size_t gotCount = SplitColorRuns(text.data(), n, classes.data(), kCodeColorOfClass, got.data());
             bool same = wantCount == gotCount;
             for (size_t i = 0; same && i < wantCount; i++) same = want[i].end == got[i].end && want[i].color == got[i].color;
             if (!same) {
