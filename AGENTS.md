@@ -558,7 +558,11 @@ Important image/link details:
   its pixels are re-encoded for a PDF. Choosing and applying in AVX2 where the CPU has it
   (GCC/Clang `target("avx2")`, chosen once), else SSE2 on x86-64, with the scalar
   functions kept as the reference and the fallback; core check 99 compares the dispatched,
-  the SSE2 and the scalar code with the textbook filters.
+  the SSE2 and the scalar code with the textbook filters. Built at `-O2`: a row's last bytes take
+  its last full vector step again (the costs of what the step before counted masked off,
+  `kTailMask`), so scalar code runs only for the first pixel and rows shorter than a step; at
+  `-O3` GCC vectorized those scalar loops into 45 KB of code, now 9 KB, for 3.5 % fewer
+  instructions on a 1024x1024 RGBA PNG.
 
 - `src/common/file_io.cpp`
   Whole-file reads and writes through C stdio (`RayoMd::File`), wide paths on Windows. On POSIX,

@@ -217,8 +217,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # against 17.7. The highlighter's lexers read every byte of a code block: 1.5 times as fast at
     # -O2 as at -Os. The HTML scanner reads every byte of the tags in a document, and Obsidian's
     # rewrite every byte of a note on every build of a preview. --black-text's scan reads every page.
+    # The PNG filters are vector code of their own: -O3 only vectorized their scalar ends (36 KB).
     set_source_files_properties(src/core/flate.cpp src/core/inflate.cpp src/core/highlight.cpp src/core/html.cpp
-        src/core/dialect_rewrite.cpp src/core/print_colors.cpp
+        src/core/dialect_rewrite.cpp src/core/print_colors.cpp src/core/png_filter.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>")
     # The command lines' terminate handler rethrows the exception it reports.
     set_source_files_properties(src/cli/terminate.cpp PROPERTIES COMPILE_OPTIONS "-fexceptions;$<$<CONFIG:Release>:-Os>")
