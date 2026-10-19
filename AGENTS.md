@@ -630,12 +630,19 @@ Important image/link details:
   What both command lines share for batch export: the JSON Lines report (one
   line per document, written by the worker that finished it), the up-to-date
   check behind `--skip-unchanged` (PDF newer than its Markdown and ending in
-  `%%EOF`) and the recursive collection behind `--recursive`.
+  `%%EOF`) and the recursive collection behind `--recursive` (sorted by name as indices: a sort
+  of the files themselves, two paths each, was 20 KB of code).
 
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single
   export, stdin Markdown export, folder batch, stdin batch, warm serve mode,
-  books, and benchmarks.
+  books, and benchmarks. Built at `-Os` with `batch_report.cpp` and the Windows CLI: the glue
+  runs once a run (`--bench` and `--serve` only call the engine in their loops).
+
+- `src/cli/terminate.cpp`
+  Both command lines' terminate handler in place of libstdc++'s (whose demangler is 61 KB):
+  the same message with the exception's type as the ABI names it (`St9bad_alloc`), then
+  `abort()`. Not part of the engine library.
 
 - `src/win32/main_windows_cli.cpp`
   The Windows CLI: wide paths, `CommandLineToArgvW`, a console program. Its modes mirror
@@ -843,6 +850,13 @@ GitHub CI entry points:
   iostreams (`<iostream>`, `<fstream>`, `<sstream>`) out of the CLI and the core: they
   pull about 460 KB of locale and stream code into that build. Use `RayoMd::File` and
   C stdio.
+- Release builds compile without exceptions and RTTI on Windows and Linux, on Linux also without
+  unwind tables (221 KB of the 1.74 MB binary): never write `try`, `catch`, `throw`,
+  `dynamic_cast` or `typeid`, and call the `std::error_code` overloads of `std::filesystem`. An
+  exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before, through
+  the command lines' own terminate handler (`src/cli/terminate.cpp`, the only `-fexceptions`
+  file): libstdc++'s links the C++ demangler, 61 KB. A call-graph profile with
+  `perf --call-graph=dwarf` needs a build with `-fasynchronous-unwind-tables`.
 - Fonts are mapped read-only (`FileBytes`); read font data in place instead of copying
   the file.
 - `TtfFont` is allocated by its own `operator new` (calloc) or lives in static storage:
