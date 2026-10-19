@@ -119,6 +119,11 @@ linked notes) identical.
   wide text read four bytes a unit; the lexer's bytes (the block, or a byte a unit for non-ASCII
   text) have the line feeds at the same indices. code-heavy -0.8 % instructions, perf cycles -0.6
   to -0.8 %, ab time -1.1 %.
+- **Tables with formulas** (`RenderMathTable`): every cell's math text bytes were looked for with
+  `std::string::find`, libstdc++'s out-of-line copy that then calls `memchr` (now `memchr`
+  itself: table-heavy -0.9 % instructions); every line of every cell was measured for its
+  placement, which only a centred or right-aligned column uses (now only there, as `RenderTable`
+  does: table-heavy -2.6 % instructions, perf cycles -1.3 %).
 - **The lexer's words end by a bit scan** (`Text::WordEnd`, highlight.cpp): `CodeLexer::Run`'s and
   `Word`'s loops over word bytes ended at a branch that mispredicts at every word; SSE2 now tests
   sixteen bytes (letters, digits, '_', bytes from 0x80) and takes the first other one, while the

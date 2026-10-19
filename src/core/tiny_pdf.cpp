@@ -5938,10 +5938,10 @@ RAYOMD_MATH_COLD static void RenderMathTable(RendererType& renderer, const Block
         double lineTop = top - pad;
         for (size_t li = from; li < to; li++) {
             MathLineExtent extent = extentOf(cell, li);
-            double lineWidth = renderer.MathCellLineWidth(cell, li, size, header);
+            // A left-aligned line, the usual one, is placed without its width.
             double tx = cellX + pad;
-            if (align == 0) tx = cellX + (colWidth - lineWidth) * 0.5;
-            else if (align == 1) tx = cellX + colWidth - pad - lineWidth;
+            if (align == 0) tx = cellX + (colWidth - renderer.MathCellLineWidth(cell, li, size, header)) * 0.5;
+            else if (align == 1) tx = cellX + colWidth - pad - renderer.MathCellLineWidth(cell, li, size, header);
             renderer.PaintMathCellLine(cell, li, tx, lineTop - extent.above - size, size,
                 renderer.TableTextColor(header), header);
             lineTop -= lh + extent.above + extent.below;
