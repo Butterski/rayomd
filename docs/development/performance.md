@@ -966,6 +966,27 @@ Binary size (2026-10-19):
   release runners' GCC 11 rejects it) and `-z pack-relative-relocs` (DT_RELR, most of the 11 KB
   of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release runs on).
 
+Note embeds and linked notes (2026-10-19; per embed against the same text inline, perf stat,
+100 embeds of small notes: warm 10.2 K instructions and 4.9 µs before the process's note cache,
+10.5 K and 3.4 µs with it, of which about 6.8 K the resolver's lookups and copies, 3.4 K the note's
+own parse and 0.75 K its `<!---->` line in the document's):
+
+- The embed line as an empty line instead of `<!---->` (0.75 K an embed less): an empty line does
+  not end an indented code block, a list item followed by indented text, or an HTML block of
+  CommonMark's kinds 1 to 5, and a comment does; the bytes would change for such documents.
+- One parse of the document with every note's text in place of its embed line (no parse per
+  note, about 1.1 K an embed, no splice): each note's link definitions would apply to the others
+  and to the document, and a note that leaves a fence, an HTML block, a display formula or an
+  Obsidian comment open would swallow what follows it, which its own parse contains.
+- Skipping Obsidian's rewrite for notes without its syntax: `RewriteObsidian`'s first test,
+  `FindSyntaxPair` (SSE2), is that check, 0.4 K a note of 90 bytes.
+- The name index ordered by `std::sort`: 1.35 KB of instantiations against a Shell sort of the
+  same total order, which runs once per change of the vault.
+- The process cache's notes and roots in maps of their own value types: 1.2 KB more than slots of
+  a vector behind the `unordered_map<std::string, int>` the parser already instantiates.
+- A cold export pays for the cache: 2.2 K instructions a note more than without it (the copies of
+  its path and the slot), 0.9 µs; a warm build saves three of a note's four system calls.
+
 Images and compression:
 
 - zlib at levels 1 to 9, zlib-ng 2.3.3, libdeflate 1.26 (levels 1 to 12) and ISA-L

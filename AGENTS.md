@@ -180,9 +180,19 @@ most 20,000 entries and 32 levels; on Windows no reparse point below the root,
 each entry's footnote labels suffixed `~eN`; the fonts are chosen on all of the text
 (`EmbedSet::all`, also for `GuessFallbackFont`). Paths are UTF-8 strings throughout (normalized in
 place, `Normalize`, only when a name has a "." or empty component); on Linux a candidate is one
-`openat2` beneath the root's descriptor, and a note costs that, an `fstat`, one `read` and a
-`close`; each folder and name is looked up once a build, and the name index is one `readdir` walk
-(`Vault::Walk`) into a single string buffer, ordered by an 8-byte key of each name. The parse does
+`openat2` beneath the root's descriptor (opened on the first note not in the cache), and a note
+read costs that, an `fstat`, one `read` into the string kept and a `close`; each folder and name is
+looked up once a build, and the name index is one `readdir` walk (`Walk`) into a single string
+buffer, ordered by an 8-byte key of each name. What a vault read is kept for the process (`Kept` in
+`vault.cpp`: notes as `shared_ptr<const std::string>`, at most `kMaxNoteCacheBytes` (64 MiB) and
+4,096 notes, least recently used out first; the name indexes of the last four roots; resolved
+roots), so a preview, `--serve` or a batch builds the same note again for one `stat` a note (one
+`GetFileAttributesExW` on Windows): size, last write and status change to the nanosecond, device and
+inode must be as they were, a note written within `SetNoteSettleTime` (2 s) of its read is never
+kept, and only what `Check` accepted (beneath the root, through no link) enters; an index is kept
+with the identity of every folder it read and every link's target, each checked by one `stat`.
+Keep new caching of files on this rule: a file that changed, moved or became a link out of the
+vault must be read again on the next build (`CheckNoteCache`). The parse does
 not change for any other document: `ParseObsidian` takes the rewrite from `RewriteDocument`, which
 in a build in an `EmbedScope` first turns the document's embed lines into `<!---->` (a comment ends
 the block before it and gives none; the rewrite leaves it, so it turns no embed into a link), and
@@ -443,8 +453,14 @@ Important image/link details:
 - `src/core/vault.h` and `src/core/vault.cpp`
   The notes a document embeds or links to: a root folder (`Vault`), resolution relative to the
   note, the root, then by name (an index built once, bounded), confinement by resolved path, and
-  on Windows `DirectPathHasLink` (shared with `tiny_pdf.cpp`'s direct image path); also
-  `ResolvedPath` and `IsWithinRoot`, which `book.cpp` uses. Built at `-Os`.
+  on Windows `DirectPathHasLink` (shared with `tiny_pdf.cpp`'s direct image path); the process's
+  cache of notes, name indexes and resolved roots; and the string path helpers `book.cpp` uses
+  instead of `std::filesystem` (`ResolvedPath`, `IsWithinRoot`, `ParentOf`, `AppendPath`,
+  `Normalize`, `RelativePath`, `FileNameOf`, `StemOf`: `operator/=`, `lexically_normal`,
+  `lexically_relative`, `filename` and `stem` as libstdc++ gives them, pinned by
+  `CheckPathHelpers`). On Windows a path that comes from a directory listing stays a wide
+  `std::filesystem::path` until it is opened (`ResolvedWidePath`; a name with an unpaired surrogate
+  has no UTF-8 form); only containment tests read it as UTF-8. Built at `-Os`.
 
 - `src/core/embeds.h` and `src/core/embeds.cpp`
   Obsidian's note embeds: reading them (`ResolveEmbeds`, bounded in count, depth, bytes read and
