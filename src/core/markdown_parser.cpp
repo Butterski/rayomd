@@ -808,24 +808,6 @@ struct LineInfo {
     int number = 0;
 };
 
-// Every block marker starts with one of these characters (after the indent). A line
-// that begins with anything else is paragraph text and needs none of the checks below.
-static bool MayStartBlock(char first) {
-    switch (first) {
-    case '`': case '~':             // code fence
-    case '$': case '\\':            // display math, \pagebreak
-    case '<':                       // page-break comment, HTML comment
-    case '!':                       // standalone image
-    case '-': case '*': case '_':   // rule, bullet
-    case '+':                       // bullet
-    case '#':                       // heading
-    case '>':                       // quote
-        return true;
-    default:
-        return std::isdigit((unsigned char)first) != 0;   // numbered item
-    }
-}
-
 static std::string_view ParseFenceMarker(std::string_view trimmed) {
     if (trimmed.empty()) return {};
     char marker = trimmed[0];
@@ -933,54 +915,64 @@ static LineInfo ClassifyLine(std::string_view line) {
         info.kind = LineKind::Empty;
         return info;
     }
-    // A line that starts with '[' starts a block only as a linked image, "[![".
-    if (!MayStartBlock(info.trimmed[0]) && (info.trimmed[0] != '[' || info.trimmed.size() < 3 ||
-        info.trimmed[1] != '!' || info.trimmed[2] != '[')) {
+    // Each block marker starts with its own bytes (after the indent), so only the checks of the
+    // line's first byte run, in the order that decides between them ("---" is a rule, "- x" an
+    // item). Anything else is paragraph text. A line that starts with '[' is a block only as a
+    // linked image, "[![".
+    switch (info.trimmed[0]) {
+    case '`':
+    case '~': {
+        const std::string_view fence = ParseFenceMarker(info.trimmed);
+        if (!fence.empty()) {
+            info.kind = LineKind::Fence;
+            info.text = fence;
+        }
         return info;
     }
-    std::string_view fence = ParseFenceMarker(info.trimmed);
-    if (!fence.empty()) {
-        info.kind = LineKind::Fence;
-        info.text = fence;
-        return info;
-    }
-    if (info.trimmed[0] == '$' || info.trimmed[0] == '\\') {
+    case '$':
+    case '\\':
         if (ClassifyMathLine(info)) return info;
-    }
-    if (IsPageBreakLine(info.trimmed)) {
-        info.kind = LineKind::PageBreak;
+        if (IsPageBreakLine(info.trimmed)) info.kind = LineKind::PageBreak;
         return info;
-    }
-    if (info.trimmed[0] == '<' && ClassifyHtmlLine(line, info)) return info;
-    if (ParseStandaloneImage(info.trimmed, nullptr)) {
-        info.kind = LineKind::Image;
+    case '<':
+        if (IsPageBreakLine(info.trimmed)) {
+            info.kind = LineKind::PageBreak;
+            return info;
+        }
+        ClassifyHtmlLine(line, info);
         return info;
-    }
-    if (IsRuleLine(line)) {
-        info.kind = LineKind::Rule;
+    case '!':
+    case '[':
+        if (ParseStandaloneImage(info.trimmed, nullptr)) info.kind = LineKind::Image;
         return info;
-    }
-    if (ParseHeadingView(line, info.level, info.text)) {
-        info.kind = LineKind::Heading;
+    case '-':
+    case '*':
+    case '_':
+        if (IsRuleLine(line)) {
+            info.kind = LineKind::Rule;
+            return info;
+        }
+        if (ParseBulletView(line, info.level, info.text)) info.kind = LineKind::Bullet;
         return info;
-    }
-    if (ParseBulletView(line, info.level, info.text)) {
-        info.kind = LineKind::Bullet;
+    case '+':
+        if (ParseBulletView(line, info.level, info.text)) info.kind = LineKind::Bullet;
         return info;
-    }
-    if (ParseNumberedView(line, info.level, info.number, info.text)) {
-        info.kind = LineKind::Numbered;
+    case '#':
+        if (ParseHeadingView(line, info.level, info.text)) info.kind = LineKind::Heading;
         return info;
-    }
-    std::string_view left = LTrimView(line);
-    if (StartsWith(left, ">")) {
+    case '>': {
         info.kind = LineKind::Quote;
-        info.text = left.substr(1);
-        if (!info.text.empty() && info.text[0] == ' ') info.text.remove_prefix(1);
-        info.text = TrimView(info.text);
+        std::string_view text = info.trimmed.substr(1);
+        if (!text.empty() && text[0] == ' ') text.remove_prefix(1);
+        info.text = TrimView(text);
         return info;
     }
-    return info;
+    default:
+        if (info.trimmed[0] >= '0' && info.trimmed[0] <= '9' && ParseNumberedView(line, info.level, info.number, info.text)) {
+            info.kind = LineKind::Numbered;
+        }
+        return info;
+    }
 }
 
 // A line that interrupts a paragraph. An HTML block of start condition 7 (any other complete tag

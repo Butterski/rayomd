@@ -63,6 +63,11 @@ linked notes) identical.
   `push_back`); time: essay -13.9 %, native_math -4.9 %. Text +6.0 KB.
 - **Line feeds by bit scans** (`SplitLineViews`): 64 bytes a step and a bit scan a line feed,
   where a loop stepped over the mask's bits one at a time: -0.2 to -1.2 % instructions everywhere.
+- **Lines classified by their first byte** (`ClassifyLine`): each block marker starts with bytes
+  of its own, so a switch on the line's first byte runs only that marker's checks, where every
+  line that might start a block took the whole chain (fence, math, page break, HTML, image, rule,
+  heading, item, number, quote): notes -3.6 %, README, tester-noimg, native_math -1.1 to -1.2 %,
+  others -0.4 to -0.7 %, table-heavy +0.02 % instructions.
 - **The Unicode renderer's wrapping in integer units** (`WrapUnits`, `MeasureWideWords`): its
   line breaks came from double sums, a character's units times the scale added in text order, a
   chain of dependent additions. The sums are now integer AFM units, and every comparison with a
@@ -931,6 +936,13 @@ Text and layout:
   kept: essay -1.2 % more); the short loop inside each `WrapAsciiWords` instantiation (four copies,
   +5 KB, before `BreakAsciiWords`); the measure buffers a member of `AsciiRuns` (the standard
   renderer's constructor went out of line, +6 KB; they are the thread's `WrapScratch`).
+- `WriteCidText`'s plain CIDs copied in AVX2 (2026-10-19): eight units a step with their plain
+  bits gathered (README -3.8 %, code-heavy -4.7 % instructions, but the function's cycles +35 %:
+  Zen 2's `vpgatherdd` is microcoded); sixteen ASCII units a step looked up in a register (no
+  gather): README -3.2 %, code-heavy -3.9 %, polish +1.0 % instructions, the function's cycles
+  -9 % on code-heavy and +10 % on README; only runs of 32 units or more: table-heavy +1.6 %
+  instructions (inlining) and the same split of cycles. The scalar loop, a bit test and a store
+  a unit, stays.
 - Keeping the default font alive at exit: 1 to 2 % less CPU, no faster by the
   clock (ending the one-shot export with `_Exit`, which skips all of the teardown, is
   kept). Loading the cmap block by block: 10 of 156 faults, a test per glyph
