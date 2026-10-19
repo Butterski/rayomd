@@ -228,11 +228,11 @@ std::vector<std::string> ThemeBandStreams(const PdfTheme& theme, bool pageNumber
 }
 
 std::string ThemeCoverStream(const ThemeDocument& document, const ThemePage& page, const ThemeLogoImage& logo,
-    const ThemeTextFont& font, const char* headingColor, const char* ruleColor) {
+    const ThemeTextFont& font, std::string_view headingColor, std::string_view ruleColor) {
     const double content = page.width - page.margin * 2.0;
     std::string out;
     // Centred lines of `text` from the baseline `y` down, which moves past them.
-    const auto lines = [&](std::string_view text, double& y, double size, double leading, bool bold, const char* color) {
+    const auto lines = [&](std::string_view text, double& y, double size, double leading, bool bold, std::string_view color) {
         if (text.empty()) return;
         out += "q ";
         out += color;

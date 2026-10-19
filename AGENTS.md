@@ -889,8 +889,9 @@ GitHub CI entry points:
   process holds, within the decode's share of the pool's three, so a busy batch asks for
   none. The first encoders of a process carve their buffers from 2 MB pages
   (`MADV_HUGEPAGE` on Linux), which saves most of a fresh process's page faults.
-- `WriteFixed2` may write one byte past the end it returns, within the
-  `kFixed2MaxChars` every caller must leave.
+- `WriteFixed2` may overwrite all `kFixed2MaxChars` bytes from where it starts (an operand under
+  10,000 writes ".dd" after its digits whether it has decimals or not), within the room every
+  caller must leave; never call it where bytes after the number must survive.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document
   libraries to the native package.
 - Reuse output buffers in batch/server paths where practical.
@@ -929,7 +930,9 @@ GitHub CI entry points:
   translation unit of its own behind a small interface, as `theme.cpp` does: inside
   `tiny_pdf.cpp`, the theme layout moved `std::string::push_back` and appends of the
   link annotations out of line (+2.6 % instructions on `baseline.md`). Write output
-  that grows by pieces through `TailWriter`, not per-byte `push_back`.
+  that grows by pieces through `TailWriter`, not per-byte `push_back`. A `TailWriter` writes
+  past the string's size until it ends: nothing else may append to that string meanwhile. Grow
+  a string that is then written whole with `ResizeForOverwrite`, not `resize` (which fills it).
 - Keep image caches bounded. Image support can dominate memory on large or many
   remote images.
 - Linux benchmarks are much faster on native/ext4 storage than on `/mnt/*` WSL
