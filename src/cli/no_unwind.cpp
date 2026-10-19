@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-// The dynamic Linux CLI's C++ exception runtime: a throw ends the process. RayoMD is built
-// without exceptions and catches nothing, so what libstdc++ throws (std::bad_alloc, a
-// std::length_error) ended it before, after unwinding the stack for a handler that is not
-// there. That search linked libgcc's unwinder, the personality routine and the emergency
-// exception pool (41 KB of code and tables, and a 73 KB allocation at every start): these
-// definitions take their place, so those archive members are never linked. A throw prints what
-// libstdc++'s terminate handler printed (the type as the ABI names it) and aborts; the landing
-// pads and handlers of libstdc++'s own code, which only an unwind would reach, abort too.
-// The nothrow operator new returns null when memory runs out, without the throw and catch
-// libstdc++'s makes of it.
+// The release CLI's C++ exception runtime (dynamic Linux and MinGW): a throw ends the process.
+// RayoMD is built without exceptions and catches nothing, so what libstdc++ throws
+// (std::bad_alloc, a std::length_error) ended it before, after unwinding the stack for a handler
+// that is not there. That search linked libgcc's unwinder, the personality routine and the
+// emergency exception pool (41 KB of code and tables on Linux, and a 73 KB allocation at every
+// start; 12 KB of rayomd.exe): these definitions take their place, so those archive members are
+// never linked. A throw prints what libstdc++'s terminate handler printed (the type as the ABI
+// names it) and aborts; the landing pads and handlers of libstdc++'s own code, which only an
+// unwind would reach, abort too. The nothrow operator new returns null when memory runs out,
+// without the throw and catch libstdc++'s makes of it.
 #include <cxxabi.h>
 #include <unwind.h>
 
@@ -41,9 +41,11 @@ extern "C" void __cxa_free_exception(void* object) noexcept {
 
 // Every type libstdc++ throws derives from std::exception, at the start of the object.
 extern "C" void __cxa_throw(void* object, std::type_info* type, void (*)(void*)) {
-    std::fprintf(stderr, "terminate called after throwing an instance of '%s'\n  what():  %s\n", type->name(),
-        static_cast<const std::exception*>(object)->what());
-    std::abort();
+    std::fputs("terminate called after throwing an instance of '", stderr);
+    std::fputs(type->name(), stderr);
+    std::fputs("'\n  what():  ", stderr);
+    std::fputs(static_cast<const std::exception*>(object)->what(), stderr);
+    Fail("\n");
 }
 
 extern "C" void __cxa_rethrow() {
@@ -58,10 +60,17 @@ extern "C" void __cxa_end_catch() {
     Fail("terminate called without an active exception\n");
 }
 
+#ifdef __SEH__
+// MinGW's personality routine for Windows' structured exception handling.
+extern "C" int __gxx_personality_seh0(void*, void*, void*, void*) {
+    Fail("terminate called without an active exception\n");
+}
+#else
 extern "C" _Unwind_Reason_Code __gxx_personality_v0(int, _Unwind_Action, _Unwind_Exception_Class, _Unwind_Exception*,
     _Unwind_Context*) {
     Fail("terminate called without an active exception\n");
 }
+#endif
 
 extern "C" void __cxa_call_unexpected(void*) {
     Fail("terminate called without an active exception\n");
@@ -89,6 +98,16 @@ int uncaught_exceptions() noexcept {
 }
 
 } // namespace std
+
+namespace __gnu_cxx {
+
+// std::terminate's handler (a joinable std::thread destroyed): no exception is ever active, so
+// terminate.cpp's handler, which reads the active exception through a catch, is not linked.
+void __verbose_terminate_handler() {
+    Fail("terminate called without an active exception\n");
+}
+
+} // namespace __gnu_cxx
 
 extern "C" void _Unwind_Resume(_Unwind_Exception*) {
     Fail("terminate called without an active exception\n");

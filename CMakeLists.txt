@@ -189,6 +189,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
         src/cli/main_cli.cpp
         src/win32/main_windows_cli.cpp
+        src/cli/std_throws.cpp
+        src/cli/no_unwind.cpp
         src/common/batch_report.cpp
         src/core/rayomd_pdf_source.cpp
         src/core/image_cache.cpp
@@ -333,7 +335,17 @@ if(RAYOMD_BUILD_CLI)
                 src/win32/delay_image_load.cpp
                 src/win32/delay_image_import_pointers.cpp)
             target_link_options(rayomd PRIVATE -Wl,--wrap=CommandLineToArgvW)
-            target_sources(rayomd PRIVATE src/cli/terminate.cpp)
+            if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+                # Release builds, compiled without exceptions: libstdc++'s throws abort where they
+                # are made, without its exception runtime (std_throws.cpp, no_unwind.cpp; as on
+                # Linux).
+                target_sources(rayomd PRIVATE
+                    $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/std_throws.cpp>
+                    $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.cpp>
+                    $<$<NOT:$<CONFIG:Release>>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/terminate.cpp>)
+            else()
+                target_sources(rayomd PRIVATE src/cli/terminate.cpp)
+            endif()
         endif()
         target_compile_definitions(rayomd PRIVATE UNICODE _UNICODE)
         target_include_directories(rayomd PRIVATE include)
@@ -350,12 +362,18 @@ if(RAYOMD_BUILD_CLI)
     else()
         add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
-            target_sources(rayomd PRIVATE src/cli/terminate.cpp)
-            if(NOT RAYOMD_STATIC)
-                # Release builds, compiled without exceptions: a throw aborts without unwinding, and
-                # the unwind tables nothing reads are dropped. Not static: glibc's libc.a links the
-                # unwinder for thread cancellation.
-                target_sources(rayomd PRIVATE $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.cpp>)
+            # Release builds, compiled without exceptions: libstdc++'s throws abort where they are
+            # made (std_throws.cpp).
+            target_sources(rayomd PRIVATE $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/std_throws.cpp>)
+            if(RAYOMD_STATIC)
+                target_sources(rayomd PRIVATE src/cli/terminate.cpp)
+            else()
+                # Release builds: a throw aborts without unwinding, and the unwind tables nothing
+                # reads are dropped; no_unwind.cpp's terminate handler takes terminate.cpp's place.
+                # Not static: glibc's libc.a links the unwinder for thread cancellation.
+                target_sources(rayomd PRIVATE
+                    $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.cpp>
+                    $<$<NOT:$<CONFIG:Release>>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/terminate.cpp>)
                 if(RAYOMD_HOT_SECTIONS)
                     set(script "${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.ld")
                     target_link_options(rayomd PRIVATE "$<$<CONFIG:Release>:-Wl,-T,${script}>")
