@@ -174,6 +174,67 @@ Every step keeps the 2,875 PDFs of the byte check and the 5,936 and 6,044 featur
   one that may be syntax (`FindByteClass`) are now appended at once. tester-noimg -1.4 %
   instructions, -1.2 % time; others unchanged.
 
+## Round 5 against 5.2.5: hot paths (opt5/hot, 2026-10-19)
+
+Measured against 5.2.5 (`ac59556`), g++ 13.3 Release, Docker; instructions by `ab.sh --instructions`
+and callgrind, cycles by `perf stat -e cycles:u` in paired round-robin runs on one CPU of a busy
+host (15 rounds unless said). Besides the eight `ab.sh` fixtures: `tester.md` without its images
+700 times (3.4 MB, the GUI's case, 2 builds a run) and two CJK documents of the CJK matrix
+(`cjkmany.md`, 15 KB of CJK, and `essay-cjk.md`) with Noto Sans CJK as the fallback font. Every
+step keeps the 2,875 PDFs of the byte check and the 5,936 and 6,044 feature-on exports (the CFF
+and fallback steps also the 470 exports of the CJK matrix).
+
+- **Math parser: no zeroed environment names, a brace table written at braces, a kept arena.** A
+  `Parser` (one a formula) zeroed 32 `string_view`s (512 bytes, `rep stos` at `-Os`) and filled its
+  brace table over the whole formula; `MathFormula::Layout` allocated a parse arena a formula (now
+  the thread's). tester x700 -1.2 % cycles; tester-noimg -0.70 % instructions.
+- **The math units at `-Os` with vector string operations and small inlining.** At `-Os` GCC copies
+  and zeroes the layout's 64-byte `Box` with `rep movs`/`rep stos` (half of `LayoutNode`'s cycles,
+  89 % of `Layouter::Open`'s: tens of cycles to start each) and calls every one-line helper. With
+  `-mstringop-strategy=vector_loop --param=max-inline-insns-size=12` (GCC only;
+  `CMakeLists.txt`'s `small_step_options`) the size/speed curve on tester x700, cycles against the
+  step before:
+
+  | Math units | Text | Cycles |
+  | --- | ---: | ---: |
+  | `-mstringop-strategy=libcall` | +0.4 KB | -2.9 % |
+  | `vector_loop` | +2.0 KB | -4.1 % |
+  | `vector_loop`, inline size 10, parser only | +4.3 KB | -7.9 % |
+  | `vector_loop`, inline size 10, layout only | +6.8 KB | -6.7 % |
+  | `vector_loop`, inline size 8 | +7.3 KB | -8.9 % |
+  | `vector_loop`, inline size 12 (kept) | +9.0 KB | -10.8 % |
+  | `-O2` | +52.2 KB | -15.7 % |
+
+  `ab.sh`: tester-noimg -12.6 % time, -5.71 % instructions; table-heavy -0.42 %; others 0. What
+  `-O2` adds beyond: `FindCommand` inlined into `Peek`, `WriteFixed2` into `OpWriter::Number`, the
+  `EmitText` loop (about 1 % each).
+- **`UsedCidSet::Values` read off the bits** from 256 CIDs on: sorting 5,000 CIDs of a page of CJK
+  took 1.4 M instructions a build (`std::sort` fell back to heapsort). cjkmany warm -19 % cycles,
+  -25 % instructions; the fixtures within 0.02 %.
+- **`cff.cpp` in the same group**: a fresh export of cjkmany -13 % cycles (task-clock 24.0 ->
+  21.7 ms) for 2.2 KB; warm builds reuse the cached subset.
+- **`ChooseFallbackFont` counts a candidate's missing characters a word at a time** (bit arrays
+  instead of a lambda call a character in a cold function): cjkmany warm -5.6 % instructions.
+
+Rejected or left in this round:
+
+- `-mmemcpy-strategy=`/`-mmemset-strategy=` tables: ignored at `-Os` (GCC takes only
+  `-mstringop-strategy` when optimizing for size). `-O2` without alignment (`-falign-*=1`): +48 KB.
+- Per-build allocations (DHAT with a build that keeps unwind tables): README about 1,000 blocks a
+  build, table-heavy 7,200 (4,200 of them `SplitTableCells`' rows and cell strings), tester-noimg
+  530; malloc and free are 7 to 9 % of the cycles of README, table-heavy and tester x700. Most are
+  structural: the parser's block strings, `Block::rows` as vectors of strings, `PdfObjects`' one
+  string an object, and the cold formula-paragraph path (`WrapMathWords`: a vector of lines of
+  spans, a `wstring` a span). Small ones left: `SplitTableCells` reserves 4 cells (a realloc for
+  wider rows; the header's count is known), `IsTableStart`'s alignment vector grows from empty,
+  `HeadingTargets::Index` does not reserve its map.
+- table-heavy's `memchr` (7.6 % of cycles): `SplitTableCells` 1.9 %, `WrapMathCell`'s one search a
+  cell for `kMathTextOpen` 1.8 %, the parser's `MayContainMath` and `EraseMathTextBytes` 2.2 %,
+  `ParseInlineRuns` 1.0 %; the parser knows which cells hold formulas, but the block has no place
+  for it.
+- Callgrind runs `Sha256BlocksPortable` (valgrind hides SHA-NI): the 11 % it shows for cjkmany is
+  not there natively.
+
 ## Round 4: incremental builds for the preview (opt4/incremental, 2026-10-19)
 
 `TinyPdf::BuildSession` (design, breakdown and numbers: `incremental_builds.md`): consecutive builds
@@ -1244,8 +1305,9 @@ are left.
 **Formulas at `-O2` (2026-10-19).** `math_parser.cpp` and `math_layout.cpp` are built at `-Os`.
 Both at `-O2`: tester-noimg -6.1 % instructions and -13.6 % time (ab.sh), other fixtures unchanged,
 for +52 KB of text (layout alone -3.4 % and -8.4 % for +33 KB, the parser alone -2.7 % and -4.2 %
-for +19 KB). Math is about a fifth of a build of `tester.md`, the GUI's test document. Not taken
-in round four: a size decision.
+for +19 KB). Math is about a fifth of a build of `tester.md`, the GUI's test document. Round five
+took two thirds of it for 9 KB (vector string operations and small inlining at `-Os`, see round
+5); the rest is `-O2`'s inlining of `FindCommand`, `WriteFixed2` and the emit loop.
 
 **`BuildInto`'s move of the page content (2026-10-19).** Taken in round four for builds
 that follow one of the same layout on their thread (`LeaveGaps`).

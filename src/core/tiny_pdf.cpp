@@ -1757,9 +1757,13 @@ public:
     }
     void MarkPlain(uint16_t unit) { plain[unit >> 6] |= 1ull << (unit & 63); }
 
+    // The recorded CIDs in ascending order. From kSortFromBits of them on, they are read off the
+    // bits in order (1,024 words, a few instructions each, and one store a CID) instead of sorted:
+    // a page of CJK text has thousands, which std::sort took 1.4 M instructions for.
     const CidList& Values() const {
         if (!sorted) {
-            std::sort(values.begin(), values.end());
+            if (values.size() < kSortFromBits) std::sort(values.begin(), values.end());
+            else ValuesFromBits();
             sorted = true;
         }
         return values;
@@ -1788,6 +1792,18 @@ public:
     uint32_t missingBmp = 0;
 
 private:
+    static constexpr size_t kSortFromBits = 256;
+
+    // `values` rewritten in ascending order from `bits`, which hold exactly its CIDs.
+    RAYOMD_NOINLINE void ValuesFromBits() const {
+        uint16_t* out = values.data();
+        for (uint32_t word = 0; word < bits.size(); word++) {
+            for (uint64_t set = bits[word]; set != 0; set &= set - 1) {
+                *out++ = (uint16_t)(word * 64 + RayoMd::Text::Detail::LowestBit64(set));
+            }
+        }
+    }
+
     std::array<uint64_t, 1024> bits;
     std::array<uint64_t, 1024> plain;
     mutable CidList values;
@@ -13961,12 +13977,6 @@ struct FallbackChoice {
 // Each candidate is read once, for the characters it covers; one stays in memory once it is
 // chosen, and is never freed then.
 RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, const CidList& used) {
-    // Control characters have no glyph anywhere: no reason to change fonts.
-    auto missingIn = [&](auto&& hasGlyph) {
-        size_t count = 0;
-        for (uint16_t cid : used) count += cid >= 0x20 && !hasGlyph(cid);
-        return count;
-    };
     auto hasLayoutChars = [](auto&& hasGlyph) {
         for (const uint16_t cid : kLayoutChars) {
             if (!hasGlyph(cid)) return false;
@@ -13974,8 +13984,34 @@ RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, con
         return true;
     };
     bool stable = hasLayoutChars([&](uint16_t cid) { return primary.HasGlyph(cid); });
-    size_t fewest = missingIn([&](uint16_t cid) { return primary.HasGlyph(cid); });
+    // Control characters have no glyph anywhere: no reason to change fonts.
+    size_t fewest = 0;
+    for (const uint16_t cid : used) fewest += cid >= 0x20 && !primary.HasGlyph(cid);
     if (fewest == 0) return { nullptr, stable };
+    // The others as bits in `wanted`, in the words listed in `words`, so that a candidate's count
+    // takes a word at a time: a page of CJK has thousands of characters (each `used` CID comes once).
+    uint64_t wanted[1024];
+    uint16_t words[1024];
+    uint64_t touched[16] = {};
+    size_t wordCount = 0;
+    for (const uint16_t cid : used) {
+        if (cid < 0x20) continue;
+        const uint32_t word = cid >> 6;
+        const uint64_t wordBit = 1ull << (word & 63);
+        if ((touched[word >> 6] & wordBit) == 0) {
+            touched[word >> 6] |= wordBit;
+            wanted[word] = 0;
+            words[wordCount++] = (uint16_t)word;
+        }
+        wanted[word] |= 1ull << (cid & 63);
+    }
+    const auto missingIn = [&](const std::vector<uint64_t>& coverage) {
+        size_t count = 0;
+        for (size_t index = 0; index < wordCount; index++) {
+            for (uint64_t missing = wanted[words[index]] & ~coverage[words[index]]; missing != 0; missing &= missing - 1) count++;
+        }
+        return count;
+    };
 
     struct Candidate {
         bool probed = false;
@@ -14003,7 +14039,7 @@ RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, con
         if (candidate.coverage.empty()) continue;
         const auto covers = [&](uint16_t cid) { return (candidate.coverage[cid >> 6] >> (cid & 63)) & 1; };
         stable = stable && hasLayoutChars(covers);
-        const size_t count = missingIn(covers);
+        const size_t count = missingIn(candidate.coverage);
         if (count < fewest) {
             best = index;
             fewest = count;
