@@ -4316,6 +4316,7 @@ int main() {
     if (!embeds_tests::CheckLinkedNotes()) return 131;
     if (!print_tests::CheckPrint()) return 128;
     if (!session_tests::CheckBuildSession()) return 137;
+    if (!hardening_tests::CheckEditedMedia()) return 138;
 #ifdef _WIN32
     if (!CheckDirectImageLinks()) return 123;
 #endif

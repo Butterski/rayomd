@@ -371,12 +371,19 @@ Important image/link details:
   whole conversion.
 - An SVG image (a file or URL) is converted by `src/core/svg.cpp`, without a
   dependency, into a form XObject for each document, as its text uses the
-  document's fonts; such forms never enter the cross-document image cache. Their `data:`
-  images do: decoded once a process and kept by the SHA-256 of their bytes
-  (`ImageRegistry::AddDecoded`), as a preview builds the same SVG on every edit. One
-  that needs what the converter does not draw (HTML, scripts, style sheets it
-  cannot match) or hits a limit shows its alt text. Keep every limit failing
-  closed: SVG input is untrusted.
+  document's fonts and its `data:` images the document's image indices; such forms never enter
+  the cross-document image cache. Their `data:` images do: decoded once a process and kept by
+  the SHA-256 of their bytes (`ImageRegistry::AddDecoded`). The form itself is kept for later
+  builds of the process by what decides it (`ImageRegistry::ConvertSvgFile`, `diagram_cache.cpp`'s
+  `ConvertedSvg`, at most 32 MiB): the file's key and stamp (as the raster cache's), the renderer
+  and its fonts (`TtfFont::loadId`), and the index its first `data:` image took, with the images
+  it registered and its text runs; `TakeConvertedSvg` registers those images again, charged to
+  the decode budget, and replays the runs into the glyph sets (`CidText`), so a build that takes
+  it writes the bytes a conversion writes (core check 138, `CheckEditedMedia`). A conversion that
+  the budget refused an image, or that a cancel ended, is not kept; a kept form the budget would
+  refuse an image of is converted again. One that needs what the converter does not draw (HTML,
+  scripts, style sheets it cannot match) or hits a limit shows its alt text. Keep every limit
+  failing closed: SVG input is untrusted.
 - The images of one build decode at most `kDecodeBudgetPixels` (2^30) pixels in all
   (`DecodeBudget`, one per `ImageRegistry`, so per pass of a build): a re-encoded PNG, a WIC
   decode and an SVG's `data:` image are charged before their pixels are read, and an image
@@ -541,8 +548,9 @@ Important image/link details:
   code block. Pie arcs are Béziers from the module's own sine; keep transcendental calls out.
 
 - `src/core/diagram_cache.h` and `src/core/diagram_cache.cpp`
-  The process's drawn diagrams for `ImageRegistry::AddDiagram`: key, bound and lock, and the
-  containers whose instantiations stay out of `tiny_pdf.cpp`. Built at `-Os`.
+  The process's drawn forms for `ImageRegistry`: diagrams (`AddDiagram`) and SVG files and URLs
+  (`ConvertSvgFile`, `TakeConvertedSvg`): keys, bounds and locks, and the containers whose
+  instantiations stay out of `tiny_pdf.cpp`. Built at `-Os`.
 
 - `src/core/cff.h` and `src/core/cff.cpp`
   OpenType fonts with PostScript outlines: the 'CFF ' table checked once when the font
