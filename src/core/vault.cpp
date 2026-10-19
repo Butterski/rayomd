@@ -78,7 +78,7 @@ bool IsMarkdownName(std::string_view name) {
 size_t RootLength(std::string_view path) {
 #ifdef _WIN32
     size_t length = 0;
-    if (path.size() >= 2 && IsSeparator(path[0]) && IsSeparator(path[1])) {
+    if (path.size() >= 3 && IsSeparator(path[0]) && IsSeparator(path[1]) && !IsSeparator(path[2])) {
         length = 2;
         while (length < path.size() && !IsSeparator(path[length])) length++;
     } else if (path.size() >= 2 && path[1] == ':') {
@@ -214,10 +214,11 @@ std::string RelativePath(std::string_view path, std::string_view base) {
     for (; hasB; hasB = to.Next(b)) up += b == ".." ? -1 : !b.empty() && b != ".";
     if (!rooted && up == 0 && a.empty()) return ".";
     if (up < 0) return out;
-    if (rooted) out += kSeparator;
+    // As the root directory is written (operator/= keeps it), then names with the platform's.
+    if (rooted) out += path[from.rootLength - 1];
     for (; !rooted && up > 0; up--) out.append(out.empty() ? 0 : 1, kSeparator).append("..");
     for (; hasA; hasA = from.Next(a)) {
-        if (!out.empty() && out.back() != kSeparator) out += kSeparator;
+        if (!out.empty() && !IsSeparator(out.back())) out += kSeparator;
         out.append(a);
     }
     return out;

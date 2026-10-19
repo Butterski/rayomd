@@ -322,9 +322,18 @@ bool CheckPathHelpers() {
         "a/b/c/../../d/", "x/y/.", "/a/b//", "///a/b", "a/.../b", "..a/b..", ".hidden/./x", "a/./", "./", "../", "a/../", "/a/..",
         "/a/../..", "x/./../y", "./.././a/" };
 #ifdef _WIN32
-    for (const char* windows : { "C:\\a\\..\\b", "C:a\\..\\..", "C:\\..", "\\\\srv\\share\\x\\..", "C:/x/./y", "\\a\\b", "C:", "C:\\",
-             "c:a/b/", "\\\\srv", "\\\\srv\\", "a\\b/c" }) {
+    for (const char* windows : { "C:\\a\\..\\b", "C:a\\..\\..", "C:\\..", "C:/x/./y", "\\a\\b", "C:", "C:\\", "c:a/b/", "a\\b/c" }) {
         normal.push_back(windows);
+    }
+    // A share's server is a root name here, as for Windows; libstdc++ (MinGW) reads the two leading
+    // backslashes as a root directory, and its lexically_normal makes them one, a path on the
+    // current drive (base's books could not read a SUMMARY.md's chapters on a share).
+    const std::pair<const char*, const char*> shares[] = { { "\\\\srv\\share\\x\\..", "\\\\srv\\share\\" }, { "\\\\srv", "\\\\srv" },
+        { "//srv/s/./a", "\\\\srv\\s\\a" }, { "\\\\srv\\s\\..\\..", "\\\\srv\\" } };
+    for (const auto& [path, want] : shares) {
+        std::string got = path;
+        TinyPdf::Internal::Normalize(got);
+        expect("Normalize", path, got, want);
     }
 #endif
     for (const std::string& path : normal) {
@@ -356,7 +365,7 @@ bool CheckPathHelpers() {
         { "/x", "../y" }, { "a", "" }, { "a/", "" }, { ".", "b" }, { "a", "b/" } };
 #ifdef _WIN32
     joined.insert(joined.end(), { { "C:\\a", "\\b" }, { "C:\\a", "D:b" }, { "C:\\a", "C:b" }, { "C:", "b" }, { "C:\\a", "D:\\b" },
-        { "a", "\\\\srv\\x" }, { "\\\\srv\\s", "\\x" } });
+        { "a", "C:\\x" } });
 #endif
     for (const auto& [base, path] : joined) {
         std::string got = base;
