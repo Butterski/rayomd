@@ -625,14 +625,14 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
   2 KB stack buffer appended when full and at the end, never piece by piece (`push_back` a glyph
   byte, `operator+=` with a `strlen` a literal: 15.7 % of tester-noimg's instructions, now 7.9 %).
   Its small members are always inlined even at `-Os` (-1.5 % more on tester-noimg, 850 bytes).
-- `WriteFixed2` opportunity (2026-10-19, not taken yet): one range test (`< 999999.5`
-  hundredths, the rest in a cold function with today's code), an `int` conversion instead of the
-  unsigned 64-bit one, `-` written always and the pointer advanced by the sign bit, and the
-  fraction written as one 4-byte store with its length computed: identical on 32 M test values
-  (every hundredth to ±20,000 and its neighbours, the half-way points, random bit patterns),
-  -10 % instructions and fewer cycles on 191,870 logged real inputs. A fully branch-free integer
-  part (four digits shifted by their leading zeros) took as many instructions as today's code and
-  more time.
+- `WriteFixed2` (2026-10-19): one range test (`< 999999.5` hundredths; the rest, NaN and
+  infinities in the cold `WriteFixed2Wide`, the code it had), an `int` conversion instead of the
+  unsigned 64-bit one (no sign fix-up), `-` written always and the pointer advanced by the sign
+  bit, and ".dd" always written with its length computed (0, 2 or 3 bytes). Identical on 32 M
+  test values (every hundredth to ±20,000 and its neighbours, the half-way points, random bit
+  patterns); in the engine -0.35 to -2.08 % instructions and -0.1 to -2.2 % time on every
+  fixture. A fully branch-free integer part (four digits shifted by their leading zeros) took as
+  many instructions as the branches and more time (scratch benchmark on 191,870 logged inputs).
 - A paragraph is asked once whether its text needs escaping in a PDF literal
   (`HasLiteralSpecial`, SSE2; the plain-text path reuses the classes
   `NeedsInlineParse` summed); its runs are then copied as they are.

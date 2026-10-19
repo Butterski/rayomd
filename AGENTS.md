@@ -874,8 +874,9 @@ GitHub CI entry points:
   process holds, within the decode's share of the pool's three, so a busy batch asks for
   none. The first encoders of a process carve their buffers from 2 MB pages
   (`MADV_HUGEPAGE` on Linux), which saves most of a fresh process's page faults.
-- `WriteFixed2` may write one byte past the end it returns, within the
-  `kFixed2MaxChars` every caller must leave.
+- `WriteFixed2` may overwrite all `kFixed2MaxChars` bytes from where it starts (an operand under
+  10,000 writes ".dd" after its digits whether it has decimals or not), within the room every
+  caller must leave; never call it where bytes after the number must survive.
 - Avoid adding large runtimes, browser engines, TeX stacks, or heavy document
   libraries to the native package.
 - Reuse output buffers in batch/server paths where practical.

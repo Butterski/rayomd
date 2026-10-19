@@ -38,16 +38,13 @@ inline char* WritePair(char* out, unsigned value) {
 }
 } // namespace Detail
 
-// Writes `value` with at most two decimals, the format of every PDF operand, and
-// returns the end of the text. `out` must have room for kFixed2MaxChars characters;
-// the byte after the end may be overwritten.
-inline char* WriteFixed2(char* out, double value) {
-    const bool negative = std::signbit(value);
-    const double hundredths = std::fabs(value) * 100.0;
+// Operands from 10,000 on, NaN and infinities: WriteFixed2's rare cases, `hundredths` already
+// positive and the sign written.
+RAYOMD_COLD inline char* WriteFixed2Wide(char* out, double hundredths) {
     uint64_t scaled;
     if (hundredths < 4503599627370496.0) {
         // Below 2^52 the fraction of a double is exact, so rounding half away from zero
-        // needs no library call. Every page coordinate takes this branch.
+        // needs no library call.
         scaled = static_cast<uint64_t>(hundredths);
         if (hundredths - static_cast<double>(scaled) >= 0.5) scaled++;
     } else {
@@ -56,31 +53,43 @@ inline char* WriteFixed2(char* out, double value) {
         scaled = hundredths < 9223372036854775808.0 ? static_cast<uint64_t>(static_cast<int64_t>(hundredths))
                                                      : static_cast<uint64_t>(INT64_MIN);
     }
-    if (negative) *out++ = '-';
-    unsigned fraction;
-    if (scaled < 1000000) {
-        // At most four integer digits, the usual operand: two digits a step.
-        const unsigned all = static_cast<unsigned>(scaled);
-        const unsigned whole = all / 100;
-        fraction = all - whole * 100;
-        if (whole >= 100) {
-            const unsigned high = whole / 100;
-            if (high >= 10) out = Detail::WritePair(out, high);
-            else *out++ = static_cast<char>('0' + high);
-            out = Detail::WritePair(out, whole - high * 100);
-        } else if (whole >= 10) {
-            out = Detail::WritePair(out, whole);
-        } else {
-            *out++ = static_cast<char>('0' + whole);
-        }
-    } else {
-        fraction = static_cast<unsigned>(scaled % 100);
-        out = std::to_chars(out, out + 20, scaled / 100).ptr;
-    }
+    const unsigned fraction = static_cast<unsigned>(scaled % 100);
+    out = std::to_chars(out, out + 20, scaled / 100).ptr;
     if (fraction == 0) return out;
     *out = '.';
     Detail::WritePair(out + 1, fraction);
     return out + (Detail::kDigitPairs[2 * fraction + 1] == '0' ? 2 : 3);
+}
+
+// Writes `value` with at most two decimals, the format of every PDF operand, and
+// returns the end of the text. `out` must have room for kFixed2MaxChars characters, all of
+// which may be overwritten (the usual operand writes ".dd" after its digits whether it has
+// decimals or not, so up to 3 bytes past the end it returns).
+// Every page coordinate is under 10,000: one range test, an int conversion, two-digit steps
+// for the integer part, and the sign and the fraction without branches.
+inline char* WriteFixed2(char* out, double value) {
+    const double hundredths = std::fabs(value) * 100.0;
+    *out = '-';
+    out += std::signbit(value);
+    if (!(hundredths < 999999.5)) return WriteFixed2Wide(out, hundredths);
+    const int truncated = static_cast<int>(hundredths);
+    const unsigned all = static_cast<unsigned>(truncated) + (hundredths - static_cast<double>(truncated) >= 0.5);
+    const unsigned whole = all / 100;
+    const unsigned fraction = all - whole * 100;
+    if (whole >= 100) {
+        const unsigned high = whole / 100;
+        if (high >= 10) out = Detail::WritePair(out, high);
+        else *out++ = static_cast<char>('0' + high);
+        out = Detail::WritePair(out, whole - high * 100);
+    } else if (whole >= 10) {
+        out = Detail::WritePair(out, whole);
+    } else {
+        *out++ = static_cast<char>('0' + whole);
+    }
+    const char* const pair = Detail::kDigitPairs + 2 * fraction;
+    out[0] = '.';
+    std::memcpy(out + 1, pair, 2);
+    return out + (fraction != 0) * 2 + (pair[1] != '0');
 }
 
 inline void AppendFixed2(std::string& out, double value) {
