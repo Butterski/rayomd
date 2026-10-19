@@ -969,7 +969,12 @@ GitHub CI entry points:
 - Page content is rendered straight into the caller's output buffer and
   `PdfObjects::BuildInto` assembles the file in place around it. Do not go back
   to one string per page: allocating and freeing those buffers cost 7-15 % of a
-  warm build on Windows.
+  warm build on Windows. Each page's content starts after a gap (`NewPage`'s
+  `StartPageContent`): what the thread's last build put before it (`PdfObjects::LeaveGaps`,
+  off for `--black-text` and `--compress`), so a build of the same layout moves no content;
+  `pageStarts[k]` is where page k's content starts, and page k ends at `pageStarts[k + 1]`
+  less `PageGapBefore(k + 1)`, not at the next start. Code that reads the content between
+  pages must take the gap out or turn the gaps off.
 - Paragraph text is parsed and wrapped as flat runs (`InlineRuns`, `AsciiRuns`,
   `StyledRuns`): one text buffer per paragraph, reused from paragraph to
   paragraph. Keep a string or vector per span, word, or line off these paths.

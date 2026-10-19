@@ -41,6 +41,25 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 4 against 5.2.4: hot paths (opt4/hot4, 2026-10-19)
+
+Measured against 5.2.4 (`27cf8f0`), g++ 13.3 Release, Docker; instructions by `ab.sh
+--instructions` (callgrind, which counts each byte a `rep movsb` copies), cycles by `perf stat -e
+cycles:u` in alternating runs of builds with `-falign-functions=64 -falign-loops=32` (a busy host).
+Every step keeps the 2,875 PDFs of the byte check and the 5,936 and 6,044 feature-on exports.
+
+- **Page content rendered where it ends up** (`PdfObjects::LeaveGaps`, `StartPageContent`): each
+  page's content starts after the bytes the thread's last build put before it (the header and the
+  objects before the first page; between pages the page's objects and the next stream's head),
+  and `BuildInto` moves a payload only when its gap was wrong, towards either end (those towards
+  the front first, from the first). Builds of an unchanged layout move nothing. Callgrind
+  instructions code-heavy -5.4 %, table-heavy -5.3 %, README -4.1 %, tester-noimg -2.1 %, others
+  -0.1 to -0.5 %; perf (no byte counting): -0.1 to -0.5 %; aligned cycles table-heavy -2.6 to
+  -3.5 %, code-heavy -2.1 to -2.3 %, essay -1.3 %, native_math -0.7 %, others even. A first export
+  pays for keeping the gaps: +0.8 K instructions on a 200-byte note, +3 K on 15 to 33 KB. A first
+  try that added a parameter to `BuildInto` renamed it out of `src/hot.ld`'s list: notes and polish
+  +0.7 to +1.2 % cycles, L1i misses +25 %, at fewer instructions.
+
 ## Round 3 against 5.2.3: parsing and layout (opt3/parse, 2026-10-19)
 
 Measured against 5.2.3 (`f28d74b`), g++ 13.3 Release, Docker; instructions by `ab.sh
@@ -777,8 +796,11 @@ still moves them (see *Hot functions grouped in `.text.hot`*).
 
 - Page content is rendered straight into the caller's output buffer and the file
   is assembled in place around it in `BuildInto`: no string per page and no second
-  copy (7 to 15 % of a warm build on Windows when it was one). The move of every
-  page's content to its final place is the one copy left.
+  copy (7 to 15 % of a warm build on Windows when it was one). Each page's content is
+  rendered after the gap the thread's last build had before it (`LeaveGaps`), so a build
+  whose objects between the pages come out as long as last time (a preview being edited,
+  `--bench`, a batch of one layout) moves no content; otherwise the pages move as they all
+  did before, towards either end.
 - Operators are written through `TailWriter` straight into the end of the string: room
   for the operation's upper bound is reserved (one capacity test), the bytes are written
   through a pointer and the destructor sets the size. A std::string grows without filling
@@ -994,9 +1016,9 @@ artifact before its TD: two marked-content sequences a cell, and the table fixtu
 takes 2.1 times its `--pdfa` time. Borders first, one artifact a row, would halve
 them, at a change of `RenderTable`'s loop that untagged documents must not pay for.
 
-**`BuildInto` moves every page's content once.** 2.6 to 4.7 % of a warm build.
-Placing content where it ends up needs another object order, which changes the
-bytes.
+**`BuildInto` moves every page's content once.** Done for repeated builds in round four
+(`LeaveGaps`, above). A first export, or one whose objects between pages changed length,
+still moves the pages after the change.
 
 **The ASCII word loop.** Done in round 2 (`MeasureWords`, above). Left: texts under 16 bytes
 keep the byte loop, and `WrapAsciiInline` still parses, builds segments and copies run text per
@@ -1021,10 +1043,8 @@ and `WrapMathCell`, the parser's 0xE2, '$' and "\("). A byte loop for the parser
 (below); one SSE2 pass a row giving its pipes as bits, and the formula byte known from the parse,
 are left.
 
-**`BuildInto`'s move of the page content (2026-10-19).** 5.4 % of README's and 5.8 % of
-code-heavy's instructions (backward 4-vector loops of `memmove`, bandwidth-bound): any layout that
-renders the content where it ends up needs the size of every object before it, which the
-annotations and images decide after layout.
+**`BuildInto`'s move of the page content (2026-10-19).** Taken in round four for builds
+that follow one of the same layout on their thread (`LeaveGaps`).
 
 **Keeping the header row's wrapped cells.** A table that breaks wraps its header
 row again (about 0.3 % of the table fixture's 1.7 %); keeping them needs a second
