@@ -97,6 +97,16 @@ inline void AppendFixed2(std::string& out, double value) {
     out.append(buffer, static_cast<size_t>(WriteFixed2(buffer, value) - buffer));
 }
 
+// An operand formatted once by WriteFixed2, for one that a content stream repeats: written again
+// as its kFixed2MaxChars bytes, of which `size` count (two moves instead of the formatting), with
+// the room and the overwriting of WriteFixed2.
+struct Fixed2Text {
+    char bytes[kFixed2MaxChars] = {};
+    size_t size = 0;
+    Fixed2Text() = default;
+    explicit Fixed2Text(double value) : size(static_cast<size_t>(WriteFixed2(bytes, value) - bytes)) {}
+};
+
 // Byte classes for one-pass scans of Markdown text. std::string::find_first_of with a
 // set of characters is several times slower on paragraph-sized input.
 enum ByteClass : unsigned char {

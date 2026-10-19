@@ -1462,6 +1462,10 @@ public:
     }
     RAYOMD_HOT_INLINE void Bytes(std::string_view text) { Bytes(text.data(), text.size()); }
     void Fixed(double value) { cursor = RayoMd::Text::WriteFixed2(cursor, value); }
+    RAYOMD_HOT_INLINE void Fixed(const RayoMd::Text::Fixed2Text& text) {
+        memcpy(cursor, text.bytes, RayoMd::Text::kFixed2MaxChars);
+        cursor += text.size;
+    }
     void Number(size_t value) { cursor = std::to_chars(cursor, cursor + 20, value).ptr; }
     char* cursor = nullptr;
 
@@ -1471,6 +1475,29 @@ private:
 
 // Room for one operand written by TailWriter::Fixed, with its separator.
 constexpr size_t kOperandBytes = RayoMd::Text::kFixed2MaxChars + 1;
+
+// The text of the font size a renderer wrote last, which the runs of a block repeat: formatted
+// again only when the size changes, compared by its bits (-0 is written "-0").
+class SizeMemo {
+public:
+    SizeMemo() {
+        text.bytes[0] = '0';
+        text.size = 1;
+    }
+    RAYOMD_HOT_INLINE const RayoMd::Text::Fixed2Text& Get(double size) {
+        uint64_t sizeBits;
+        memcpy(&sizeBits, &size, sizeof(sizeBits));
+        if (__builtin_expect(sizeBits != bits, 0)) {
+            bits = sizeBits;
+            text = RayoMd::Text::Fixed2Text(size);
+        }
+        return text;
+    }
+
+private:
+    uint64_t bits = 0;
+    RayoMd::Text::Fixed2Text text;
+};
 
 // The checkbox of a task list item, a square `side` points wide standing on (x, bottom), with
 // a check mark when the task is done. Paths, not a glyph, so every font shows it.
@@ -6850,6 +6877,7 @@ private:
     int listDepth = 0;   // the list items the blocks being drawn are nested in
     // The page being rendered is the tail of `content`, so painting is a plain append.
     std::string& content;
+    SizeMemo sizeMemo;              // the font size the text written last had
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     RunLinkUrls runLinkUrls;        // the target of the last link a run drew (AddRunLink)
@@ -8087,7 +8115,7 @@ private:
         w.Lit("q ");
         w.Bytes(color);
         w.Lit(" rg BT /F1 ");
-        w.Fixed(size);
+        w.Fixed(sizeMemo.Get(size));
         w.Lit(" Tf 1 0 ");
         if (italic) w.Lit("0.18 ");
         else w.Lit("0 ");
@@ -9247,7 +9275,7 @@ private:
                 w.Lit("q ");
                 w.Bytes(color);
                 w.Lit(" rg BT /F1 ");
-                w.Fixed(size);
+                w.Fixed(sizeMemo.Get(size));
                 w.Lit(" Tf 1 0 0 1 ");
                 w.Fixed(x);
                 w.Lit(" ");
@@ -10625,6 +10653,7 @@ private:
     int listDepth = 0;   // the list items the blocks being drawn are nested in
     // The page being rendered is the tail of `content`, so painting is a plain append.
     std::string& content;
+    SizeMemo sizeMemo;              // the font size the text written last had
     std::vector<size_t> pageStarts;
     std::vector<std::vector<LinkRect>> pageLinks;
     RunLinkUrls runLinkUrls;        // the target of the last link a run drew (AddRunLink)
@@ -11902,7 +11931,7 @@ private:
         out.Lit(" rg BT /");
         out.Bytes(fontName);
         out.Lit(" ");
-        out.Fixed(size);
+        out.Fixed(sizeMemo.Get(size));
         out.Lit(" Tf 1 0 0 1 ");
         out.Fixed(x);
         out.Lit(" ");
@@ -12497,7 +12526,7 @@ private:
                 out.Lit("q ");
                 out.Bytes(color.data(), color.size());
                 out.Lit(" rg BT /F3 ");
-                out.Fixed(size);
+                out.Fixed(sizeMemo.Get(size));
                 out.Lit(" Tf 1 0 0 1 ");
                 out.Fixed(x);
                 out.Lit(" ");
