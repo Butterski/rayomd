@@ -3629,7 +3629,7 @@ bool CheckLatinText() {
 
 // MeasureWords and SumAdvances (word_bounds.h) against a byte loop: every length from 0 to 300
 // and some longer, texts of words, runs of each white-space byte, bytes from 0x80 and tables
-// whose entry 256 is not 0 (which the vector sums must drop); the dispatched code (AVX2 where the
+// whose entry 256 is not 0 (which no sum may read); the dispatched code (AVX2 where the
 // CPU has it), the SSE2 code and the portable code, a slice of a larger buffer each time, so a
 // read past its end would read other bytes.
 bool CheckWordBounds() {
@@ -3772,6 +3772,58 @@ bool CheckWordBounds() {
         }
     }
     return true;
+}
+
+// SplitColorRuns (word_bounds.h) against the loop over characters: every length from 0 to 200 and
+// some longer, in narrow and wide characters, lines of spaces, runs of one colour, colours that
+// change at every character and across 16-character steps, classes whose colours repeat
+// (kCodeColorOfClass), a slice of a larger buffer each time.
+template <typename Char>
+bool CheckColorRunsOf(const char* name) {
+    using namespace TinyPdf::Internal;
+    uint32_t seed = 20261020u;
+    auto next = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 16;
+    };
+    std::vector<size_t> lengths;
+    for (size_t n = 0; n <= 200; n++) lengths.push_back(n);
+    lengths.insert(lengths.end(), { 255, 256, 257, 1023, 4096 });
+    for (size_t n : lengths) {
+        for (int pattern = 0; pattern < 6; pattern++) {
+            std::vector<Char> text(n + 64, static_cast<Char>('q'));
+            std::vector<uint8_t> classes(n + 64, 0);
+            for (size_t i = 0; i < n; i++) {
+                const uint32_t r = next();
+                bool space = false;
+                uint8_t cls = 0;
+                switch (pattern) {
+                case 0: space = r % 4 == 0; cls = static_cast<uint8_t>(r / 7 % kCodeClassCount); break;
+                case 1: space = true; break;                                            // spaces only
+                case 2: space = false; cls = static_cast<uint8_t>(r % kCodeClassCount); break;
+                case 3: space = i < 40 || r % 2 == 0; cls = static_cast<uint8_t>(i / 16 % kCodeClassCount); break;
+                case 4: space = r % 9 == 0; cls = 3; break;                             // one colour
+                default: space = i % 32 >= 16; cls = static_cast<uint8_t>(i / 32 % kCodeClassCount); break;
+                }
+                text[i] = space ? static_cast<Char>(' ') : static_cast<Char>(r % 3 == 0 ? (sizeof(Char) > 1 ? 0x2520 : 0xA0) : 'a' + r % 26);
+                classes[i] = space ? static_cast<uint8_t>(r % kCodeClassCount) : cls;
+            }
+            std::vector<ColorRun> want(n + 1), got(n + 1, ColorRun{ 0xFFFFFFFFu, 0xEE });
+            const size_t wantCount = SplitColorRunsScalar(text.data(), n, classes.data(), kCodeColorOfClass, want.data());
+            const size_t gotCount = SplitColorRuns(text.data(), n, classes.data(), kCodeColorOfClass, kCodeClassCount, got.data());
+            bool same = wantCount == gotCount;
+            for (size_t i = 0; same && i < wantCount; i++) same = want[i].end == got[i].end && want[i].color == got[i].color;
+            if (!same) {
+                std::cerr << "SplitColorRuns (" << name << ") wrong: " << n << " characters, pattern " << pattern << std::endl;
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool CheckColorRuns() {
+    return CheckColorRunsOf<char>("char") && CheckColorRunsOf<wchar_t>("wchar_t");
 }
 
 // The PNG row filters against the textbook definitions (PNG specification, section 9): the
@@ -4055,6 +4107,7 @@ int main() {
     if (!CheckTaggedPdf()) return 98;
     if (!CheckPngFilters()) return 99;
     if (!CheckWordBounds()) return 133;
+    if (!CheckColorRuns()) return 134;
     if (!CheckChangedImageFiles()) return 100;
     if (!CheckCidStrings()) return 101;
     if (!CheckWriteAll()) return 102;

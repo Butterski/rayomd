@@ -6166,26 +6166,17 @@ struct ContentsLine {
 
 // A run of a line of highlighted code: where it ends, and the colour index of its characters
 // (Internal::kCodeColorOfClass).
-struct CodeRun {
-    uint32_t end;
-    uint8_t color;
-};
+using CodeRun = Internal::ColorRun;
 
-// Splits a line of highlighted code into runs of one colour, into `runs`, which keeps its room
-// from line to line. Spaces take the colour of the run they are in, leading ones that of the first
-// run, so they never start one.
+// Splits a line of highlighted code into runs of one colour (SplitColorRuns, word_bounds.h), into
+// the first entries of `runs`, which keeps its room from line to line; returns how many. Spaces
+// take the colour of the run they are in, leading ones that of the first run, so they never start
+// one.
 template <typename Char>
-static void SplitCodeRuns(const Char* text, size_t length, const uint8_t* classes, std::vector<CodeRun>& runs) {
-    runs.clear();
-    uint8_t color = 0xFF;   // none yet
-    for (size_t at = 0; at < length; at++) {
-        if (text[at] == ' ') continue;
-        const uint8_t next = Internal::kCodeColorOfClass[classes[at]];
-        if (next == color) continue;
-        if (color != 0xFF) runs.push_back({ (uint32_t)at, color });
-        color = next;
-    }
-    runs.push_back({ (uint32_t)length, color == 0xFF ? (uint8_t)0 : color });
+static size_t SplitCodeRuns(const Char* text, size_t length, const uint8_t* classes, std::vector<CodeRun>& runs) {
+    if (runs.size() < length + 1) runs.resize(length + 1);
+    return Internal::SplitColorRuns(text, length, classes, Internal::kCodeColorOfClass, Internal::kCodeClassCount,
+        runs.data());
 }
 
 // Where a block's layout started: the page it began on, y there, and the content length.
@@ -9393,15 +9384,16 @@ private:
     // A line of highlighted code at (x, baseline): as PaintText when it is one colour, otherwise
     // one text object with each run after its colour.
     RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::wstring_view text, const uint8_t* classes) {
-        SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
-        if (codeRuns.size() == 1) {
+        const size_t runCount = SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
+        if (runCount == 1) {
             PaintText(x, baseline, size, text, Internal::CodeColor(codeRuns[0].color));
             return;
         }
         if (tags != nullptr) tags->Content();
-        TailWriter w(content, 64 + kOperandBytes * 3 + text.size() * 4 + codeRuns.size() * 32);
+        TailWriter w(content, 64 + kOperandBytes * 3 + text.size() * 4 + runCount * 32);
         size_t begin = 0;
-        for (const CodeRun& run : codeRuns) {
+        for (size_t index = 0; index < runCount; index++) {
+            const CodeRun& run = codeRuns[index];
             const std::string_view color = Internal::CodeColor(run.color);
             if (begin == 0) {
                 w.Lit("q ");
@@ -12660,14 +12652,15 @@ private:
     // otherwise one text object with each run after its colour.
     RAYOMD_SHARED void PaintCodeRuns(double x, double baseline, double size, std::string_view text, const uint8_t* classes) {
         if (text.empty()) return;
-        SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
-        if (codeRuns.size() == 1) {
+        const size_t runCount = SplitCodeRuns(text.data(), text.size(), classes, codeRuns);
+        if (runCount == 1) {
             Text(x, baseline, size, text, "F3", Internal::CodeColor(codeRuns[0].color));
             return;
         }
-        TailWriter out(content, 48 + kOperandBytes * 3 + text.size() * 2 + codeRuns.size() * 32);
+        TailWriter out(content, 48 + kOperandBytes * 3 + text.size() * 2 + runCount * 32);
         size_t begin = 0;
-        for (const CodeRun& run : codeRuns) {
+        for (size_t index = 0; index < runCount; index++) {
+            const CodeRun& run = codeRuns[index];
             const std::string_view color = Internal::CodeColor(run.color);
             if (begin == 0) {
                 out.Lit("q ");

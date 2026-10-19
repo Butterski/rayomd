@@ -49,4 +49,33 @@ size_t MeasureWideWords(const wchar_t* text, size_t n, const uint16_t* cache, Wi
 size_t MeasureWideWordsPortable(const wchar_t* text, size_t n, const uint16_t* cache, WideWidth width,
     const void* context, uint32_t* prefix, uint32_t* bounds);
 
+// A run of a line of highlighted code: where it ends, and the colour of its characters.
+struct ColorRun {
+    uint32_t end;
+    uint8_t color;
+};
+
+// The runs of one colour of a line of code text[0, n), whose characters have the classes `classes`
+// (each below classCount, at most 16) and the colours colorOf[class] (each below 255): a run ends where a character
+// other than ' ' has another colour than the one before it that is not ' '; spaces take the colour
+// of the run they are in, leading ones that of the first run. The last run ends at n (colour 0 for
+// a line of spaces). Into `runs`, which holds n + 1; returns how many. AVX2 sixteen characters a
+// step (their colours looked up, carried over spaces, compared with the one before), else one at
+// a time.
+size_t SplitColorRuns(const char* text, size_t n, const uint8_t* classes, const uint8_t* colorOf, size_t classCount, ColorRun* runs);
+size_t SplitColorRuns(const wchar_t* text, size_t n, const uint8_t* classes, const uint8_t* colorOf, size_t classCount, ColorRun* runs);
+template <typename Char>
+size_t SplitColorRunsScalar(const Char* text, size_t n, const uint8_t* classes, const uint8_t* colorOf, ColorRun* runs,
+    size_t from = 0, uint8_t color = 0xFF, size_t count = 0) {
+    for (size_t at = from; at < n; at++) {
+        if (text[at] == ' ') continue;
+        const uint8_t next = colorOf[classes[at]];
+        if (next == color) continue;
+        if (color != 0xFF) runs[count++] = { static_cast<uint32_t>(at), color };
+        color = next;
+    }
+    runs[count++] = { static_cast<uint32_t>(n), color == 0xFF ? static_cast<uint8_t>(0) : color };
+    return count;
+}
+
 } // namespace TinyPdf::Internal

@@ -98,6 +98,20 @@ linked notes) identical.
   paragraphs laid out twice, README +5 % instructions) and on 3,800 generated Unicode documents
   (scripts, surrogate pairs, combining marks, spaces of every kind, inline styles, narrow tables,
   page sizes; DejaVu Sans, Serif and Sans Mono): identical PDFs.
+- **A table start ruled out by the next line** (`IsTableStart`): every paragraph line was searched
+  for '|' before the line after it was looked at; a separator line starts with '|', '-' or ':'
+  after its indent, so most next lines rule the table out by one byte. Instructions essay -0.6 %,
+  others -0.2 to +0.2 %; time essay -2.4 %, notes and native_math -2.0 %.
+- **Colour runs of highlighted code sixteen characters a step** (`SplitColorRuns`,
+  word_bounds.cpp): `SplitCodeRuns` looked at each character, a branch on its colour that
+  mispredicts at every token. AVX2 now looks up sixteen classes' colours with one `pshufb`, carries
+  the colour over spaces by a doubling scan (lanes 1, 2, 4, 8 back, then the colour from the step
+  before), and writes a run for each bit where a character's colour differs from the one before;
+  the vector of runs is sized once and the painters take a count. Instructions code-heavy -1.3 %,
+  others 0.0 to -0.2 %; perf cycles code-heavy -4.1 to -4.8 %, README -1.6 to -1.9 % (3 runs);
+  ab time code-heavy -4.4 %, README -1.5 %. 400 generated documents of code blocks (27 fence
+  languages, deep indents, blank-filled lines, tabs, non-ASCII, `--black-text`, `--pdfua`,
+  `--no-highlight`) identical. Core check 134 compares it with the loop. Text +4 KB.
 
 ## After 4.6.1: formula fonts, tables, fallback fonts, images, code, static start
 

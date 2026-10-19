@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <type_traits>
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
 #include <emmintrin.h>
@@ -311,6 +312,73 @@ RAYOMD_AVX2 size_t MeasureWideAvx2(const wchar_t* text, size_t n, const uint16_t
     return k / 2;
 }
 
+// Sixteen spaces as bytes: 0xFF where the character is ' '.
+template <typename Char>
+RAYOMD_AVX2 inline __m128i Spaces16(const Char* at) {
+    if constexpr (sizeof(Char) == 1) {
+        return _mm_cmpeq_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(at)), _mm_set1_epi8(' '));
+    } else if constexpr (sizeof(Char) == 2) {
+        const __m256i units = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(at));
+        const __m256i spaces = _mm256_cmpeq_epi16(units, _mm256_set1_epi16(' '));
+        return _mm_packs_epi16(_mm256_castsi256_si128(spaces), _mm256_extracti128_si256(spaces, 1));
+    } else {
+        const __m256i space = _mm256_set1_epi32(' ');
+        const __m256i a = _mm256_cmpeq_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(at)), space);
+        const __m256i b = _mm256_cmpeq_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(at + 8)), space);
+        // packs keeps 128-bit lanes: [a0-3 b0-3 | a4-7 b4-7], put in order by the permute.
+        const __m256i words = _mm256_permute4x64_epi64(_mm256_packs_epi32(a, b), 0xD8);
+        return _mm_packs_epi16(_mm256_castsi256_si128(words), _mm256_extracti128_si256(words, 1));
+    }
+}
+
+// SplitColorRuns sixteen characters a step: colours looked up by class, carried over the spaces
+// in four steps (each lane takes the lane 1, 2, 4, 8 before while it has none of its own, then the
+// colour carried from the step before), the colour before each character compared with its own,
+// and a run written for each bit of the mask.
+template <typename Char>
+RAYOMD_AVX2 size_t SplitColorRunsAvx2(const Char* text, size_t n, const uint8_t* classes, const uint8_t* colorOf,
+    size_t classCount, ColorRun* runs) {
+    alignas(16) uint8_t table[16] = {};
+    for (size_t i = 0; i < classCount && i < 16; i++) table[i] = colorOf[i];
+    const __m128i colorTable = _mm_load_si128(reinterpret_cast<const __m128i*>(table));
+    const __m128i none = _mm_set1_epi8(static_cast<char>(0xFF));
+    __m128i carry = none;       // the colour so far, in every lane
+    size_t count = 0;
+    size_t at = 0;
+    alignas(16) uint8_t before[16];
+    for (; at + 16 <= n; at += 16) {
+        const __m128i spaces = Spaces16(text + at);
+        const __m128i colors = _mm_shuffle_epi8(colorTable, _mm_loadu_si128(reinterpret_cast<const __m128i*>(classes + at)));
+        __m128i fill = _mm_or_si128(colors, spaces);     // none (0xFF) at the spaces
+        __m128i known = _mm_xor_si128(spaces, none);
+        const auto step = [&](auto shift) RAYOMD_AVX2 {
+            constexpr int s = decltype(shift)::value;
+            const __m128i shifted = _mm_alignr_epi8(fill, carry, 16 - s);
+            const __m128i shiftedKnown = _mm_alignr_epi8(known, none, 16 - s);
+            fill = _mm_blendv_epi8(shifted, fill, known);
+            known = _mm_or_si128(known, shiftedKnown);
+        };
+        step(std::integral_constant<int, 1>());
+        step(std::integral_constant<int, 2>());
+        step(std::integral_constant<int, 4>());
+        step(std::integral_constant<int, 8>());
+        fill = _mm_blendv_epi8(carry, fill, known);     // the steps reach 15 lanes back, not 16
+        const __m128i previous = _mm_alignr_epi8(fill, carry, 15);
+        const __m128i ends = _mm_andnot_si128(_mm_or_si128(spaces, _mm_cmpeq_epi8(previous, none)),
+            _mm_xor_si128(_mm_cmpeq_epi8(colors, previous), none));
+        unsigned mask = static_cast<unsigned>(_mm_movemask_epi8(ends));
+        if (mask != 0) {
+            _mm_store_si128(reinterpret_cast<__m128i*>(before), previous);
+            for (; mask != 0; mask &= mask - 1) {
+                const unsigned lane = static_cast<unsigned>(__builtin_ctz(mask));
+                runs[count++] = { static_cast<uint32_t>(at + lane), before[lane] };
+            }
+        }
+        carry = _mm_shuffle_epi8(fill, _mm_set1_epi8(15));
+    }
+    return SplitColorRunsScalar(text, n, classes, colorOf, runs, at, static_cast<uint8_t>(_mm_cvtsi128_si32(carry)), count);
+}
+
 // The CPU's answer, asked once: -1 until then. Every thread that asks gets the same answer, so a
 // relaxed store and load are enough, and no guard is taken on each call.
 std::atomic<signed char> avx2State{-1};
@@ -382,6 +450,20 @@ RAYOMD_NOINLINE size_t MeasureWideWordsPortable(const wchar_t* text, size_t n, c
     }
     if (n % 64 == 0 && carry == 0) bounds[k++] = static_cast<uint32_t>(n);
     return k / 2;
+}
+
+size_t SplitColorRuns(const char* text, size_t n, const uint8_t* classes, const uint8_t* colorOf, size_t classCount, ColorRun* runs) {
+#if RAYOMD_WORDS_AVX2
+    if (n >= 16 && UseAvx2()) return SplitColorRunsAvx2(text, n, classes, colorOf, classCount, runs);
+#endif
+    return SplitColorRunsScalar(text, n, classes, colorOf, runs);
+}
+
+size_t SplitColorRuns(const wchar_t* text, size_t n, const uint8_t* classes, const uint8_t* colorOf, size_t classCount, ColorRun* runs) {
+#if RAYOMD_WORDS_AVX2
+    if (n >= 16 && UseAvx2()) return SplitColorRunsAvx2(text, n, classes, colorOf, classCount, runs);
+#endif
+    return SplitColorRunsScalar(text, n, classes, colorOf, runs);
 }
 
 size_t MeasureWideWords(const wchar_t* text, size_t n, const uint16_t* cache, WideWidth width, const void* context,
