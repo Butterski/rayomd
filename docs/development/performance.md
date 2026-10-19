@@ -527,6 +527,17 @@ but regresses larger documents, batch/serve throughput, memory, or package size
 must be fixed, isolated behind an opt-in/separate package, or documented as a
 deliberate tradeoff.
 
+Where the bytes go: relink without `-s` and with `-Wl,-Map,FILE`, then sum the input sections
+of the map per object (archive members show which runtime pieces a symbol pulled in, and why:
+"Archive member included to satisfy reference by file (symbol)"); `symdiff.py` for functions.
+The 2026-10-19 cuts, dynamic Linux binary with GCC 13 (GCC 11, the release runners' compiler,
+in brackets): 1,740,064 (1,727,720) bytes in 5.2.2; no exceptions, RTTI or unwind tables
+-221,176; libstdc++'s terminate handler (the demangler) -61,440; `__builtin_cpu_supports`
+(libgcc's cpuinfo) -4,096; the command lines at `-Os` and the batch sorted as indices -61,440;
+tag names and Mermaid tables without relocations -4,096; the PNG filters' scalar ends -36,864;
+no unwinder (`src/cli/no_unwind.cpp`, `no_unwind.ld`) -57,976: 1,292,976 (1,297,008). MinGW: no
+`-fdata-sections` (zero statics written as data) -316 KB, no string streams in the CLI -65 KB.
+
 Keep the candidate comparable to its baseline: same suite, seed, style, margin,
 image mode, worker count, compiler, build type, and storage. Linux release
 claims should use native/ext4 storage. Label WSL `/mnt/*` results explicitly.
@@ -649,6 +660,17 @@ case found so far took seconds for 40,000 to 200,000 openers).
 
 Findings that could make RayoMD faster later, with the evidence and the reason
 they were not taken yet. Add to this list when a change turns one up.
+
+**`std::filesystem` out of the build (size).** MinGW's libstdc++.a has no per-function
+sections, and its `fs_path.o` and `fs_ops.o` pull the codecvt facets, the locale's
+initialisation and with it every facet, `fstream`, `istream` and `ostream` (`copy_file` uses a
+`filebuf`): a MinGW program of one `std::wstring` is 214 KB, with one `std::filesystem::path`
+operation 1,247 KB, with one `file_size` 1,310 KB (GCC 13, `-O2 -static -Wl,--gc-sections`,
+2026-10-19). In `rayomd.exe` (2.32 MB) about 650 to 700 KB are that code. On Linux the same
+members are 69 KB (`fs_path.o` 35 KB, `fs_ops.o` 19.5 KB, `fs_dir.o` 14 KB). Taking it out
+means a small path and folder layer in `RayoMd::File` for every user of `std::filesystem`
+(`tiny_pdf.cpp`, `book.cpp`, `vault.*`, `file_io.*`, `batch_report.*`, `image_cache.cpp`, both
+command lines).
 
 **RayoMD's encoder against ISA-L.** Compressing the colour is the longest stage
 of a new image: 4.2 ms of the mascot's 8.7 on one CPU, where ISA-L's level 1
@@ -913,6 +935,17 @@ README.md, 18.8 % before and 3.9 % kept):
   line feeds from an SSE2 bit mask instead of a `memchr` a line, and plain lines in a loop of their
   own (57 K, +1.2 KB of code); `NextTag` inlined (a 5 KB note dense with tags 1.2 K a build cheaper,
   +490 bytes); the next tag taken from the next '#' found for each line (that note +0.6 %).
+
+Binary size (2026-10-19):
+
+- `png_filter.cpp` at `-O2` without rewriting the row ends: 37 KB less, but the mascot's export
+  +3.84 % instructions (callgrind): the scalar ends out of line in `FilterCosts::Add`, the Paeth
+  pair loop +0.74 M. Kept only with the vector row ends and the peeled loop (-3.4 %).
+- `no_unwind.cpp` in the static build: glibc's libc.a links libgcc's unwinder for thread
+  cancellation, so `_Unwind_Resume` is defined twice. The static build keeps libstdc++'s runtime.
+- Not measured, excluded by their requirements: `-Oz` for the `-Os` units (GCC 12 or newer; the
+  release runners' GCC 11 rejects it) and `-z pack-relative-relocs` (DT_RELR, most of the 11 KB
+  of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release runs on).
 
 Images and compression:
 
