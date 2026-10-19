@@ -3,7 +3,8 @@
 // Footnotes at the foot of the page (PdfOptions::footnotes, FootnotePlacement::Page), in both
 // renderers: each note on the page of its first reference, below it, also when the reference is
 // on a page's last line, two on one line, a cluster of notes, table rows with a repeated header,
-// headings and quotes, notes with code and lists; a note too tall for a page after the text;
+// headings and quotes, notes with code and lists; a note too tall for a page after the text, also
+// one whose measuring stops early and one that refers to another from deep inside;
 // books, PDF/UA and the source map. Uses References, CountOccurrences and RAYOMD_TEST_SOURCE_DIR
 // of tests/core_tests.cpp, so it is included after LinkTargetsByPage, inside its anonymous
 // namespace.
@@ -200,6 +201,51 @@ bool CheckTallNote() {
     return true;
 }
 
+bool CheckTallNotesStop() {
+    // Notes taller than a page whose measuring layout stops after a page and a half (a table whose
+    // header row would repeat, code), and one whose last paragraph refers to another note, which
+    // measuring must reach: all of them after the text, the first where the end section puts it
+    // without page footnotes, the note referred to right after its referrer; the small note at the
+    // foot of the first page.
+    std::string table = "    | Key | Value |\n    |---|---|\n";
+    for (int row = 0; row < 150; row++) table += "    | r" + std::to_string(row) + " | v |\n";
+    std::string code = "    ```\n";
+    for (int line = 0; line < 150; line++) code += "    x = " + std::to_string(line) + "\n";
+    code += "    ```\n";
+    std::string deep = "[^deep]: Deep.";
+    for (int line = 0; line < 80; line++) deep += "\n\n    Paragraph " + std::to_string(line) + " of the deep note.";
+    deep += "\n\n    Its end refers to[^inner] another note.\n";
+    const std::string document = "Table[^table], code[^code], deep[^deep] and small[^small].\n\n" + Filler(5) +
+        "[^small]: Small.\n[^table]: A table.\n\n" + table + "\n[^code]: Code.\n\n" + code + "\n" + deep +
+        "[^inner]: Only a note refers to this one.\n";
+    for (const std::string& text : { document, kUnicode + document }) {
+        std::string pdf, end;
+        TinyPdf::PdfOptions endOptions = PageOptions();
+        endOptions.footnotes = TinyPdf::FootnotePlacement::End;
+        const bool unicode = text != document;
+        if (!BuildPage(text, pdf) || !BuildPage(text, end, endOptions)) return false;
+        const std::vector<NoteLink> links = InternalLinks(pdf);
+        const std::vector<NoteLink> endLinks = InternalLinks(end);
+        // The text's four references first: the first tall note where the end section has it, the
+        // other two after the text (the small note's room at the foot of the first page moves
+        // them), the small one at the foot of its page; then, after the text, the deep note's
+        // reference down to the inner note.
+        const bool same = links.size() >= 5 && endLinks.size() >= 5 && links[0].destPage == endLinks[0].destPage &&
+            links[0].destTop == endLinks[0].destTop && links[1].destPage > 0 && links[2].destPage > links[1].destPage;
+        bool inner = false;
+        for (const NoteLink& link : links) {
+            inner = inner || (link.page > 0 && (link.destPage > link.page || (link.destPage == link.page && link.destTop < link.bottom)));
+        }
+        if (!same || links[3].destPage != 0 || !(links[3].destTop < 100.0) || !inner ||
+            (!unicode && CountOccurrences(pdf, "(Key) Tj") < 2)) {
+            std::cerr << "page notes: tall notes that stop measuring mismatch (" << (unicode ? "Unicode" : "standard") << ")"
+                      << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool CheckBook() {
     TinyPdf::Book book;
     book.chapters.push_back({ "# One\n\n" + Filler(20) + "First[^1].\n\n[^1]: One's note.\n", "one.md", "", 0, false });
@@ -304,8 +350,8 @@ bool CheckLongPage() {
 }
 
 bool CheckPageNotes() {
-    return CheckBasics() && CheckLastLine() && CheckLinesAndClusters() && CheckBlocks() && CheckTallNote() && CheckBook() &&
-        CheckTagged() && CheckSourceMap() && CheckLongPage();
+    return CheckBasics() && CheckLastLine() && CheckLinesAndClusters() && CheckBlocks() && CheckTallNote() &&
+        CheckTallNotesStop() && CheckBook() && CheckTagged() && CheckSourceMap() && CheckLongPage();
 }
 
 } // namespace page_notes_tests
