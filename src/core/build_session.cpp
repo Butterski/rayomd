@@ -2,6 +2,8 @@
 
 #include "build_session.h"
 
+#include "../common/text_utils.h"
+
 #include "dialect.h"
 #include "embeds.h"
 #include "footnotes.h"
@@ -13,6 +15,11 @@
 #include <iterator>
 #include <memory>
 #include <utility>
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
+#include <emmintrin.h>
+#define RAYOMD_SESSION_SSE2 1
+#endif
 
 namespace TinyPdf::Internal {
 
@@ -34,14 +41,17 @@ bool SameImage(const ImageSource& a, const ImageSource& b) {
 }
 
 // Whether two blocks are laid out the same way: every field the renderers read, all but where the
-// block stands in the Markdown (sourceLine, sourceLines), which only the source map takes.
+// block stands in the Markdown (sourceLine, sourceLines), which only the source map takes; but
+// whether it has a place there, which gives it an entry of the map or none (a table of contents
+// inserted by --toc has none, one at a "[TOC]" paragraph the paragraph's lines).
 #if defined(__GLIBCXX__) && defined(__x86_64__)
 static_assert(sizeof(Block) == 136, "a new field of Block: compare it in SameBlock");
 #endif
 bool SameBlock(const Block& a, const Block& b) {
     if (a.type != b.type || a.level != b.level || a.number != b.number || a.task != b.task || a.alert != b.alert ||
         a.notesPending != b.notesPending || a.codeLanguage != b.codeLanguage || a.hasMath != b.hasMath ||
-        a.align != b.align || a.text != b.text || a.aligns != b.aligns || a.rows != b.rows ||
+        a.align != b.align || (a.sourceLine == kNoSourceLine) != (b.sourceLine == kNoSourceLine) || a.text != b.text ||
+        a.aligns != b.aligns || a.rows != b.rows ||
         (a.image == nullptr) != (b.image == nullptr) || (a.image != nullptr && !SameImage(*a.image, *b.image)) ||
         a.children.size() != b.children.size()) {
         return false;
@@ -131,6 +141,7 @@ void LayoutTape::Clear() {
     renderer = 0;
     std::fill(std::begin(fonts), std::end(fonts), nullptr);
     blockCount = 0;
+    blockData = nullptr;
     blockNumbers.clear();
     contents.clear();
     numbers.clear();
@@ -148,6 +159,7 @@ void LayoutTape::Clear() {
     for (std::vector<uint16_t>& list : cids) list.clear();
     glyphs.clear();
     pageBottoms.clear();
+    images.clear();
     headingPlaces.clear();
     idPlaces.clear();
 }
@@ -163,8 +175,320 @@ void LayoutTape::Reserve(const LayoutTape& like) {
     for (size_t set = 0; set < kLayoutCidSets; set++) cids[set].reserve(like.cids[set].size() + 64);
     glyphs.reserve(like.glyphs.size() + 16);
     pageBottoms.reserve(like.pageBottoms.size() + like.pageBottoms.size() / 16);
+    images.reserve(like.images.size() + like.images.size() / 16);
     headingPlaces.reserve(like.headingPlaces.size() + like.headingPlaces.size() / 16);
     idPlaces.reserve(like.idPlaces.size() + like.idPlaces.size() / 16);
+}
+
+namespace {
+
+// "]:" in `text`.
+size_t CountPairs(std::string_view text) {
+    size_t count = 0;
+    for (size_t at = text.find("]:"); at != std::string_view::npos; at = text.find("]:", at + 2)) count++;
+    return count;
+}
+
+// The pairs a change of bytes [from, to) of `text` may make or take: those with a byte in it, or
+// right before it ("]" before, ":" first).
+size_t PairsAround(std::string_view text, size_t from, size_t to) {
+    const size_t low = from > 0 ? from - 1 : 0;
+    return CountPairs(text.substr(low, std::min(text.size(), to + 1) - low));
+}
+
+// The bytes from 0x80 of `text`: sixteen at a time where SSE2 is (each a 1 or a 0 added up by
+// PSADBW), else eight (at -Os a byte at a time took 4 instructions a byte).
+size_t CountHigh(std::string_view text) {
+    const char* at = text.data();
+    const char* const end = at + text.size();
+    size_t count = 0;
+#ifdef RAYOMD_SESSION_SSE2
+    const __m128i ones = _mm_set1_epi8(1);
+    __m128i sums = _mm_setzero_si128();
+    for (; end - at >= 16; at += 16) {
+        const __m128i bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(at));
+        sums = _mm_add_epi64(sums, _mm_sad_epu8(_mm_and_si128(_mm_srli_epi64(bytes, 7), ones), _mm_setzero_si128()));
+    }
+    count = static_cast<size_t>(_mm_cvtsi128_si64(sums)) + static_cast<size_t>(_mm_cvtsi128_si64(_mm_unpackhi_epi64(sums, sums)));
+#else
+    constexpr uint64_t kOnes = 0x0101010101010101ull;
+    while (end - at >= 8) {
+        // Each byte of `sum` counts to at most 255 before it is added up.
+        uint64_t sum = 0;
+        for (int step = 0; step < 255 && end - at >= 8; step++, at += 8) {
+            uint64_t word;
+            std::memcpy(&word, at, 8);
+            sum += (word >> 7) & kOnes;
+        }
+        // Added up in four 16-bit lanes of at most 510, then to at most 2,040.
+        const uint64_t lanes = (sum & 0x00FF00FF00FF00FFull) + ((sum >> 8) & 0x00FF00FF00FF00FFull);
+        count += static_cast<size_t>((lanes * 0x0001000100010001ull) >> 48);
+    }
+#endif
+    for (; at != end; at++) count += static_cast<unsigned char>(*at) >> 7;
+    return count;
+}
+
+} // namespace
+
+void KeptText::Change(size_t from, size_t to, std::string_view with, uint64_t next) {
+    replacedPairs = pairs;
+    pairs -= PairsAround(bytes, from, to);
+    replaced.assign(bytes, from, to - from);
+    // Room for a text a sixteenth longer, so that a letter typed does not move it.
+    const size_t size = bytes.size() - (to - from) + with.size();
+    if (size > bytes.capacity()) bytes.reserve(size + size / 16);
+    bytes.replace(from, to - from, with.data(), with.size());
+    pairs += PairsAround(bytes, from, from + with.size());
+    base = version;
+    version = next;
+    differs = from;
+    oldEnd = to;
+    newEnd = from + with.size();
+    undoable = true;
+}
+
+void KeptText::Set(std::string_view with, uint64_t next) {
+    if (with.size() > bytes.capacity()) bytes.reserve(with.size() + with.size() / 16);
+    bytes.assign(with.data(), with.size());
+    pairs = CountPairs(bytes);
+    version = next;
+    base = 0;
+    undoable = false;
+}
+
+void KeptText::Take(std::string& with, uint64_t next) {
+    bytes.swap(with);
+    pairs = CountPairs(bytes);
+    version = next;
+    base = 0;
+    undoable = false;
+}
+
+void KeptText::Undo(uint64_t fresh) {
+    if (undoable) {
+        bytes.replace(differs, newEnd - differs, replaced);
+        pairs = replacedPairs;
+        version = base;
+    } else {
+        version = fresh;
+    }
+    base = 0;
+    undoable = false;
+}
+
+// A session's text from build to build (BuildSession::Build): the markdown and, while the standard
+// fonts show it in WinAnsiEncoding, its WinAnsi text, each changed in place where the next build's
+// differs; and what ChooseFonts reads of the markdown (bytes from 0x80, character references) as
+// counts kept up to date, so that the fonts are chosen without reading all of it.
+class SessionText {
+public:
+    // This build's markdown becomes the kept text, which the build then reads.
+    const std::string& Begin(const std::string& text);
+    // The build was made; or it was not, and the last build's text is back.
+    void Commit() { changed = winAnsiChanged = false; }
+    void Undo();
+    // LayoutSession::TextFonts.
+    uint8_t Fonts(const std::string& text, const std::string*& winAnsiText);
+    const KeptText* Kept(const std::string& text) const {
+        return &text == &markdown.bytes ? &markdown : &text == &winAnsi.bytes ? &winAnsi : nullptr;
+    }
+
+private:
+    // A place in the markdown at the start of a character and where its WinAnsi text has it.
+    struct Checkpoint {
+        size_t text;
+        size_t winAnsi;
+    };
+    // A character reference reads at most ten bytes after its '&' (MatchCharacterReference).
+    static constexpr size_t kReferenceReach = 16;
+    static constexpr size_t kChunk = 16384;   // between checkpoints, as the whole text is transcoded
+
+    // Adds `sign` times the references of `text` that start in [from, to) to `references`.
+    static void CountReferences(std::string_view text, size_t from, size_t to, size_t* counts, int sign);
+    // winAnsi becomes the WinAnsi text of the markdown; false when the markdown has a character
+    // WinAnsiEncoding lacks (RayoMd::Text::TranscodeToWinAnsi).
+    bool TranscodeChange();
+    bool TranscodeWhole();
+    // Where the markdown's character at `at` is in winAnsi, from the checkpoint before it.
+    size_t WinAnsiAt(size_t at);
+
+    KeptText markdown;
+    KeptText winAnsi;
+    uint64_t versions = 0;
+    uint64_t winAnsiOf = 0;      // the markdown's version winAnsi is the WinAnsi text of; 0 none
+    size_t nonAscii = 0;         // bytes from 0x80 in the markdown
+    size_t references[2] = {};   // its character references that need WinAnsiEncoding, a Unicode font
+    std::vector<Checkpoint> checkpoints;
+    // What Undo puts back.
+    bool changed = false;
+    bool winAnsiChanged = false;
+    uint64_t lastWinAnsiOf = 0;
+    size_t lastNonAscii = 0;
+    size_t lastReferences[2] = {};
+    std::vector<Checkpoint> lastCheckpoints;
+    std::string scratch;
+    std::string piece;          // a change or a piece, transcoded
+    std::string previous;
+};
+
+void SessionText::CountReferences(std::string_view text, size_t from, size_t to, size_t* counts, int sign) {
+    for (size_t at = text.find('&', from); at < to; at = text.find('&', at + 1)) {
+        const ReferenceNeed need = CharacterReferenceNeedAt(text, at);
+        if (need != ReferenceNeed::Ascii) counts[need == ReferenceNeed::WinAnsi ? 0 : 1] += static_cast<size_t>(sign);
+    }
+}
+
+const std::string& SessionText::Begin(const std::string& text) {
+    changed = winAnsiChanged = false;
+    std::string& kept = markdown.bytes;
+    if (markdown.version == 0) {
+        markdown.Set(text, ++versions);
+        nonAscii = CountHigh(kept);
+        references[0] = references[1] = 0;
+        CountReferences(kept, 0, kept.size(), references, 1);
+        changed = true;
+        return kept;
+    }
+    const size_t common = std::min(kept.size(), text.size());
+    const size_t differs = FirstDifference(kept.data(), text.data(), common);
+    if (differs == common && kept.size() == text.size()) return kept;
+    const size_t same = CommonEnd(kept.data() + kept.size(), text.data() + text.size(), common - differs);
+    const size_t oldEnd = kept.size() - same;
+    const size_t newEnd = text.size() - same;
+    lastNonAscii = nonAscii;
+    std::copy(std::begin(references), std::end(references), lastReferences);
+    const auto high = [](const std::string& bytes, size_t from, size_t to) {
+        return CountHigh(std::string_view(bytes).substr(from, to - from));
+    };
+    // The references that read a byte of the change: those that start up to kReferenceReach before it.
+    const size_t reach = differs > kReferenceReach ? differs - kReferenceReach : 0;
+    nonAscii -= high(kept, differs, oldEnd);
+    CountReferences(kept, reach, oldEnd, references, -1);
+    markdown.Change(differs, oldEnd, std::string_view(text).substr(differs, newEnd - differs), ++versions);
+    nonAscii += high(kept, differs, newEnd);
+    CountReferences(kept, reach, newEnd, references, 1);
+    changed = true;
+    return kept;
+}
+
+void SessionText::Undo() {
+    if (winAnsiChanged) {
+        winAnsi.Undo(++versions);
+        checkpoints.swap(lastCheckpoints);
+        winAnsiOf = lastWinAnsiOf;
+    }
+    if (changed) {
+        // A first text has nothing before it: the same bytes as another version.
+        if (markdown.base == 0) {
+            markdown.Undo(++versions);
+            winAnsiOf = 0;
+        } else {
+            markdown.Undo(0);
+            nonAscii = lastNonAscii;
+            std::copy(std::begin(lastReferences), std::end(lastReferences), references);
+        }
+    }
+    changed = winAnsiChanged = false;
+}
+
+uint8_t SessionText::Fonts(const std::string& text, const std::string*& winAnsiText) {
+    if (&text != &markdown.bytes) return LayoutSession::kNotKept;
+    // As ChooseFonts: ASCII without references beyond it, then the WinAnsi text when the references
+    // need no Unicode font and every character has a WinAnsi code; else a TrueType font.
+    if (references[1] != 0) return 2;
+    if (nonAscii == 0 && references[0] == 0) return 0;
+    if (winAnsiOf != markdown.version && !(winAnsiOf != 0 && winAnsiOf == markdown.base ? TranscodeChange() : TranscodeWhole())) {
+        return 2;
+    }
+    winAnsiText = &winAnsi.bytes;
+    return 1;
+}
+
+size_t SessionText::WinAnsiAt(size_t at) {
+    const auto after = std::upper_bound(checkpoints.begin(), checkpoints.end(), at,
+        [](size_t value, const Checkpoint& point) { return value < point.text; });
+    const Checkpoint& from = *(after - 1);
+    RayoMd::Text::TranscodeToWinAnsi(std::string_view(markdown.bytes).substr(from.text, at - from.text), &scratch);
+    return from.winAnsi + scratch.size();
+}
+
+bool SessionText::TranscodeChange() {
+    // The markdown's change as whole characters [start, end) (each transcodes on its own, as
+    // TranscodeToWinAnsi does it, when the whole text has a WinAnsi text) and its last version's.
+    const std::string& text = markdown.bytes;
+    const auto continuation = [](char ch) { return (static_cast<unsigned char>(ch) & 0xC0) == 0x80; };
+    size_t start = markdown.differs;
+    while (start > 0 && continuation(text[start])) start--;
+    size_t end = markdown.newEnd;
+    while (end < text.size() && continuation(text[end])) end++;
+    const size_t oldEnd = markdown.oldEnd + (end - markdown.newEnd);
+    if (!RayoMd::Text::TranscodeToWinAnsi(std::string_view(text).substr(start, end - start), &piece)) return false;
+    const size_t at = WinAnsiAt(start);
+    scratch.assign(text, start, markdown.differs - start);
+    scratch += markdown.Replaced();
+    scratch.append(text, markdown.newEnd, end - markdown.newEnd);
+    if (!RayoMd::Text::TranscodeToWinAnsi(scratch, &previous)) return TranscodeWhole();
+    lastCheckpoints = checkpoints;
+    lastWinAnsiOf = winAnsiOf;
+    winAnsi.Change(at, at + previous.size(), piece, ++versions);
+    winAnsiChanged = true;
+    // TranscodeToWinAnsi refuses a text whose WinAnsi bytes would read as a status symbol's UTF-8
+    // (E2 9C 85, E2 9A A0, E2 9D 8C): the change may make one with the bytes around it.
+    const std::string& bytes = winAnsi.bytes;
+    const size_t stop = std::min(bytes.size(), at + piece.size() + 2);
+    for (size_t index = at > 2 ? at - 2 : 0; index + 2 < stop; index++) {
+        if (static_cast<unsigned char>(bytes[index]) != 0xE2) continue;
+        const unsigned pair = (static_cast<unsigned>(static_cast<unsigned char>(bytes[index + 1])) << 8) |
+            static_cast<unsigned char>(bytes[index + 2]);
+        if (pair == 0x9C85u || pair == 0x9AA0u || pair == 0x9D8Cu) {
+            winAnsi.Undo(++versions);
+            winAnsiChanged = false;
+            return false;
+        }
+    }
+    // The checkpoints in the change go; those after it move with it.
+    const ptrdiff_t textShift = static_cast<ptrdiff_t>(end) - static_cast<ptrdiff_t>(oldEnd);
+    const ptrdiff_t winAnsiShift = static_cast<ptrdiff_t>(piece.size()) - static_cast<ptrdiff_t>(previous.size());
+    size_t keep = static_cast<size_t>(std::upper_bound(checkpoints.begin(), checkpoints.end(), start,
+        [](size_t value, const Checkpoint& point) { return value < point.text; }) - checkpoints.begin());
+    size_t from = static_cast<size_t>(std::upper_bound(checkpoints.begin(), checkpoints.end(), oldEnd,
+        [](size_t value, const Checkpoint& point) { return value < point.text; }) - checkpoints.begin());
+    std::vector<Checkpoint> moved(checkpoints.begin() + static_cast<ptrdiff_t>(from), checkpoints.end());
+    checkpoints.resize(keep);
+    if (end < text.size()) checkpoints.push_back({ end, at + piece.size() });
+    for (const Checkpoint& point : moved) {
+        checkpoints.push_back({ static_cast<size_t>(static_cast<ptrdiff_t>(point.text) + textShift),
+            static_cast<size_t>(static_cast<ptrdiff_t>(point.winAnsi) + winAnsiShift) });
+    }
+    winAnsiOf = markdown.version;
+    return true;
+}
+
+bool SessionText::TranscodeWhole() {
+    // In pieces that end before an ASCII byte, where no status symbol's bytes can be split.
+    const std::string& text = markdown.bytes;
+    lastCheckpoints.swap(checkpoints);
+    checkpoints.clear();
+    checkpoints.push_back({ 0, 0 });
+    lastWinAnsiOf = 0;   // undone, the WinAnsi text is of no markdown
+    scratch.clear();
+    scratch.reserve(text.size());
+    for (size_t at = 0; at < text.size();) {
+        size_t end = std::min(text.size(), at + kChunk);
+        while (end < text.size() && static_cast<unsigned char>(text[end]) >= 0x80) end++;
+        if (!RayoMd::Text::TranscodeToWinAnsi(std::string_view(text).substr(at, end - at), &piece)) {
+            checkpoints.swap(lastCheckpoints);
+            return false;
+        }
+        scratch += piece;
+        at = end;
+        if (at < text.size()) checkpoints.push_back({ at, scratch.size() });
+    }
+    winAnsi.Take(scratch, ++versions);
+    winAnsiChanged = true;
+    winAnsiOf = markdown.version;
+    return true;
 }
 
 // The LayoutSession of a BuildSession.
@@ -181,8 +505,12 @@ public:
     void Commit(LayoutTarget& target, std::vector<Block>& blocks, std::vector<ContentsEntry>& contents,
         std::vector<HeadingNumber>& numbers) override;
     void Forget() override;
+    uint8_t TextFonts(const std::string& markdown, const std::string*& winAnsi) override {
+        return sessionText->Fonts(markdown, winAnsi);
+    }
 
     BuildSession::Reuse reuse;
+    SessionText* sessionText = nullptr;   // the session's text, which its builds read
 
 private:
     static constexpr uint32_t kUnknown = 0xFFFFFFFFu;
@@ -255,8 +583,8 @@ void SessionLayout::Begin(uint8_t renderer, const void* const fonts[kLayoutCidSe
     oldNumbers = nullptr;
     // The last build's blocks are the session's (SessionBlocks), as this build's parse left them.
     if (!last || last->renderer != renderer || !std::equal(fonts, fonts + kLayoutCidSets, last->fonts) ||
-        last->marks.size() != last->blockCount + 1 || store == nullptr || !store->parsed ||
-        store->OldCount() != last->blockCount) {
+        last->marks.size() != last->blockCount + 1 || last->images.size() != last->blockCount || store == nullptr ||
+        !store->parsed || store->OldCount() != last->blockCount) {
         return;
     }
     oldCount = last->blockCount;
@@ -266,19 +594,19 @@ void SessionLayout::Begin(uint8_t renderer, const void* const fonts[kLayoutCidSe
         if (last->blockNumbers.size() != oldCount) last->blockNumbers.assign(oldCount, nullptr);
         oldNumbers = &last->blockNumbers;
     }
-    // The blocks before the first that changed keep their places. The others are compared only when
-    // a layout reaches one in the state the last build had there, which after an edit that moved
-    // the text on the page may never happen: then nothing was compared in vain.
-    const size_t common = std::min(blockCount, oldCount);
-    size_t prefix = 0;
-    while (prefix < common && Same(prefix, prefix)) prefix++;
-    // With as many blocks as before, the blocks after the change keep their places too; else they
-    // are shifted by as many as were added or removed.
-    if (blockCount != oldCount) suffixStart = prefix;
-    std::fill(runEnd.begin() + prefix, runEnd.end(), kUnknown);
-    for (size_t index = prefix; index-- > 0;) {
-        if (TouchesImages(newBlocks[index])) continue;
-        runEnd[index] = index + 1 < prefix && runEnd[index + 1] != 0 ? runEnd[index + 1] : static_cast<uint32_t>(index + 1);
+    // The blocks are compared only when a layout reaches one in the state the last build had there
+    // (RunFrom), which after an edit that moved the text on the page may never happen: then nothing
+    // was compared in vain.
+    std::fill(runEnd.begin(), runEnd.end(), kUnknown);
+    // With as many blocks as before, every block stands for the last build's in its place; else
+    // those after the first that changed are shifted by as many as were added or removed. The blocks
+    // before the first the parse made are the last build's, equal to themselves (a spliced parse has
+    // no table of contents).
+    if (blockCount != oldCount) {
+        const size_t common = std::min(blockCount, oldCount);
+        size_t prefix = store->spliced && newNumbers.empty() && contentsSame ? std::min(store->front, common) : 0;
+        while (prefix < common && Same(prefix, prefix)) prefix++;
+        suffixStart = prefix;
     }
 }
 
@@ -296,14 +624,38 @@ bool SessionLayout::Same(size_t index, size_t old) const {
 }
 
 size_t SessionLayout::RunFrom(size_t index) {
+    // A run never crosses from the blocks before the change to those after it, shifted.
+    const size_t stop = index < suffixStart ? suffixStart : blockCount;
+    // The blocks the parse kept stand for the last build's blocks they are (equal; a spliced parse
+    // has no table of contents): only whether they read images is looked at.
+    const SessionBlocks& kept = *store;
+    const bool fast = kept.spliced && newNumbers.empty() && contentsSame;
+    const size_t suffix = kept.front + kept.newWindow;
     size_t end = index;
-    while (end < blockCount) {
+    while (end < stop) {
         if (runEnd[end] != kUnknown) {
             if (runEnd[end] != 0) end = runEnd[end];
             break;
         }
+        if (fast) {
+            size_t to = end;
+            if (end < kept.front) to = std::min(kept.front, stop);
+            else if (end >= suffix && (end >= suffixStart || blockCount == oldCount)) to = stop;
+            if (to > end) {
+                const uint8_t* const bits = last->images.data() + OldIndex(end);
+                const void* const image = std::memchr(bits, 1, to - end);
+                if (image == nullptr) {
+                    end = to;
+                    continue;
+                }
+                end += static_cast<size_t>(static_cast<const uint8_t*>(image) - bits);
+                runEnd[end] = 0;
+                break;
+            }
+        }
         const bool mapped = end < suffixStart || end + oldCount >= blockCount;
-        if (!mapped || OldIndex(end) >= oldCount || TouchesImages((*blocks)[end]) || !Same(end, OldIndex(end))) {
+        // An equal block reads images as the last build's did.
+        if (!mapped || OldIndex(end) >= oldCount || !Same(end, OldIndex(end)) || last->images[OldIndex(end)] != 0) {
             runEnd[end] = 0;
             break;
         }
@@ -316,8 +668,25 @@ size_t SessionLayout::RunFrom(size_t index) {
 void SessionLayout::Mark(size_t index, LayoutMark& mark, const LayoutTarget& target) {
     if (!active) return;
     LayoutTape& tape = *recording;
-    // The source map's entries since the last mark are the block's before this one.
-    while (tape.sourceMapBlocks.size() < tape.sourceMap.size()) tape.sourceMapBlocks.push_back(static_cast<uint32_t>(index - 1));
+    // Block index - 1 was laid out (a replay notes its own blocks): whether it reads images, the
+    // source map's entries since the last mark, and where the marks it made view their text.
+    if (index > tape.images.size()) {
+        const size_t block = index - 1;
+        const Block& laid = (*blocks)[block];
+        tape.images.push_back(TouchesImages(laid) ? 1 : 0);
+        tape.sourceMapBlocks.resize(tape.sourceMap.size(), static_cast<uint32_t>(block));
+        const std::string& text = laid.text;
+        const auto place = [&](const std::vector<HeadingMark>& marks, std::vector<LayoutTape::MarkPlace>& places) {
+            for (size_t at = places.size(); at < marks.size(); at++) {
+                const char* const view = marks[at].text.data();
+                const bool own = view >= text.data() && view + marks[at].text.size() <= text.data() + text.size();
+                places.push_back({ static_cast<uint32_t>(block),
+                    own ? static_cast<uint32_t>(view - text.data()) : LayoutTape::MarkPlace::kNested });
+            }
+        };
+        place(*target.headings, tape.headingPlaces);
+        place(*target.ids, tape.idPlaces);
+    }
     mark.content = target.content->size();
     mark.page = static_cast<uint32_t>(target.pageStarts->size() - 1);
     mark.links = static_cast<uint32_t>(target.pageLinks->back().size());
@@ -380,21 +749,28 @@ size_t SessionLayout::Replayable(size_t index, const LayoutTarget& target) {
         return index;
     }
     // The run's headings and anchors view its blocks' text: moved to this build's blocks, which are
-    // equal to the last build's, by where they were in them.
+    // equal to the last build's, by where they were in them. A block the parse kept, where the last
+    // build had it, is the last build's: its marks' views are still good.
+    const Block* const data = blocks->data();
     const auto move = [&](const std::vector<HeadingMark>& marks, const std::vector<LayoutTape::MarkPlace>& places,
                           uint32_t first, uint32_t stop, std::vector<HeadingMark>& moved) {
         moved.clear();
         for (uint32_t mark = first; mark < stop; mark++) {
             HeadingMark heading = marks[mark];
             const LayoutTape::MarkPlace place = places[mark];
-            const Block& block = (*blocks)[place.block - from + index];
+            const size_t at = place.block - from + index;
+            const bool kept = store->Kept(at, place.block);
+            if (kept && data + at == last->blockData + place.block) {
+                moved.push_back(heading);
+                continue;
+            }
+            const Block& block = data[at];
             const char* text = nullptr;
             if (place.offset != LayoutTape::MarkPlace::kNested) {
                 if (place.offset + heading.text.size() <= block.text.size()) text = block.text.data() + place.offset;
             } else {
-                // A block the parse kept is the last build's: the mark's view is still good.
-                text = store->Kept(place.block - from + index, place.block) ? heading.text.data() :
-                    Relocate(heading.text, store->Old(place.block), block);
+                // A nested block's text does not move with its top-level block.
+                text = kept ? heading.text.data() : Relocate(heading.text, store->Old(place.block), block);
             }
             if (text == nullptr) return false;
             heading.text = std::string_view(text, heading.text.size());
@@ -417,8 +793,6 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
     const LayoutMark now = tape.marks[index];
     const LayoutMark& before = old.marks[oldFrom];
     const LayoutMark& after = old.marks[oldTo];
-    // Counts in this build: those of the last moved by what each had before the run.
-    const auto move = [](uint32_t value, uint32_t from, uint32_t to) { return static_cast<uint32_t>(value - from + to); };
     const size_t pageShift = static_cast<size_t>(now.page) - before.page;   // modulo 2^64, as the pages' indices
     // The content page by page, each new page after the gap this build leaves before it (the last
     // build's gaps are not copied), so that it lies where BuildInto wants it.
@@ -444,6 +818,7 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
         target.pageBottoms->insert(target.pageBottoms->end(), old.pageBottoms.begin() + before.bottoms,
             old.pageBottoms.begin() + after.bottoms);
     }
+    const size_t blockShift = index - oldFrom;
     for (HeadingMark& mark : movedHeadings) {
         mark.page += pageShift;
         target.headings->push_back(mark);
@@ -452,63 +827,116 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
         mark.page += pageShift;
         target.ids->push_back(mark);
     }
+    // Where they are, in this build's blocks.
+    const auto places = [blockShift](const std::vector<LayoutTape::MarkPlace>& from, uint32_t first, uint32_t stop,
+                            std::vector<LayoutTape::MarkPlace>& into) {
+        for (uint32_t mark = first; mark < stop; mark++) {
+            into.push_back({ static_cast<uint32_t>(from[mark].block + blockShift), from[mark].offset });
+        }
+    };
+    places(old.headingPlaces, before.headings, after.headings, tape.headingPlaces);
+    places(old.idPlaces, before.ids, after.ids, tape.idPlaces);
     for (uint32_t line = before.contentsLines; line < after.contentsLines; line++) {
         ContentsLine moved = old.contentsLines[line];
         moved.page += pageShift;
         target.contentsLines->push_back(moved);
     }
-    const size_t blockShift = index - oldFrom;
-    for (uint32_t entry = before.sourceBlocks; entry < after.sourceBlocks; entry++) {
-        SourceBlock moved = old.sourceMap[entry];
-        const size_t block = old.sourceMapBlocks[entry] + blockShift;
-        const Block& source = (*blocks)[block];
-        moved.firstLine = source.sourceLine;
-        moved.endLine = source.sourceLine + source.sourceLines;
-        moved.page = static_cast<uint32_t>(moved.page + pageShift);
-        moved.endPage = static_cast<uint32_t>(moved.endPage + pageShift);
-        tape.sourceMap.push_back(moved);
-        tape.sourceMapBlocks.push_back(static_cast<uint32_t>(block));
+    // The source map's entries, with the lines of this build's blocks: those of a block the parse
+    // kept are the last build's moved by the lines the edit added before it, else read from the block.
+    if (after.sourceBlocks != before.sourceBlocks) {
+        const size_t at = tape.sourceMap.size();
+        tape.sourceMap.insert(tape.sourceMap.end(), old.sourceMap.begin() + before.sourceBlocks,
+            old.sourceMap.begin() + after.sourceBlocks);
+        tape.sourceMapBlocks.insert(tape.sourceMapBlocks.end(), old.sourceMapBlocks.begin() + before.sourceBlocks,
+            old.sourceMapBlocks.begin() + after.sourceBlocks);
+        SourceBlock* moved = tape.sourceMap.data() + at;
+        SourceBlock* const stop = tape.sourceMap.data() + tape.sourceMap.size();
+        uint32_t* block = tape.sourceMapBlocks.data() + at;
+        const SessionBlocks& kept = *store;
+        const size_t suffix = kept.front + kept.newWindow;
+        const uint32_t lineShift = static_cast<uint32_t>(kept.lineShift);
+        for (; moved != stop; moved++, block++) {
+            const size_t from = *block;
+            const size_t to = from + blockShift;
+            *block = static_cast<uint32_t>(to);
+            if (kept.spliced && to < kept.front && from == to) {
+                // The same lines.
+            } else if (kept.spliced && to >= suffix && from + kept.newWindow == to + kept.oldWindow) {
+                moved->firstLine += lineShift;
+                moved->endLine += lineShift;
+            } else {
+                const Block& source = (*blocks)[to];
+                moved->firstLine = source.sourceLine;
+                moved->endLine = source.sourceLine + source.sourceLines;
+            }
+            moved->page = static_cast<uint32_t>(moved->page + pageShift);
+            moved->endPage = static_cast<uint32_t>(moved->endPage + pageShift);
+        }
     }
-    // The marks between, the CIDs each block recorded first added in their order.
+    tape.images.insert(tape.images.end(), old.images.begin() + static_cast<ptrdiff_t>(oldFrom),
+        old.images.begin() + static_cast<ptrdiff_t>(oldTo));
+    // The marks between: the last build's, moved by what this one had before the run, and the CIDs
+    // each block recorded first added in their order (each mark then has the count after them).
+    const size_t marks = tape.marks.size();
+    tape.marks.insert(tape.marks.end(), old.marks.begin() + static_cast<ptrdiff_t>(oldFrom + 1),
+        old.marks.begin() + static_cast<ptrdiff_t>(oldTo));
+    LayoutMark* const firstMark = tape.marks.data() + marks;
+    LayoutMark* const endMark = tape.marks.data() + tape.marks.size();
+    for (size_t set = 0; set < kLayoutCidSets; set++) {
+        const LayoutCids& cids = target.cids[set];
+        if (cids.set == nullptr) continue;
+        for (size_t at = oldFrom + 1; at <= oldTo; at++) {
+            for (uint32_t cid = old.marks[at - 1].cids[set]; cid < old.marks[at].cids[set]; cid++) {
+                cids.add(cids.set, old.cids[set][cid]);
+            }
+            if (at < oldTo) firstMark[at - oldFrom - 1].cids[set] = static_cast<uint32_t>(cids.recorded(cids.set).size());
+        }
+    }
     const MathGlyphUse glyphs = *target.glyphs;
     uint32_t glyphsOf = before.glyphs;   // the last build's glyphs the last mark moved here had
     constexpr uint8_t kMath = LayoutMark::kMathUsed | LayoutMark::kMathLaidOut;
-    for (size_t at = oldFrom + 1; at <= oldTo; at++) {
-        const LayoutMark& prior = old.marks[at - 1];
-        const LayoutMark& mark = old.marks[at];
-        for (size_t set = 0; set < kLayoutCidSets; set++) {
-            const LayoutCids& cids = target.cids[set];
-            if (cids.set == nullptr) continue;
-            for (uint32_t cid = prior.cids[set]; cid < mark.cids[set]; cid++) cids.add(cids.set, old.cids[set][cid]);
+    const uint8_t mathNow = now.flags & kMath;
+    const size_t contentShift = now.content - before.content;
+    const uint32_t linkShift = now.links - before.links;
+    const uint32_t headingShift = now.headings - before.headings;
+    const uint32_t idShift = now.ids - before.ids;
+    const uint32_t contentsShift = now.contentsLines - before.contentsLines;
+    const uint32_t sourceShift = now.sourceBlocks - before.sourceBlocks;
+    const uint32_t numberShift = now.nextNumber - before.nextNumber;
+    const uint32_t bottomShift = now.bottoms - before.bottoms;
+    uint32_t missingShift[kLayoutCidSets];
+    for (size_t set = 0; set < kLayoutCidSets; set++) missingShift[set] = now.missing[set] - before.missing[set];
+    const uint32_t missingBmpShift = now.missingBmp - before.missingBmp;
+    const size_t* const oldStarts = old.pageStarts.data();
+    const size_t* const newStarts = target.pageStarts->data();
+    const uint32_t firstPage = before.page;
+    for (LayoutMark* moved = firstMark; moved != endMark; moved++) {
+        if (moved->page == firstPage) {
+            moved->content += contentShift;
+            moved->links += linkShift;
+        } else {
+            moved->content = moved->content - oldStarts[moved->page] + newStarts[moved->page + pageShift];
         }
-        if (at == oldTo) break;
-        LayoutMark moved = mark;
-        moved.content = mark.page == before.page ? mark.content - before.content + now.content :
-            mark.content - old.pageStarts[mark.page] + (*target.pageStarts)[mark.page + pageShift];
-        moved.page = static_cast<uint32_t>(mark.page + pageShift);
-        if (mark.page == before.page) moved.links = move(mark.links, before.links, now.links);
-        moved.headings = move(mark.headings, before.headings, now.headings);
-        moved.ids = move(mark.ids, before.ids, now.ids);
-        moved.contentsLines = move(mark.contentsLines, before.contentsLines, now.contentsLines);
-        moved.sourceBlocks = move(mark.sourceBlocks, before.sourceBlocks, now.sourceBlocks);
-        moved.nextNumber = move(mark.nextNumber, before.nextNumber, now.nextNumber);
-        moved.bottoms = move(mark.bottoms, before.bottoms, now.bottoms);
-        for (size_t set = 0; set < kLayoutCidSets; set++) {
-            const LayoutCids& cids = target.cids[set];
-            moved.cids[set] = cids.set != nullptr ? static_cast<uint32_t>(cids.recorded(cids.set).size()) : 0;
-            moved.missing[set] = move(mark.missing[set], before.missing[set], now.missing[set]);
+        moved->page = static_cast<uint32_t>(moved->page + pageShift);
+        moved->headings += headingShift;
+        moved->ids += idShift;
+        moved->contentsLines += contentsShift;
+        moved->sourceBlocks += sourceShift;
+        moved->nextNumber += numberShift;
+        moved->bottoms += bottomShift;
+        for (size_t set = 0; set < kLayoutCidSets; set++) moved->missing[set] += missingShift[set];
+        moved->missingBmp += missingBmpShift;
+        moved->facesUsed = static_cast<uint8_t>(moved->facesUsed | now.facesUsed);
+        moved->flags = static_cast<uint8_t>(moved->flags | mathNow);
+        if (moved->glyphs == glyphsOf) {
+            moved->glyphs = static_cast<uint32_t>(tape.glyphs.size() - 1);
+            continue;
         }
-        moved.missingBmp = move(mark.missingBmp, before.missingBmp, now.missingBmp);
-        moved.facesUsed = static_cast<uint8_t>(mark.facesUsed | now.facesUsed);
-        moved.flags = static_cast<uint8_t>((mark.flags & ~kMath) | ((mark.flags | now.flags) & kMath));
-        if (mark.glyphs != glyphsOf) {
-            glyphsOf = mark.glyphs;
-            MathGlyphUse drawn = glyphs;
-            AddGlyphs(drawn, old.glyphs[mark.glyphs]);
-            if (std::memcmp(&tape.glyphs.back(), &drawn, sizeof drawn) != 0) tape.glyphs.push_back(drawn);
-        }
-        moved.glyphs = static_cast<uint32_t>(tape.glyphs.size() - 1);
-        tape.marks.push_back(moved);
+        glyphsOf = moved->glyphs;
+        MathGlyphUse drawn = glyphs;
+        AddGlyphs(drawn, old.glyphs[glyphsOf]);
+        if (std::memcmp(&tape.glyphs.back(), &drawn, sizeof drawn) != 0) tape.glyphs.push_back(drawn);
+        moved->glyphs = static_cast<uint32_t>(tape.glyphs.size() - 1);
     }
     for (size_t set = 0; set < kLayoutCidSets; set++) {
         const LayoutCids& cids = target.cids[set];
@@ -520,9 +948,9 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
     reuse.laidOut -= static_cast<uint32_t>(end - index);
     reuse.replayed += static_cast<uint32_t>(end - index);
     LayoutMark state = after;
-    state.nextNumber = move(after.nextNumber, before.nextNumber, now.nextNumber);
+    state.nextNumber = after.nextNumber + numberShift;
     state.facesUsed = static_cast<uint8_t>(after.facesUsed | now.facesUsed);
-    state.flags = static_cast<uint8_t>((after.flags & ~kMath) | ((after.flags | now.flags) & kMath));
+    state.flags = static_cast<uint8_t>(after.flags | mathNow);
     return state;
 }
 
@@ -669,8 +1097,9 @@ void SessionLayout::Commit(LayoutTarget& target, std::vector<Block>& newBlocks, 
     if (!active) return;
     active = false;
     LayoutTape& tape = *recording;
-    // Complete only when every block was laid out or replayed.
-    if (tape.marks.size() != newBlocks.size() + 1) {
+    // Complete only when every block was laid out or replayed (Mark noted the last one's marks).
+    if (tape.marks.size() != newBlocks.size() + 1 || tape.images.size() != newBlocks.size() ||
+        tape.headingPlaces.size() != target.headings->size() || tape.idPlaces.size() != target.ids->size()) {
         last.reset();
         return;
     }
@@ -678,22 +1107,7 @@ void SessionLayout::Commit(LayoutTarget& target, std::vector<Block>& newBlocks, 
     tape.headings = std::move(*target.headings);
     tape.ids = std::move(*target.ids);
     tape.contentsLines = std::move(*target.contentsLines);
-    // Where the marks are, with the blocks in the cache.
-    const auto place = [&](const std::vector<HeadingMark>& marks, uint32_t LayoutMark::*count,
-                           std::vector<LayoutTape::MarkPlace>& places) {
-        places.resize(marks.size());
-        for (size_t block = 0; block < newBlocks.size() && !marks.empty(); block++) {
-            const std::string& text = newBlocks[block].text;
-            for (uint32_t mark = tape.marks[block].*count; mark < tape.marks[block + 1].*count; mark++) {
-                const char* const at = marks[mark].text.data();
-                const bool own = at >= text.data() && at + marks[mark].text.size() <= text.data() + text.size();
-                places[mark] = { static_cast<uint32_t>(block),
-                    own ? static_cast<uint32_t>(at - text.data()) : LayoutTape::MarkPlace::kNested };
-            }
-        }
-    };
-    place(tape.headings, &LayoutMark::headings, tape.headingPlaces);
-    place(tape.ids, &LayoutMark::ids, tape.idPlaces);
+    tape.blockData = newBlocks.data();
     tape.blockCount = newBlocks.size();
     if (!numbers.empty()) tape.blockNumbers = NumbersOf(newBlocks, numbers);
     if (store != nullptr) CommitParse(*store);
@@ -714,6 +1128,12 @@ void SessionLayout::Forget() {
     recording.reset();
     spareBuffers.clear();
     reuse = {};
+}
+
+const KeptText* KeptTextOf(const std::string& text) {
+    if (g_session == nullptr) return nullptr;
+    const SessionText* const kept = static_cast<const SessionLayout*>(g_session)->sessionText;
+    return kept != nullptr ? kept->Kept(text) : nullptr;
 }
 
 // The parse side (session_parse.h). A document's block loop reads the lines from where it is on,
@@ -792,17 +1212,18 @@ bool MayHoldMarker(const std::vector<Block>& blocks, size_t first, size_t end) {
 
 // Where BeginDocumentParse may start the loop of `parse`, which goes on from `last`: the line, or
 // SIZE_MAX to parse whole. Sets what DocumentPass and EndDocumentParse need.
-size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, const std::string& text,
+size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, std::string_view text,
     const std::vector<std::string_view>& lines, const std::vector<unsigned char>& suppressed,
     const ReferenceDefinitions& definitions, bool definitionSyntax, size_t first, const LineChange& change) {
     constexpr size_t kNone = SIZE_MAX;
     const ParseRecord& next = parse.next;
     const size_t count = lines.size();
     const size_t oldCount = last.kinds.size();
+    // The last text, changed in place where the change is not known, is gone: no line is known to be the same.
     if (last.winAnsi != next.winAnsi || last.definitionSyntax != definitionSyntax || last.first != first ||
         last.paddedCellsAtStart != parse.cellStart || count >= 0x7FFFFFFFu || oldCount >= 0x7FFFFFFFu ||
         last.referenceLeft < kMaxReferenceDestinationBytes || suppressed.empty() != last.suppressed.empty() ||
-        parse.budget == nullptr || last.passes.empty() || last.passes[0].line != first ||
+        parse.budget == nullptr || last.passes.empty() || last.passes[0].line != first || !change.textKnown ||
         !SameDefinitions(last.definitions, definitions)) {
         return kNone;
     }
@@ -810,7 +1231,7 @@ size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, const std::stri
     const size_t oldSize = last.text.size();
     const size_t size = text.size();
     const size_t common = std::min(oldSize, size);
-    const size_t differs = change.known ? change.differs : FirstDifference(last.text.data(), text.data(), common);
+    const size_t differs = change.differs;
     const char* const base = text.data();
     const auto lineStart = [&](size_t line) { return static_cast<size_t>(lines[line].data() - base); };
     size_t changed = count;      // the first line that may differ
@@ -826,7 +1247,7 @@ size_t ResumeLine(DocumentParse& parse, const ParseRecord& last, const std::stri
         }
         changed = low == 0 ? 0 : low - 1;
         // A line after it whose line feed before it is in the end both texts share.
-        const size_t same = change.known ? change.same : CommonEnd(last.text.data() + oldSize, base + size, common - differs);
+        const size_t same = change.same;
         low = changed + 1;
         high = count;
         while (low < high) {
@@ -914,6 +1335,10 @@ const ParseRecord* LastRecord(const DocumentParse& parse) {
 
 ParseRecord& NextRecord(DocumentParse& parse) {
     return parse.next;
+}
+
+bool ParseReuses(const DocumentParse& parse) {
+    return parse.reuse;
 }
 
 size_t BeginDocumentParse(DocumentParse& parse, const std::vector<std::string_view>& lines,
@@ -1088,7 +1513,7 @@ std::vector<Block> ParseInSession(const std::string& markdown, Footnotes& footno
         // A session's first records: as large as the last, so that they do not grow a step at a time.
         if (store.record) {
             const ParseRecord& like = *store.record;
-            store.pending->text.reserve(like.text.size() + like.text.size() / 16);
+            if (like.kept == nullptr) store.pending->own.reserve(like.own.size() + like.own.size() / 16);
             store.pending->kinds.reserve(like.kinds.size() + like.kinds.size() / 16);
             store.pending->suppressed.reserve(like.suppressed.size() + like.suppressed.size() / 16);
             store.pending->passes.reserve(like.passes.size() + like.passes.size() / 16);
@@ -1197,8 +1622,12 @@ private:
 } // namespace
 
 struct BuildSession::State {
-    State() { layout.store = &blocks; }
+    State() {
+        layout.store = &blocks;
+        layout.sessionText = &text;
+    }
     Internal::SessionBlocks blocks;
+    Internal::SessionText text;
     Internal::SessionLayout layout;
     PdfOptions options;     // the last build's, without its cancel flag and source map
     bool built = false;
@@ -1232,8 +1661,10 @@ BuildResult BuildSession::Build(const std::string& markdown, const PdfOptions& o
     if (pdfBytes.capacity() < expected(markdown.size())) pdfBytes.reserve(expected(markdown.size() + markdown.size() / 16));
     BuildResult result;
     {
+        // The build reads the session's text, which becomes this one where it differs.
+        const std::string& text = session.text.Begin(markdown);
         const SessionScope scope(&session.layout);
-        result = BuildPdf(markdown, options, pdfBytes);
+        result = BuildPdf(text, options, pdfBytes);
     }
     // A parse the layout did not commit: kept when the build was made (footnotes, PDF/UA, whose
     // layout keeps no tape), else the last build's blocks are put back for the tape that is left.
@@ -1245,6 +1676,8 @@ BuildResult BuildSession::Build(const std::string& markdown, const PdfOptions& o
             Internal::UndoParse(session.blocks);
         }
     }
+    if (result.error == BuildError::None) session.text.Commit();
+    else session.text.Undo();
     session.layout.reuse.parsed = static_cast<uint32_t>(session.blocks.made);
     return result;
 }
@@ -1252,6 +1685,7 @@ BuildResult BuildSession::Build(const std::string& markdown, const PdfOptions& o
 void BuildSession::Clear() {
     state->layout.Forget();
     state->blocks = {};
+    state->text = Internal::SessionText();
     state->layout.store = &state->blocks;
     state->built = false;
 }

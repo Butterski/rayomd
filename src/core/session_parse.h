@@ -44,15 +44,19 @@ struct ParseRecord;
 // of each line after ResolveMathOpeners) and `suppressed` (the lines the definitions take).
 const ParseRecord* LastRecord(const DocumentParse& parse);
 ParseRecord& NextRecord(DocumentParse& parse);
-// How the lines of a parse stand to the last's (session_parse.cpp's ClassifyInSession), when
-// `known`: the texts' first `differs` bytes and last `same` are alike, and only lines
-// [classFirst, classEnd) may have another class or definition mark than the last parse's line in
-// that place (those before them the same line, those after it the line as many lines before or
-// after as the edit added).
+// Whether `parse` goes on from the last build's (BeginDocumentParse found where).
+bool ParseReuses(const DocumentParse& parse);
+// How the text and lines of a parse stand to the last's (session_parse.cpp's ClassifyInSession):
+// when `textKnown`, the texts' first `differs` bytes and last `same` are alike (else the last text is
+// gone: a session's kept text changed in place in a way not noted, and the parse is whole); when
+// `known`, only lines [classFirst, classEnd) may have another class or definition mark than the
+// last parse's line in that place (those before them the same line, those after it the line as
+// many lines before or after as the edit added).
 struct LineChange {
-    bool known = false;
+    bool textKnown = false;
     size_t differs = 0;
     size_t same = 0;
+    bool known = false;
     size_t classFirst = 0;
     size_t classEnd = 0;
 };

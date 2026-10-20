@@ -41,6 +41,58 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 6: session builds of long prose (opt6/prose, 2026-10-20)
+
+Against master `53734af`'s `BuildSession`, g++ 13.3 Release, the engine library linked into the lab
+harness (`session_check bench FILE KIND WHERE`); `perf stat -e cycles:u,instructions:u` on CPU 4,
+alternating A/B, medians of 3 rounds of 20 builds. e50 is 50 copies of `essay.md` (2.9 MB, 9,500
+blocks, 925 pages, WinAnsi text); its edits all resync at once (99.4 to 100 % replayed): what a letter
+cost was the per-build work over the whole document, not the layout.
+
+Where a letter in e50 went before (perf, 20 Mcycles): the replayed content's copy 15 %, the text's
+passes 30 % (WinAnsi transcoding 9 %, `find("]:")` and `CharacterReferenceNeed` 7 %, the parse
+record's copy of the text 6 %, comparing it with the last 6 %, shifting the lines 2 %), the session's
+per-block bookkeeping 15 % (marks, source map, image tests, mark places), the PDF's assembly 20 %
+(outline titles, link annotations, page objects, `BuildInto`).
+
+- **Lean bookkeeping** (`build_session.cpp`): whether a block reads images is kept per block in the
+  tape (`LayoutTape::images`), runs are compared lazily (a kept range of blocks in one `memchr` over
+  those bits), a replay copies the marks and source map entries in bulk and moves them in place (a
+  kept block's lines shifted, not read), mark places are noted as blocks are laid out or replayed
+  (Commit no longer walks the blocks), a kept block's heading marks are not relocated where it did
+  not move. e50 letter in the middle 19.9 -> 18.0 Mcycles (instructions 18.9 -> 16.5 M), t700
+  85.5 -> 79.0.
+- **The text kept in place** (`SessionText`, `KeptText`): the session keeps the markdown and its
+  WinAnsi text and changes them in place where the next text differs (one comparison of the raw
+  text a build); the parse record views the kept text instead of copying it and gets the change
+  instead of comparing; the font choice comes from counts kept up to date (bytes from 0x80,
+  references by need, `CharacterReferenceNeedAt`), the WinAnsi text is transcoded only around the
+  change (checkpoints map the markdown to it; the status-symbol bytes are checked around the
+  change); "]:" is counted, not searched. A cancelled build puts both texts back. Both steps
+  against master, quiet run: e50 a letter at the start / middle / end 20.5 / 20.4 / 20.3 -> 16.5 /
+  15.2 / 14.0 Mcycles (x1.24 / x1.34 / x1.44, instructions x1.23 to x1.34), a line deleted 23.6 ->
+  18.8 (x1.25), a paragraph inserted 21.1 -> 16.2 (x1.30), e10 x1.25, t700 85.7 -> 77.2 (x1.11),
+  t70 x1.10. The start costs more than the end: the in-place change moves the text after it.
+- **A source map bug in master**: `SameBlock` ignored whether a block has source lines, so a table
+  of contents inserted by `--toc` and one at a "[TOC]" paragraph counted as equal and the replay
+  left out the paragraph's map entry (harness, `mermaid.md` seed 1001 with `WINANSI=1`).
+- First build of a new session (cleared each time), e50: master 118.9 M instructions, now 121.8
+  (+2.4 %; the kept text's copy and counts, the image bits and mark places); against `BuildPdf`
+  109.5 M (+11 %; cycles +22 % on a busy host, with the freed memory faulted in again). Not reached:
+  the +1 % goal (see open items).
+- Checks: harness (`session_check`, extra snippets for Latin text, references, status symbols and
+  broken UTF-8; `WINANSI=1` keeps documents Latin): 3,000+ random sequences of 20 to 40 edits over
+  the warm fixtures, generated and wiki pages, media and parse-heavy documents, t70 and e10, Hebrew
+  with a fallback font, ten option profiles and cancelled builds: all identical to `BuildPdf`.
+- Rejected: `build_session.cpp` at `-O2` (e50 letter -4 % instructions, t700 -3.4 %) for now: more
+  code in the GUI for what the steps above took more of.
+- Open: the replayed content's copy (3 Mcycles of e50's 15, memory-bound; only an output the
+  session owns could skip it), the PDF's assembly (outline titles, link annotations, page objects:
+  about 4 Mcycles), shifting the parse lines in place, image blocks replayed when the registry gives
+  the same answer (opt6/gap makes a failed source a lookup), the first build's recording (the
+  tape's content copy alone is 4 to 5 % of a whole build), long prose without headings (no e50 edit
+  failed to resync).
+
 ## Round 5: package size (opt5/size, 2026-10-19)
 
 Against 5.2.5 (`ac59556`), GCC 13.3 unless named; the Linux archives of the GCC 11 builds, as the

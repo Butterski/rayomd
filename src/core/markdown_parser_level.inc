@@ -75,7 +75,7 @@
     // The document's lines and classes in the record this parse leaves, those the edit left alone
     // shifted from the last build's (session_parse.cpp's ClassifyInSession).
     ReferenceDefinitions definitions;
-    const bool definitionSyntax = markdown.find("]:") != std::string::npos;
+    const bool definitionSyntax = DefinitionSyntaxInSession(markdown);
     notes->possible = definitionSyntax;
     const bool notesPossible = notes->possible;
     const size_t firstNote = notes->found.size();
@@ -112,6 +112,8 @@
     }
 #if RAYOMD_SESSION_LEVEL
     i = BeginInSession(lines, suppressed, definitions, definitionSyntax, i, change, notes);
+    // A parse that does not go on from the last one's makes all of the document's blocks.
+    if (!ParseReuses(*tSessionDocument)) blocks.reserve(std::min(lines.size(), std::max<size_t>(8, lines.size() / 2)));
 #endif
 
     const bool stampLines = depth == 0;

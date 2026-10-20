@@ -1550,6 +1550,19 @@ ReferenceNeed CharacterReferenceNeed(std::string_view text) {
     return need;
 }
 
+#ifdef RAYOMD_BUILD_SESSION
+// A BuildSession counts the references of its text as CharacterReferenceNeed reads them, a change at
+// a time (build_session.cpp's SessionText).
+RAYOMD_COLD ReferenceNeed CharacterReferenceNeedAt(std::string_view text, size_t at) {
+    uint32_t codePoint = 0;
+    if (MatchCharacterReference(text, at, codePoint) == 0 || codePoint < 0x80 || IsDroppedReference(codePoint) ||
+        IsSpaceReference(codePoint)) {
+        return ReferenceNeed::Ascii;
+    }
+    return RayoMd::Text::WinAnsiCode(codePoint) < 0 ? ReferenceNeed::Unicode : ReferenceNeed::WinAnsi;
+}
+#endif
+
 void NonAsciiCodepoints(std::string_view text, CidList& out) {
     out.clear();
     // A bit per code point in words of 64; `touched` has a bit per word written, the only words

@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace TinyPdf {
@@ -55,11 +56,45 @@ struct ParseLinesFree {
     void operator()(ParseLines* lines) const;
 };
 
+// A text a session keeps from build to build (SessionText: the markdown and its WinAnsi text),
+// changed in place where the next build's differs, so that the bytes before and after the change
+// stay where they were: a parse's record views it instead of copying it, and the next parse knows
+// the change instead of comparing the texts.
+struct KeptText {
+    std::string bytes;
+    uint64_t version = 0;    // of `bytes`, never the same for other bytes in the session; 0 for none
+    // The version `bytes` were before the last change, 0 when not known; the change kept their
+    // [0, differs) and their bytes from oldEnd on, from newEnd on now.
+    uint64_t base = 0;
+    size_t differs = 0;
+    size_t oldEnd = 0;
+    size_t newEnd = 0;
+    size_t pairs = 0;        // "]:" in `bytes`, of a link or footnote definition
+
+    // Bytes [from, to) become `with`, version `next`; Undo puts them back.
+    void Change(size_t from, size_t to, std::string_view with, uint64_t next);
+    // All of the bytes become `with` (Take swaps them with it), version `next`, which Undo cannot put back.
+    void Set(std::string_view with, uint64_t next);
+    void Take(std::string& with, uint64_t next);
+    // The bytes before the last Change or Set again: the same version when it can, else `fresh`.
+    void Undo(uint64_t fresh);
+    // What the last Change replaced.
+    std::string_view Replaced() const { return replaced; }
+
+private:
+    std::string replaced;    // what the last Change replaced
+    size_t replacedPairs = 0;
+    bool undoable = false;
+};
+
 // What a session's document-level parse leaves for the next (session_parse.h): the text it read,
 // its lines, each line's class and definition mark, the link definitions, and every pass of its
 // block loop.
 struct ParseRecord {
-    std::string text;
+    std::string own;                 // the text it read, when that is not one the session keeps
+    std::string_view text;           // the text it read: `own`, or a KeptText's bytes when it read them
+    const KeptText* kept = nullptr;  // that KeptText, whose `version` the text was
+    uint64_t version = 0;
     std::unique_ptr<ParseLines, ParseLinesFree> lines;   // views of `text`
     std::vector<uint8_t> kinds;
     std::vector<unsigned char> suppressed;
@@ -73,6 +108,9 @@ struct ParseRecord {
     bool definitionSyntax = false;
     bool winAnsi = false;           // WinAnsiReferences::Active()
 };
+
+// The KeptText whose bytes `text` is, in the session of this thread's build; else null.
+const KeptText* KeptTextOf(const std::string& text);
 
 // A session's blocks: the last build's, which the next one's parse keeps where the edit left them
 // alone (ParseInSession, session_parse.h). The builders parse into `blocks` (BuildBlocks); until
@@ -160,6 +198,7 @@ struct LayoutTape {
     uint8_t renderer = 0;                    // LayoutSession::Begin's `renderer`
     const void* fonts[kLayoutCidSets] = {};  // and its fonts
     size_t blockCount = 0;
+    const Block* blockData = nullptr;        // where its blocks were (a block that did not move keeps its text's place)
     std::vector<ContentsEntry> contents;
     std::vector<HeadingNumber> numbers;
     std::vector<const std::string*> blockNumbers;   // --number-headings: each block's, in `numbers`
@@ -184,9 +223,10 @@ struct LayoutTape {
     std::vector<uint16_t> cids[kLayoutCidSets];   // in the order each set recorded them
     std::vector<MathGlyphUse> glyphs;        // LayoutMark::glyphs
     std::vector<double> pageBottoms;
+    std::vector<uint8_t> images;             // 1 for each block that reads an image or draws a diagram (TouchesImages)
     // Where each heading's and anchor's mark views its text: its top-level block and the offset in
-    // that block's text, or kNested in a block inside it (Commit notes them while the blocks are
-    // in the cache, so that a replay reads the old blocks for nested marks only).
+    // that block's text, or kNested in a block inside it (noted as the layout goes, while the
+    // block is in the cache, so that a replay reads the old blocks for nested marks only).
     struct MarkPlace {
         static constexpr uint32_t kNested = 0xFFFFFFFFu;
         uint32_t block;
@@ -283,6 +323,11 @@ public:
         std::vector<HeadingNumber>& numbers) = 0;
     // A build of this session that is not laid out by blocks (footnotes, PDF/UA): no tape.
     virtual void Forget() = 0;
+    // ChooseFonts (tiny_pdf.cpp) for `markdown`, past what the options choose: 0 the standard fonts
+    // (ASCII), 1 the same in WinAnsiEncoding, with `winAnsi` the text transcoded, 2 a TrueType font;
+    // kNotKept when `markdown` is not the text the session keeps, which the caller then looks at.
+    static constexpr uint8_t kNotKept = 0xFF;
+    virtual uint8_t TextFonts(const std::string& markdown, const std::string*& winAnsi) = 0;
 };
 
 // The session of the build running on this thread (BuildSession::Build), or null. Builds without

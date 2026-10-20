@@ -14681,12 +14681,14 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
 // and in WinAnsiEncoding for Latin text, which `winAnsi` then gets; else a TrueType font.
 enum class TextFonts : uint8_t { Ascii, WinAnsi, TrueType };
 
+// A theme's font shows all text, and a theme's header and footer text that is not WinAnsi needs a
+// TrueType font too, as PDF/A and PDF/UA, which embed every font, do for all text.
+static bool OptionsTakeTrueType(const PdfOptions& options) {
+    return !options.theme.fontPath.empty() || options.pdfa || options.pdfua || ThemeTextNeedsUnicode(options.theme);
+}
+
 static TextFonts ChooseFonts(const std::string& markdown, const PdfOptions& options, std::string& winAnsi) {
-    // A theme's font shows all text, and a theme's header and footer text that is not WinAnsi
-    // needs a TrueType font too, as PDF/A and PDF/UA, which embed every font, do for all text.
-    if (!options.theme.fontPath.empty() || options.pdfa || options.pdfua || ThemeTextNeedsUnicode(options.theme)) {
-        return TextFonts::TrueType;
-    }
+    if (OptionsTakeTrueType(options)) return TextFonts::TrueType;
     // A character reference counts as the character it stands for: "&copy;" needs the WinAnsi
     // text of the standard fonts, "&rarr;" a Unicode font. A document is searched for them only
     // where it would otherwise go to the standard fonts.
@@ -14702,6 +14704,20 @@ static TextFonts ChooseFonts(const std::string& markdown, const PdfOptions& opti
     }
     return TextFonts::TrueType;
 }
+
+#ifdef RAYOMD_BUILD_SESSION
+// ChooseFonts in a BuildSession's build: from what the session keeps of its text, without reading all
+// of it (LayoutSession::TextFonts); `transcoded` then the session's WinAnsi text when it is chosen.
+RAYOMD_COLD static TextFonts SessionFonts(const std::string& markdown, const PdfOptions& options, std::string& winAnsi,
+    const std::string*& transcoded) {
+    Internal::LayoutSession* const session = Internal::CurrentLayoutSession();
+    if (session != nullptr && !OptionsTakeTrueType(options)) {
+        const uint8_t fonts = session->TextFonts(markdown, transcoded);
+        if (fonts != Internal::LayoutSession::kNotKept) return static_cast<TextFonts>(fonts);
+    }
+    return ChooseFonts(markdown, options, winAnsi);
+}
+#endif
 
 // A document in a TrueType font (TextFonts::TrueType): the theme's, without a fallback font: the
 // company's look; else the system's, built again in a fallback font that has more of the
@@ -14787,12 +14803,20 @@ static bool BuildDocument(const std::string& markdown, const PdfOptions& options
     BuildResult& stats, uint32_t& missingCharacters, BookSource* book) {
     KeptLocal<std::string, 3> keptWinAnsi;  // the transcoded text, kept from export to export
     std::string& winAnsi = keptWinAnsi.value;
-    switch (ChooseFonts(markdown, options, winAnsi)) {
+#ifdef RAYOMD_BUILD_SESSION
+    const std::string* transcoded = nullptr;
+    const TextFonts fonts = book == nullptr ? SessionFonts(markdown, options, winAnsi, transcoded) : ChooseFonts(markdown, options, winAnsi);
+    const std::string& standard = transcoded != nullptr ? *transcoded : winAnsi;
+#else
+    const TextFonts fonts = ChooseFonts(markdown, options, winAnsi);
+    const std::string& standard = winAnsi;
+#endif
+    switch (fonts) {
     case TextFonts::Ascii:
         return BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes, stats, book);
     case TextFonts::WinAnsi:
         if (book != nullptr) TranscodeBook(*book, false);
-        return BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats, book);
+        return BuildStandardPdfBytes(standard, markdown, true, options, pdfBytes, stats, book);
     case TextFonts::TrueType:
         break;
     }
