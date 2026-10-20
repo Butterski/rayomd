@@ -41,6 +41,67 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 6: the GUI's preview against the engine harness (opt6/gap, 2026-10-20)
+
+rayomd-gui's worker took 49 ms a keystroke at the title of 700 copies of `tester.md` (lab
+`lab.session`, worker median; total 51), the session harness `keys` about 26. Separated by building
+the harness against the engine's own library (GCC 13) and the GUI's (GCC 16, its hardening flags),
+with an options mode giving what `BuildWorker` passes (Elegant, normal margins, A4, the image cache
+directory, a source map), and by a copy of the worker timing each step. Where the 23 ms went:
+
+| Factor | Share | How it was measured |
+|---|---:|---|
+| `tester.md`'s images missing in the GUI lab's temporary folder: `realpath` of each failed image, 2,100 a build (a `readlink` a path component, then a `stat`; 50 % of the worker's cycles were kernel) | +12.2 ms | harness 25.9 (corpus with `docs/assets`) -> 38.1 ms (no `docs/`) |
+| the same at the GUI lab's deeper path (more components a walk) | +6.8 ms | harness at the lab document's path 44.9 ms |
+| the GUI's options (Elegant, image cache, source map) | +0.4 ms | harness GUI=1 against Modern; no font subset, CMap or width table is redone (callgrind: `SubsetFontName` 22 K instructions a build) |
+| compiler and flags (GCC 16 with `_FORTIFY_SOURCE=3`, PIE, canaries, clash, CET) | +0.6 ms | harness against the GUI's `librayomd_engine.a` 45.5 ms |
+| the worker thread, its recycled output, the render threads | +1.1 ms | worker's build 46.6 ms; render threads 3 % of the samples |
+| GUI post-build work | +3.2 ms | `PdfFile::Parse` 2.2, `SourceMap::FromEngine` 0.6, `ComputeStats` 0.4 |
+
+Kept:
+
+- **A failed image source fails at once for the rest of its build** (`ImageRegistry::FailSource`:
+  index -1 under its `source:` key; not a decode-budget refusal or a cancel). Harness at the lab's
+  path: 44.9 -> 17.7 ms; kernel 80.6 -> 5.4 Mcycles a keystroke. GUI worker 49 -> 21 ms.
+- **The formula fonts and images of a page's resources written once a build** (both builders: two
+  strings before the page loop, empty without formulas or images; the page reserved for them):
+  `AppendMathFontResources` was 7.3 M instructions a build of 4,200 pages. Harness (perf stat, CPU
+  7, medians of 7/5): title of t700 without images 73.5 -> 71.9 Mcycles (90.7 -> 83.2 M
+  instructions), middle of t700 with images 78.8 -> 74.8 (95.7 -> 84.2 M).
+
+GUI, base (`53734af`) / now, medians of three interleaved runs (lab worker, `lab.session`; total
+in brackets): 700 copies title 48.9 (51.0) / 20.9 (23.6) ms, middle 50.8 (53.5) / 20.7 (23.4);
+70 copies title 5.1 (7.5) / 2.2 (4.0), middle 5.1 (7.9) / 2.2 (4.7). `bench.preview_latency`
+p50 / p99: 700 copies 50.8 / 73.3 -> 23.6 / 45.0, 70 copies 7.3 / 8.7 -> 4.1 / 6.0, 8 copies
+2.5 / 3.8 -> 2.0 / 2.9. Session3's conditions (t700 in the corpus with images, a letter in the
+middle): 25.9 -> 17.7 ms.
+
+Gates: ab.sh `--instructions` against `53734af`, the CLI -0.69 to +0.08 %, the CLI built as the
+engine library -0.68 to +0.08 % on every fixture; the 2,875 / 5,936 / 6,044 byte gates identical;
+session harness 2,800 random runs (7 files, with and without images) and 800 with the GUI's options,
+no mismatch; ctest and `verify_cli.py` (GCC 13), GCC 11 static ctest, ASan/UBSan core tests;
+MinGW `rayomd.exe` 1,472,000 -> 1,474,048 bytes.
+
+Hardening flags, each removed from the GUI's set (GCC 16, a letter at the title of t700, session,
+Mcycles / M instructions, medians of 7): all 73.0 / 85.3; without `-fcf-protection` 72.7 / 85.0,
+`-fstack-clash-protection` 72.5 / 85.3, `-fstack-protector-strong` 72.1 / 84.4, PIE 72.2 / 84.9,
+`_FORTIFY_SOURCE=3` 69.7 / 84.9 (-4.5 %), none 69.3 / 83.4. Two thirds of fortify's cost is
+`AddOutline` (394 against 125 samples), which calls no `__*_chk` function in either build: a
+difference in its code generation, cause not established. GCC 11, the release builds' compiler
+(where `=3` acts as `=2`): all 72.2 / 87.0,
+none 71.5 / 85.0. GCC 13 with Ubuntu's defaults (the same flags) 74.3 / 90.7. Nothing removed.
+
+Rejected: one string holding each page's head and resources (`PageDictionaryParts`): -10.5 M
+instructions a build of t700 but polish.md +0.95 %, notes.md +0.42 % (three strings for a one-page
+document). glibc's `mmap_threshold`/`trim_threshold` raised in the GUI (`GLIBC_TUNABLES`): faults
+a keystroke 860 -> 490, time within the noise of a loaded host (about 0.3 ms by the kernel cycles):
+not worth retaining freed memory process-wide.
+
+Open: replaying image blocks in a session (their registry answer now a hash lookup when it fails;
+t700 without its image lines is 2 ms faster, 17.6 -> 15.7), `TouchesImages` over every block each
+build (3.5 % of the worker), why fortify slows `AddOutline` in GCC 16 builds, the first keystroke
+after a full build (p99 45 ms at 700 copies).
+
 ## Round 5: package size (opt5/size, 2026-10-19)
 
 Against 5.2.5 (`ac59556`), GCC 13.3 unless named; the Linux archives of the GCC 11 builds, as the
