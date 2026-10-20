@@ -280,7 +280,6 @@ footnotes, long pages and print output, from the follow-up report, are planned i
 - Export a folder, several files or a book from the window (`BuildBookPdf` exists).
 - Header, footer, cover and fonts edited in the app, writing a theme file.
 - Named presets, remembered per document, optionally written to front matter.
-- Markdown highlighting in the editor (the README lists its absence as a boundary).
 
 **Not a fit** (report, *Not a fit or out of scope*): arbitrary CSS layout (see the CSS issue
 for the bounded subset that does fit), citations and CSL, executing code blocks, PlantUML or
@@ -292,5 +291,8 @@ editor.
 
 - [#29](https://github.com/Butterski/rayomd/issues/29) Epic: CSS styling without a browser, a
   bounded stylesheet subset mapped onto RayoMD's own layout values.
-- [#30](https://github.com/Butterski/rayomd/issues/30) VS Code extension on `rayomd --serve`
-  (with a JSON-lines serve mode for per-request output paths and options).
+- [#30](https://github.com/Butterski/rayomd/issues/30) VS Code extension on `rayomd --serve --json`.
+- [#36](https://github.com/Butterski/rayomd/issues/36) A versioned JSON-lines serve protocol (per-request
+  input, output and flags) for the extension, the MCP server and an Obsidian plugin.
+- [#37](https://github.com/Butterski/rayomd/issues/37) Agent tools: an Agent Skill, an MCP server on the
+  serve protocol, and a container image.
