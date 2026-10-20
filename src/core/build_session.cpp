@@ -254,6 +254,30 @@ size_t CountHigh(std::string_view text) {
     return count;
 }
 
+// Copies `size` bytes to `to` without reading the lines it writes first (streaming stores, where
+// SSE2 is): a long run's replayed content, which nothing reads again in the build; an SFENCE must
+// follow before another thread could read them.
+void StreamCopy(char* to, const char* from, size_t size) {
+#ifdef RAYOMD_SESSION_SSE2
+    const size_t head = std::min(size, (16 - (reinterpret_cast<uintptr_t>(to) & 15)) & 15);
+    std::memcpy(to, from, head);
+    to += head;
+    from += head;
+    size -= head;
+    for (; size >= 64; size -= 64, to += 64, from += 64) {
+        const __m128i* const source = reinterpret_cast<const __m128i*>(from);
+        __m128i* const target = reinterpret_cast<__m128i*>(to);
+        const __m128i a = _mm_loadu_si128(source), b = _mm_loadu_si128(source + 1);
+        const __m128i c = _mm_loadu_si128(source + 2), d = _mm_loadu_si128(source + 3);
+        _mm_stream_si128(target, a);
+        _mm_stream_si128(target + 1, b);
+        _mm_stream_si128(target + 2, c);
+        _mm_stream_si128(target + 3, d);
+    }
+#endif
+    std::memcpy(to, from, size);
+}
+
 } // namespace
 
 void KeptText::Change(size_t from, size_t to, std::string_view with, uint64_t next) {
@@ -623,6 +647,8 @@ private:
     // blocks may write past their end (TailWriter's fixed-width numbers): after one, nothing is
     // taken in place.
     const char* inPlace = nullptr;
+    // A replay long enough that its content is copied with streaming stores (StreamCopy).
+    bool streaming = false;
 };
 
 void SessionLayout::Begin(uint8_t renderer, const void* const fonts[kLayoutCidSets], const std::vector<Block>& newBlocks,
@@ -884,6 +910,9 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
     // build's gaps are not copied), so that it lies where BuildInto wants it.
     std::string& content = *target.content;
     const auto gapless = [&](size_t at, size_t page) { return at - old.pageStarts[page] + old.pageFree[page]; };
+    // From a megabyte on, past what the caches keep of the build: nothing reads it again here.
+    constexpr size_t kStreamBytes = size_t{1} << 20;
+    streaming = target.grow != nullptr && gapless(after.content, after.page) - gapless(before.content, before.page) >= kStreamBytes;
     CopyContent(gapless(before.content, before.page),
         after.page == before.page ? gapless(after.content, after.page) : old.pageFree[before.page + 1], before.page, content, target);
     for (size_t page = before.page + 1; page <= after.page; page++) {
@@ -891,6 +920,10 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
         CopyContent(old.pageFree[page], page == after.page ? gapless(after.content, page) : old.pageFree[page + 1], page, content,
             target);
     }
+#ifdef RAYOMD_SESSION_SSE2
+    if (streaming) _mm_sfence();
+#endif
+    streaming = false;
     // Which of the last build's pages each page of the run's content came from.
     std::vector<uint32_t>& origins = tape.pageOrigins;
     if (origins.size() <= after.page + pageShift) origins.resize(after.page + pageShift + 1, kNoPage);
@@ -1059,6 +1092,18 @@ void SessionLayout::CopyContent(size_t from, size_t to, size_t page, std::string
         at == last->pageFile[page] + (from - last->pageFree[page])) {
         target.grow(content, end);
         content[at] = pieces[piece].data[from - pieces[piece].at];
+        return;
+    }
+    if (streaming && content.capacity() >= end) {
+        target.grow(content, end);
+        char* out = &content[at];
+        while (from < to) {
+            const size_t stop = std::min(to, pieces[piece + 1].at);
+            StreamCopy(out, pieces[piece].data + (from - pieces[piece].at), stop - from);
+            out += stop - from;
+            from = stop;
+            piece++;
+        }
         return;
     }
     while (from < to) {
