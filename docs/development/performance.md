@@ -41,6 +41,251 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 6: the GUI's preview against the engine harness (opt6/gap, 2026-10-20)
+
+rayomd-gui's worker took 49 ms a keystroke at the title of 700 copies of `tester.md` (lab
+`lab.session`, worker median; total 51), the session harness `keys` about 26. Separated by building
+the harness against the engine's own library (GCC 13) and the GUI's (GCC 16, its hardening flags),
+with an options mode giving what `BuildWorker` passes (Elegant, normal margins, A4, the image cache
+directory, a source map), and by a copy of the worker timing each step. Where the 23 ms went:
+
+| Factor | Share | How it was measured |
+|---|---:|---|
+| `tester.md`'s images missing in the GUI lab's temporary folder: `realpath` of each failed image, 2,100 a build (a `readlink` a path component, then a `stat`; 50 % of the worker's cycles were kernel) | +12.2 ms | harness 25.9 (corpus with `docs/assets`) -> 38.1 ms (no `docs/`) |
+| the same at the GUI lab's deeper path (more components a walk) | +6.8 ms | harness at the lab document's path 44.9 ms |
+| the GUI's options (Elegant, image cache, source map) | +0.4 ms | harness GUI=1 against Modern; no font subset, CMap or width table is redone (callgrind: `SubsetFontName` 22 K instructions a build) |
+| compiler and flags (GCC 16 with `_FORTIFY_SOURCE=3`, PIE, canaries, clash, CET) | +0.6 ms | harness against the GUI's `librayomd_engine.a` 45.5 ms |
+| the worker thread, its recycled output, the render threads | +1.1 ms | worker's build 46.6 ms; render threads 3 % of the samples |
+| GUI post-build work | +3.2 ms | `PdfFile::Parse` 2.2, `SourceMap::FromEngine` 0.6, `ComputeStats` 0.4 |
+
+Kept:
+
+- **A failed image source fails at once for the rest of its build** (`ImageRegistry::FailSource`:
+  index -1 under its `source:` key; not a decode-budget refusal or a cancel). Harness at the lab's
+  path: 44.9 -> 17.7 ms; kernel 80.6 -> 5.4 Mcycles a keystroke. GUI worker 49 -> 21 ms.
+- **The formula fonts and images of a page's resources written once a build** (both builders: two
+  strings before the page loop, empty without formulas or images; the page reserved for them):
+  `AppendMathFontResources` was 7.3 M instructions a build of 4,200 pages. Harness (perf stat, CPU
+  7, medians of 7/5): title of t700 without images 73.5 -> 71.9 Mcycles (90.7 -> 83.2 M
+  instructions), middle of t700 with images 78.8 -> 74.8 (95.7 -> 84.2 M).
+
+GUI, base (`53734af`) / now, medians of three interleaved runs (lab worker, `lab.session`; total
+in brackets): 700 copies title 48.9 (51.0) / 20.9 (23.6) ms, middle 50.8 (53.5) / 20.7 (23.4);
+70 copies title 5.1 (7.5) / 2.2 (4.0), middle 5.1 (7.9) / 2.2 (4.7). `bench.preview_latency`
+p50 / p99: 700 copies 50.8 / 73.3 -> 23.6 / 45.0, 70 copies 7.3 / 8.7 -> 4.1 / 6.0, 8 copies
+2.5 / 3.8 -> 2.0 / 2.9. Session3's conditions (t700 in the corpus with images, a letter in the
+middle): 25.9 -> 17.7 ms.
+
+Gates: ab.sh `--instructions` against `53734af`, the CLI -0.69 to +0.08 %, the CLI built as the
+engine library -0.68 to +0.08 % on every fixture; the 2,875 / 5,936 / 6,044 byte gates identical;
+session harness 2,800 random runs (7 files, with and without images) and 800 with the GUI's options,
+no mismatch; ctest and `verify_cli.py` (GCC 13), GCC 11 static ctest, ASan/UBSan core tests;
+MinGW `rayomd.exe` 1,472,000 -> 1,474,048 bytes.
+
+Hardening flags, each removed from the GUI's set (GCC 16, a letter at the title of t700, session,
+Mcycles / M instructions, medians of 7): all 73.0 / 85.3; without `-fcf-protection` 72.7 / 85.0,
+`-fstack-clash-protection` 72.5 / 85.3, `-fstack-protector-strong` 72.1 / 84.4, PIE 72.2 / 84.9,
+`_FORTIFY_SOURCE=3` 69.7 / 84.9 (-4.5 %), none 69.3 / 83.4. Two thirds of fortify's cost is
+`AddOutline` (394 against 125 samples), which calls no `__*_chk` function in either build: a
+difference in its code generation, cause not established. GCC 11, the release builds' compiler
+(where `=3` acts as `=2`): all 72.2 / 87.0,
+none 71.5 / 85.0. GCC 13 with Ubuntu's defaults (the same flags) 74.3 / 90.7. Nothing removed.
+
+Rejected: one string holding each page's head and resources (`PageDictionaryParts`): -10.5 M
+instructions a build of t700 but polish.md +0.95 %, notes.md +0.42 % (three strings for a one-page
+document). glibc's `mmap_threshold`/`trim_threshold` raised in the GUI (`GLIBC_TUNABLES`): faults
+a keystroke 860 -> 490, time within the noise of a loaded host (about 0.3 ms by the kernel cycles):
+not worth retaining freed memory process-wide.
+
+Open: replaying image blocks in a session (their registry answer now a hash lookup when it fails;
+t700 without its image lines is 2 ms faster, 17.6 -> 15.7), `TouchesImages` over every block each
+build (3.5 % of the worker), why fortify slows `AddOutline` in GCC 16 builds, the first keystroke
+after a full build (p99 45 ms at 700 copies).
+
+## Round 6: package size (opt6/size, 2026-10-20; measured, not taken)
+
+Against `53734af` (5.2.5 with round 5), GCC 13.3 unless named; instructions by `ab.sh
+--instructions` on the eight warm fixtures (callgrind), time its paired medians (A/A in brackets).
+Not taken at integration: on the merged tree (with opt6/gap), two paired `ab.sh` runs against the
+same tree without it gave time +0.38 % and +0.13 % geomean, README +0.53/+0.47 %, tester-noimg
++0.40/+0.57 %, code-heavy +0.40/+0.39 %: 8 KB is not worth it. The table and the curve below stay
+as the record of what size costs in `tiny_pdf.cpp`.
+
+| | 53734af | opt6/size | |
+|---|---:|---:|---:|
+| Linux dynamic, GCC 13 | 1,272,472 | 1,264,280 | -8,192 |
+| Linux dynamic, GCC 11 | 1,284,696 | 1,280,600 | -4,096 |
+| Linux static, GCC 13 | 2,182,928 | 2,178,832 | -4,096 |
+| Linux static, GCC 11 | 2,275,440 | 2,271,344 | -4,096 |
+| `rayomd.exe` (MinGW GCC 13) | 1,472,000 | 1,466,880 | -5,120 |
+| `linux-x64.tar.gz` (`pigz -11`) | 702,526 | 700,438 | -2,088 |
+| `linux-x64-static.tar.gz` | 1,087,725 | 1,085,587 | -2,138 |
+| `windows-x64.zip` (7-Zip, as `release.yml`) | 789,814 | 787,207 | -2,607 |
+
+- **`tiny_pdf.cpp` with an inlining budget of 38 and no loop unswitching** (`CMakeLists.txt`,
+  GCC Release; `RAYOMD_UNSWITCH_LOOPS` keeps unswitching in `RenderMathTable`, whose formula-table
+  loop cost table-heavy.md +0.47 % instructions without it). Text -5.6 KB. Instructions: notes
+  +0.18 %, polish +0.16 %, essay +0.10 %, native_math +0.05 %, table-heavy +0.05 %, the others
+  +0.02 %; time geomean -0.04 % (A/A +0.00 %). Byte check 2,875, `oncmp.py` 5,936 and `compare.py`
+  6,044: 0 differ. Fresh exports (`fresh.sh`, 128 runs) +0.08 %, +0.78 %, +0.20 % (+2 to +22 µs,
+  B faster in 52 to 61 of 128 pairs). ctest and `verify_cli.py` (GCC 13), ctest of the GCC 11
+  static build.
+
+The size and speed curve (dynamic GCC 13 binary; instructions per fixture, the largest named):
+
+| `tiny_pdf.cpp` built with | Binary | Text | Instructions, largest | Geomean |
+|---|---:|---:|---|---:|
+| `--param=inline-unit-growth=38` | -4,096 | -2.9 KB | notes +0.19 %, polish +0.16 % | +0.07 % |
+| 36 | -8,192 | -6.1 KB | essay +0.38 %, notes +0.33 %, native_math +0.30 % | +0.15 % |
+| 34 | -12,288 | -10.1 KB | essay +0.39 %, notes +0.37 %, native_math +0.31 % | +0.18 % |
+| 32 | -12,288 | -12.3 KB | essay +1.36 %, native_math +1.13 %, notes +0.54 % | +0.46 % |
+| 30 | -16,384 | -15.5 KB | essay +1.39 %, native_math +1.22 %, notes +0.60 % | +0.52 % |
+| 25 | -28,672 | -27.3 KB | essay +2.03 %, notes +1.66 %, native_math +1.39 % | +0.87 % |
+| 20 | -40,960 | -39.2 KB | essay +2.92 %, notes +2.62 %, native_math +1.84 % | +1.29 % |
+| `-fno-unswitch-loops` | -4,096 | -4.7 KB | table-heavy +0.49 % | +0.07 % |
+| `-fno-split-paths` | -4,096 | -2.6 KB | code-heavy +1.23 %, README +0.42 % | +0.28 % |
+| `-O3` without its loop passes (unswitch, split loops and paths, peel, distribution, ...) | -8,192 | -7.4 KB | code-heavy +1.28 %, table-heavy +0.63 % | +0.31 % |
+| `-O2` | -24,576 | -25.3 KB | code-heavy +5.45 %, notes +3.38 %, essay +2.74 % | +2.29 % |
+| `-O2` with `-O3`'s inlining parameters | -16,384 | -17.5 KB | code-heavy +5.25 %, notes +2.64 % | +1.91 % |
+| `-O2`, the 24 hottest functions `optimize("O3")` | -16,384 | -14.0 KB | notes +2.21 %, essay +1.61 % | +1.13 % |
+
+Time moved with the instructions (budget 20: geomean +1.95 %, `-O2` +2.57 %, the last row +1.90 %).
+The other loop passes of `-O3` alone (`-fno-peel-loops`, `-fno-predictive-commoning`,
+`-fno-tree-loop-distribution`, `-fno-loop-interchange`, `-fno-loop-unroll-and-jam`,
+`-fno-version-loops-for-strides`, `-fno-split-loops`, `-fno-gcse-after-reload`,
+`-fno-tree-partial-pre`) change no page. Under the gate (+0.3 % on every fixture) budget 38 and
+no unswitching are all there is: 8 KB. Each further page costs instructions on the small and the
+ASCII documents.
+
+Measured and not taken:
+
+- **Cold functions of `tiny_pdf.cpp` moved into an `-Os` unit** (`tiny_pdf_cold.cpp`, which
+  included `tiny_pdf.cpp` for its types and helpers, so the functions moved unchanged; the state
+  both share, `g_cancel` and `g_lastError`, defined in one, and the external functions fenced).
+  Linked text against 53734af: the SVG and diagram glue (`ConvertSvgImage`, `ConvertSvgFile`,
+  `TakeConvertedSvg`, `AddDiagram`, the SVG hosts) -561 bytes, no page; with the renderers'
+  destructors -4.4 KB, but polish.md +0.46 % and notes.md +0.23 % instructions (a build's
+  destructor at `-Os`: its members' destructors and `KeptBuffer::Give` become calls); with 35
+  never-run members of both renderers (contents, callouts, title pages, theme faces, tagged paint,
+  long pages, page-note hooks) +10.5 KB; the theme glue (`ThemeFont`, `LayOutTheme`, the theme
+  texts, `AddCoverPage`, `AddPageNumber`) +1.5 KB more. Three causes: `RAYOMD_COLD` functions are
+  compiled for size already (all of `tiny_pdf.cpp` at `-Os` takes about 10 KB off the code the
+  fixtures never run, 105 KB off what they run); the inlining budget a moved function took GCC
+  spends on others (`BuildUnicodePdfBytes` and `BuildStandardPdfBytes` +1.7 KB each, the image
+  registry's paths); and the `-Os` unit compiles its own copies of the inline members and static
+  helpers the moved code calls (`BreakWideWords`, `WrapText`, `ChooseFallbackFont` with its cache,
+  the renderer's constructor out of line), and of their state, which must not happen at all.
+- **The budget re-calibrated after such moves** (object only): with the glue and destructors
+  moved, budget 38 left the hot functions as they were but for the two builders (+1.7 KB each);
+  not linked, as the destructors' move failed the gate.
+
+## Round 6: session builds of long prose (opt6/prose, 2026-10-20)
+
+Against master `53734af`'s `BuildSession`, g++ 13.3 Release, the engine library linked into the lab
+harness (`session_check bench FILE KIND WHERE`); `perf stat -e cycles:u,instructions:u` on CPU 4,
+alternating A/B, medians of 3 rounds of 20 builds. e50 is 50 copies of `essay.md` (2.9 MB, 9,500
+blocks, 925 pages, WinAnsi text); its edits all resync at once (99.4 to 100 % replayed): what a letter
+cost was the per-build work over the whole document, not the layout.
+
+Where a letter in e50 went before (perf, 20 Mcycles): the replayed content's copy 15 %, the text's
+passes 30 % (WinAnsi transcoding 9 %, `find("]:")` and `CharacterReferenceNeed` 7 %, the parse
+record's copy of the text 6 %, comparing it with the last 6 %, shifting the lines 2 %), the session's
+per-block bookkeeping 15 % (marks, source map, image tests, mark places), the PDF's assembly 20 %
+(outline titles, link annotations, page objects, `BuildInto`).
+
+- **Lean bookkeeping** (`build_session.cpp`): whether a block reads images is kept per block in the
+  tape (`LayoutTape::images`), runs are compared lazily (a kept range of blocks in one `memchr` over
+  those bits), a replay copies the marks and source map entries in bulk and moves them in place (a
+  kept block's lines shifted, not read), mark places are noted as blocks are laid out or replayed
+  (Commit no longer walks the blocks), a kept block's heading marks are not relocated where it did
+  not move. e50 letter in the middle 19.9 -> 18.0 Mcycles (instructions 18.9 -> 16.5 M), t700
+  85.5 -> 79.0.
+- **The text kept in place** (`SessionText`, `KeptText`): the session keeps the markdown and its
+  WinAnsi text and changes them in place where the next text differs (one comparison of the raw
+  text a build); the parse record views the kept text instead of copying it and gets the change
+  instead of comparing; the font choice comes from counts kept up to date (bytes from 0x80,
+  references by need, `CharacterReferenceNeedAt`), the WinAnsi text is transcoded only around the
+  change (checkpoints map the markdown to it; the status-symbol bytes are checked around the
+  change); "]:" is counted, not searched. A cancelled build puts both texts back. Both steps
+  against master, quiet run: e50 a letter at the start / middle / end 20.5 / 20.4 / 20.3 -> 16.5 /
+  15.2 / 14.0 Mcycles (x1.24 / x1.34 / x1.44, instructions x1.23 to x1.34), a line deleted 23.6 ->
+  18.8 (x1.25), a paragraph inserted 21.1 -> 16.2 (x1.30), e10 x1.25, t700 85.7 -> 77.2 (x1.11),
+  t70 x1.10. The start costs more than the end: the in-place change moves the text after it.
+- **A source map bug in master**: `SameBlock` ignored whether a block has source lines, so a table
+  of contents inserted by `--toc` and one at a "[TOC]" paragraph counted as equal and the replay
+  left out the paragraph's map entry (harness, `mermaid.md` seed 1001 with `WINANSI=1`).
+- First build of a new session (cleared each time), e50: master 118.9 M instructions, now 121.8
+  (+2.4 %; the kept text's copy and counts, the image bits and mark places); against `BuildPdf`
+  109.5 M (+11 %; cycles +22 % on a busy host, with the freed memory faulted in again). Not reached:
+  the +1 % goal (see open items).
+- Checks: harness (`session_check`, extra snippets for Latin text, references, status symbols and
+  broken UTF-8; `WINANSI=1` keeps documents Latin): 3,000+ random sequences of 20 to 40 edits over
+  the warm fixtures, generated and wiki pages, media and parse-heavy documents, t70 and e10, Hebrew
+  with a fallback font, ten option profiles and cancelled builds: all identical to `BuildPdf`.
+- Rejected: `build_session.cpp` at `-O2` (e50 letter -4 % instructions, t700 -3.4 %) for now: more
+  code in the GUI for what the steps above took more of.
+- Open after this step (see the continuation below): shifting the parse lines in place, image blocks
+  replayed when the registry gives the same answer (opt6/gap makes a failed source a lookup), long
+  prose without headings (no e50 edit failed to resync).
+
+Continued (opt6/prose, second part). The command line is byte-identical to master again: the
+`OptionsTakeTrueType` helper shared by `ChooseFonts` and `SessionFonts` moved GCC's inlining of
+`ChooseFonts` into `BuildDocument` (symdiff: `ChooseFonts` and its `.cold` split out, `.text` +608
+bytes); `SessionFonts` now repeats the options' test. Paired, CPU 1 (CCX0, nothing else on it),
+alternating, medians of 5 rounds of 10 builds, against `ca1f336`:
+
+| case | ca1f336 Mcycles | now Mcycles | cycles | instructions |
+|---|---:|---:|---:|---:|
+| e50, letter at start / middle / end | 16.19 / 15.07 / 13.70 | 13.32 / 10.95 / 8.6 | x1.22 / x1.38 / x1.59 | x1.37 to x1.45 |
+| e50, line deleted / paragraph inserted (middle) | 18.58 / 15.93 | 14.22 / 11.98 | x1.31 / x1.33 | x1.33 / x1.35 |
+| e10 / t70 / t700, letter in the middle | 2.75 / 7.46 / 77.4 | 1.78 / 6.04 / 61.2 | x1.55 / x1.24 / x1.27 | x1.40 to x1.45 |
+| e50, first build of a new session (BuildPdf 50.0) | 61.4 (with the assembly tape; master's 62.2) | 58.4 | x1.05 | x1.01 |
+
+(e50 end and the first build are the commit before the streaming copy; it changed neither. Master's
+20.4 Mcycles for e50 a letter in the middle is Prose's measure on CPU 4.)
+
+- **The assembly taken from the last build** (`AssemblyTape`, build_session.h; the session's code in
+  tiny_pdf.cpp is behind `RAYOMD_BUILD_SESSION`): an external link annotation is the last build's
+  bytes where the link is the one the last build had at its index on the page its content was
+  replayed from (`LayoutSession::PageOrigin`; rectangle and the target text's address, which a
+  replay shares, compared); an outline entry where its title, the objects it names and its top are
+  the same; the page dictionaries after the first are the first's text before `/Contents` and their
+  own objects, one after another in one buffer. All are views (`Reserve` + `SetView` once a buffer
+  no longer grows): no string an object, so `~PdfObjects` frees nothing. e50 letter 15.6 -> 11.7 M
+  instructions (callgrind), 15.73 -> 13.64 Mcycles.
+- **Replayed pages left in place**: when the caller gives back the PDF the session's last build
+  wrote (the same string and size, and no layout began since: `HoldsLastOutput`), the replays before
+  the first laid-out block find their content where BuildInto put it (`LayoutTape::pageFile`, from
+  its gaps) and copy only the byte the string's terminator overwrote. After a laid-out block nothing
+  is taken in place: a renderer writes past its end (TailWriter's fixed-width numbers). Only the
+  first layout of a Build may (a fallback font's second layout wrote the buffer). e50 letter at the
+  end 13.7 -> 9.0 Mcycles, middle -2.2; the start gains nothing (its tail is shifted).
+- **A long replay copied with streaming stores** (from 1 MB a run, SSE2): -4 % at the start, -2.7 %
+  in the middle.
+- Smaller: `PlaceContents` skipped where the session's parse keeps its record (it holds no marker
+  then, `SessionParseUnmarked`); `CountReferences` searches the change alone (it read the rest of
+  the text); the first tape reserved by blocks and copied in one piece with its page gaps;
+  `CountHigh` 64 bytes a step.
+- Where an e50 letter's 11 Mcycles go now (perf): comparing the caller's text with the kept one
+  19 % (two 2.9 MB streams from memory; only a change range from the caller could avoid it), the
+  replayed content's copy after the edit ~20 % at the start, the marks' copy 5 %, `BuildInto` 5 %,
+  shifting the parse lines 4.5 %.
+- First build of a new session, e50: +17 % cycles, +9 % instructions over `BuildPdf` (was +22 /
+  +10 %). What is left is mostly inherent to keeping a tape: the tape's copy of the 7.2 MB content
+  (3.3 %), the kept text's copy (2 %), the per-block marks and loop (about 3 %), the parse record
+  (2 %). The +3 % goal is not reached.
+- Rejected: copying and moving the marks in one pass (`push_back` per mark): +0.9 M instructions,
+  +4 % cycles; an append-mode WinAnsi transcoder (a template in text_utils.cpp) for the first
+  build: the command line's code moved (same size, other addresses) and the copy it saves is from
+  L2.
+- Pre-existing, not of this branch: the harness' `latin-007.md` seed 4006 (footnotes at the foot of
+  the page, A5) runs out of memory in master's session and `BuildPdf` alike.
+- Checks: harness (cancelled builds now half of the time into the output the next build gets)
+  over the small set, `WINANSI=1`, Hebrew with a fallback font and t70/e10, about 2,600 sequences
+  of 20 to 30 edits: identical (one run per set is the seed above); ctest and `verify_cli.py`
+  (GCC 13); `rayomd` byte-identical to master's (cmp), so check.sh, oncmp, compare.py, fresh.sh
+  and the command line's ab.sh have nothing to compare.
+
 ## Round 5: package size (opt5/size, 2026-10-19)
 
 Against 5.2.5 (`ac59556`), GCC 13.3 unless named; the Linux archives of the GCC 11 builds, as the
@@ -1296,13 +1541,10 @@ they were not taken yet. Add to this list when a change turns one up.
 object), about 125 KB run in none of the eight warm fixtures (callgrind, default options): some
 65 KB of it cold already (`RAYOMD_COLD` functions and the `.cold` parts GCC splits off), which GCC
 compiles for size, and some 60 KB not (image decoding and the image registry about 22 KB of it,
-`BuildBookPdf`, the themes' text, math cells). Round 4 found the same functions about 83 KB when
-the whole unit is built at `-Os`. The agreed attribute (cold, noinline, `optimize("Os")`) on
-whole functions made the binary 8 KB larger (round 5, "Round 5: package size" above): GCC does
-not inline `-O3` callees into an `-Os` function. What remains is the pattern the themes, books and
-page notes took: a feature's functions in a translation unit of their own built at `-Os`, behind
-a small interface, each move checked for the inlining of the hot paths. Image decoding and math
-tables are per pixel and per cell: keep them out.
+`BuildBookPdf`, the themes' text, math cells). Moved into an `-Os` unit they do not get smaller
+(round 6 above): the cold ones are size-optimized already, GCC spends their inlining budget
+elsewhere, and the other unit copies the helpers they call. What `-Os` would save is in the code
+the fixtures run (about 105 KB of the 151 KB), which the instruction gate keeps at `-O3`.
 
 **`std::filesystem` out of the build (size).** MinGW's libstdc++.a has no per-function
 sections, and its `fs_path.o` and `fs_ops.o` pull the codecvt facets, the locale's

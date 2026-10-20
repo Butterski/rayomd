@@ -101,13 +101,13 @@ bool DefinitionsPass(const std::vector<std::string_view>& lines, const std::vect
     return true;
 }
 
-// The lines of `next`'s text, their classes, the definitions and the lines they take, as
+// The lines of `text` (next's), their classes, the definitions and the lines they take, as
 // ParseMarkdownImpl makes them, and the fences.
-void ClassifyWhole(ParseRecord& next, ParseLines& out, ReferenceDefinitions& definitions, bool definitionSyntax,
-    FootnoteParse& notes) {
+void ClassifyWhole(const std::string& text, ParseRecord& next, ParseLines& out, ReferenceDefinitions& definitions,
+    bool definitionSyntax, FootnoteParse& notes) {
     std::vector<std::string_view>& lines = out.lines;
     std::vector<LineInfo>& infos = out.infos;
-    SplitLineViews(next.text, lines);
+    SplitLineViews(text, lines);
     infos.clear();
     infos.resize(lines.size());
     bool hasMathOpeners = false;
@@ -179,27 +179,31 @@ bool SameFound(const std::vector<std::pair<std::string, ReferenceDefinition>>& a
     return true;
 }
 
-// The lines of `next`'s text from the last parse's: those before and after the edit shifted, the
-// changed ones split and classified, and ResolveMathOpeners and the definitions' pass run again
-// from a blank line before them to one after them at which both texts have no fence open (from
-// there on both passes go as in the last parse). False when it cannot (the caller classifies
-// whole; what it wrote is then of no use): a footnote definition in the last text or near the
-// edit, a byte order mark that may come or go, other definitions near the edit.
+// The lines of `next`'s text from the last parse's: those before and after the edit (`change`, whose
+// text change is known) shifted, the changed ones split and classified, and ResolveMathOpeners and
+// the definitions' pass run again from a blank line before them to one after them at which both
+// texts have no fence open (from there on both passes go as in the last parse). False when it
+// cannot (the caller classifies whole; what it wrote is then of no use): a footnote definition in
+// the last text or near the edit, a byte order mark that may come or go, other definitions near the
+// edit (also when the last text was changed in place: those are not there any more to compare).
 bool ClassifyShifted(const ParseRecord& last, ParseRecord& next, ParseLines& out, ReferenceDefinitions& definitions,
     bool definitionSyntax, LineChange& change) {
     const ParseLines& old = *last.lines;
     if (old.notes || last.definitionSyntax != definitionSyntax || last.winAnsi != WinAnsiReferences::Active()) return false;
-    const std::string& oldText = last.text;
-    const std::string& text = next.text;
+    const std::string_view oldText = last.text;
+    const std::string_view text = next.text;
     const size_t oldCount = old.lines.size();
     const size_t oldSize = oldText.size();
     const size_t size = text.size();
     if (oldCount >= 0x7FFFFFFFu || size >= 0x7FFFFFFFu || oldSize >= 0x7FFFFFFFu) return false;
     const size_t common = std::min(oldSize, size);
-    const size_t differs = FirstDifference(oldText.data(), text.data(), common);
-    const char* const oldBase = oldText.data();
+    const size_t differs = change.differs;
+    // The last text's lines are views of where its bytes were (and may be no more): only their
+    // places are read, as numbers.
+    const uintptr_t oldBase = reinterpret_cast<uintptr_t>(oldText.data());
     const char* const base = text.data();
-    const uintptr_t by = reinterpret_cast<uintptr_t>(base) - reinterpret_cast<uintptr_t>(oldBase);
+    const uintptr_t by = reinterpret_cast<uintptr_t>(base) - oldBase;
+    const bool oldBytes = last.kept == nullptr || last.version == next.version;
     std::vector<std::string_view>& lines = out.lines;
     std::vector<LineInfo>& infos = out.infos;
     std::vector<uint8_t>& kinds = next.kinds;
@@ -213,12 +217,14 @@ bool ClassifyShifted(const ParseRecord& last, ParseRecord& next, ParseLines& out
         out.fences = old.fences;
         out.notes = false;
         definitions = last.definitions;
-        change = { true, differs, 0, oldCount, oldCount };
+        change.known = true;
+        change.classFirst = oldCount;
+        change.classEnd = oldCount;
         return true;
     }
     if (differs < 3) return false;
-    const size_t same = CommonEnd(oldBase + oldSize, base + size, common - differs);
-    const auto start = [&](size_t line) { return static_cast<size_t>(old.lines[line].data() - oldBase); };
+    const size_t same = change.same;
+    const auto start = [&](size_t line) { return static_cast<size_t>(reinterpret_cast<uintptr_t>(old.lines[line].data()) - oldBase); };
     // The lines before the one that holds the first byte that differs (a line holds its line feed)
     // are the same, at the same place.
     size_t low = 1;
@@ -362,6 +368,7 @@ bool ClassifyShifted(const ParseRecord& last, ParseRecord& next, ParseLines& out
         bool hadDefinitions = false;
         for (size_t line = restart; line < oldSettle && !hadDefinitions; line++) hadDefinitions = last.suppressed[line] != 0;
         if (hadDefinitions || !found.empty()) {
+            if (!oldBytes) return false;
             std::vector<std::pair<std::string, ReferenceDefinition>> before;
             DefinitionsPass(old.lines, old.infos, nullptr, restart, oldSettle, NoteLines::Skip, nullptr, tookNotes, add(before));
             if (!SameFound(found, before)) return false;
@@ -369,8 +376,33 @@ bool ClassifyShifted(const ParseRecord& last, ParseRecord& next, ParseLines& out
     }
     out.notes = false;
     definitions = last.definitions;
-    change = { true, differs, same, restart, settle };
+    change.known = true;
+    change.classFirst = restart;
+    change.classEnd = settle;
     return true;
+}
+
+// How the text `next` read stands to the one `last` read: compared when the last is a copy, from the
+// change of the session's kept text when the same one changed once since or not at all; else not
+// known (the last text's bytes are gone).
+void TextChange(const ParseRecord& last, const ParseRecord& next, LineChange& change) {
+    const std::string_view oldText = last.text;
+    const std::string_view text = next.text;
+    const size_t common = std::min(oldText.size(), text.size());
+    if (last.kept == nullptr) {
+        change.differs = FirstDifference(oldText.data(), text.data(), common);
+        change.same = change.differs == common ? 0 :
+            CommonEnd(oldText.data() + oldText.size(), text.data() + text.size(), common - change.differs);
+        change.textKnown = true;
+    } else if (last.kept == next.kept && last.version == next.version) {
+        change.differs = text.size();
+        change.same = 0;
+        change.textKnown = true;
+    } else if (last.kept == next.kept && last.version == next.kept->base) {
+        change.differs = next.kept->differs;
+        change.same = text.size() - next.kept->newEnd;
+        change.textKnown = true;
+    }
 }
 
 // The document's lines, their classes and definitions, in the record this parse leaves.
@@ -390,15 +422,33 @@ ParseLines& ClassifyInSession(const std::string& markdown, bool definitionSyntax
         }
     }
     ParseLines& out = *next.lines;
-    // Room for a text a sixteenth longer, so that each letter typed does not move it.
-    if (next.text.capacity() < markdown.size()) next.text.reserve(markdown.size() + markdown.size() / 16);
-    next.text.assign(markdown);
+    // The record views the session's kept text, which the next build changes in place; else a copy.
+    next.kept = KeptTextOf(markdown);
+    next.version = next.kept != nullptr ? next.kept->version : 0;
+    const std::string* text = &markdown;
+    if (next.kept != nullptr) {
+        next.own.clear();
+    } else {
+        // Room for a text a sixteenth longer, so that each letter typed does not move it.
+        if (next.own.capacity() < markdown.size()) next.own.reserve(markdown.size() + markdown.size() / 16);
+        next.own.assign(markdown);
+        text = &next.own;
+    }
+    next.text = *text;
     change = {};
-    if (last == nullptr || !last->lines || !ClassifyShifted(*last, next, out, definitions, definitionSyntax, change)) {
-        change = {};
-        ClassifyWhole(next, out, definitions, definitionSyntax, notes);
+    if (last != nullptr && last->lines) TextChange(*last, next, change);
+    if (!change.textKnown || !ClassifyShifted(*last, next, out, definitions, definitionSyntax, change)) {
+        change.known = false;
+        ClassifyWhole(*text, next, out, definitions, definitionSyntax, notes);
     }
     return out;
+}
+
+// "]:", which every link or footnote definition has, in the document: the count the session keeps
+// of its kept text, else looked for.
+bool DefinitionSyntaxInSession(const std::string& markdown) {
+    if (const KeptText* const kept = KeptTextOf(markdown)) return kept->pairs != 0;
+    return markdown.find("]:") != std::string::npos;
 }
 
 // BeginDocumentParse with the record's lines and classes.

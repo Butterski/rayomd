@@ -201,6 +201,8 @@ size_t MatchCharacterReference(std::string_view text, size_t at, uint32_t& codeP
 // standard fonts' WinAnsiEncoding, or Unicode text.
 enum class ReferenceNeed : unsigned char { Ascii, WinAnsi, Unicode };
 ReferenceNeed CharacterReferenceNeed(std::string_view text);
+// What the reference at text[at] needs (Ascii also for none), as CharacterReferenceNeed reads it.
+ReferenceNeed CharacterReferenceNeedAt(std::string_view text, size_t at);
 
 // The code points of the BMP from U+0080 on that `text` has, as UTF-8 or as character
 // references (U+FFFD for a byte that is not UTF-8), ascending, each once.

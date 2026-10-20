@@ -111,9 +111,21 @@ make no session and carry none of it (unused, MinGW's linker kept 24 KB of it in
    what a build replayed stays where the last tape had it, what it laid out is copied into a buffer
    of its own; when the buffers a tape holds pass twice its content, the content is copied into one
    again. A replay copies piece by piece.
-5. **Assemble** the whole PDF as `BuildPdf` does, then **commit** the tape (`Commit`): it takes the
-   blocks, the table of contents and heading numbers, the renderer's links, headings, anchors and
-   contents lines, and where each heading and anchor mark lies in its block.
+5. **Assemble** the whole PDF as `BuildPdf` does, taking what did not change from the last build's
+   assembly (`AssemblyTape`, two kept, the last read and this one written): an external link
+   annotation is the last build's bytes when the link at its index on the page its content was
+   replayed from (`PageOrigin`) has the same rectangle and the same target (the replay shares the
+   target's text, compared by address); an outline entry when its title, the objects it names and
+   its top are the same; the page dictionaries after the first are written into one buffer from the
+   first's text before `/Contents`. The objects view these buffers. Then **commit** the tape
+   (`Commit`): it takes the blocks, the table of contents and heading numbers, the renderer's links,
+   headings, anchors and contents lines, where each heading and anchor mark lies in its block, and
+   where each page's content lies in the PDF made (`pageFile`, from BuildInto's gaps).
+6. **In place**: when the next Build gets that PDF back (the same string and size, no layout begun
+   since: `HoldsLastOutput`), its first layout leaves the replayed content before the first block
+   it lays out where it is, copying only the byte the string's terminator overwrote (libstdc++,
+   `grow`); after a laid-out block it copies, as a renderer may write past its end. Replays of a
+   megabyte or more are copied with streaming stores.
 
 Why the bytes are those of a fresh build: a replayed run starts where the fresh layout would be in
 the same state as the last build was (every field of that state the blocks after it read is in the
