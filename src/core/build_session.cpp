@@ -160,6 +160,7 @@ void LayoutTape::Clear() {
     glyphs.clear();
     pageBottoms.clear();
     images.clear();
+    pageOrigins.clear();
     headingPlaces.clear();
     idPlaces.clear();
 }
@@ -176,8 +177,23 @@ void LayoutTape::Reserve(const LayoutTape& like) {
     glyphs.reserve(like.glyphs.size() + 16);
     pageBottoms.reserve(like.pageBottoms.size() + like.pageBottoms.size() / 16);
     images.reserve(like.images.size() + like.images.size() / 16);
+    pageOrigins.reserve(like.pageOrigins.size() + like.pageOrigins.size() / 16);
     headingPlaces.reserve(like.headingPlaces.size() + like.headingPlaces.size() / 16);
     idPlaces.reserve(like.idPlaces.size() + like.idPlaces.size() / 16);
+}
+
+void AssemblyTape::Clear() {
+    winAnsi = print = false;
+    annotationList.clear();
+    pageAnnotations.clear();
+    annotations.clear();
+    entries.clear();
+    entriesStart = 0;
+    titles.clear();
+    outline.clear();
+    pagePrefix.clear();
+    pages.clear();
+    pending.clear();
 }
 
 namespace {
@@ -196,18 +212,27 @@ size_t PairsAround(std::string_view text, size_t from, size_t to) {
     return CountPairs(text.substr(low, std::min(text.size(), to + 1) - low));
 }
 
-// The bytes from 0x80 of `text`: sixteen at a time where SSE2 is (each a 1 or a 0 added up by
-// PSADBW), else eight (at -Os a byte at a time took 4 instructions a byte).
+// The bytes from 0x80 of `text`: 64 at a time where SSE2 is (a byte from 0x80 compares below zero,
+// -1, which each lane subtracts up to 252 times before PSADBW adds the lanes up), else eight (at -Os
+// a byte at a time took 4 instructions a byte).
 size_t CountHigh(std::string_view text) {
     const char* at = text.data();
     const char* const end = at + text.size();
     size_t count = 0;
 #ifdef RAYOMD_SESSION_SSE2
-    const __m128i ones = _mm_set1_epi8(1);
-    __m128i sums = _mm_setzero_si128();
-    for (; end - at >= 16; at += 16) {
-        const __m128i bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(at));
-        sums = _mm_add_epi64(sums, _mm_sad_epu8(_mm_and_si128(_mm_srli_epi64(bytes, 7), ones), _mm_setzero_si128()));
+    const __m128i zero = _mm_setzero_si128();
+    __m128i sums = zero;
+    while (end - at >= 64) {
+        const char* const stop = at + std::min<size_t>(static_cast<size_t>(end - at) / 64, 63) * 64;
+        __m128i lanes = zero;
+        for (; at != stop; at += 64) {
+            const __m128i* const block = reinterpret_cast<const __m128i*>(at);
+            lanes = _mm_sub_epi8(lanes, _mm_cmplt_epi8(_mm_loadu_si128(block), zero));
+            lanes = _mm_sub_epi8(lanes, _mm_cmplt_epi8(_mm_loadu_si128(block + 1), zero));
+            lanes = _mm_sub_epi8(lanes, _mm_cmplt_epi8(_mm_loadu_si128(block + 2), zero));
+            lanes = _mm_sub_epi8(lanes, _mm_cmplt_epi8(_mm_loadu_si128(block + 3), zero));
+        }
+        sums = _mm_add_epi64(sums, _mm_sad_epu8(lanes, zero));
     }
     count = static_cast<size_t>(_mm_cvtsi128_si64(sums)) + static_cast<size_t>(_mm_cvtsi128_si64(_mm_unpackhi_epi64(sums, sums)));
 #else
@@ -333,7 +358,9 @@ private:
 };
 
 void SessionText::CountReferences(std::string_view text, size_t from, size_t to, size_t* counts, int sign) {
-    for (size_t at = text.find('&', from); at < to; at = text.find('&', at + 1)) {
+    // Searched for in [from, to) alone: a search to the end of the text read all of it after a change.
+    const std::string_view window = text.substr(0, std::min(to, text.size()));
+    for (size_t at = window.find('&', from); at != std::string_view::npos; at = window.find('&', at + 1)) {
         const ReferenceNeed need = CharacterReferenceNeedAt(text, at);
         if (need != ReferenceNeed::Ascii) counts[need == ReferenceNeed::WinAnsi ? 0 : 1] += static_cast<size_t>(sign);
     }
@@ -508,6 +535,30 @@ public:
     uint8_t TextFonts(const std::string& markdown, const std::string*& winAnsi) override {
         return sessionText->Fonts(markdown, winAnsi);
     }
+    const AssemblyTape* LastAssembly() const override { return active ? lastAssembly.get() : nullptr; }
+    AssemblyTape* NextAssembly() override {
+        if (!active) return nullptr;
+        if (!nextAssembly) nextAssembly = std::make_unique<AssemblyTape>();
+        else nextAssembly->Clear();
+        return nextAssembly.get();
+    }
+    uint32_t PageOrigin(size_t page) const override {
+        return active && page < recording->pageOrigins.size() ? recording->pageOrigins[page] : kNoPage;
+    }
+
+    // Whether `pdfBytes` is the PDF the session's last build made, as it made it: the same string,
+    // of the same size, and no layout began since (BuildSession::Build's contract).
+    bool HoldsLastOutput(const std::string& pdfBytes) const {
+        return output != nullptr && pdfBytes.data() == output && pdfBytes.size() == outputSize;
+    }
+    // The buffer of this build's output while it holds the last build's PDF (after
+    // HoldsLastOutput), or null: the first layout of the build may leave its pages in place.
+    void SetOutput(const char* data) { heldOutput = data; }
+    // The build is over; one that failed may have left anything in its output.
+    void EndOutput(bool made) {
+        heldOutput = inPlace = nullptr;
+        if (!made) output = nullptr;
+    }
 
     BuildSession::Reuse reuse;
     SessionText* sessionText = nullptr;   // the session's text, which its builds read
@@ -523,8 +574,10 @@ private:
     bool Same(size_t index, size_t old) const;
     // The end of the run of blocks from `index` (not known yet) that may be replayed, compared now.
     size_t RunFrom(size_t index);
-    // Appends the last build's content [from, to) (without gaps) to `content`, noting where it went.
-    void CopyContent(size_t from, size_t to, std::string& content);
+    // Appends the last build's content [from, to) (without gaps) of its page `page` to `content`,
+    // noting where it went; in place where `content` holds the last build's PDF with those bytes
+    // where they go (inPlace).
+    void CopyContent(size_t from, size_t to, size_t page, std::string& content, const LayoutTarget& target);
     // Moves the buffers no tape holds any more from `tape` to the spares.
     void Recycle(LayoutTape& tape);
     // A buffer of at least `bytes` bytes, empty: a spare one when there is one.
@@ -558,6 +611,18 @@ private:
     std::vector<Copied> copied;
     std::vector<uint32_t> bufferMap;   // EndLayout: the last tape's buffers in this one's
     std::vector<std::shared_ptr<std::string>> spareBuffers;   // buffers no tape holds, for the next
+    std::unique_ptr<AssemblyTape> lastAssembly;   // the last committed build's, or null
+    std::unique_ptr<AssemblyTape> nextAssembly;   // this build's (the memory of an older one)
+    // The PDF the last committed build made (its buffer and size), until a layout begins again.
+    const char* output = nullptr;
+    size_t outputSize = 0;
+    const char* heldOutput = nullptr;   // SetOutput
+    // While this layout's content is in the buffer that holds the last build's PDF, and nothing but
+    // replays and the page gaps were written to it: where the replayed content lies there already
+    // (LayoutTape::pageFile), only the byte the string's terminator overwrote is copied. Laid-out
+    // blocks may write past their end (TailWriter's fixed-width numbers): after one, nothing is
+    // taken in place.
+    const char* inPlace = nullptr;
 };
 
 void SessionLayout::Begin(uint8_t renderer, const void* const fonts[kLayoutCidSets], const std::vector<Block>& newBlocks,
@@ -571,12 +636,22 @@ void SessionLayout::Begin(uint8_t renderer, const void* const fonts[kLayoutCidSe
         recording->Clear();
     }
     copied.clear();
+    // The output is written again from here on: the last build's PDF is no longer in it afterwards.
+    inPlace = heldOutput;
+    heldOutput = nullptr;
+    output = nullptr;
     recording->renderer = renderer;
     std::copy(fonts, fonts + kLayoutCidSets, recording->fonts);
     active = true;
     blocks = &newBlocks;
     blockCount = newBlocks.size();
     reuse = { static_cast<uint32_t>(blockCount), static_cast<uint32_t>(blockCount), 0 };
+    // A mark and an image bit a block, and an entry of the source map for most: a first tape grows
+    // no step at a time.
+    recording->marks.reserve(blockCount + 1);
+    recording->images.reserve(blockCount);
+    recording->sourceMap.reserve(blockCount);
+    recording->sourceMapBlocks.reserve(blockCount);
     runEnd.assign(blockCount, 0);
     suffixStart = blockCount;
     newNumbers.clear();
@@ -585,8 +660,10 @@ void SessionLayout::Begin(uint8_t renderer, const void* const fonts[kLayoutCidSe
     if (!last || last->renderer != renderer || !std::equal(fonts, fonts + kLayoutCidSets, last->fonts) ||
         last->marks.size() != last->blockCount + 1 || last->images.size() != last->blockCount || store == nullptr ||
         !store->parsed || store->OldCount() != last->blockCount) {
+        inPlace = nullptr;
         return;
     }
+    if (last->pageFile.size() != last->pageStarts.size()) inPlace = nullptr;
     oldCount = last->blockCount;
     contentsSame = SameContents(contents, last->contents);
     if (!numbers.empty() || !last->numbers.empty()) {
@@ -668,13 +745,22 @@ size_t SessionLayout::RunFrom(size_t index) {
 void SessionLayout::Mark(size_t index, LayoutMark& mark, const LayoutTarget& target) {
     if (!active) return;
     LayoutTape& tape = *recording;
+    // Before the first block the content is the first page's gap alone, which the last PDF's start
+    // fills (StartPageContent): the bytes after it are as that build left them.
+    if (index == 0 && inPlace != nullptr &&
+        (target.grow == nullptr || target.pageStarts->size() != 1 || target.content->size() != target.pageStarts->back())) {
+        inPlace = nullptr;
+    }
     // Block index - 1 was laid out (a replay notes its own blocks): whether it reads images, the
     // source map's entries since the last mark, and where the marks it made view their text.
     if (index > tape.images.size()) {
+        inPlace = nullptr;
         const size_t block = index - 1;
         const Block& laid = (*blocks)[block];
         tape.images.push_back(TouchesImages(laid) ? 1 : 0);
-        tape.sourceMapBlocks.resize(tape.sourceMap.size(), static_cast<uint32_t>(block));
+        if (tape.sourceMapBlocks.size() < tape.sourceMap.size()) {
+            tape.sourceMapBlocks.resize(tape.sourceMap.size(), static_cast<uint32_t>(block));
+        }
         const std::string& text = laid.text;
         const auto place = [&](const std::vector<HeadingMark>& marks, std::vector<LayoutTape::MarkPlace>& places) {
             for (size_t at = places.size(); at < marks.size(); at++) {
@@ -799,11 +885,16 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
     std::string& content = *target.content;
     const auto gapless = [&](size_t at, size_t page) { return at - old.pageStarts[page] + old.pageFree[page]; };
     CopyContent(gapless(before.content, before.page),
-        after.page == before.page ? gapless(after.content, after.page) : old.pageFree[before.page + 1], content);
+        after.page == before.page ? gapless(after.content, after.page) : old.pageFree[before.page + 1], before.page, content, target);
     for (size_t page = before.page + 1; page <= after.page; page++) {
         target.startPage(content, *target.pageStarts);
-        CopyContent(old.pageFree[page], page == after.page ? gapless(after.content, page) : old.pageFree[page + 1], content);
+        CopyContent(old.pageFree[page], page == after.page ? gapless(after.content, page) : old.pageFree[page + 1], page, content,
+            target);
     }
+    // Which of the last build's pages each page of the run's content came from.
+    std::vector<uint32_t>& origins = tape.pageOrigins;
+    if (origins.size() <= after.page + pageShift) origins.resize(after.page + pageShift + 1, kNoPage);
+    for (size_t page = before.page; page <= after.page; page++) origins[page + pageShift] = static_cast<uint32_t>(page);
     std::vector<std::vector<LinkRect>>& links = *target.pageLinks;
     const std::vector<LinkRect>& firstLinks = old.pageLinks[before.page];
     if (after.page == before.page) {
@@ -954,12 +1045,22 @@ LayoutMark SessionLayout::Replay(size_t index, size_t end, LayoutTarget& target)
     return state;
 }
 
-void SessionLayout::CopyContent(size_t from, size_t to, std::string& content) {
+void SessionLayout::CopyContent(size_t from, size_t to, size_t page, std::string& content, const LayoutTarget& target) {
     if (from == to) return;
     const std::vector<LayoutTape::Piece>& pieces = last->pieces;
     copied.push_back({ content.size(), content.size() + (to - from), from });
     size_t piece = static_cast<size_t>(std::upper_bound(pieces.begin(), pieces.end(), from,
         [](size_t at, const LayoutTape::Piece& it) { return at < it.at; }) - pieces.begin()) - 1;
+    // In place: the last build's PDF has these bytes where they go, all but the first, which the
+    // string's terminator overwrote when it ended there. The string must not move to grow.
+    const size_t at = content.size();
+    const size_t end = at + (to - from);
+    if (inPlace != nullptr && content.data() == inPlace && end <= content.capacity() &&
+        at == last->pageFile[page] + (from - last->pageFree[page])) {
+        target.grow(content, end);
+        content[at] = pieces[piece].data[from - pieces[piece].at];
+        return;
+    }
     while (from < to) {
         const size_t stop = std::min(to, pieces[piece + 1].at);
         content.append(pieces[piece].data + (from - pieces[piece].at), stop - from);
@@ -1030,14 +1131,21 @@ void SessionLayout::EndLayout(const LayoutTarget& target, std::vector<SourceBloc
         }
         pieces.push_back({ at, data, buffer });
     };
-    if (replayed != total) {
+    if (copied.empty() && pages != 0) {
+        // All of it laid out (a session's first build): one copy of it with the gaps between the pages,
+        // which a large copy makes without reading the buffer it writes, each page a piece.
+        fresh = Buffer(content.size() - starts[0]);
+        fresh->append(content, starts[0], content.size() - starts[0]);
+        for (size_t page = 0; page < pages; page++) pieces.push_back({ tape.pageFree[page], fresh->data() + (starts[page] - starts[0]), 0 });
+        tape.buffers.push_back(fresh);
+    } else if (replayed != total) {
         fresh = Buffer(total - replayed);
         tape.buffers.push_back(fresh);
     }
     const size_t oldBuffers = last ? last->buffers.size() : 0;
     bufferMap.assign(oldBuffers, UINT32_MAX);
     size_t next = 0;
-    for (size_t page = 0; page < pages; page++) {
+    for (size_t page = 0; page < pages && !copied.empty(); page++) {
         size_t at = starts[page];
         const size_t end = pageEnd(page);
         size_t gapless = tape.pageFree[page];
@@ -1109,11 +1217,24 @@ void SessionLayout::Commit(LayoutTarget& target, std::vector<Block>& newBlocks, 
     tape.contentsLines = std::move(*target.contentsLines);
     tape.blockData = newBlocks.data();
     tape.blockCount = newBlocks.size();
+    // Where the PDF BuildInto made has each page's content: after the gap it put before it.
+    tape.pageFile.clear();
+    const std::vector<size_t>* const gaps = target.fileGaps;
+    if (gaps != nullptr && gaps->size() == tape.pageStarts.size() && tape.pageFree.size() == tape.pageStarts.size() + 1) {
+        size_t placed = 0;
+        for (size_t page = 0; page < gaps->size(); page++) {
+            tape.pageFile.push_back(placed + (*gaps)[page]);
+            placed = tape.pageFile.back() + (tape.pageFree[page + 1] - tape.pageFree[page]);
+        }
+        output = target.content->data();
+        outputSize = target.content->size();
+    }
     if (!numbers.empty()) tape.blockNumbers = NumbersOf(newBlocks, numbers);
     if (store != nullptr) CommitParse(*store);
     tape.contents = std::move(contents);
     tape.numbers = std::move(numbers);
     std::swap(last, recording);
+    std::swap(lastAssembly, nextAssembly);
     // The tape before goes now; its memory makes the next one.
     if (recording) {
         Recycle(*recording);
@@ -1126,8 +1247,11 @@ void SessionLayout::Forget() {
     active = false;
     last.reset();
     recording.reset();
+    lastAssembly.reset();
+    nextAssembly.reset();
     spareBuffers.clear();
     reuse = {};
+    output = heldOutput = inPlace = nullptr;
 }
 
 const KeptText* KeptTextOf(const std::string& text) {
@@ -1473,6 +1597,11 @@ bool SessionParses() {
     return g_session != nullptr && g_session->store != nullptr;
 }
 
+bool SessionParseUnmarked() {
+    const SessionBlocks* const store = g_session != nullptr ? g_session->store : nullptr;
+    return store != nullptr && store->parsed && store->pending != nullptr;
+}
+
 std::vector<Block> ParseInSession(const std::string& markdown, Footnotes& footnotes) {
     SessionBlocks& store = *g_session->store;
     // A second parse of this build (in another font): from the last build's blocks again.
@@ -1658,7 +1787,11 @@ BuildResult BuildSession::Build(const std::string& markdown, const PdfOptions& o
     // has not touched (t700: 28 MB of page faults at the first keystroke). When it would, room for a
     // text a sixteenth longer; what is not written takes no memory.
     const auto expected = [](size_t bytes) { return std::min<size_t>(bytes * 8 + 256 * 1024, size_t{64} << 20); };
+    // The caller gives back the PDF the last build wrote: the pages the layout replays may stay where
+    // they are in it (SessionLayout::CopyContent). A reserve moves it, as it is.
+    const bool held = session.layout.HoldsLastOutput(pdfBytes);
     if (pdfBytes.capacity() < expected(markdown.size())) pdfBytes.reserve(expected(markdown.size() + markdown.size() / 16));
+    session.layout.SetOutput(held ? pdfBytes.data() : nullptr);
     BuildResult result;
     {
         // The build reads the session's text, which becomes this one where it differs.
@@ -1666,6 +1799,7 @@ BuildResult BuildSession::Build(const std::string& markdown, const PdfOptions& o
         const SessionScope scope(&session.layout);
         result = BuildPdf(text, options, pdfBytes);
     }
+    session.layout.EndOutput(result.error == BuildError::None);
     // A parse the layout did not commit: kept when the build was made (footnotes, PDF/UA, whose
     // layout keeps no tape), else the last build's blocks are put back for the tape that is left.
     if (session.blocks.parsed) {

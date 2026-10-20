@@ -214,6 +214,9 @@ struct LayoutTape {
     std::vector<std::shared_ptr<std::string>> buffers;
     std::vector<size_t> pageStarts;
     std::vector<size_t> pageFree;            // where each page's content starts without the gaps; then its end
+    // Where each page's content lies in the PDF the build made (BuildInto put it there); empty when
+    // that is not known (--compress and --black-text rewrite it, and leave no gaps).
+    std::vector<size_t> pageFile;
     std::vector<std::vector<LinkRect>> pageLinks;
     std::vector<HeadingMark> headings;
     std::vector<HeadingMark> ids;
@@ -224,6 +227,9 @@ struct LayoutTape {
     std::vector<MathGlyphUse> glyphs;        // LayoutMark::glyphs
     std::vector<double> pageBottoms;
     std::vector<uint8_t> images;             // 1 for each block that reads an image or draws a diagram (TouchesImages)
+    // For each page, the last build's page whose content a replay put on it, LayoutSession::kNoPage
+    // where none did (and past the end), for the assembly (AssemblyTape).
+    std::vector<uint32_t> pageOrigins;
     // Where each heading's and anchor's mark views its text: its top-level block and the offset in
     // that block's text, or kNested in a block inside it (noted as the layout goes, while the
     // block is in the cache, so that a replay reads the old blocks for nested marks only).
@@ -238,6 +244,46 @@ struct LayoutTape {
     void Clear();
     // Room for what `like` holds, and some.
     void Reserve(const LayoutTape& like);
+};
+
+// What a session's build assembled of its PDF that the next one takes again, byte for byte, where
+// what made it is the same (tiny_pdf.cpp's SessionAnnotations, OutlineMemo, SessionPages): the
+// external link annotations with their rectangles and targets, the outline's entries with their
+// titles and the objects they name, and the page dictionaries. A session keeps two: the last
+// build's, read, and this build's, written, whose bytes the PDF's objects view until BuildInto.
+struct AssemblyTape {
+    struct Annotation {
+        LinkRect link;    // holds the target's text, by whose address it is compared
+        size_t index;     // in its page's links
+        size_t end;       // of its bytes in `annotations`
+    };
+    struct Entry {
+        uint64_t top;     // the bits of its heading's top
+        int ids[6];       // its parent, previous, next, first and last entry (0 for none), its page
+        size_t count;     // the entries under it
+        size_t titleEnd;  // of its title, as the heading gave it, in `titles`
+        size_t end;       // of its bytes in `outline`
+    };
+    // A view of `annotations` or `pages` that object `id` gets once they no longer grow.
+    struct Pending {
+        int id;
+        size_t begin;
+        size_t end;
+    };
+    bool winAnsi = false;                    // the targets and titles were WinAnsi text
+    bool print = false;                      // /F 4 on each annotation
+    std::vector<Annotation> annotationList;  // external links of fewer than kSharedActionUrlBytes
+    std::vector<size_t> pageAnnotations;     // the first of each page's, then their end
+    std::string annotations;
+    std::vector<Entry> entries;
+    size_t entriesStart = 0;                 // where the entries' bytes begin in `outline`, after its root's
+    std::string titles;
+    std::string outline;                     // AddOutline's storage
+    std::string pagePrefix;                  // a page dictionary before its /Contents, the same on every page
+    std::string pages;
+    std::vector<Pending> pending;
+
+    void Clear();
 };
 
 // A renderer's CID set as the session sees it (tiny_pdf.cpp's UsedCidSet): null `set` for none.
@@ -267,6 +313,12 @@ struct LayoutTarget {
     // `gapBefore(page)` bytes long.
     void (*startPage)(std::string& content, std::vector<size_t>& pageStarts) = nullptr;
     size_t (*gapBefore)(size_t page) = nullptr;
+    // Makes `content` `size` bytes long without writing what lies past its old size (tiny_pdf.cpp's
+    // ResizeForOverwrite), or null where the string fills it.
+    void (*grow)(std::string& content, size_t size) = nullptr;
+    // Commit: after BuildInto, the bytes it put before each page's content after the one before
+    // (PdfObjects' gaps), or null when it left no gaps.
+    const std::vector<size_t>* fileGaps = nullptr;
 };
 
 class LayoutSession;
@@ -328,6 +380,13 @@ public:
     // kNotKept when `markdown` is not the text the session keeps, which the caller then looks at.
     static constexpr uint8_t kNotKept = 0xFF;
     virtual uint8_t TextFonts(const std::string& markdown, const std::string*& winAnsi) = 0;
+    // The assembly the session's last build left (null for none) and the one this build writes,
+    // emptied; both null outside a layout by blocks (Forget).
+    virtual const AssemblyTape* LastAssembly() const = 0;
+    virtual AssemblyTape* NextAssembly() = 0;
+    // The last build's page whose content page `page` of this build took by a replay, or kNoPage.
+    static constexpr uint32_t kNoPage = 0xFFFFFFFFu;
+    virtual uint32_t PageOrigin(size_t page) const = 0;
 };
 
 // The session of the build running on this thread (BuildSession::Build), or null. Builds without
@@ -340,6 +399,9 @@ inline std::vector<Block>& BuildBlocks(std::vector<Block>& own, const void* book
     LayoutSession* const session = CurrentLayoutSession();
     return session != nullptr && book == nullptr ? session->store->blocks : own;
 }
+// Whether this build is a session's whose parse is kept for the next build: only one without a
+// paragraph that may be a contents marker is (ParseInSession), where PlaceContents finds none.
+bool SessionParseUnmarked();
 #else
 inline LayoutSession* CurrentLayoutSession() { return nullptr; }
 #endif
