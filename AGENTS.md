@@ -318,6 +318,17 @@ pass run again between blank lines with no fence open. A new pass over the lines
 loop, or a line class that depends on lines past a blank line, must go there too (or make it
 classify whole). The tape keeps the page content in pieces of buffers its tapes share
 (`LayoutTape::pieces`, without the page gaps); nothing outside `build_session.cpp` reads it.
+A session builds from its own copy of the text (`SessionText`, `KeptText` in `build_session.cpp`),
+changed in place where the next text differs, with its WinAnsi text: the parse record views it, the
+font choice reads counts kept with it (bytes from 0x80, `CharacterReferenceNeedAt`, "]:"). A new
+test of ChooseFonts' over the text, or a new rule of `TranscodeToWinAnsi` that reads past a
+character, must go into `SessionText::Fonts` too. A session's assembly takes the last build's bytes
+of link annotations and outline entries by what made them (`AssemblyTape`): a new input of their
+bytes goes into its keys (`SessionAnnotations::Add`, `TakeOutlineEntry`), and a page dictionary's
+text before `/Contents` must stay the same on every page of fixed size (`NotePagePrefix`). The
+in-place replay trusts only bytes no laid-out block wrote near: keep it before the first one.
+Session-only code in `tiny_pdf.cpp` stays behind `RAYOMD_BUILD_SESSION`, with the command line's
+code unchanged (`cmp` of `rayomd` against master's build).
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and

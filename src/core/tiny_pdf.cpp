@@ -5087,11 +5087,64 @@ static char* WriteTextString(char* out, std::string_view text, bool winAnsi) {
     return out;
 }
 
+#ifdef RAYOMD_BUILD_SESSION
+// What a session's build reads and writes of the assembly (build_session.h's AssemblyTape): this
+// build's tape, and the last build's when it was made for targets and titles in the same encoding
+// and with the same annotation flags (else null: nothing is taken).
+struct SessionAssembly {
+    Internal::LayoutSession* session = nullptr;
+    Internal::AssemblyTape* next = nullptr;
+    const Internal::AssemblyTape* last = nullptr;
+
+    RAYOMD_COLD SessionAssembly(Internal::LayoutSession* layout, bool winAnsi, bool print) {
+        if (layout == nullptr || (next = layout->NextAssembly()) == nullptr) return;
+        session = layout;
+        next->winAnsi = winAnsi;
+        next->print = print;
+        last = layout->LastAssembly();
+        if (last != nullptr && (last->winAnsi != winAnsi || last->print != print)) last = nullptr;
+    }
+};
+
+// AddOutline in a session's build: entry `index`, which `key` and `title` make, is the last build's
+// bytes again when its entry `index` had the same title, objects and top (an entry of headings the
+// edit left alone, where it added no object before the outline); appended to `storage`, the tape's.
+RAYOMD_COLD static bool TakeOutlineEntry(SessionAssembly& assembly, size_t index, const Internal::AssemblyTape::Entry& key,
+    std::string_view title, std::string& storage) {
+    const Internal::AssemblyTape* const last = assembly.last;
+    if (last == nullptr || index >= last->entries.size()) return false;
+    const Internal::AssemblyTape::Entry& old = last->entries[index];
+    const size_t titleBegin = index == 0 ? 0 : last->entries[index - 1].titleEnd;
+    if (old.top != key.top || memcmp(old.ids, key.ids, sizeof key.ids) != 0 || old.count != key.count ||
+        std::string_view(last->titles).substr(titleBegin, old.titleEnd - titleBegin) != title) {
+        return false;
+    }
+    const size_t begin = index == 0 ? last->entriesStart : last->entries[index - 1].end;
+    storage.append(last->outline, begin, old.end - begin);
+    return true;
+}
+
+// The entry AddOutline just wrote or took, for the next build.
+RAYOMD_COLD static void NoteOutlineEntry(SessionAssembly& assembly, Internal::AssemblyTape::Entry key, std::string_view title,
+    size_t end) {
+    Internal::AssemblyTape& next = *assembly.next;
+    next.titles.append(title.data(), title.size());
+    key.titleEnd = next.titles.size();
+    key.end = end;
+    next.entries.push_back(key);
+}
+#endif
+
 // Adds the outline of `headings`, nested by level with every entry open, and its entry to
 // `catalog`. The entries are written one after another into `storage`, which must outlive
 // BuildInto, with one growth instead of a string each.
+// In a session's build (`assembly`), `storage` is its tape's (AssemblyTape::outline).
 RAYOMD_COLD static void AddOutline(PdfObjects& pdf, std::string& catalog, const std::vector<HeadingMark>& headings,
-    const std::vector<int>& pageIds, bool winAnsi, std::string& storage) {
+    const std::vector<int>& pageIds, bool winAnsi, std::string& storage
+#ifdef RAYOMD_BUILD_SESSION
+    , SessionAssembly* assembly = nullptr
+#endif
+    ) {
     if (headings.empty() || pageIds.empty()) return;
     constexpr size_t kNone = std::string::npos;
     constexpr size_t kRootBytes = 128;      // the root's text
@@ -5152,9 +5205,31 @@ RAYOMD_COLD static void AddOutline(PdfObjects& pdf, std::string& catalog, const 
     out = lit(out, " >>");
     storage.append(scratch.data(), (size_t)(out - scratch.data()));
     root.end = storage.size();
+#ifdef RAYOMD_BUILD_SESSION
+    if (assembly != nullptr) assembly->next->entriesStart = storage.size();
+#endif
     for (size_t index = 0; index < count; index++) {
         const HeadingMark& heading = headings[index];
         Entry& entry = entries[index];
+#ifdef RAYOMD_BUILD_SESSION
+        // What the entry's bytes are made of besides its title.
+        Internal::AssemblyTape::Entry key{};
+        if (assembly != nullptr) {
+            memcpy(&key.top, &heading.top, sizeof key.top);
+            key.ids[0] = static_cast<int>(entry.parent == kNone ? (size_t)rootId : id(entry.parent));
+            key.ids[1] = entry.previous == kNone ? 0 : static_cast<int>(id(entry.previous));
+            key.ids[2] = entry.next == kNone ? 0 : static_cast<int>(id(entry.next));
+            key.ids[3] = entry.first == kNone ? 0 : static_cast<int>(id(entry.first));
+            key.ids[4] = entry.first == kNone ? 0 : static_cast<int>(id(entry.last));
+            key.ids[5] = pageIds[std::min(heading.page, pageIds.size() - 1)];
+            key.count = entry.first == kNone ? 0 : entry.descendants;
+            if (TakeOutlineEntry(*assembly, index, key, heading.text, storage)) {
+                entry.end = storage.size();
+                NoteOutlineEntry(*assembly, key, heading.text, entry.end);
+                continue;
+            }
+        }
+#endif
         const size_t room = heading.text.size() * 4 + 6 + kEntryBytes;
         if (scratch.size() < room) scratch.resize(room);
         out = lit(&scratch[0], "<< /Title ");
@@ -5187,6 +5262,9 @@ RAYOMD_COLD static void AddOutline(PdfObjects& pdf, std::string& catalog, const 
         out = lit(out, " null] >>");
         storage.append(scratch.data(), (size_t)(out - scratch.data()));
         entry.end = storage.size();
+#ifdef RAYOMD_BUILD_SESSION
+        if (assembly != nullptr) NoteOutlineEntry(*assembly, key, heading.text, entry.end);
+#endif
     }
 
     // The text is complete and no longer moves.
@@ -5806,6 +5884,64 @@ RAYOMD_COLD static void AppendSharedUriAction(std::string& annot, PdfObjects& pd
     AppendLit(annot, " 0 R");
 }
 
+#ifdef RAYOMD_BUILD_SESSION
+// AddLinkAnnotationObjects in a session's build: the external links (of fewer than
+// kSharedActionUrlBytes) are written one after another into the tape (AssemblyTape::annotations),
+// and a link is the last build's bytes again where it is the link the last build had at its index on
+// the page this page's content was replayed from (LayoutSession::PageOrigin): the same rectangle
+// and the same target, whose text a replay shares with the last build's. Each gets its object now
+// and its view of the tape once the tape no longer grows (FinishAnnotations).
+struct SessionAnnotations {
+    SessionAssembly& assembly;
+    size_t cursor = 0;   // the last build's annotations of the page's origin still to compare
+    size_t stop = 0;
+
+    RAYOMD_COLD void BeginPage(size_t page) {
+        Internal::AssemblyTape& next = *assembly.next;
+        next.pageAnnotations.push_back(next.annotationList.size());
+        cursor = stop = 0;
+        const Internal::AssemblyTape* const last = assembly.last;
+        if (last == nullptr) return;
+        const uint32_t origin = assembly.session->PageOrigin(page);
+        if (origin == Internal::LayoutSession::kNoPage || (size_t)origin + 1 >= last->pageAnnotations.size()) return;
+        cursor = last->pageAnnotations[origin];
+        stop = last->pageAnnotations[origin + 1];
+    }
+    // Link `index` of the page, an external one.
+    RAYOMD_COLD int Add(PdfObjects& pdf, const LinkRect& link, size_t index, bool winAnsi, bool print) {
+        Internal::AssemblyTape& next = *assembly.next;
+        const Internal::AssemblyTape* const last = assembly.last;
+        const size_t begin = next.annotations.size();
+        while (cursor < stop && last->annotationList[cursor].index < index) cursor++;
+        const Internal::AssemblyTape::Annotation* const old = cursor < stop ? &last->annotationList[cursor] : nullptr;
+        if (old != nullptr && old->index == index && old->link.url.View().data() == link.url.View().data() &&
+            memcmp(&old->link, &link, 4 * sizeof(double)) == 0) {
+            const size_t from = cursor == 0 ? 0 : last->annotationList[cursor - 1].end;
+            next.annotations.append(last->annotations, from, old->end - from);
+            cursor++;
+        } else {
+            AppendLinkAnnotationStart(next.annotations, link, print);
+            AppendLit(next.annotations, " /A << /S /URI /URI (");
+            AppendUriLiteral(next.annotations, link.url, winAnsi);
+            AppendLit(next.annotations, ") >> >>");
+        }
+        next.annotationList.push_back({ link, index, next.annotations.size() });
+        const int id = pdf.Reserve();
+        next.pending.push_back({ id, begin, next.annotations.size() });
+        return id;
+    }
+    RAYOMD_COLD void FinishAnnotations(PdfObjects& pdf) {
+        Internal::AssemblyTape& next = *assembly.next;
+        next.pageAnnotations.push_back(next.annotationList.size());
+        const std::string_view bytes(next.annotations);
+        for (const Internal::AssemblyTape::Pending& object : next.pending) {
+            pdf.SetView(object.id, bytes.substr(object.begin, object.end - object.begin));
+        }
+        next.pending.clear();
+    }
+};
+#endif
+
 // The link annotations of every page. Those of links into the document are left to `targets`
 // (HeadingTargets, a book's BookTargets), which drops a link to a place the document does not
 // have instead of leading nowhere. `Tagged` (PDF/UA): each annotation belongs to the Link its
@@ -5814,11 +5950,18 @@ RAYOMD_COLD static void AppendSharedUriAction(std::string& annot, PdfObjects& pd
 template <typename Targets, bool Tagged = false>
 static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
     const std::vector<std::vector<LinkRect>>& linksByPage, bool winAnsiTargets, Targets& targets,
-    std::vector<InternalLink>& internalLinks, bool print, Internal::StructTree* tags = nullptr) {
+    std::vector<InternalLink>& internalLinks, bool print, Internal::StructTree* tags = nullptr
+#ifdef RAYOMD_BUILD_SESSION
+    , SessionAnnotations* session = nullptr
+#endif
+    ) {
     std::vector<std::vector<int>> idsByPage;
     idsByPage.reserve(linksByPage.size());
     SharedUriActions actions;
     for (size_t page = 0; page < linksByPage.size(); page++) {
+#ifdef RAYOMD_BUILD_SESSION
+        if (session != nullptr) session->BeginPage(page);
+#endif
         const std::vector<LinkRect>& pageLinks = linksByPage[page];
         std::vector<int> ids;
         ids.reserve(pageLinks.size());
@@ -5839,6 +5982,12 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
             }
             std::string annot;
             const bool sharedAction = link.url.size() >= kSharedActionUrlBytes;
+#ifdef RAYOMD_BUILD_SESSION
+            if (!Tagged && session != nullptr && !sharedAction) {
+                ids.push_back(session->Add(pdf, link, index, winAnsiTargets, print));
+                continue;
+            }
+#endif
             annot.reserve((sharedAction ? 0 : link.url.size()) + 192);
             AppendLinkAnnotationStart(annot, link, print);
             if (sharedAction) {
@@ -5864,6 +6013,9 @@ static std::vector<std::vector<int>> AddLinkAnnotationObjects(PdfObjects& pdf,
         }
         idsByPage.push_back(std::move(ids));
     }
+#ifdef RAYOMD_BUILD_SESSION
+    if (session != nullptr) session->FinishAnnotations(pdf);
+#endif
     return idsByPage;
 }
 
@@ -13586,6 +13738,11 @@ RAYOMD_COLD static Internal::LayoutCids SessionCidSet(UsedCidSet* set) {
 RAYOMD_COLD static void SessionStartPage(std::string& content, std::vector<size_t>& pageStarts) {
     StartPageContent(content, pageStarts);
 }
+#ifdef RAYOMD_STRING_SET_LENGTH
+RAYOMD_COLD static void SessionGrow(std::string& content, size_t size) {
+    ResizeForOverwrite(content, size);
+}
+#endif
 
 template <typename RendererType>
 struct SessionAccess {
@@ -13629,6 +13786,10 @@ struct SessionAccess {
         target.glyphs = r.math.GlyphUse();
         target.startPage = SessionStartPage;
         target.gapBefore = PageGapBefore;
+#ifdef RAYOMD_STRING_SET_LENGTH
+        target.grow = SessionGrow;
+#endif
+        target.fileGaps = g_pageGaps;
         if constexpr (kUnicode) {
             target.cids[0] = SessionCidSet(&r.usedCids);
             for (int face = 0; face < 3; face++) target.cids[face + 1] = SessionCidSet(r.faceCids[face].get());
@@ -13725,6 +13886,33 @@ struct SessionAccess {
     }
 };
 
+// The page dictionaries of a session's build after its first, on pages of a fixed size: the first's
+// text before its /Contents (NotePagePrefix), which every page has (the fonts, formula fonts and
+// images are the document's), and then the page's own objects, written one after another into the
+// tape (AssemblyTape::pages) instead of a string each. Each gets its object now and its view once
+// the tape no longer grows (FinishSessionPages).
+RAYOMD_COLD static void NotePagePrefix(Internal::AssemblyTape& tape, const std::string& page) {
+    const size_t contents = page.find(" /Contents ");
+    if (contents != std::string::npos) tape.pagePrefix.assign(page, 0, contents);
+}
+RAYOMD_COLD static int AddSessionPage(Internal::AssemblyTape& tape, PdfObjects& pdf, int contentId, int numberId, int contentsId,
+    const std::vector<int>* annotations) {
+    std::string& pages = tape.pages;
+    const size_t begin = pages.size();
+    pages += tape.pagePrefix;
+    AppendContents(pages, contentId, numberId, contentsId);
+    if (annotations != nullptr) AppendPageAnnotations(pages, *annotations);
+    AppendLit(pages, " >>");
+    const int id = pdf.Reserve();
+    tape.pending.push_back({ id, begin, pages.size() });
+    return id;
+}
+RAYOMD_COLD static void FinishSessionPages(Internal::AssemblyTape& tape, PdfObjects& pdf) {
+    const std::string_view pages(tape.pages);
+    for (const Internal::AssemblyTape::Pending& object : tape.pending) pdf.SetView(object.id, pages.substr(object.begin, object.end - object.begin));
+    tape.pending.clear();
+}
+
 // Only a BuildSession asks for these (build_session.cpp).
 RAYOMD_COLD Internal::SessionCalls Internal::SessionRendererCalls() {
     return { { SessionAccess<StandardRenderer>::RenderAny, SessionAccess<Renderer>::RenderAny },
@@ -13809,6 +13997,10 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         if (book == nullptr) {
             blocks = ParseMarkdown(text, &footnotes);
             if (options.pageBreakBeforeLevel > 0) Internal::BreakBeforeHeadings(blocks, options.pageBreakBeforeLevel);
+#ifdef RAYOMD_BUILD_SESSION
+            // A session's parse it keeps for the next build holds no marker: nothing to place.
+            if (options.toc || !Internal::SessionParseUnmarked())
+#endif
             contents = Internal::PlaceContents(blocks, options.toc, options.tocDepth);
         } else {
             bookParse = std::make_unique<BookParse>();
@@ -13852,6 +14044,11 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     }
     if (BuildCancelled()) return CancelBuild();
     if (session != nullptr) session->calls.endLayout[0](&renderer, *session, options.sourceMap);
+#ifdef RAYOMD_BUILD_SESSION
+    // A session's build takes what it can of the last build's assembly (AssemblyTape).
+    SessionAssembly assembly(session, winAnsi, false);
+    SessionAnnotations sessionLinks{ assembly };
+#endif
     // The headings without their footnote references, for anchors, bookmarks and titles.
     std::vector<HeadingMark> titledHeadings;
     std::vector<std::string> headingTitles;
@@ -13867,7 +14064,12 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     if (!contents.empty()) headingTargets.SetContents(&contentsTargets);
     std::vector<InternalLink> internalLinks;
     std::vector<std::vector<int>> annotationIds = book == nullptr
+#ifdef RAYOMD_BUILD_SESSION
+        ? AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks, false, nullptr,
+            assembly.next != nullptr ? &sessionLinks : nullptr)
+#else
         ? AddLinkAnnotationObjects(pdf, renderer.PageLinks(), winAnsi, headingTargets, internalLinks, false)
+#endif
         : AddBookLinkAnnotations(pdf, renderer.PageLinks(), winAnsi, headings, renderer.Ids(), *book->book, *bookParse,
             renderer.PageHeight(), contents.empty() ? nullptr : &contentsTargets, internalLinks, false);
     std::vector<int> mathFontIds;
@@ -13909,6 +14111,13 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
             : 0;
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
+#ifdef RAYOMD_BUILD_SESSION
+        if (assembly.next != nullptr && pageIndex > 0 && bottoms == nullptr && !assembly.next->pagePrefix.empty()) {
+            pageIds.push_back(AddSessionPage(*assembly.next, pdf, contentId, numberId, contentsId,
+                pageIndex < annotationIds.size() ? &annotationIds[pageIndex] : nullptr));
+            continue;
+        }
+#endif
         std::string page;
         page.reserve(192 + pageMathFonts.size() + pageImages.size());
         AppendLit(page, "<< /Type /Page /Parent ");
@@ -13945,8 +14154,14 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         AppendContents(page, contentId, numberId, contentsId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
         AppendLit(page, " >>");
+#ifdef RAYOMD_BUILD_SESSION
+        if (assembly.next != nullptr && pageIndex == 0) NotePagePrefix(*assembly.next, page);
+#endif
         pageIds.push_back(pdf.Add(std::move(page)));
     }
+#ifdef RAYOMD_BUILD_SESSION
+    if (assembly.next != nullptr) FinishSessionPages(*assembly.next, pdf);
+#endif
 
     int coverId = 0;
     if (options.theme.cover) {
@@ -13971,7 +14186,12 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     KeptLocal<std::string, 1> outline;      // kept from export to export; must outlive BuildInto
     NumberedMarks numberedMarks;
     AddOutline(pdf, catalog, numbers.empty() ? headings : NumberedHeadings(headings, renderer.Headings(), numbers, numberedMarks),
+#ifdef RAYOMD_BUILD_SESSION
+        pageIds, winAnsi, assembly.next != nullptr ? assembly.next->outline : outline.value,
+        assembly.next != nullptr ? &assembly : nullptr);
+#else
         pageIds, winAnsi, outline.value);
+#endif
     if (options.embedSource) AddReversibleSource(pdf, catalog, source);
     AppendLit(catalog, " >>");
     int catalogId = pdf.Add(std::move(catalog));
@@ -14442,6 +14662,10 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         if (book == nullptr) {
             blocks = ParseMarkdown(markdown, &footnotes);
             if (options.pageBreakBeforeLevel > 0) Internal::BreakBeforeHeadings(blocks, options.pageBreakBeforeLevel);
+#ifdef RAYOMD_BUILD_SESSION
+            // A session's parse it keeps for the next build holds no marker: nothing to place.
+            if (options.toc || !Internal::SessionParseUnmarked())
+#endif
             contents = Internal::PlaceContents(blocks, options.toc, options.tocDepth);
         } else {
             bookParse = std::make_unique<BookParse>();
@@ -14512,6 +14736,11 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         return true;
     }
     if (session != nullptr) session->calls.endLayout[1](&renderer, *session, options.sourceMap);
+#ifdef RAYOMD_BUILD_SESSION
+    // A session's build takes what it can of the last build's assembly (AssemblyTape).
+    SessionAssembly assembly(session, false, options.pdfa);
+    SessionAnnotations sessionLinks{ assembly };
+#endif
     if (tags) tags->Finish();
     // The headings without their footnote references, for anchors, bookmarks and titles.
     std::vector<HeadingMark> titledHeadings;
@@ -14538,7 +14767,12 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
             renderer.PageHeight(), contents.empty() ? nullptr : &contentsTargets, internalLinks, options.pdfa, tags.get())
         : tags ? AddLinkAnnotationObjects<HeadingTargets, true>(pdf, renderer.PageLinks(), false, headingTargets, internalLinks,
             options.pdfa, tags.get())
+#ifdef RAYOMD_BUILD_SESSION
+        : AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa, nullptr,
+            assembly.next != nullptr ? &sessionLinks : nullptr);
+#else
         : AddLinkAnnotationObjects(pdf, renderer.PageLinks(), false, headingTargets, internalLinks, options.pdfa);
+#endif
     std::vector<int> mathFontIds;
     std::vector<std::shared_ptr<const MathFaceObjects>> mathFaceKeep;
     if (renderer.MathUsed()) mathFontIds = AddMathFontObjects(pdf, renderer.MathGlyphs(), options.compress, mathFaceKeep);
@@ -14622,6 +14856,13 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
             : 0;
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
+#ifdef RAYOMD_BUILD_SESSION
+        if (assembly.next != nullptr && pageIndex > 0 && bottoms == nullptr && !assembly.next->pagePrefix.empty()) {
+            pageIds.push_back(AddSessionPage(*assembly.next, pdf, contentId, numberId, contentsId,
+                pageIndex < annotationIds.size() ? &annotationIds[pageIndex] : nullptr));
+            continue;
+        }
+#endif
         std::string page;
         page.reserve(160 + pageMathFonts.size() + pageImages.size());
         AppendLit(page, "<< /Type /Page /Parent ");
@@ -14651,8 +14892,14 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
         if (tags) AppendTaggedPage(page, pageIndex);
         AppendLit(page, " >>");
+#ifdef RAYOMD_BUILD_SESSION
+        if (assembly.next != nullptr && pageIndex == 0) NotePagePrefix(*assembly.next, page);
+#endif
         pageIds.push_back(pdf.Add(std::move(page)));
     }
+#ifdef RAYOMD_BUILD_SESSION
+    if (assembly.next != nullptr) FinishSessionPages(*assembly.next, pdf);
+#endif
 
     int coverId = 0;
     if (options.theme.cover) {
@@ -14678,7 +14925,12 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     KeptLocal<std::string, 1> outline;      // kept from export to export; must outlive BuildInto
     NumberedMarks numberedMarks;
     AddOutline(pdf, catalog, numbers.empty() ? headings : NumberedHeadings(headings, renderer.Headings(), numbers, numberedMarks),
+#ifdef RAYOMD_BUILD_SESSION
+        pageIds, false, assembly.next != nullptr ? assembly.next->outline : outline.value,
+        assembly.next != nullptr ? &assembly : nullptr);
+#else
         pageIds, false, outline.value);
+#endif
     const char* const producer = "RayoMD Native Tiny PDF";
     if (options.pdfa || tags) {
         AddArchivalCatalogEntries(pdf, catalog, metadata, headings, producer,
@@ -14723,6 +14975,23 @@ static TextFonts ChooseFonts(const std::string& markdown, const PdfOptions& opti
     }
     return TextFonts::TrueType;
 }
+
+#ifdef RAYOMD_BUILD_SESSION
+// ChooseFonts in a BuildSession's build: from what the session keeps of its text, without reading all
+// of it (LayoutSession::TextFonts); `transcoded` then the session's WinAnsi text when it is chosen.
+// The options' test repeats ChooseFonts' first line: a function of both moved what GCC inlined into
+// the command lines' BuildDocument, which compile none of this.
+RAYOMD_COLD static TextFonts SessionFonts(const std::string& markdown, const PdfOptions& options, std::string& winAnsi,
+    const std::string*& transcoded) {
+    Internal::LayoutSession* const session = Internal::CurrentLayoutSession();
+    if (session != nullptr && options.theme.fontPath.empty() && !options.pdfa && !options.pdfua &&
+        !ThemeTextNeedsUnicode(options.theme)) {
+        const uint8_t fonts = session->TextFonts(markdown, transcoded);
+        if (fonts != Internal::LayoutSession::kNotKept) return static_cast<TextFonts>(fonts);
+    }
+    return ChooseFonts(markdown, options, winAnsi);
+}
+#endif
 
 // A document in a TrueType font (TextFonts::TrueType): the theme's, without a fallback font: the
 // company's look; else the system's, built again in a fallback font that has more of the
@@ -14808,12 +15077,20 @@ static bool BuildDocument(const std::string& markdown, const PdfOptions& options
     BuildResult& stats, uint32_t& missingCharacters, BookSource* book) {
     KeptLocal<std::string, 3> keptWinAnsi;  // the transcoded text, kept from export to export
     std::string& winAnsi = keptWinAnsi.value;
+#ifdef RAYOMD_BUILD_SESSION
+    const std::string* transcoded = nullptr;
+    const TextFonts fonts = book == nullptr ? SessionFonts(markdown, options, winAnsi, transcoded) : ChooseFonts(markdown, options, winAnsi);
+    const std::string& standard = transcoded != nullptr ? *transcoded : winAnsi;
+    switch (fonts) {
+#else
+    const std::string& standard = winAnsi;
     switch (ChooseFonts(markdown, options, winAnsi)) {
+#endif
     case TextFonts::Ascii:
         return BuildStandardPdfBytes(markdown, markdown, false, options, pdfBytes, stats, book);
     case TextFonts::WinAnsi:
         if (book != nullptr) TranscodeBook(*book, false);
-        return BuildStandardPdfBytes(winAnsi, markdown, true, options, pdfBytes, stats, book);
+        return BuildStandardPdfBytes(standard, markdown, true, options, pdfBytes, stats, book);
     case TextFonts::TrueType:
         break;
     }

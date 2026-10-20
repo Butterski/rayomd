@@ -248,8 +248,10 @@ BuildResult BuildPdf(const std::string& markdown, const PdfOptions& options, std
 // where an edit that changes its height lays out what follows until the pages fall as they did
 // (often the next image, heading or code block that moves to a new page).
 //
-// Everything BuildPdf does besides the layout is done every time: the Markdown is parsed whole,
-// and the PDF is assembled whole. Builds with footnotes or PDF/UA, books, and builds with other
+// Everything BuildPdf does besides the layout is done every time: the Markdown is parsed (from the
+// last build's blocks around the edit), and the PDF is assembled whole, taking the last build's
+// bytes of link annotations and outline entries that did not change. Builds with footnotes or
+// PDF/UA, books, and builds with other
 // options or fonts than the last are laid out whole, as BuildPdf lays them out; images and diagrams
 // are always laid out again (a file may have changed). A session keeps its last build's page
 // content, blocks and a few dozen bytes for each block: about twice the page content of its PDF.
@@ -265,7 +267,10 @@ public:
     BuildSession& operator=(const BuildSession&) = delete;
 
     // BuildPdf(markdown, options, pdfBytes), with options.sourceMap filled the same way. A cancelled
-    // or failed build leaves the session as the last successful one left it.
+    // or failed build leaves the session as the last successful one left it. When pdfBytes is the
+    // string the session's last Build wrote, of the size it left, its bytes are read as that build
+    // left them: the pages before the first change then stay where they are instead of being copied.
+    // A caller that changes those bytes in place must clear the string (or pass another) first.
     BuildResult Build(const std::string& markdown, const PdfOptions& options, std::string& pdfBytes);
     // Forgets the last build and frees what the session keeps.
     void Clear();
