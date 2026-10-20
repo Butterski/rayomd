@@ -391,7 +391,10 @@ Important image/link details:
   sooner): its image streams a few percent larger, the same pixels. Without it the PDF bytes stay
   as they are; its streams are kept apart in both image caches.
 - Failed images should degrade to useful fallback text instead of failing the
-  whole conversion.
+  whole conversion. A source that failed (the policy refused it, the file is missing, it cannot be
+  read or decoded) fails at once for the rest of its build (`ImageRegistry::FailSource`: index -1
+  under its `source:` key), as one that resolved takes its index: a missing file shown 700 times
+  cost 700 `realpath` walks a build. Not one the decode budget refused or a cancel ended.
 - An SVG image (a file or URL) is converted by `src/core/svg.cpp`, without a
   dependency, into a form XObject for each document, as its text uses the
   document's fonts and its `data:` images the document's image indices; such forms never enter
