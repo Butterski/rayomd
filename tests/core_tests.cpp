@@ -929,6 +929,24 @@ bool CheckImageFormats() {
             break;
         }
     }
+    // A source that failed fails again for each of its images in the build (each counted, the
+    // others unchanged), and only in that build: a file that appears is shown by the next one.
+    if (ok) {
+        const std::string markdown = "![m](late.png)\n\n![b](pixel.bmp)\n\n![p](pixel.png)\n\n![m](late.png)\n\n"
+                                     "![b](pixel.bmp)\n\n![p](pixel.png)\n\n![m](late.png)\n";
+        std::string before, after;
+        const TinyPdf::BuildResult missing = TinyPdf::BuildPdf(markdown, options, before);
+        fs::copy_file(root / "pixel.png", root / "late.png");
+        const TinyPdf::BuildResult found = TinyPdf::BuildPdf(markdown, options, after);
+        // The mascot has a soft mask: an image object of its own.
+        const size_t shown = CountOccurrences(before, "/Subtype /Image");
+        if (!missing.Ok() || missing.failedImages != 5 || shown == 0 || !found.Ok() || found.failedImages != 2 ||
+            CountOccurrences(after, "/Subtype /Image") != 2 * shown) {
+            std::cerr << "repeated failed images: " << missing.failedImages << " then " << found.failedImages << " failed"
+                      << std::endl;
+            ok = false;
+        }
+    }
     fs::remove_all(root);
     return ok;
 }

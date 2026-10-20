@@ -4416,14 +4416,15 @@ private:
     bool ResolveSource(const std::string& src, const std::string& alt, int& index, uint32_t base) {
         RayoMd::Profiling::ScopedPhase profile(RayoMd::Profiling::Phase::Image);
         // Reuse raw sources only after this registry has accepted them through
-        // its immutable policy; cross-build caches stay canonical-keyed.
+        // its immutable policy; cross-build caches stay canonical-keyed. A source that failed
+        // earlier in this build is there with index -1 (FailSource).
         std::string sourceKey = "source:";
         if (base != 0) EmbeddedSourceKey(sourceKey, base);
         sourceKey += src;
         auto source = indexByKey.find(sourceKey);
         if (source != indexByKey.end()) {
             index = source->second;
-            return true;
+            return index >= 0;
         }
 
         std::string key;
@@ -4441,12 +4442,12 @@ private:
         } else {
 #ifdef _WIN32
             DirectLocalImageResult direct = localPolicy.TryOpenDirect(src, key, localFile, base);
-            if (direct == DirectLocalImageResult::Rejected) return false;
+            if (direct == DirectLocalImageResult::Rejected) return FailSource(std::move(sourceKey));
             directLocal = direct == DirectLocalImageResult::Opened;
             if (directLocal) stamp = localFile.stamp;
-            else if (!localPolicy.Resolve(src, key, localPathUtf8, base, stamp)) return false;
+            else if (!localPolicy.Resolve(src, key, localPathUtf8, base, stamp)) return FailSource(std::move(sourceKey));
 #else
-            if (!localPolicy.Resolve(src, key, localPathUtf8, base, stamp)) return false;
+            if (!localPolicy.Resolve(src, key, localPathUtf8, base, stamp)) return FailSource(std::move(sourceKey));
 #endif
         }
 
@@ -4460,7 +4461,7 @@ private:
         std::string keyStorage;
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
         if (sharedImage && !budget.Take(sharedImage->decodedPixels)) return false;
-        if (!sharedImage && IsKnownFailure(key, stamp)) return false;
+        if (!sharedImage && IsKnownFailure(key, stamp)) return FailSource(std::move(sourceKey));
         if (!sharedImage && !TakeConvertedSvg(key, stamp, sharedImage)) {
             std::vector<uint8_t> bytes;
             budget.refused = false;
@@ -4479,8 +4480,9 @@ private:
             }
             if (!loaded || !Decode(key, stamp, bytes, sharedImage)) {
                 // A cancelled read or decode tells nothing, nor one the budget refused.
-                if (!BuildCancelled() && !budget.refused) StoreFailure(key, stamp);
-                return false;
+                if (BuildCancelled() || budget.refused) return false;
+                StoreFailure(key, stamp);
+                return FailSource(std::move(sourceKey));
             }
         }
 
@@ -4490,6 +4492,15 @@ private:
         images.push_back(std::move(sharedImage));
         (void)alt;
         return true;
+    }
+
+    // A source that failed, which every later image of it in this build fails at once (as one that
+    // resolved takes its index): a document showing a missing file 700 times resolved its path
+    // (realpath: a readlink a component) 700 times a build. Not one the decode budget refused or
+    // that a cancel ended. Restore may drop them with the images: the source then fails once more.
+    RAYOMD_COLD bool FailSource(std::string&& sourceKey) {
+        indexByKey.emplace(std::move(sourceKey), -1);
+        return false;
     }
 
 public:
@@ -13881,6 +13892,11 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     if (options.blackText) Internal::PrintColors(pdfBytes, renderer.PageStarts(), bands, cover, contentsOverlays);
     if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
     std::vector<int> pageIds;
+    // The formula fonts and images every page names, written once and not per page (empty, and so
+    // no allocation, without formulas or images).
+    std::string pageMathFonts, pageImages;
+    AppendMathFontResources(pageMathFonts, mathFontIds);
+    AppendXObjectResources(pageImages, imageObjectIds);
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] - PageGapBefore(pageIndex + 1)
@@ -13894,7 +13910,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
         std::string page;
-        page.reserve(192);
+        page.reserve(192 + pageMathFonts.size() + pageImages.size());
         AppendLit(page, "<< /Type /Page /Parent ");
         AppendInt(page, pagesId);
         if (bottoms == nullptr) {
@@ -13922,9 +13938,9 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
             AppendInt(page, fontBoldObliqueId);
             AppendLit(page, " 0 R");
         }
-        AppendMathFontResources(page, mathFontIds);
+        page += pageMathFonts;
         AppendLit(page, " >>");
-        AppendXObjectResources(page, imageObjectIds);
+        page += pageImages;
         AppendLit(page, " >>");
         AppendContents(page, contentId, numberId, contentsId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
@@ -14589,6 +14605,11 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (options.blackText) Internal::PrintColors(pdfBytes, renderer.PageStarts(), bands, cover, contentsOverlays);
     if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
     std::vector<int> pageIds;
+    // The formula fonts and images every page names, written once and not per page (the GUI's
+    // preview of 700 copies of tester.md has 4,200 pages; empty strings without formulas or images).
+    std::string pageMathFonts, pageImages;
+    AppendMathFontResources(pageMathFonts, mathFontIds);
+    AppendXObjectResources(pageImages, imageObjectIds);
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] - PageGapBefore(pageIndex + 1)
@@ -14602,7 +14623,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
         std::string page;
-        page.reserve(160);
+        page.reserve(160 + pageMathFonts.size() + pageImages.size());
         AppendLit(page, "<< /Type /Page /Parent ");
         AppendInt(page, pagesId);
         if (bottoms == nullptr) {
@@ -14622,9 +14643,9 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
             AppendInt(page, numberFontId);
             AppendLit(page, " 0 R");
         }
-        AppendMathFontResources(page, mathFontIds);
+        page += pageMathFonts;
         AppendLit(page, " >>");
-        AppendXObjectResources(page, imageObjectIds);
+        page += pageImages;
         AppendLit(page, " >>");
         AppendContents(page, contentId, numberId, contentsId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
