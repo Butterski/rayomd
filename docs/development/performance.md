@@ -41,6 +41,254 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Round 5: package size (opt5/size, 2026-10-19)
+
+Against 5.2.5 (`ac59556`), GCC 13.3 unless named; the Linux archives of the GCC 11 builds, as the
+release runners make them. Every build keeps the 2,875 PDFs of the byte check and the 5,936 and
+6,044 feature-on exports; ctest and `verify_cli.py` (GCC 13), ctest of the GCC 11 static build.
+
+| | 5.2.5 | opt5/size | |
+|---|---:|---:|---:|
+| Linux dynamic, GCC 13 | 1,268,376 | 1,251,992 | -16,384 |
+| Linux dynamic, GCC 11 | 1,280,600 | 1,264,216 | -16,384 |
+| Linux static, GCC 13 | 2,285,824 | 2,162,448 | -123,376 |
+| Linux static, GCC 11 | 2,378,336 | 2,254,960 | -123,376 |
+| `rayomd.exe` (MinGW GCC 13) | 1,473,536 | 1,457,152 | -16,384 |
+| `linux-x64.tar.gz` | 727,256 | 692,879 | -34,377 |
+| `linux-x64-static.tar.gz` | 1,178,766 | 1,078,377 | -100,389 |
+| `windows-x64.zip` (5.2.5: zlib level 6 standing for Compress-Archive) | 820,313 | 782,953 | -37,360 |
+
+- **No padding before jump targets** (`-falign-jumps=1`, GCC release builds): GCC pads a target
+  only jumps reach to 16 bytes, up to 10 bytes of no-ops after an unconditional jump, which never
+  run. Code -15.1 KB (`.text.hot` -9.1 KB, `.text` -6.0 KB), every binary above one 4 KB page
+  or more (-16,384). Instructions (callgrind, `ab.sh`) +0.00 to +0.02 % on the eight fixtures.
+  Cycles (`perf stat -e cycles:u`, CPU 5, alternating pairs; A/A on that host: medians within
+  ±0.7 %, notes 1.7 %): 31 pairs 5.2.5 -> candidate geomean +0.41 % (A/A +0.35 %), 41 pairs
+  the other way -0.02 %, notes.md +1.3 and +1.8 % in both; with functions and loops pinned
+  (`-falign-functions=64 -falign-loops=32` on both) geomean -0.12 % and notes.md -0.42 %: the
+  release build's notes.md difference is placement. Fresh exports (`fresh.sh`, 128 runs) -0.01 %.
+- **Release archives at zopfli strength** (`release.yml`): `tar | pigz -11` instead of `tar -z`
+  (gzip -6) and 7-Zip's `-tzip -mx=9 -mfb=258 -mpass=15` instead of `Compress-Archive`; the same
+  formats. 5.2.5's binaries: `linux-x64.tar.gz` -29,404, the static archive -52,109, the zip
+  -32,498 (against zlib level 6). `pigz` is installed with the build dependencies; 7-Zip is part
+  of the Windows runner image.
+- **No unwinder in the static build either** (`no_unwind.cpp` for static Release builds too, with
+  `no_unwind.ld`): glibc's libc.a calls three more unwinder entry points, C's personality routine
+  for stdio's cleanup regions and `_Unwind_ForcedUnwind`/`_Unwind_GetCFA` for a thread's exit or
+  cancellation, which RayoMD never does; defined there (they abort), libgcc_eh.a is not linked,
+  and the unwind tables of libc.a and libstdc++ go: static GCC 13 2,269,440 -> 2,162,448, GCC 11
+  2,361,952 -> 2,254,960 (-106,992 each). `static_frames.cpp`, which kept GCC 13's unwinder from
+  sorting the FDEs at start, is gone with the unwinder. Static byte check 2,875: 0 differ; ctest
+  and `verify_cli.py` pass; fresh exports (`fresh.sh`, 128 runs, against the static build of the
+  step before) geomean -1.26 %.
+
+Measured and not taken:
+
+- **Cold whole functions of `tiny_pdf.cpp` at `-Os`** (`__attribute__((cold, noinline,
+  optimize("Os")))`, the form agreed in round 4): larger, not smaller. GCC inlines into a function
+  of lower optimization level only the callees whose call costs more than their body (the
+  "optimization mismatch" rule), so what `-O3` had inlined into the cold function, mostly
+  single-caller templates and statics (`AddLinkAnnotationObjects<BookTargets>` 1.8 KB,
+  `BuildInTrueType<…>` 1.1 KB, `make_shared<PdfImage>` 2 KB, the copy of `PdfOptions`, the
+  destructors of `BookTargets` and `FootBuffers`), now stands out of line at `-O3`, beside its
+  inlined copies in the hot callers. Those functions are cold already, and GCC optimizes cold
+  functions for size, so `-Os` takes little more off their own bodies. The 70 `RAYOMD_COLD`
+  functions of books, embeds, themes, image cache, font folder scan, PDF/A, PDF/UA, page notes,
+  long pages and SVG host glue: object +8,539, linked GCC 13 binary +8,320 bytes (GCC 11 object
+  +3,886); with the 30 more of contents, numbering, aligned blocks, CFF and page numbers, and
+  attributes on 16 never-run functions that had none (116 functions): +8,320 too. Singly, 20 of
+  117 made the object smaller, -8,430 together, -5,898 of it `ImageRegistry::Decode` (below);
+  the 9 that left the code of the functions the fixtures run as it was, by 265 bytes together.
+  The attribute kept `-fno-exceptions`, no unwind tables (no `.eh_frame`), the stack protector
+  (`%fs:0x28` canaries and `__stack_chk_fail` calls) and `endbr64` (checked on
+  `StandardThemeText::Emit`). A plain `cold` attribute on the never-run functions without one
+  behaved the same; `ImageRegistry::Decode` cold is -8 KB, but `DecodeImageBytes`, which GCC
+  then treats as called from cold code only, holds the per-pixel PNG paths.
+- `-falign-loops=1` on top: 4 KB more and -0.10 to -0.25 % instructions, but cycles +0.64 %
+  (code-heavy), +1.10 % (essay), +1.01 % (native_math), +0.57 % (tester-noimg), 41 pairs.
+- `-fvect-cost-model=very-cheap` for the `-O3` units: -8,192, code-heavy +4.83 % instructions.
+- `-Oz` for the `-Os` units (GCC 13): -4,096; GCC 11 has no `-Oz`. `-fno-inline-small-functions`,
+  `-fno-ipa-cp`, `-fno-partial-inlining` or smaller inlining parameters for them: no page less.
+- `-fno-plt` and `-fno-ipa-cp-clone`: +4,096 each. `-z noseparate-code`: no page less.
+- Profile feedback (`-fprofile-use` trained on the warm fixtures, the fresh documents and 60
+  generated ones): +16,384; with `-fprofile-partial-training` +126,976.
+- The formula fonts' glyph programs compressed: `kMathGlyphBytes` (46 KB) deflates to 40 KB.
+- The static build's libc: `strerror` links gettext (28 KB), but glibc's `dlopen`, `malloc`'s
+  messages and the resolver's configuration link it as well.
+- For scale: all of `tiny_pdf.cpp` at `-O2` -24,576, at `-Os` -151,296 bytes.
+
+## Round 5: images, SVGs and diagrams in the preview (opt5/media, 2026-10-19)
+
+Against 5.2.5 (`ac59556`). The GUI builds its preview on every key, on one worker thread, through
+`BuildSession`. A lab loop (`media_loop`, not in the repository) builds one document on a warm
+thread, 3 builds and then 10 measured ones, a letter typed at the end of the title each time,
+through `BuildPdf` or one `BuildSession`; each document is a few paragraphs around its media:
+four copies of an opaque 640x400 PNG (720 KB, its stream passed through), of a 480x320 PNG with
+transparency (re-encoded, kept by the process), of a JPEG (46 KB); two 2560x1600 screenshots
+(2 MB each, with and without transparency); eight SVG files (4 to 11 KB, shapes, gradients and
+text); three copies of an SVG with a 250 KB `data:` PNG; nine Mermaid diagrams; `native_math.md`.
+
+What a warm build did again for each kind in 5.2.5 (callgrind instructions a build, the standard
+fonts; kernel work from `perf stat`):
+
+| Document | BuildPdf | Session | Repeated each build |
+|---|---:|---:|---|
+| png-opaque | 1,567,660 | 818,885 | copying the 720 KB stream into the output; in BuildPdf once more, when the first page outgrew the gap left for the objects before it |
+| png-alpha | 500,932 | 286,187 | the same (192 KB); `realpath` (7 `readlink`) and a `stat` an image: 44 K kernel instructions |
+| jpeg | 178,391 | 152,338 | resolving the path, the stream copy |
+| shot | 1,096,731 | 594,995 | the stream copy (4.3 MB), twice in BuildPdf |
+| svg | 7,480,472 | 7,355,598 | reading and converting all eight files (95 %); 64 `readlink` a build, 0.8 M kernel instructions |
+| svg + `data:` | 39,316,744 | 39,163,688 | converting the SVGs: base64 by `push_back` a byte (18 %), SHA-256 of each image (46 % in callgrind's portable code; SHA-NI on the hosts) |
+| mermaid | 194,643 | 174,169 | nothing: diagrams are kept since 5.2 (their key and glyph replay, 10 K) |
+| math | 1,065,415 | 477,120 | in BuildPdf the formulas' layout; a session replays them |
+
+No decode, re-encode or font subsetting repeated: decoded PNGs and their failures were kept by
+file stamp already, the subset is cached by its CIDs. Kept steps:
+
+- **SVG forms kept for the process** (`ConvertSvgFile`, `TakeConvertedSvg`, `diagram_cache.cpp`'s
+  `ConvertedSvg`): by the file's key and stamp, the renderer's fonts and the index of its first
+  `data:` image; a hit registers its images again (charged to the decode budget) and replays its
+  text into the glyph sets as a kept diagram does. Not kept when the budget refused an image or the
+  build was cancelled. With it, **PrepareOutput reserves the first page's gap** (`PageGapBefore(0)`):
+  every image stream was copied once more per BuildPdf. BuildPdf svg 7.48 M -> 0.39 M, svg + `data:`
+  39.3 M -> 0.24 M, png-opaque 1.57 M -> 0.84 M, png-alpha 0.50 M -> 0.31 M, shot 1.10 M -> 0.61 M;
+  sessions svg 7.36 M -> 0.36 M, svg + `data:` 39.2 M -> 0.22 M.
+- **Known image paths resolved with one `stat`** (`KeptImagePath` in `vault.cpp`, POSIX): the
+  resolution inside the root is kept with the stamp of the file found, and the joined path is
+  taken again while it names a file of that stamp; the stamp then serves the image caches. A theme's
+  logo the same way (no root). Kernel instructions a build: svg 310 K -> 61 K, png-alpha 44 K ->
+  12 K, a theme logo 51 K -> 20 K.
+- **base64 decoded a group at a time** (`DecodeBase64`): a first conversion of svg + `data:`
+  60.3 M -> 49.3 M instructions.
+
+After them (callgrind a build; BuildPdf / session, the standard fonts and DejaVu Sans as theme):
+
+| Document | Standard 5.2.5 | Standard now | DejaVu 5.2.5 | DejaVu now |
+|---|---:|---:|---:|---:|
+| png-opaque | 1,567,660 / 818,885 | 839,462 / 813,657 | 1,747,609 / 918,141 | 992,693 / 913,044 |
+| png-alpha | 500,932 / 286,187 | 307,101 / 281,061 | 464,295 / 382,906 | 459,241 / 377,878 |
+| jpeg | 178,391 / 152,338 | 172,507 / 147,164 | 299,674 / 218,563 | 294,410 / 213,278 |
+| shot | 1,096,731 / 594,995 | 604,243 / 535,833 | 1,286,233 / 740,491 | 791,022 / 729,881 |
+| svg | 7,480,472 / 7,355,598 | 345,478 / 315,639 | 7,547,677 / 7,458,184 | 548,346 / 458,467 |
+| svg + `data:` | 39,316,744 / 39,163,688 | 239,632 / 214,930 | 39,336,274 / 39,260,634 | 387,338 / 311,661 |
+| mermaid | 194,643 / 174,169 | 195,292 / 175,099 | 360,101 / 291,346 | 360,753 / 292,148 |
+| math | 1,065,415 / 477,120 | 1,065,424 / 477,228 | 1,448,531 / 740,100 | 1,448,503 / 740,127 |
+
+Wall time a build (CPU 5 of a busy host, medians of three runs of 200; ms, BuildPdf / session,
+standard fonts): svg 2.16 / 2.04 -> 0.085 / 0.109, svg + `data:` 4.31 / 4.31 -> 0.029 / 0.028,
+png-opaque 0.086 / 0.067 -> 0.054 / 0.047, png-alpha 0.053 / 0.044 -> 0.032 / 0.033, jpeg 0.044 /
+0.041 -> 0.030 / 0.029, shot 1.18 / 0.76 -> 0.79 / 0.79; mermaid and math unchanged. DejaVu Sans:
+svg 2.01 / 2.03 -> 0.119 / 0.106, svg + `data:` 4.34 / 4.33 -> 0.049 / 0.042. The command lines'
+single exports are unchanged (byte gates, warm ab within +0.09 % instructions).
+
+Measured and not done:
+
+- **Replaying image and diagram blocks in a session** (an image resolving to the same registry
+  entry at the same index): the registry must still be asked for every image, in order, for the
+  XObjects and the decode budget, and that call is now most of such a block: in a session build
+  of svg an image block is 8.0 K instructions of which `ResolveSource` 6.8 K (the `stat`, keys and
+  lookups), a diagram block 2.3 K of which `AddDiagram` 1.1 K (DejaVu: 5.2 K and 4.0 K, the glyph
+  replay). A replay would save at most 3 to 5 % of such a build; `build_session.cpp` keeps laying
+  them out.
+- **The output buffer reused between builds**: no change at 0.7 and 4.3 MB of output (glibc
+  reuses the freed blocks). What is left of an image document's warm build is mostly copying its
+  streams into the PDF (png-opaque 727 K of 814 K instructions in a session, shot 510 K of 536 K).
+- A formula cache: a session lays formulas out only in the blocks an edit touched.
+- Windows: `TryOpenDirect` opens each local image every build (a handle, its final path, the
+  folders below the root); not changed here, as it needs MinGW and Wine runs.
+
+## Round 5: incremental builds, parse reuse (opt5/session, 2026-10-19)
+
+Against 5.2.5's `BuildSession` (`ac59556`), g++ 13.3 Release, the engine library linked into the lab
+harness; `perf stat -e cycles:u,instructions:u` on CPU 4 of a shared host, session builds alternating
+the text before and after the edit (the GUI's case), medians of 3 paired rounds. Design and rules:
+`incremental_builds.md` ("Parse reuse").
+
+- **The parse goes on from the last build's** (`ParseInSession`, `session_parse.h`): every line is
+  still split and classified, then the block loop starts at the last pass before the edit that the
+  last parse began at an Empty line with no HTML element open, and stops at the first pass after it
+  that the last parse began on the same line of the unchanged end in the same state; the blocks
+  before and after are the last build's, kept in place (`SessionBlocks`). A letter typed in the
+  middle: t700 273 -> 176 Mcycles (x1.55, instructions 262 -> 144 M), t70 27.4 -> 15.9 (x1.73),
+  e50 45.9 -> 34.8 (x1.32). The parse of t700 went from 149 M to 52 M instructions (callgrind), of
+  which classifying every line is now most.
+- **Page gaps in session builds** (`LeaveGaps` no longer off; `Replay` copies page by page, each new
+  page after `StartPageContent`'s gap, `LayoutTape::pageGaps`): `BuildInto` moves nothing on a
+  replayed layout. On top of the parse step: t700 x1.11 cycles, t70 x1.09, e50 x1.04, instructions
+  even (callgrind counted the move as 24 M a build of t700).
+- **The session's parse in a copy of the parser compiled apart** (`session_parse.cpp` compiles
+  `markdown_parser.cpp` a second time, its external functions renamed; the level parse is
+  `markdown_parser_level.inc`, included as `ParseMarkdownImpl` without hooks and as
+  `ParseSessionDocument` with them). With the hooks in `ParseMarkdownImpl`, ordinary `BuildPdf`
+  builds in the engine library measured +0.41 to +0.78 % instructions on notes, README and
+  tester-noimg (GCC no longer inlined a string destructor there); a second copy in the same unit,
+  +1.3 to 2.1 % (single-caller helpers no longer inlined). Tried first without effect: keeping NRVO
+  of `blocks`, a thread-local tested at each hook instead of a local, the definition marks passed as
+  a pointer. Now `ab.sh --instructions` of the CLI compiled as the engine library (with
+  `RAYOMD_BUILD_SESSION`, the session sources linked in) against 5.2.5 the same way: -0.00 to
+  +0.03 % on every fixture. The command line's `.text` is byte-identical to 5.2.5's. The copy costs
+  session builds of t700 3 % more instructions (its inline-markdown calls are not inlined).
+- All steps, a quiet re-run (7 paired rounds, ranges within 2 %): t700 a letter or a line deleted
+  in the middle 183 -> 108 Mcycles (x1.67 to x1.69, instructions x1.77); t70 x1.61 (x1.78); e50
+  a letter at the start, middle or end x1.29 to x1.30 (instructions x1.45 to x1.52), a line deleted
+  x1.14 (x1.38), a paragraph inserted x1.27 (x1.41). e50 stays under x1.4 in cycles: what is left
+  is classifying every line (now its largest part), the comparisons and the copies.
+- First keystrokes (lab harness, t700, a new session, letters typed one after another, a new output
+  string each build, quiet host): the full build 183 ms, then 59, 53, 41, and 32 from the fourth
+  on. Three unchanged builds first take 59, 43, 32; the two edits after them still 42 and 41, so
+  part of the warm-up is the session's (an edit's buffers), part the process's. With glibc's
+  `MALLOC_MMAP_THRESHOLD_` and `MALLOC_TRIM_THRESHOLD_` raised, the first three keystrokes are 51
+  ms each and the rest 32: large buffers handed to and taken back from the kernel each build cost
+  much of it (in a loaded run, 65 -> 33 ms steady). Not fixed here; the GUI could keep its output
+  buffer or set those thresholds.
+- **Only the changed lines classified** (`ClassifyInSession`, `session_parse.cpp`; incremental_builds.md
+  "Line classes"): the lines and classes are the last parse's, shifted; the passes that carry a
+  state (`ResolveMathOpeners`, the definitions') run again between blank lines with no fence open.
+  Measured first, as the shift is still a pass over every line: about 24 instructions a line
+  against about 300 for splitting, classifying and the passes. A letter in the middle, against
+  `e37f9af` (CPU 7, 3 paired rounds): t700 109.1 -> 90.5 Mcycles (x1.21, instructions 147.7 -> 98.2
+  M), t70 x1.19 (x1.51), e50 x1.10 (x1.17); the parse of t700 57 -> 6.5 M instructions a build.
+- **The tape's content in pieces** (`LayoutTape::pieces`): what a build replayed stays in the
+  buffer the last tape had it in, what it laid out goes into one of its own; one buffer again when
+  they pass twice the content. On the step before (5 rounds): t700 88.7 -> 83.1 Mcycles (x1.07),
+  t70 x1.16, e50 x1.12, instructions even; dropping the copy outright (a lab build) measured 81.8 on
+  t700, so the pieces cost about 1.3 Mcycles.
+- **The first keystrokes**: the builders reserve the output for the text's length and no more, so
+  a recycled output (the GUI keeps it now) moved to a new buffer of twice its size when the text grew
+  by a letter: 7,300 page faults (28 MB of new pages) at the first edit. `BuildSession::Build`
+  leaves room for a text a sixteenth longer, the parse record's text the same, and a session's
+  first tape and records are reserved from the last's. Lab harness `keys` (t700, letters typed one
+  after another in the middle, CPU 7, output kept, ms, the range of three runs; the whole build was
+  already slower at `e37f9af`, not measured further):
+
+  | build | 5.2.5 | `e37f9af` | now |
+  |---|---:|---:|---:|
+  | the whole document | 175-180 | 183-189 | 182-187 |
+  | keystroke 1 | 81-83 | 61-62 | 35-37 |
+  | keystroke 2 | 63-64 | 47-49 | 26.5-28 |
+  | keystroke 3 | 63-65 | 43-45 | 26-28 |
+  | keystroke 4 | 50-53 | 32-34 | 26-27 |
+  | keystroke 5 | 50-52 | 32-34 | 26-28 |
+
+  With a new output string each build: now 43-45, 26.5-27.5, 27-29, 26.5-27.5, 32-34 (the last the
+  process's: glibc hands a freed 30 MB string back). After three unchanged builds, edits take 26 ms
+  from the first (`e37f9af`: 44, 44, 33). What is left of the first keystroke: 5,550 page faults (the
+  new parse record and tape, the PDF's object table).
+- All of round 5 against 5.2.5's `BuildSession` (paired, CPU 7, 5 rounds, ranges within 2 %): t700
+  a letter at the start, middle or end, a line deleted or a paragraph inserted in the middle 182-186
+  -> 84-87 Mcycles (x2.14 to x2.18, instructions x2.52 to x2.69); t70 17.7-18.3 -> 8.1-8.9 (x2.01 to
+  x2.20); e50 a letter 30 -> 20 (x1.50 to x1.53, instructions x1.72 to x1.80), a line deleted x1.29
+  (x1.60), a paragraph inserted x1.47 (x1.65). Against `e37f9af` (a busier run, ranges to 10 %):
+  t700 x1.26 to x1.40 (instructions x1.47 to x1.50), t70 x1.27 to x1.33, e50 x1.20 to x1.25.
+- Gates: `ab.sh --instructions` of the command line against 5.2.5 and of the command line built as
+  the engine library against `e37f9af`: +0.00 % on every fixture (the command line's `.text` and the
+  engine's `markdown_parser.o` and `tiny_pdf.o` code are those of `e37f9af`); the byte check's 2,875
+  PDFs, `oncmp` 5,936 and the embeds' 6,044 exports identical; MinGW's `rayomd.exe` the size of
+  5.2.5's.
+- Not done: footnote documents (replay the body when the numbers are equal), the worst case's
+  measure, the first keystroke's new memory (the session's records could be made at the whole
+  build, which would move the cost there).
+
 ## Round 4: package size (opt4/size2, 2026-10-19)
 
 Against 5.2.4 (`27cf8f0`): the dynamic Linux binary of GCC 13 (GCC 11, the release runners', in
@@ -97,6 +345,67 @@ Every step keeps the 2,875 PDFs of the byte check and the 5,936 and 6,044 featur
   definitions every paragraph with a '[' was copied a `push_back` a byte; the bytes up to the next
   one that may be syntax (`FindByteClass`) are now appended at once. tester-noimg -1.4 %
   instructions, -1.2 % time; others unchanged.
+
+## Round 5 against 5.2.5: hot paths (opt5/hot, 2026-10-19)
+
+Measured against 5.2.5 (`ac59556`), g++ 13.3 Release, Docker; instructions by `ab.sh --instructions`
+and callgrind, cycles by `perf stat -e cycles:u` in paired round-robin runs on one CPU of a busy
+host (15 rounds unless said). Besides the eight `ab.sh` fixtures: `tester.md` without its images
+700 times (3.4 MB, the GUI's case, 2 builds a run) and two CJK documents of the CJK matrix
+(`cjkmany.md`, 15 KB of CJK, and `essay-cjk.md`) with Noto Sans CJK as the fallback font. Every
+step keeps the 2,875 PDFs of the byte check and the 5,936 and 6,044 feature-on exports (the CFF
+and fallback steps also the 470 exports of the CJK matrix).
+
+- **Math parser: no zeroed environment names, a brace table written at braces, a kept arena.** A
+  `Parser` (one a formula) zeroed 32 `string_view`s (512 bytes, `rep stos` at `-Os`) and filled its
+  brace table over the whole formula; `MathFormula::Layout` allocated a parse arena a formula (now
+  the thread's). tester x700 -1.2 % cycles; tester-noimg -0.70 % instructions.
+- **The math units at `-Os` with vector string operations and small inlining.** At `-Os` GCC copies
+  and zeroes the layout's 64-byte `Box` with `rep movs`/`rep stos` (half of `LayoutNode`'s cycles,
+  89 % of `Layouter::Open`'s: tens of cycles to start each) and calls every one-line helper. With
+  `-mstringop-strategy=vector_loop --param=max-inline-insns-size=12` (GCC only;
+  `CMakeLists.txt`'s `small_step_options`) the size/speed curve on tester x700, cycles against the
+  step before:
+
+  | Math units | Text | Cycles |
+  | --- | ---: | ---: |
+  | `-mstringop-strategy=libcall` | +0.4 KB | -2.9 % |
+  | `vector_loop` | +2.0 KB | -4.1 % |
+  | `vector_loop`, inline size 10, parser only | +4.3 KB | -7.9 % |
+  | `vector_loop`, inline size 10, layout only | +6.8 KB | -6.7 % |
+  | `vector_loop`, inline size 8 | +7.3 KB | -8.9 % |
+  | `vector_loop`, inline size 12 (kept) | +9.0 KB | -10.8 % |
+  | `-O2` | +52.2 KB | -15.7 % |
+
+  `ab.sh`: tester-noimg -12.6 % time, -5.71 % instructions; table-heavy -0.42 %; others 0. What
+  `-O2` adds beyond: `FindCommand` inlined into `Peek`, `WriteFixed2` into `OpWriter::Number`, the
+  `EmitText` loop (about 1 % each).
+- **`UsedCidSet::Values` read off the bits** from 256 CIDs on: sorting 5,000 CIDs of a page of CJK
+  took 1.4 M instructions a build (`std::sort` fell back to heapsort). cjkmany warm -19 % cycles,
+  -25 % instructions; the fixtures within 0.02 %.
+- **`cff.cpp` in the same group**: a fresh export of cjkmany -13 % cycles (task-clock 24.0 ->
+  21.7 ms) for 2.2 KB; warm builds reuse the cached subset.
+- **`ChooseFallbackFont` counts a candidate's missing characters a word at a time** (bit arrays
+  instead of a lambda call a character in a cold function): cjkmany warm -5.6 % instructions.
+
+Rejected or left in this round:
+
+- `-mmemcpy-strategy=`/`-mmemset-strategy=` tables: ignored at `-Os` (GCC takes only
+  `-mstringop-strategy` when optimizing for size). `-O2` without alignment (`-falign-*=1`): +48 KB.
+- Per-build allocations (DHAT with a build that keeps unwind tables): README about 1,000 blocks a
+  build, table-heavy 7,200 (4,200 of them `SplitTableCells`' rows and cell strings), tester-noimg
+  530; malloc and free are 7 to 9 % of the cycles of README, table-heavy and tester x700. Most are
+  structural: the parser's block strings, `Block::rows` as vectors of strings, `PdfObjects`' one
+  string an object, and the cold formula-paragraph path (`WrapMathWords`: a vector of lines of
+  spans, a `wstring` a span). Small ones left: `SplitTableCells` reserves 4 cells (a realloc for
+  wider rows; the header's count is known), `IsTableStart`'s alignment vector grows from empty,
+  `HeadingTargets::Index` does not reserve its map.
+- table-heavy's `memchr` (7.6 % of cycles): `SplitTableCells` 1.9 %, `WrapMathCell`'s one search a
+  cell for `kMathTextOpen` 1.8 %, the parser's `MayContainMath` and `EraseMathTextBytes` 2.2 %,
+  `ParseInlineRuns` 1.0 %; the parser knows which cells hold formulas, but the block has no place
+  for it.
+- Callgrind runs `Sha256BlocksPortable` (valgrind hides SHA-NI): the 11 % it shows for cjkmany is
+  not there natively.
 
 ## Round 4: incremental builds for the preview (opt4/incremental, 2026-10-19)
 
@@ -983,15 +1292,17 @@ case found so far took seconds for 40,000 to 200,000 openers).
 Findings that could make RayoMD faster later, with the evidence and the reason
 they were not taken yet. Add to this list when a change turns one up.
 
-**Never-run functions of `tiny_pdf.cpp` at -Os (size, round 4).** 140 KB of `tiny_pdf.cpp`'s
-out-of-line functions run in none of the eight warm fixtures (callgrind, default options): books,
-embeds, themes, image decoding and caches, the font folder scan, PDF/A and PDF/UA paths, math
-tables. Compiled at `-Os` the same functions are about 83 KB (`DecodeImageBytes` 9.8 -> 5.5 KB,
-`PdfImage`'s move 4.2 -> 0.4 KB, `BuildBookPdf` 3.1 -> 1.3 KB), plus 25 KB of functions `-Os`
-inlines elsewhere: an estimated 30 to 50 KB off both platforms. Agreed form: an attribute on whole
-cold functions only (cold, noinline, `optimize("Os")`), checked for GCC 11, with `symdiff.py` on
-the hot functions and the `ab.sh` gate; not measured yet. Image decoding and math tables are per
-pixel and per cell: keep them out.
+**Never-run functions of `tiny_pdf.cpp` (size).** Of the unit's 425 KB of code (GCC 13, the
+object), about 125 KB run in none of the eight warm fixtures (callgrind, default options): some
+65 KB of it cold already (`RAYOMD_COLD` functions and the `.cold` parts GCC splits off), which GCC
+compiles for size, and some 60 KB not (image decoding and the image registry about 22 KB of it,
+`BuildBookPdf`, the themes' text, math cells). Round 4 found the same functions about 83 KB when
+the whole unit is built at `-Os`. The agreed attribute (cold, noinline, `optimize("Os")`) on
+whole functions made the binary 8 KB larger (round 5, "Round 5: package size" above): GCC does
+not inline `-O3` callees into an `-Os` function. What remains is the pattern the themes, books and
+page notes took: a feature's functions in a translation unit of their own built at `-Os`, behind
+a small interface, each move checked for the inlining of the hot paths. Image decoding and math
+tables are per pixel and per cell: keep them out.
 
 **`std::filesystem` out of the build (size).** MinGW's libstdc++.a has no per-function
 sections, and its `fs_path.o` and `fs_ops.o` pull the codecvt facets, the locale's
@@ -1166,8 +1477,9 @@ are left.
 **Formulas at `-O2` (2026-10-19).** `math_parser.cpp` and `math_layout.cpp` are built at `-Os`.
 Both at `-O2`: tester-noimg -6.1 % instructions and -13.6 % time (ab.sh), other fixtures unchanged,
 for +52 KB of text (layout alone -3.4 % and -8.4 % for +33 KB, the parser alone -2.7 % and -4.2 %
-for +19 KB). Math is about a fifth of a build of `tester.md`, the GUI's test document. Not taken
-in round four: a size decision.
+for +19 KB). Math is about a fifth of a build of `tester.md`, the GUI's test document. Round five
+took two thirds of it for 9 KB (vector string operations and small inlining at `-Os`, see round
+5); the rest is `-O2`'s inlining of `FindCommand`, `WriteFixed2` and the emit loop.
 
 **`BuildInto`'s move of the page content (2026-10-19).** Taken in round four for builds
 that follow one of the same layout on their thread (`LeaveGaps`).
@@ -1371,11 +1683,13 @@ Binary size (2026-10-19):
 - `png_filter.cpp` at `-O2` without rewriting the row ends: 37 KB less, but the mascot's export
   +3.84 % instructions (callgrind): the scalar ends out of line in `FilterCosts::Add`, the Paeth
   pair loop +0.74 M. Kept only with the vector row ends and the peeled loop (-3.4 %).
-- `no_unwind.cpp` in the static build: glibc's libc.a links libgcc's unwinder for thread
-  cancellation, so `_Unwind_Resume` is defined twice. The static build keeps libstdc++'s runtime.
-- Not measured, excluded by their requirements: `-Oz` for the `-Os` units (GCC 12 or newer; the
-  release runners' GCC 11 rejects it) and `-z pack-relative-relocs` (DT_RELR, most of the 11 KB
-  of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release runs on).
+- `no_unwind.cpp` in the static build as first tried: glibc's libc.a links libgcc's unwinder for
+  thread cancellation, so `_Unwind_Resume` was defined twice. Superseded in round 5: `no_unwind.cpp`
+  now also stubs the entry points libc.a calls, and the static build links no unwinder (-107 KB).
+- `-Oz` for the `-Os` units: GCC 13 -4,096 (round 5); GCC 12 or newer, the release runners'
+  GCC 11 rejects it. Not measured, excluded by its requirement: `-z pack-relative-relocs` (DT_RELR,
+  most of the 11 KB of `.rela.dyn`; needs glibc 2.36 at run time, newer than systems the release
+  runs on).
 - UCRT's own `strtod` for the page size and margin options on MinGW UCRT builds (round 4,
   2026-10-19): libstdc++ makes `strtod` libmingwex's `__mingw_strtod` (its gdtoa), 18,944 bytes of
   a UCRT-linked `rayomd.exe`. mingw-w64's headers call UCRT's conforming to C99, but Wine's

@@ -301,6 +301,23 @@ where a run starts, set where it ends), a new field of `Block` into `SameBlock`,
 on beyond its block and that state (as footnote numbers, image names, PDF/UA's tags) must make the
 session lay those blocks out, or the whole document. Ordinary builds pay one test of the thread's
 session per build. Core check 137 (`tests/session_tests.inc`) compares random edits built both ways.
+A session's parse goes on from its last build's (`ParseInSession`, `src/core/session_parse.h`): the
+builders parse into the session's blocks (`BuildBlocks`), and the session's copy of the level parse
+notes its block loop's state at every pass (`DocumentPass`). The level parse's body is
+`src/core/markdown_parser_level.inc`: `ParseMarkdownImpl` includes it without hooks
+(`RAYOMD_SESSION_LEVEL` 0), and `src/core/session_parse.cpp`, which compiles `markdown_parser.cpp` a
+second time in the engine library only (its external functions renamed), as `ParseSessionDocument`
+with them; hooks in the plain copy, or both copies in one unit, cost BuildPdf 0.4 to 2 % (round 5 in
+performance.md). A new external function of `markdown_parser.cpp` must be renamed there too. New state
+that the loop carries from one pass to the next (beyond the line, the open HTML elements and the
+ParseBudget) must go into `ParsePass` and be compared there, and anything a later pass reads before
+its own line, or a transformation of the blocks after the parse, must make the session parse whole.
+The session's copy classifies only the lines an edit changed (`ClassifyInSession`): the others are the
+last parse's, shifted (`ParseLines` in the record), and `ResolveMathOpeners` and the definitions'
+pass run again between blank lines with no fence open. A new pass over the lines before the block
+loop, or a line class that depends on lines past a blank line, must go there too (or make it
+classify whole). The tape keeps the page content in pieces of buffers its tapes share
+(`LayoutTape::pieces`, without the page gaps); nothing outside `build_session.cpp` reads it.
 Native exports can opt into the `rayomd-source/1` reversible PDF profile.
 Embedding is disabled by default because it exposes the complete source,
 including content not visible on rendered pages. Recovery is byte-exact and
@@ -333,7 +350,13 @@ Important math details (contract: `docs/development/native_math.md`):
 Important image/link details:
 
 - Local image paths are resolved relative to `TinyPdf::BuildOptions::sourcePath`
-  when the caller provides an input file path.
+  when the caller provides an input file path. On POSIX a document's image found inside its root
+  is kept for the process by the joined path and root with the stamp of the file it resolved to
+  (`KeptImagePath` in `vault.cpp`, at most 4,096): a later build resolves it with one `stat`, whose
+  stamp the image caches then take, instead of `realpath`'s one call a path component and a
+  `stat`. Only the same file (size, times, device and inode) keeps the answer: a file that
+  changed, moved, or that the path now reaches through another link is resolved again. A theme's
+  logo is kept the same way by its absolute path (no root). Keep new caching of files on this rule.
 - URL images are controlled by `BuildOptions::enableUrlImages`.
 - Windows image support uses WinHTTP/WIC through the Win32 build. WIC sees only PNG and JPEG
   files (by their magic bytes) that RayoMD's own readers reject, once, through Microsoft's own
@@ -371,12 +394,19 @@ Important image/link details:
   whole conversion.
 - An SVG image (a file or URL) is converted by `src/core/svg.cpp`, without a
   dependency, into a form XObject for each document, as its text uses the
-  document's fonts; such forms never enter the cross-document image cache. Their `data:`
-  images do: decoded once a process and kept by the SHA-256 of their bytes
-  (`ImageRegistry::AddDecoded`), as a preview builds the same SVG on every edit. One
-  that needs what the converter does not draw (HTML, scripts, style sheets it
-  cannot match) or hits a limit shows its alt text. Keep every limit failing
-  closed: SVG input is untrusted.
+  document's fonts and its `data:` images the document's image indices; such forms never enter
+  the cross-document image cache. Their `data:` images do: decoded once a process and kept by
+  the SHA-256 of their bytes (`ImageRegistry::AddDecoded`). The form itself is kept for later
+  builds of the process by what decides it (`ImageRegistry::ConvertSvgFile`, `diagram_cache.cpp`'s
+  `ConvertedSvg`, at most 32 MiB): the file's key and stamp (as the raster cache's), the renderer
+  and its fonts (`TtfFont::loadId`), and the index its first `data:` image took, with the images
+  it registered and its text runs; `TakeConvertedSvg` registers those images again, charged to
+  the decode budget, and replays the runs into the glyph sets (`CidText`), so a build that takes
+  it writes the bytes a conversion writes (core check 138, `CheckEditedMedia`). A conversion that
+  the budget refused an image, or that a cancel ended, is not kept; a kept form the budget would
+  refuse an image of is converted again. One that needs what the converter does not draw (HTML,
+  scripts, style sheets it cannot match) or hits a limit shows its alt text. Keep every limit
+  failing closed: SVG input is untrusted.
 - The images of one build decode at most `kDecodeBudgetPixels` (2^30) pixels in all
   (`DecodeBudget`, one per `ImageRegistry`, so per pass of a build): a re-encoded PNG, a WIC
   decode and an SVG's `data:` image are charged before their pixels are read, and an image
@@ -479,7 +509,8 @@ Important image/link details:
   The notes a document embeds or links to: a root folder (`Vault`), resolution relative to the
   note, the root, then by name (an index built once, bounded), confinement by resolved path, and
   on Windows `DirectPathHasLink` (shared with `tiny_pdf.cpp`'s direct image path); the process's
-  cache of notes, name indexes and resolved roots, and `ResolvedPath`/`IsWithinRoot` on UTF-8
+  cache of notes, name indexes, resolved roots and documents' image paths (`KeptImagePath`), and
+  `ResolvedPath`/`IsWithinRoot` on UTF-8
   paths. Its paths are UTF-8 strings joined and normalized by `src/common/path.h`'s lexical
   functions; on Windows a path that comes from a directory listing stays a wide
   `RayoMd::File::Path` until it is opened (a name with an unpaired surrogate has no UTF-8 form);
@@ -487,16 +518,19 @@ Important image/link details:
 
 - `src/core/embeds.h` and `src/core/embeds.cpp`
   Obsidian's note embeds: reading them (`ResolveEmbeds`, bounded in count, depth, bytes read and
-
-- `src/core/build_session.h` and `src/core/build_session.cpp`
-  `BuildSession`: the tape of the last build (blocks, marks, page content, the renderer's marks and
-  sets), the blocks compared with it (`SameBlock`, runs of one shift without images), runs replayed
-  into the renderer, options compared (`SameOptions`). The renderers' side (`SessionAccess`) is in
-  `tiny_pdf.cpp`, reached through `SessionCalls`; both only with `RAYOMD_BUILD_SESSION` (the
-  `rayomd_engine` library and the core tests). Built at `-Os`; checked by `tests/session_tests.inc`.
   scanned, lookups), the build's `EmbedScope`, and splicing their blocks into the parse
   (`ParseWithEmbeds`, `SpliceEmbeds`). Built at `-Os`; checked by `tests/embeds_tests.inc`
   (core test exits 130, embeds, and 131, linked notes and backlinks).
+
+- `src/core/build_session.h` and `src/core/build_session.cpp`
+  `BuildSession`: the tape of the last build (blocks, marks, page content in pieces of shared
+  buffers, the renderer's marks and sets), the blocks compared with it (`SameBlock`, runs of one
+  shift without images), runs replayed into the renderer, options compared (`SameOptions`), the
+  parse's side (`ParseInSession`, `ResumeLine`); `src/core/session_parse.cpp` the session's copy of
+  the level parse and its line classes (`ClassifyInSession`). The renderers' side (`SessionAccess`)
+  is in `tiny_pdf.cpp`, reached through `SessionCalls`; all only with `RAYOMD_BUILD_SESSION` (the
+  `rayomd_engine` library and the core tests). `build_session.cpp` is built at `-Os`; checked by
+  `tests/session_tests.inc`.
 
 - `src/core/book.h` and `src/core/book.cpp`
   Books: reading `--book`'s inputs for both command lines (SUMMARY.md as mdBook and
@@ -541,8 +575,9 @@ Important image/link details:
   code block. Pie arcs are Béziers from the module's own sine; keep transcendental calls out.
 
 - `src/core/diagram_cache.h` and `src/core/diagram_cache.cpp`
-  The process's drawn diagrams for `ImageRegistry::AddDiagram`: key, bound and lock, and the
-  containers whose instantiations stay out of `tiny_pdf.cpp`. Built at `-Os`.
+  The process's drawn forms for `ImageRegistry`: diagrams (`AddDiagram`) and SVG files and URLs
+  (`ConvertSvgFile`, `TakeConvertedSvg`): keys, bounds and locks, and the containers whose
+  instantiations stay out of `tiny_pdf.cpp`. Built at `-Os`.
 
 - `src/core/cff.h` and `src/core/cff.cpp`
   OpenType fonts with PostScript outlines: the 'CFF ' table checked once when the font
@@ -740,8 +775,8 @@ Important image/link details:
 
 - `src/cli/terminate.cpp`
   The terminate handler in place of libstdc++'s (whose demangler is 61 KB) where `no_unwind.cpp`
-  is not linked (the static Linux build, Debug builds): the same message with the exception's
-  type as the ABI names it (`St9bad_alloc`), then `abort()`. Not part of the engine library.
+  is not linked (Debug builds, other compilers): the same message with the exception's type as
+  the ABI names it (`St9bad_alloc`), then `abort()`. Not part of the engine library.
 
 - `src/cli/std_throws.cpp`
   The release CLIs' `std::__throw_*` functions (Linux and MinGW): the error libstdc++ would throw
@@ -752,15 +787,18 @@ Important image/link details:
   fails on the duplicate definitions.
 
 - `src/cli/no_unwind.cpp` and `src/cli/no_unwind.ld`
-  The exception runtime of the dynamic Linux and the MinGW release CLIs: `__cxa_throw` prints
-  the terminate message and aborts, so libgcc's unwinder, the personality routine (`_v0`, on
-  MinGW `_seh0`) and the emergency exception pool (a 73 KB allocation at every start) are never
-  linked, and on Linux the linker script drops the unwind and exception tables nothing reads then
-  (58 KB in all). Its terminate handler takes `terminate.cpp`'s place (no exception is ever
+  The exception runtime of the Linux (dynamic and static) and the MinGW release CLIs:
+  `__cxa_throw` prints the terminate message and aborts, so libgcc's unwinder, the personality
+  routine (`_v0`, on MinGW `_seh0`) and the emergency exception pool (a 73 KB allocation at every
+  start) are never linked, and on Linux the linker script drops the unwind and exception tables
+  nothing reads then (58 KB dynamic, 107 KB static). For the static build it also defines what
+  glibc's libc.a calls of the unwinder (`__gcc_personality_v0` for stdio's cleanups,
+  `_Unwind_ForcedUnwind` and `_Unwind_GetCFA` for a thread's exit or cancellation, which RayoMD
+  never does): a symbol of libgcc_eh.a still referenced would link it again, and the link fails
+  on the duplicates. Its terminate handler takes `terminate.cpp`'s place (no exception is ever
   active). The nothrow `operator new` is its own (malloc and the new-handler, null when both
   fail; libstdc++'s caught a throw). Release builds only, as only they compile without
-  exceptions; not the static Linux build, whose libc.a links the unwinder for thread
-  cancellation, nor the engine library. Windows keeps its SEH tables (`.pdata`, `.xdata`): the
+  exceptions; not the engine library. Windows keeps its SEH tables (`.pdata`, `.xdata`): the
   x64 ABI requires them of every function that calls or saves registers.
 
 - `src/win32/main_windows_cli.cpp`
@@ -946,8 +984,11 @@ GitHub CI entry points:
   and UBSan, and runs each target 60 s on the seed corpus; any crash, timeout or OOM fails it.
 
 - `.github/workflows/release.yml`
-  Packages default Linux, curl-enabled Linux, and Windows artifacts for matching version
-  bumps, `v<VERSION>` tags, and manual dispatch; keep `VERSION` and package contents aligned.
+  Packages default Linux, curl-enabled Linux, static Linux and Windows artifacts for matching
+  version bumps, `v<VERSION>` tags, and manual dispatch; keep `VERSION` and package contents
+  aligned. Archives are packed at zopfli strength (`pigz -11` for the `.tar.gz`, 7-Zip's
+  `-mx=9 -mpass=15` for the `.zip`): the same formats, 29 to 52 KB smaller each than `tar -z`
+  and zlib's level 6 (5.2.5's binaries).
 
 ## Benchmark And Documentation Rules
 
@@ -985,8 +1026,8 @@ GitHub CI entry points:
   `dynamic_cast` or `typeid`. An
   exception the C++ runtime throws (`std::bad_alloc`) ends the process, as it did before: in the
   release command lines where it is made (`src/cli/std_throws.cpp` for libstdc++'s
-  `std::__throw_*`, `src/cli/no_unwind.cpp`'s `__cxa_throw` for the rest, dynamic Linux and MinGW),
-  in the static Linux build through the command lines' own terminate handler
+  `std::__throw_*`, `src/cli/no_unwind.cpp`'s `__cxa_throw` for the rest, Linux and MinGW),
+  in Debug builds through the command lines' own terminate handler
   (`src/cli/terminate.cpp`, the only `-fexceptions` file; libstdc++'s links the C++ demangler,
   61 KB). A call-graph profile with
   `perf --call-graph=dwarf` needs a build with `-fasynchronous-unwind-tables`, and without
@@ -1065,6 +1106,12 @@ GitHub CI entry points:
   that grows by pieces through `TailWriter`, not per-byte `push_back`. A `TailWriter` writes
   past the string's size until it ends: nothing else may append to that string meanwhile. Grow
   a string that is then written whole with `ResizeForOverwrite`, not `resize` (which fills it).
+- `math_parser.cpp`, `math_layout.cpp` and `cff.cpp` stay at `-Os` but take GCC's
+  `small_step_options` (`CMakeLists.txt`): `-mstringop-strategy=vector_loop` and
+  `--param=max-inline-insns-size=12`. At plain `-Os` their small struct copies and zeroing are
+  `rep movs`/`rep stos` and every one-line helper a call (tester.md x700 10.8 % slower). A unit
+  that runs a step a node or a glyph and must stay small belongs there, not at `-O2` (52 KB for
+  math). `MathFormula::Layout`'s parse arena is the thread's (`RAYOMD_THREAD_OBJECT`).
 - Keep image caches bounded. Image support can dominate memory on large or many
   remote images.
 - Linux benchmarks are much faster on native/ext4 storage than on `/mnt/*` WSL

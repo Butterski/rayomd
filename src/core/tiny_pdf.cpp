@@ -1757,9 +1757,13 @@ public:
     }
     void MarkPlain(uint16_t unit) { plain[unit >> 6] |= 1ull << (unit & 63); }
 
+    // The recorded CIDs in ascending order. From kSortFromBits of them on, they are read off the
+    // bits in order (1,024 words, a few instructions each, and one store a CID) instead of sorted:
+    // a page of CJK text has thousands, which std::sort took 1.4 M instructions for.
     const CidList& Values() const {
         if (!sorted) {
-            std::sort(values.begin(), values.end());
+            if (values.size() < kSortFromBits) std::sort(values.begin(), values.end());
+            else ValuesFromBits();
             sorted = true;
         }
         return values;
@@ -1788,6 +1792,18 @@ public:
     uint32_t missingBmp = 0;
 
 private:
+    static constexpr size_t kSortFromBits = 256;
+
+    // `values` rewritten in ascending order from `bits`, which hold exactly its CIDs.
+    RAYOMD_NOINLINE void ValuesFromBits() const {
+        uint16_t* out = values.data();
+        for (uint32_t word = 0; word < bits.size(); word++) {
+            for (uint64_t set = bits[word]; set != 0; set &= set - 1) {
+                *out++ = (uint16_t)(word * 64 + RayoMd::Text::Detail::LowestBit64(set));
+            }
+        }
+    }
+
     std::array<uint64_t, 1024> bits;
     std::array<uint64_t, 1024> plain;
     mutable CidList values;
@@ -3057,10 +3073,12 @@ public:
 #endif
 
     // `embedBase`: ImageSource::base, the folder of a note the document embeds that the image is of.
-    bool Resolve(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t embedBase) {
+    // `stamp`: the file's (RayoMd::File::StampOf) as it is found, before anything reads it.
+    bool Resolve(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t embedBase,
+        RayoMd::File::Stamp& stamp) {
         if (src.empty() || IsHttpUrl(src)) return false;
-        if (embedBase != 0) return ResolveEmbedded(src, key, pathUtf8, embedBase);
-        if (allowUnsafe) return ResolveUnsafe(src, key, pathUtf8);
+        if (embedBase != 0) return ResolveEmbedded(src, key, pathUtf8, embedBase, stamp);
+        if (allowUnsafe) return ResolveUnsafe(src, key, pathUtf8, stamp);
         if (!hasSourcePath || IsUnsafeLocalImageSource(src)) return false;
 
         const RayoMd::File::Path& root = SafeRoot();
@@ -3074,12 +3092,25 @@ public:
             if (!chapterRootValid) return false;
             base = &chapterRoot;
         }
+        const RayoMd::File::Path joined = Joined(*base, PathFromUtf8(src));
+#ifndef _WIN32
+        // A file found in this root before, while it is the file found then: one stat, where
+        // resolving it takes one a component of its path (Internal::KeptImagePath).
+        pathUtf8 = Internal::KeptImagePath(joined, root, stamp);
+        if (!pathUtf8.empty()) {
+            key = "file:" + pathUtf8;
+            return true;
+        }
+#endif
         RayoMd::File::Path normalized;
-        if (!TryCanonicalForPolicy(Joined(*base, PathFromUtf8(src)), normalized) ||
-            !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
+        if (!TryCanonicalForPolicy(joined, normalized) || !IsPathContainedInRoot(normalized, root, safeRootDirect)) return false;
 
         pathUtf8 = PathToUtf8(normalized);
         key = "file:" + pathUtf8;
+        stamp = RayoMd::File::StampOf(normalized);
+#ifndef _WIN32
+        Internal::KeepImagePath(joined, root, pathUtf8, stamp);
+#endif
         return true;
     }
 
@@ -3111,7 +3142,8 @@ private:
     }
 
     // An image of a note the document embeds: from that note's folder, inside the root.
-    RAYOMD_COLD bool ResolveEmbedded(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t base) {
+    RAYOMD_COLD bool ResolveEmbedded(const std::string& src, std::string& key, std::string& pathUtf8, uint32_t base,
+        RayoMd::File::Stamp& stamp) {
         const std::string* folder = Internal::EmbedFolder(base);
         if (folder == nullptr || !hasSourcePath || (!allowUnsafe && IsUnsafeLocalImageSource(src))) return false;
         RayoMd::File::Path normalized;
@@ -3122,6 +3154,7 @@ private:
         }
         pathUtf8 = PathToUtf8(normalized);
         key = "file:" + pathUtf8;
+        stamp = RayoMd::File::StampOf(normalized);
         return true;
     }
 
@@ -3135,7 +3168,7 @@ private:
         return safeRoot;
     }
 
-    bool ResolveUnsafe(const std::string& src, std::string& key, std::string& pathUtf8) {
+    bool ResolveUnsafe(const std::string& src, std::string& key, std::string& pathUtf8, RayoMd::File::Stamp& stamp) {
         RayoMd::File::Path path = PathFromUtf8(src);
         if (!RayoMd::File::IsAbsolute(RayoMd::File::PathView(path)) && hasSourcePath) {
             PrepareBases();
@@ -3146,6 +3179,7 @@ private:
         if (!TryCanonicalForPolicy(path, normalized)) return false;
         pathUtf8 = PathToUtf8(normalized);
         key = "file:" + pathUtf8;
+        stamp = RayoMd::File::StampOf(normalized);
         return true;
     }
 
@@ -4319,6 +4353,7 @@ public:
     // be read or decoded.
     RAYOMD_COLD bool ResolveThemeFile(const std::string& pathUtf8, int& index) {
         RayoMd::File::Path normalized;
+        RayoMd::File::Stamp stamp;
 #ifdef _WIN32
         // Theme assets are local files: a UNC, device or network-drive path is refused before
         // anything opens it, so a theme cannot make the build connect to a share.
@@ -4326,18 +4361,34 @@ public:
             failed++;
             return false;
         }
-#endif
         if (!TryCanonicalForPolicy(PathFromUtf8(pathUtf8), normalized)) {
             failed++;
             return false;
         }
+        stamp = RayoMd::File::StampOf(normalized);
+#else
+        // Resolved with one stat while it is the file resolved before (Internal::KeptImagePath, no root).
+        RayoMd::File::Path absolute;
+        if (!RayoMd::File::Absolute(PathFromUtf8(pathUtf8), absolute)) {
+            failed++;
+            return false;
+        }
+        normalized = Internal::KeptImagePath(absolute, {}, stamp);
+        if (normalized.empty()) {
+            if (!TryCanonicalForPolicy(absolute, normalized)) {
+                failed++;
+                return false;
+            }
+            stamp = RayoMd::File::StampOf(normalized);
+            Internal::KeepImagePath(absolute, {}, normalized, stamp);
+        }
+#endif
         const std::string key = "file:" + PathToUtf8(normalized);
         auto known = indexByKey.find(key);
         if (known != indexByKey.end()) {
             index = known->second;
             return true;
         }
-        const RayoMd::File::Stamp stamp = RayoMd::File::StampOf(normalized);
         std::string keyStorage;
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
         if (sharedImage && !budget.Take(sharedImage->decodedPixels)) {
@@ -4347,8 +4398,9 @@ public:
         if (!sharedImage) {
             std::vector<uint8_t> bytes;
             budget.refused = false;
-            if (IsKnownFailure(key, stamp) || !ReadLocalImageFile(PathToUtf8(normalized), bytes) ||
-                bytes.size() > kMaxImageBytes || !Decode(key, stamp, bytes, sharedImage)) {
+            if (IsKnownFailure(key, stamp) || (!TakeConvertedSvg(key, stamp, sharedImage) &&
+                (!ReadLocalImageFile(PathToUtf8(normalized), bytes) || bytes.size() > kMaxImageBytes ||
+                !Decode(key, stamp, bytes, sharedImage)))) {
                 if (!BuildCancelled() && !budget.refused) StoreFailure(key, stamp);
                 failed++;
                 return false;
@@ -4376,6 +4428,8 @@ private:
 
         std::string key;
         std::string localPathUtf8;
+        // A local file is taken from the process's caches only while it is the file they read.
+        RayoMd::File::Stamp stamp;
 #ifdef _WIN32
         WinLocalImageFile localFile;
         bool directLocal = false;
@@ -4389,9 +4443,10 @@ private:
             DirectLocalImageResult direct = localPolicy.TryOpenDirect(src, key, localFile, base);
             if (direct == DirectLocalImageResult::Rejected) return false;
             directLocal = direct == DirectLocalImageResult::Opened;
-            if (!directLocal && !localPolicy.Resolve(src, key, localPathUtf8, base)) return false;
+            if (directLocal) stamp = localFile.stamp;
+            else if (!localPolicy.Resolve(src, key, localPathUtf8, base, stamp)) return false;
 #else
-            if (!localPolicy.Resolve(src, key, localPathUtf8, base)) return false;
+            if (!localPolicy.Resolve(src, key, localPathUtf8, base, stamp)) return false;
 #endif
         }
 
@@ -4402,18 +4457,11 @@ private:
             return true;
         }
 
-        // A local file is taken from the process's caches only while it is the file they read.
-        RayoMd::File::Stamp stamp;
-#ifdef _WIN32
-        if (directLocal) stamp = localFile.stamp;
-        else
-#endif
-        if (!isUrl) stamp = RayoMd::File::StampOf(PathFromUtf8(localPathUtf8));
         std::string keyStorage;
         SharedPdfImage sharedImage = LoadDecodedImageFromCache(CacheKey(key, keyStorage), stamp);
         if (sharedImage && !budget.Take(sharedImage->decodedPixels)) return false;
         if (!sharedImage && IsKnownFailure(key, stamp)) return false;
-        if (!sharedImage) {
+        if (!sharedImage && !TakeConvertedSvg(key, stamp, sharedImage)) {
             std::vector<uint8_t> bytes;
             budget.refused = false;
             bool loaded = false;
@@ -4453,17 +4501,13 @@ public:
 
 private:
     // `bytes` as an image: an SVG converted for this document, as its forms name the document's
-    // fonts, else a PNG or JPEG decoded and kept for later documents, and a re-encoded PNG in
-    // options.imageCacheDirectory for later processes too.
+    // fonts and images (ConvertSvgFile), else a PNG or JPEG decoded and kept for later documents,
+    // and a re-encoded PNG in options.imageCacheDirectory for later processes too.
     bool Decode(const std::string& key, const RayoMd::File::Stamp& stamp, const std::vector<uint8_t>& bytes,
         SharedPdfImage& shared) {
         PdfImage image;
         const std::string_view view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-        if (Internal::LooksLikeSvg(view)) {
-            if (!ConvertSvgImage(view, image)) return false;
-            shared = std::make_shared<PdfImage>(std::move(image));
-            return true;
-        }
+        if (Internal::LooksLikeSvg(view)) return ConvertSvgFile(key, stamp, view, shared);
         if (!DecodeImageBytes(bytes, image, options.imageCacheDirectory, options.fastImages, &budget)) return false;
         std::string keyStorage;
         shared = StoreDecodedImageInCache(CacheKey(key, keyStorage), stamp, std::move(image));
@@ -4481,6 +4525,24 @@ private:
     // An SVG as a form XObject (svg.h), its text in the document's font; defined after the hosts.
     // With `runs`, the Unicode renderer's text runs are noted there in order.
     RAYOMD_COLD bool ConvertSvgImage(std::string_view svg, PdfImage& image, std::vector<Internal::SvgTextRun>* runs = nullptr);
+    // The SVG file or URL `key`, read with `stamp`, converted (ConvertSvgImage) and kept for the
+    // process (Internal::KeepConvertedSvg) with the data: images it registered, unless the build's
+    // decode budget refused one, which a later build need not, or the build was cancelled.
+    RAYOMD_COLD bool ConvertSvgFile(const std::string& key, const RayoMd::File::Stamp& stamp, std::string_view svg,
+        SharedPdfImage& shared);
+    // The form ConvertSvgFile kept for `key` with `stamp` this renderer made with its data: images
+    // where they would go now: those images registered again, charged to the decode budget as
+    // AddDecoded charges a kept image, and its text's glyphs added to the sets. False, and nothing
+    // changed, when there is none or the budget refuses an image: the file is then read and
+    // converted, which does what it does without a cache.
+    RAYOMD_COLD bool TakeConvertedSvg(const std::string& key, const RayoMd::File::Stamp& stamp, SharedPdfImage& shared);
+    // What decides the forms of this registry's SVG files besides their bytes.
+    Internal::SvgFileKey SvgKey(const std::string& key) const {
+        return { svgFont != nullptr, svgFont != nullptr ? svgFont->loadId : 0, svgBoldFont != nullptr ? svgBoldFont->loadId : 0, key };
+    }
+    // The glyphs of a kept form's text (AddDiagram, TakeConvertedSvg) added to the document's sets,
+    // as converting it added them.
+    RAYOMD_COLD void ReplaySvgText(const std::vector<Internal::SvgTextRun>& runs);
 
     const PdfOptions& options;
     LocalImagePolicy localPolicy;
@@ -4673,6 +4735,55 @@ bool ImageRegistry::ConvertSvgImage(std::string_view svg, PdfImage& image, std::
     return true;
 }
 
+void ImageRegistry::ReplaySvgText(const std::vector<Internal::SvgTextRun>& runs) {
+    for (const Internal::SvgTextRun& run : runs) {
+        CidText(run.bold ? *svgBoldFont : *svgFont, run.text, run.bold ? *svgBoldCids : *svgCids);
+    }
+}
+
+bool ImageRegistry::ConvertSvgFile(const std::string& key, const RayoMd::File::Stamp& stamp, std::string_view svg,
+    SharedPdfImage& shared) {
+    const size_t base = images.size();
+    const uint32_t refused = failed;   // AddDecoded counts an image the budget refused
+    const std::shared_ptr<Internal::ConvertedSvg> kept = Internal::NewConvertedSvg();
+    Internal::CountSvgFileConversion();
+    PdfImage image;
+    if (!ConvertSvgImage(svg, image, svgFont != nullptr ? &kept->runs : nullptr)) return false;
+    shared = std::make_shared<PdfImage>(std::move(image));
+    if (failed != refused || BuildCancelled()) return true;
+    const Internal::SvgForm& form = *shared->svg;
+    size_t bytes = form.content.size() + form.extGStates.size() + form.shadings.size();
+    for (size_t index = base; index < images.size(); index++) {
+        kept->images.push_back(images[index]);
+        bytes += ImageCacheCost(*images[index]);
+    }
+    kept->image = shared;
+    kept->base = base;
+    kept->stamp = stamp;
+    Internal::KeepConvertedSvg(SvgKey(key), kept, bytes);
+    return true;
+}
+
+bool ImageRegistry::TakeConvertedSvg(const std::string& key, const RayoMd::File::Stamp& stamp, SharedPdfImage& shared) {
+    const std::shared_ptr<const Internal::ConvertedSvg> kept = Internal::FindConvertedSvg(SvgKey(key), stamp, images.size());
+    if (!kept) return false;
+    const DecodeBudget before = budget;
+    for (const std::shared_ptr<const void>& raster : kept->images) {
+        SharedPdfImage image = std::static_pointer_cast<const PdfImage>(raster);
+        if (!budget.Take(image->decodedPixels)) {
+            budget = before;
+            images.resize(kept->base);
+            return false;
+        }
+        images.push_back(std::move(image));
+    }
+    // What ConvertSvgImage left behind besides: the flag, and the glyphs in the sets.
+    svgAttempted = true;
+    ReplaySvgText(kept->runs);
+    shared = std::static_pointer_cast<const PdfImage>(kept->image);
+    return true;
+}
+
 bool ImageRegistry::AddDiagram(std::string_view source, int& index) {
     if (!options.diagrams) return false;
     Internal::Mermaid::Palette palette = options.blackText ? Internal::Mermaid::kPrintPalette : Internal::Mermaid::kDefaultPalette;
@@ -4684,9 +4795,7 @@ bool ImageRegistry::AddDiagram(std::string_view source, int& index) {
     if (const std::shared_ptr<const Internal::DrawnDiagram> cached = Internal::FindDrawnDiagram(key)) {
         // What ConvertSvgImage left behind for the first build: the flag, and the glyphs in the sets.
         svgAttempted = true;
-        for (const Internal::SvgTextRun& run : cached->runs) {
-            CidText(run.bold ? *svgBoldFont : *svgFont, run.text, run.bold ? *svgBoldCids : *svgCids);
-        }
+        ReplaySvgText(cached->runs);
         index = (int)images.size();
         images.push_back(std::static_pointer_cast<const PdfImage>(cached->image));
         return true;
@@ -13463,6 +13572,10 @@ RAYOMD_COLD static Internal::LayoutCids SessionCidSet(UsedCidSet* set) {
     return cids;
 }
 
+RAYOMD_COLD static void SessionStartPage(std::string& content, std::vector<size_t>& pageStarts) {
+    StartPageContent(content, pageStarts);
+}
+
 template <typename RendererType>
 struct SessionAccess {
     static constexpr bool kUnicode = std::is_same<RendererType, Renderer>::value;
@@ -13503,6 +13616,8 @@ struct SessionAccess {
         target.contentsLines = &r.contentsLines;
         target.pageBottoms = r.pageBottoms;
         target.glyphs = r.math.GlyphUse();
+        target.startPage = SessionStartPage;
+        target.gapBefore = PageGapBefore;
         if constexpr (kUnicode) {
             target.cids[0] = SessionCidSet(&r.usedCids);
             for (int face = 0; face < 3; face++) target.cids[face + 1] = SessionCidSet(r.faceCids[face].get());
@@ -13609,11 +13724,13 @@ RAYOMD_COLD Internal::SessionCalls Internal::SessionRendererCalls() {
 
 // Page content is rendered straight into the output buffer. A buffer the caller reuses
 // keeps its capacity; a new one starts at the size a document of this length usually
-// needs, so it does not grow several times while the pages are rendered.
+// needs, so it does not grow several times while the pages are rendered, and with the gap
+// left before the first page (StartPageContent): the objects before it, its images' streams
+// among them, which would else be copied when the first page's content outgrew the gap.
 static void PrepareOutput(std::string& pdfBytes, size_t expectedBytes) {
     constexpr size_t kMaxInitialReserve = 64u * 1024u * 1024u;
     pdfBytes.clear();
-    expectedBytes = std::min(expectedBytes, kMaxInitialReserve);
+    expectedBytes = std::min(expectedBytes, kMaxInitialReserve) + PageGapBefore(0);
     if (pdfBytes.capacity() < expectedBytes) pdfBytes.reserve(expectedBytes);
 }
 
@@ -13666,7 +13783,13 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     const PdfOptions& options, std::string& pdfBytes, BuildResult& stats, const BookSource* book = nullptr) {
     // Character references come out as the WinAnsi codes the standard fonts show.
     const Internal::WinAnsiReferences references;
+#ifdef RAYOMD_BUILD_SESSION
+    // A BuildSession's builds parse into its blocks, which its next build's parse reuses.
+    std::vector<Block> ownBlocks;
+    std::vector<Block>& blocks = Internal::BuildBlocks(ownBlocks, book);
+#else
     std::vector<Block> blocks;
+#endif
     Internal::Footnotes footnotes;
     std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
     std::unique_ptr<BookParse> bookParse;   // a book's files: off the stack, which single documents keep as it was
@@ -13685,8 +13808,8 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     std::vector<Internal::HeadingNumber> numbers;   // --number-headings
     if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
     PdfObjects pdf;
-    // No gaps for a session build: it copies the last build's page content (build_session.h).
-    if (!options.blackText && !options.compress && Internal::CurrentLayoutSession() == nullptr) pdf.LeaveGaps();
+    // A session's build replays page content page by page, each after its gap (build_session.cpp).
+    if (!options.blackText && !options.compress) pdf.LeaveGaps();
     int pagesId = pdf.Reserve();
     // WinAnsiEncoding: without it the fonts' built-in StandardEncoding shows the straight
     // quote and the backtick as curly quotes, and transcoded Latin text has no codes above
@@ -13961,12 +14084,6 @@ struct FallbackChoice {
 // Each candidate is read once, for the characters it covers; one stays in memory once it is
 // chosen, and is never freed then.
 RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, const CidList& used) {
-    // Control characters have no glyph anywhere: no reason to change fonts.
-    auto missingIn = [&](auto&& hasGlyph) {
-        size_t count = 0;
-        for (uint16_t cid : used) count += cid >= 0x20 && !hasGlyph(cid);
-        return count;
-    };
     auto hasLayoutChars = [](auto&& hasGlyph) {
         for (const uint16_t cid : kLayoutChars) {
             if (!hasGlyph(cid)) return false;
@@ -13974,8 +14091,34 @@ RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, con
         return true;
     };
     bool stable = hasLayoutChars([&](uint16_t cid) { return primary.HasGlyph(cid); });
-    size_t fewest = missingIn([&](uint16_t cid) { return primary.HasGlyph(cid); });
+    // Control characters have no glyph anywhere: no reason to change fonts.
+    size_t fewest = 0;
+    for (const uint16_t cid : used) fewest += cid >= 0x20 && !primary.HasGlyph(cid);
     if (fewest == 0) return { nullptr, stable };
+    // The others as bits in `wanted`, in the words listed in `words`, so that a candidate's count
+    // takes a word at a time: a page of CJK has thousands of characters (each `used` CID comes once).
+    uint64_t wanted[1024];
+    uint16_t words[1024];
+    uint64_t touched[16] = {};
+    size_t wordCount = 0;
+    for (const uint16_t cid : used) {
+        if (cid < 0x20) continue;
+        const uint32_t word = cid >> 6;
+        const uint64_t wordBit = 1ull << (word & 63);
+        if ((touched[word >> 6] & wordBit) == 0) {
+            touched[word >> 6] |= wordBit;
+            wanted[word] = 0;
+            words[wordCount++] = (uint16_t)word;
+        }
+        wanted[word] |= 1ull << (cid & 63);
+    }
+    const auto missingIn = [&](const std::vector<uint64_t>& coverage) {
+        size_t count = 0;
+        for (size_t index = 0; index < wordCount; index++) {
+            for (uint64_t missing = wanted[words[index]] & ~coverage[words[index]]; missing != 0; missing &= missing - 1) count++;
+        }
+        return count;
+    };
 
     struct Candidate {
         bool probed = false;
@@ -14003,7 +14146,7 @@ RAYOMD_COLD static FallbackChoice ChooseFallbackFont(const TtfFont& primary, con
         if (candidate.coverage.empty()) continue;
         const auto covers = [&](uint16_t cid) { return (candidate.coverage[cid >> 6] >> (cid & 63)) & 1; };
         stable = stable && hasLayoutChars(covers);
-        const size_t count = missingIn(covers);
+        const size_t count = missingIn(candidate.coverage);
         if (count < fewest) {
             best = index;
             fewest = count;
@@ -14268,7 +14411,13 @@ RAYOMD_COLD static void ThemeFaceStyle(const TtfFont& face, int& flags, int& ita
 static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& font, const PdfOptions& options,
     std::string& pdfBytes, FallbackCheck* check, size_t& missingCharacters, BuildResult& stats,
     const BookSource* book = nullptr, const ThemeFaces* faces = nullptr) {
+#ifdef RAYOMD_BUILD_SESSION
+    // A BuildSession's builds parse into its blocks, which its next build's parse reuses.
+    std::vector<Block> ownBlocks;
+    std::vector<Block>& blocks = Internal::BuildBlocks(ownBlocks, book);
+#else
     std::vector<Block> blocks;
+#endif
     Internal::Footnotes footnotes;
     std::vector<Internal::ContentsEntry> contents;   // the entries of the table of contents, if any
     std::unique_ptr<BookParse> bookParse;   // a book's files: off the stack, which single documents keep as it was
@@ -14288,8 +14437,8 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (options.numberHeadings > 0) numbers = NumberDocument(options, blocks, book, bookParse.get(), contents);
 
     PdfObjects pdf;
-    // No gaps for a session build: it copies the last build's page content (build_session.h).
-    if (!options.blackText && !options.compress && Internal::CurrentLayoutSession() == nullptr) pdf.LeaveGaps();
+    // A session's build replays page content page by page, each after its gap (build_session.cpp).
+    if (!options.blackText && !options.compress) pdf.LeaveGaps();
 
     int fontFileId = pdf.Reserve();
     int cidMapId = pdf.Reserve();

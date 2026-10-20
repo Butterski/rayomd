@@ -305,6 +305,13 @@ struct Checkpoint {
     int orphans;
 };
 
+// An open environment's name. Trivial, so that a Parser (one per formula) starts without zeroing
+// a string_view array: only the entries below envTop_ are ever read.
+struct EnvName {
+    const char* data;
+    size_t size;
+};
+
 class Parser {
 public:
     Parser(std::string_view tex, bool display, bool hasFallback, MathParseResult& out)
@@ -536,7 +543,7 @@ private:
     uint8_t leftBraceBase_[kScopeCapacity];   // brace depth at which each open \left started
     uint8_t optionalBrace_[kScopeCapacity];   // brace and \left depth of each open [..] argument
     uint8_t optionalLeft_[kScopeCapacity];
-    std::string_view envNames_[kScopeCapacity];
+    EnvName envNames_[kScopeCapacity];
     IndexStack stack_;
     uint16_t bracesLocal_[kInlineBraces];
     std::vector<uint16_t> bracesHeap_;
@@ -546,8 +553,9 @@ private:
 // Lexer
 // ------------------------------------------------------------------------------------------
 
-// One pass: closeOf_[p] = position of the '}' matching the '{' at p. A backslash escapes the next
-// byte. Every "is this group balanced" question is answered from this table in O(1).
+// One pass: closeOf_[p] = position of the '}' matching the '{' at p, kNoBrace when it has none.
+// A backslash escapes the next byte. Only the entries of '{' bytes are written, escaped ones too:
+// every "is this group balanced" question is asked of a '{' and answered from this table in O(1).
 void Parser::MatchBraces() {
     if (!size_ || !std::memchr(s_, '{', size_)) return;
     uint16_t* table = bracesLocal_;
@@ -555,12 +563,16 @@ void Parser::MatchBraces() {
         bracesHeap_.resize(size_);
         table = bracesHeap_.data();
     }
-    std::memset(table, 0xFF, size_ * sizeof(uint16_t));
     for (uint32_t i = 0; i < size_; i++) {
         const char c = s_[i];
-        if (c == '\\') i++;
-        else if (c == '{') stack_.Push(static_cast<uint16_t>(i));
-        else if (c == '}' && stack_.size) table[stack_.data[--stack_.size]] = static_cast<uint16_t>(i);
+        if (c == '\\') {
+            if (++i < size_ && s_[i] == '{') table[i] = kNoBrace;
+        } else if (c == '{') {
+            table[i] = kNoBrace;
+            stack_.Push(static_cast<uint16_t>(i));
+        } else if (c == '}' && stack_.size) {
+            table[stack_.data[--stack_.size]] = static_cast<uint16_t>(i);
+        }
     }
     stack_.size = 0;
     closeOf_ = table;
@@ -671,7 +683,7 @@ bool Parser::IsStop(const Token& token) const {
         uint32_t after = 0;
         if (!PeekEnvName(token.end, name, after)) return false;
         for (int i = envFloor_; i < envTop_; i++) {
-            if (envNames_[i] == name) return true;
+            if (std::string_view(envNames_[i].data, envNames_[i].size) == name) return true;
         }
         return false;
     }
@@ -1657,7 +1669,7 @@ uint16_t Parser::ParseEnvironment() {
         }
         if (env.args != kEnvArgsOptAlign) ParseColSpec(RawBraced(), spec);
     }
-    if (envTop_ < kScopeCapacity) envNames_[envTop_++] = name;
+    if (envTop_ < kScopeCapacity) envNames_[envTop_++] = {name.data(), name.size()};
     else Fail();
     Rows rows;
     ParseRows(env.columns == kEnvColsPairs ? kRowsPairs : kRowsCentre, false, true, rows);

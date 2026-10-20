@@ -557,6 +557,59 @@ std::string ResolvedFilePath(std::string_view path, std::string_view folder) {
     return ResolvedPath(path);
 }
 
+#ifndef _WIN32
+namespace {
+
+constexpr size_t kMaxKeptImagePaths = 4096;
+
+struct KeptImage {
+    std::string resolved;
+    RayoMd::File::Stamp stamp;
+};
+
+struct KeptImagePaths {
+    std::mutex mutex;
+    std::unordered_map<std::string, KeptImage> paths;   // by root, '\0' and the path
+};
+
+// Never destroyed, as TheKept.
+KeptImagePaths& TheImagePaths() {
+    static KeptImagePaths* const kept = new KeptImagePaths;
+    return *kept;
+}
+
+std::string ImagePathKey(std::string_view path, std::string_view root) {
+    std::string key;
+    key.reserve(root.size() + 1 + path.size());
+    key.append(root.data(), root.size());
+    key += '\0';
+    key.append(path.data(), path.size());
+    return key;
+}
+
+} // namespace
+
+std::string KeptImagePath(const std::string& path, std::string_view root, RayoMd::File::Stamp& stamp) {
+    stamp = RayoMd::File::StampOf(path);
+    if (stamp == RayoMd::File::Stamp()) return {};
+    const std::string key = ImagePathKey(path, root);
+    KeptImagePaths& kept = TheImagePaths();
+    const std::lock_guard<std::mutex> lock(kept.mutex);
+    const auto found = kept.paths.find(key);
+    return found != kept.paths.end() && found->second.stamp == stamp ? found->second.resolved : std::string();
+}
+
+void KeepImagePath(const std::string& path, std::string_view root, const std::string& resolved,
+    const RayoMd::File::Stamp& stamp) {
+    if (stamp == RayoMd::File::Stamp()) return;
+    std::string key = ImagePathKey(path, root);
+    KeptImagePaths& kept = TheImagePaths();
+    const std::lock_guard<std::mutex> lock(kept.mutex);
+    if (kept.paths.size() >= kMaxKeptImagePaths) kept.paths.clear();
+    kept.paths[std::move(key)] = KeptImage{ resolved, stamp };
+}
+#endif
+
 Vault::Vault(const std::string& vaultRoot, const std::string& notePath, size_t maxIndexEntries)
     : indexLimit(maxIndexEntries) {
     std::string_view folder = vaultRoot;

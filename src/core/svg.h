@@ -60,5 +60,9 @@ bool ConvertSvg(std::string_view svg, SvgHost& host, SvgForm& form);
 // process: each once, kept by its SHA-256 for later builds (tiny_pdf.cpp's ImageRegistry). Read by
 // the tests.
 uint64_t SvgImageDecodes();
+// How many SVG files and URLs the documents' builds have converted in this process: each once for
+// its stamp, renderer and place among the images, the form kept for later builds (tiny_pdf.cpp's
+// ImageRegistry::ConvertSvgFile, diagram_cache.h). Read by the tests.
+uint64_t SvgFileConversions();
 
 } // namespace TinyPdf::Internal

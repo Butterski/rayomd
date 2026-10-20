@@ -6,6 +6,7 @@
 #include "math_parser.h"
 #include "../common/exact_math.h"
 #include "../common/text_utils.h"
+#include "../common/thread_object.h"
 
 #include <algorithm>
 #include <charconv>
@@ -1673,7 +1674,9 @@ const std::array<StandardWordAdvances, 3> kStandardWordAdvances = MakeStandardWo
 MathFormula MathFormula::Layout(std::string_view tex, double fontSize, bool display,
                                 const MathFallbackFont* fallback, double maxWidth, bool bold,
                                 double maxHeight) {
-    MathParseResult parsed;
+    // The arena is the thread's, kept from formula to formula (at most kMathMaxSourceBytes + 16
+    // nodes, 262 KB): one allocation a formula less.
+    RAYOMD_THREAD_OBJECT(MathParseResult, parsed);
     ParseMath(tex, display, fallback != nullptr, parsed);
     return LayoutParsed(parsed, tex, fontSize, display, fallback, maxWidth, bold, maxHeight);
 }

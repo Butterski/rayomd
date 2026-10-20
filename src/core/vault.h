@@ -61,6 +61,21 @@ std::string CachedResolvedPath(std::string_view path, bool* directory = nullptr)
 // ResolvedPath of the file at `path`, whose folder (ParentOf, "." for none) resolves to `folder`:
 // on POSIX that and the file's name when it is no symbolic link (one lstat), else ResolvedPath.
 std::string ResolvedFilePath(std::string_view path, std::string_view folder);
+#ifndef _WIN32
+// A document's image file that a build's policy (tiny_pdf.cpp's LocalImagePolicy) resolved to
+// `resolved` inside its root `root` from `path`, the root and the image's source joined, and found
+// with `stamp` (of `resolved`, after it was resolved); a theme's logo (ResolveThemeFile) by its
+// absolute path with an empty root, which nothing confines. Kept for the process, at most 4,096. Asked
+// again, `path` is resolved from the cache while it still names a file of the same stamp (one stat:
+// size, last write, status change, device and inode; `stamp` is set to what it is now, all zero
+// when nothing is there), else empty, and the policy resolves it as if it had never met it. A file
+// that changed, moved, or that `path` reaches through another link is resolved again: only the
+// same file by another route that leaves its stamp as it was (a hard link made before, a bind
+// mount) keeps the answer, which then names that same file inside the root.
+std::string KeptImagePath(const std::string& path, std::string_view root, RayoMd::File::Stamp& stamp);
+void KeepImagePath(const std::string& path, std::string_view root, const std::string& resolved,
+    const RayoMd::File::Stamp& stamp);
+#endif
 
 struct NameIndex;
 

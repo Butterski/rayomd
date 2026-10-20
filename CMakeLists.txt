@@ -90,6 +90,13 @@ function(rayomd_release_flags target)
                     $<$<CONFIG:Release>:-Wl,--gc-sections>)
             endif()
         endif()
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+            # No padding before jump targets: GCC aligns a target that only jumps reach to 16 bytes
+            # (up to 10 bytes of no-ops, which nothing executes, as the code before it jumps away),
+            # some 15 KB of the code. The same instructions run (callgrind: the eight warm
+            # fixtures within +0.02 %), cycles within the A/A noise. Loops keep their alignment.
+            target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-falign-jumps=1>)
+        endif()
     endif()
 endfunction()
 
@@ -220,6 +227,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/common/thread_object.cpp
         src/core/build_session.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
+    # A formula is parsed and laid out a node at a time, and a document such as tester.md has
+    # thousands: at -Os GCC copies and zeroes the layout's 64-byte boxes with `rep movs`/`rep stos`,
+    # which take tens of cycles to start, and calls every one-line helper. Vector loops for those
+    # and inlining up to 12 instructions: tester.md x700 -10.8 % cycles for 9 KB, where -O2 gave
+    # -15.7 % for 52 KB. The CFF subsetter interprets every charstring a CJK document shows the
+    # same way: a fresh export of a page of CJK -12.7 % for 2.2 KB (performance.md, round 5).
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        include(CheckCXXCompilerFlag)
+        check_cxx_compiler_flag(-mstringop-strategy=vector_loop RAYOMD_HAVE_STRINGOP_STRATEGY)
+        set(small_step_options -Os --param=max-inline-insns-size=12)
+        if(RAYOMD_HAVE_STRINGOP_STRATEGY)
+            list(APPEND small_step_options -mstringop-strategy=vector_loop)
+        endif()
+        set_source_files_properties(src/core/math_parser.cpp src/core/math_layout.cpp src/core/cff.cpp
+            PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:${small_step_options}>")
+    endif()
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
     # RayoMD's streams at half the code; the inflater, 1.5 % slower than -O3 at 8.9 KB of code
     # against 17.7. The highlighter's lexers read every byte of a code block: 1.5 times as fast at
@@ -294,7 +317,8 @@ set(RAYOMD_CORE_SOURCES
 # BuildSession (incremental builds for an editor's preview): only the engine library and the core
 # tests have it, compiled with RAYOMD_BUILD_SESSION; the command lines make no session and carry
 # none of its code (MinGW's linker kept 24 KB of it in rayomd.exe when it was there unused).
-set(RAYOMD_SESSION_SOURCES src/core/build_session.cpp)
+# session_parse.cpp compiles markdown_parser.cpp a second time with the session's parse hooks.
+set(RAYOMD_SESSION_SOURCES src/core/build_session.cpp src/core/session_parse.cpp)
 
 if(NOT WIN32)
     if(RAYOMD_USE_CURL)
@@ -373,27 +397,19 @@ if(RAYOMD_BUILD_CLI)
             # Release builds, compiled without exceptions: libstdc++'s throws abort where they are
             # made (std_throws.cpp).
             target_sources(rayomd PRIVATE $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/std_throws.cpp>)
-            if(RAYOMD_STATIC)
-                target_sources(rayomd PRIVATE src/cli/terminate.cpp)
-            else()
-                # Release builds: a throw aborts without unwinding, and the unwind tables nothing
-                # reads are dropped; no_unwind.cpp's terminate handler takes terminate.cpp's place.
-                # Not static: glibc's libc.a links the unwinder for thread cancellation.
-                target_sources(rayomd PRIVATE
-                    $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.cpp>
-                    $<$<NOT:$<CONFIG:Release>>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/terminate.cpp>)
-                if(RAYOMD_HOT_SECTIONS)
-                    set(script "${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.ld")
-                    target_link_options(rayomd PRIVATE "$<$<CONFIG:Release>:-Wl,-T,${script}>")
-                    set_property(TARGET rayomd APPEND PROPERTY LINK_DEPENDS "${script}")
-                endif()
+            # Release builds: a throw aborts without unwinding, and the unwind tables nothing
+            # reads are dropped; no_unwind.cpp's terminate handler takes terminate.cpp's place.
+            # In the static build no_unwind.cpp also stands for what glibc's libc.a calls of
+            # libgcc's unwinder (a thread's exit and cancellation, stdio's cleanups), so it does
+            # not link libgcc_eh.a and its tables either (107 KB).
+            target_sources(rayomd PRIVATE
+                $<$<CONFIG:Release>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.cpp>
+                $<$<NOT:$<CONFIG:Release>>:${CMAKE_CURRENT_SOURCE_DIR}/src/cli/terminate.cpp>)
+            if(RAYOMD_HOT_SECTIONS)
+                set(script "${CMAKE_CURRENT_SOURCE_DIR}/src/cli/no_unwind.ld")
+                target_link_options(rayomd PRIVATE "$<$<CONFIG:Release>:-Wl,-T,${script}>")
+                set_property(TARGET rayomd APPEND PROPERTY LINK_DEPENDS "${script}")
             endif()
-        endif()
-        if(RAYOMD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
-            # No .eh_frame registration at startup: the unwinder reads PT_GNU_EH_FRAME (static_frames.cpp).
-            target_sources(rayomd PRIVATE src/cli/static_frames.cpp)
-            target_link_options(rayomd PRIVATE -Wl,--eh-frame-hdr -Wl,--wrap=__register_frame_info
-                -Wl,--wrap=__deregister_frame_info)
         endif()
         target_include_directories(rayomd PRIVATE include)
         target_link_libraries(rayomd PRIVATE Threads::Threads)
