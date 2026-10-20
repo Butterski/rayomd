@@ -242,13 +242,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         endif()
         set_source_files_properties(src/core/math_parser.cpp src/core/math_layout.cpp src/core/cff.cpp
             PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:${small_step_options}>")
-        # tiny_pdf.cpp: -O3's inlining budget 38 % of the unit (GCC's default 40) and no loop
-        # unswitching but in RenderMathTable (RAYOMD_UNSWITCH_LOOPS): the GCC 13 binary 8 KB smaller
-        # at the eight warm fixtures' instructions +0.18 % at most (notes.md). The budget is a share
-        # of the unit: a change to tiny_pdf.cpp moves what it buys (performance.md, round 6, for
-        # the curve down to 20 and -O2).
-        set_source_files_properties(src/core/tiny_pdf.cpp
-            PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:--param=inline-unit-growth=38;-fno-unswitch-loops>")
     endif()
     # The DEFLATE encoder of --compress and re-encoded images: -O2 is within 1 % of -O3 on
     # RayoMD's streams at half the code; the inflater, 1.5 % slower than -O3 at 8.9 KB of code

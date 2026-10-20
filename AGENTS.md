@@ -1109,13 +1109,6 @@ GitHub CI entry points:
   that grows by pieces through `TailWriter`, not per-byte `push_back`. A `TailWriter` writes
   past the string's size until it ends: nothing else may append to that string meanwhile. Grow
   a string that is then written whole with `ResizeForOverwrite`, not `resize` (which fills it).
-  It is built (GCC Release, `CMakeLists.txt`) with an inlining budget of 38 % of the unit
-  (`--param=inline-unit-growth=38`, GCC's `-O3` default 40) and without loop unswitching
-  (`-fno-unswitch-loops`), 8 KB of the binary; a loop that needs unswitching gets it in its own
-  function with `RAYOMD_UNSWITCH_LOOPS` (`RenderMathTable`), only on a function GCC never
-  inlines. Moving cold functions out of the unit into an `-Os` one buys nothing (round 6 in
-  performance.md): they are compiled for size already, the inlining they took GCC spends
-  elsewhere, and the other unit gets its own copies of the helpers they call.
 - `math_parser.cpp`, `math_layout.cpp` and `cff.cpp` stay at `-Os` but take GCC's
   `small_step_options` (`CMakeLists.txt`): `-mstringop-strategy=vector_loop` and
   `--param=max-inline-insns-size=12`. At plain `-Os` their small struct copies and zeroing are

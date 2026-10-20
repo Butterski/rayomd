@@ -102,10 +102,14 @@ t700 without its image lines is 2 ms faster, 17.6 -> 15.7), `TouchesImages` over
 build (3.5 % of the worker), why fortify slows `AddOutline` in GCC 16 builds, the first keystroke
 after a full build (p99 45 ms at 700 copies).
 
-## Round 6: package size (opt6/size, 2026-10-20)
+## Round 6: package size (opt6/size, 2026-10-20; measured, not taken)
 
 Against `53734af` (5.2.5 with round 5), GCC 13.3 unless named; instructions by `ab.sh
 --instructions` on the eight warm fixtures (callgrind), time its paired medians (A/A in brackets).
+Not taken at integration: on the merged tree (with opt6/gap), two paired `ab.sh` runs against the
+same tree without it gave time +0.38 % and +0.13 % geomean, README +0.53/+0.47 %, tester-noimg
++0.40/+0.57 %, code-heavy +0.40/+0.39 %: 8 KB is not worth it. The table and the curve below stay
+as the record of what size costs in `tiny_pdf.cpp`.
 
 | | 53734af | opt6/size | |
 |---|---:|---:|---:|
