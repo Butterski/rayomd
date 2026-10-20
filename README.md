@@ -6,7 +6,7 @@
 
 # RayoMD
 
-**Markdown to PDF in milliseconds, from a single small executable.**<br>
+**Markdown to PDF in under a millisecond, from a single small executable.**<br>
 No browser. No LaTeX. No Pandoc. No runtime.
 
 <a href="https://github.com/Butterski/rayomd/releases/latest"><img alt="Version: 5.2.5 MathTex" src="https://img.shields.io/badge/version-5.2.5%20MathTex-informational?style=for-the-badge"></a>
