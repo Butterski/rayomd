@@ -21,6 +21,7 @@ No browser. No LaTeX. No Pandoc. No runtime.
 <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
 <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2ea44f">
 <a href="https://github.com/Butterski/rayomd/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Butterski/rayomd?style=social"></a>
+<a href="https://cli.masoko.net/tools/rayomd/"><img alt="rayomd on The Terminal Index" src="https://cli.masoko.net/badge/rayomd.svg"></a>
 
 [**Download**](https://github.com/Butterski/rayomd/releases/latest) ·
 [Quick start](#quick-start) ·
@@ -42,7 +43,7 @@ No browser. No LaTeX. No Pandoc. No runtime.
 RayoMD parses Markdown and writes PDF bytes directly, in its own C++17 code: a small
 command-line tool for Linux and Windows, and an exporter you can embed through the
 [C++ API](https://github.com/Butterski/rayomd/wiki/C++-API). The desktop app for Linux and
-Windows is developed in a separate repository, RayoMD GUI.
+Windows, [RayoMD GUI](https://github.com/Butterski/rayomd-gui), lives in its own repository.
 
 ## Highlights
 
@@ -119,7 +120,7 @@ rayomd.exe --export input.md output.pdf
 ```
 
 Since 5.0.0, `rayomd.exe` started without arguments prints its usage; up to 4.7.0 it opened a
-desktop app, which RayoMD GUI replaces.
+desktop app, which [RayoMD GUI](https://github.com/Butterski/rayomd-gui) replaces.
 
 </details>
 
