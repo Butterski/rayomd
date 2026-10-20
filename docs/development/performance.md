@@ -102,6 +102,79 @@ t700 without its image lines is 2 ms faster, 17.6 -> 15.7), `TouchesImages` over
 build (3.5 % of the worker), why fortify slows `AddOutline` in GCC 16 builds, the first keystroke
 after a full build (p99 45 ms at 700 copies).
 
+## Round 6: package size (opt6/size, 2026-10-20)
+
+Against `53734af` (5.2.5 with round 5), GCC 13.3 unless named; instructions by `ab.sh
+--instructions` on the eight warm fixtures (callgrind), time its paired medians (A/A in brackets).
+
+| | 53734af | opt6/size | |
+|---|---:|---:|---:|
+| Linux dynamic, GCC 13 | 1,272,472 | 1,264,280 | -8,192 |
+| Linux dynamic, GCC 11 | 1,284,696 | 1,280,600 | -4,096 |
+| Linux static, GCC 13 | 2,182,928 | 2,178,832 | -4,096 |
+| Linux static, GCC 11 | 2,275,440 | 2,271,344 | -4,096 |
+| `rayomd.exe` (MinGW GCC 13) | 1,472,000 | 1,466,880 | -5,120 |
+| `linux-x64.tar.gz` (`pigz -11`) | 702,526 | 700,438 | -2,088 |
+| `linux-x64-static.tar.gz` | 1,087,725 | 1,085,587 | -2,138 |
+| `windows-x64.zip` (7-Zip, as `release.yml`) | 789,814 | 787,207 | -2,607 |
+
+- **`tiny_pdf.cpp` with an inlining budget of 38 and no loop unswitching** (`CMakeLists.txt`,
+  GCC Release; `RAYOMD_UNSWITCH_LOOPS` keeps unswitching in `RenderMathTable`, whose formula-table
+  loop cost table-heavy.md +0.47 % instructions without it). Text -5.6 KB. Instructions: notes
+  +0.18 %, polish +0.16 %, essay +0.10 %, native_math +0.05 %, table-heavy +0.05 %, the others
+  +0.02 %; time geomean -0.04 % (A/A +0.00 %). Byte check 2,875, `oncmp.py` 5,936 and `compare.py`
+  6,044: 0 differ. Fresh exports (`fresh.sh`, 128 runs) +0.08 %, +0.78 %, +0.20 % (+2 to +22 µs,
+  B faster in 52 to 61 of 128 pairs). ctest and `verify_cli.py` (GCC 13), ctest of the GCC 11
+  static build.
+
+The size and speed curve (dynamic GCC 13 binary; instructions per fixture, the largest named):
+
+| `tiny_pdf.cpp` built with | Binary | Text | Instructions, largest | Geomean |
+|---|---:|---:|---|---:|
+| `--param=inline-unit-growth=38` | -4,096 | -2.9 KB | notes +0.19 %, polish +0.16 % | +0.07 % |
+| 36 | -8,192 | -6.1 KB | essay +0.38 %, notes +0.33 %, native_math +0.30 % | +0.15 % |
+| 34 | -12,288 | -10.1 KB | essay +0.39 %, notes +0.37 %, native_math +0.31 % | +0.18 % |
+| 32 | -12,288 | -12.3 KB | essay +1.36 %, native_math +1.13 %, notes +0.54 % | +0.46 % |
+| 30 | -16,384 | -15.5 KB | essay +1.39 %, native_math +1.22 %, notes +0.60 % | +0.52 % |
+| 25 | -28,672 | -27.3 KB | essay +2.03 %, notes +1.66 %, native_math +1.39 % | +0.87 % |
+| 20 | -40,960 | -39.2 KB | essay +2.92 %, notes +2.62 %, native_math +1.84 % | +1.29 % |
+| `-fno-unswitch-loops` | -4,096 | -4.7 KB | table-heavy +0.49 % | +0.07 % |
+| `-fno-split-paths` | -4,096 | -2.6 KB | code-heavy +1.23 %, README +0.42 % | +0.28 % |
+| `-O3` without its loop passes (unswitch, split loops and paths, peel, distribution, ...) | -8,192 | -7.4 KB | code-heavy +1.28 %, table-heavy +0.63 % | +0.31 % |
+| `-O2` | -24,576 | -25.3 KB | code-heavy +5.45 %, notes +3.38 %, essay +2.74 % | +2.29 % |
+| `-O2` with `-O3`'s inlining parameters | -16,384 | -17.5 KB | code-heavy +5.25 %, notes +2.64 % | +1.91 % |
+| `-O2`, the 24 hottest functions `optimize("O3")` | -16,384 | -14.0 KB | notes +2.21 %, essay +1.61 % | +1.13 % |
+
+Time moved with the instructions (budget 20: geomean +1.95 %, `-O2` +2.57 %, the last row +1.90 %).
+The other loop passes of `-O3` alone (`-fno-peel-loops`, `-fno-predictive-commoning`,
+`-fno-tree-loop-distribution`, `-fno-loop-interchange`, `-fno-loop-unroll-and-jam`,
+`-fno-version-loops-for-strides`, `-fno-split-loops`, `-fno-gcse-after-reload`,
+`-fno-tree-partial-pre`) change no page. Under the gate (+0.3 % on every fixture) budget 38 and
+no unswitching are all there is: 8 KB. Each further page costs instructions on the small and the
+ASCII documents.
+
+Measured and not taken:
+
+- **Cold functions of `tiny_pdf.cpp` moved into an `-Os` unit** (`tiny_pdf_cold.cpp`, which
+  included `tiny_pdf.cpp` for its types and helpers, so the functions moved unchanged; the state
+  both share, `g_cancel` and `g_lastError`, defined in one, and the external functions fenced).
+  Linked text against 53734af: the SVG and diagram glue (`ConvertSvgImage`, `ConvertSvgFile`,
+  `TakeConvertedSvg`, `AddDiagram`, the SVG hosts) -561 bytes, no page; with the renderers'
+  destructors -4.4 KB, but polish.md +0.46 % and notes.md +0.23 % instructions (a build's
+  destructor at `-Os`: its members' destructors and `KeptBuffer::Give` become calls); with 35
+  never-run members of both renderers (contents, callouts, title pages, theme faces, tagged paint,
+  long pages, page-note hooks) +10.5 KB; the theme glue (`ThemeFont`, `LayOutTheme`, the theme
+  texts, `AddCoverPage`, `AddPageNumber`) +1.5 KB more. Three causes: `RAYOMD_COLD` functions are
+  compiled for size already (all of `tiny_pdf.cpp` at `-Os` takes about 10 KB off the code the
+  fixtures never run, 105 KB off what they run); the inlining budget a moved function took GCC
+  spends on others (`BuildUnicodePdfBytes` and `BuildStandardPdfBytes` +1.7 KB each, the image
+  registry's paths); and the `-Os` unit compiles its own copies of the inline members and static
+  helpers the moved code calls (`BreakWideWords`, `WrapText`, `ChooseFallbackFont` with its cache,
+  the renderer's constructor out of line), and of their state, which must not happen at all.
+- **The budget re-calibrated after such moves** (object only): with the glue and destructors
+  moved, budget 38 left the hot functions as they were but for the two builders (+1.7 KB each);
+  not linked, as the destructors' move failed the gate.
+
 ## Round 5: package size (opt5/size, 2026-10-19)
 
 Against 5.2.5 (`ac59556`), GCC 13.3 unless named; the Linux archives of the GCC 11 builds, as the
@@ -1357,13 +1430,10 @@ they were not taken yet. Add to this list when a change turns one up.
 object), about 125 KB run in none of the eight warm fixtures (callgrind, default options): some
 65 KB of it cold already (`RAYOMD_COLD` functions and the `.cold` parts GCC splits off), which GCC
 compiles for size, and some 60 KB not (image decoding and the image registry about 22 KB of it,
-`BuildBookPdf`, the themes' text, math cells). Round 4 found the same functions about 83 KB when
-the whole unit is built at `-Os`. The agreed attribute (cold, noinline, `optimize("Os")`) on
-whole functions made the binary 8 KB larger (round 5, "Round 5: package size" above): GCC does
-not inline `-O3` callees into an `-Os` function. What remains is the pattern the themes, books and
-page notes took: a feature's functions in a translation unit of their own built at `-Os`, behind
-a small interface, each move checked for the inlining of the hot paths. Image decoding and math
-tables are per pixel and per cell: keep them out.
+`BuildBookPdf`, the themes' text, math cells). Moved into an `-Os` unit they do not get smaller
+(round 6 above): the cold ones are size-optimized already, GCC spends their inlining budget
+elsewhere, and the other unit copies the helpers they call. What `-Os` would save is in the code
+the fixtures run (about 105 KB of the 151 KB), which the instruction gate keeps at `-O3`.
 
 **`std::filesystem` out of the build (size).** MinGW's libstdc++.a has no per-function
 sections, and its `fs_path.o` and `fs_ops.o` pull the codecvt facets, the locale's
