@@ -13892,6 +13892,11 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     if (options.blackText) Internal::PrintColors(pdfBytes, renderer.PageStarts(), bands, cover, contentsOverlays);
     if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
     std::vector<int> pageIds;
+    // The formula fonts and images every page names, written once and not per page (empty, and so
+    // no allocation, without formulas or images).
+    std::string pageMathFonts, pageImages;
+    AppendMathFontResources(pageMathFonts, mathFontIds);
+    AppendXObjectResources(pageImages, imageObjectIds);
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] - PageGapBefore(pageIndex + 1)
@@ -13905,7 +13910,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
         std::string page;
-        page.reserve(192);
+        page.reserve(192 + pageMathFonts.size() + pageImages.size());
         AppendLit(page, "<< /Type /Page /Parent ");
         AppendInt(page, pagesId);
         if (bottoms == nullptr) {
@@ -13933,9 +13938,9 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
             AppendInt(page, fontBoldObliqueId);
             AppendLit(page, " 0 R");
         }
-        AppendMathFontResources(page, mathFontIds);
+        page += pageMathFonts;
         AppendLit(page, " >>");
-        AppendXObjectResources(page, imageObjectIds);
+        page += pageImages;
         AppendLit(page, " >>");
         AppendContents(page, contentId, numberId, contentsId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
@@ -14600,6 +14605,11 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
     if (options.blackText) Internal::PrintColors(pdfBytes, renderer.PageStarts(), bands, cover, contentsOverlays);
     if (options.compress) CompressPageContents(pdfBytes, renderer.PageStarts(), flatePages);
     std::vector<int> pageIds;
+    // The formula fonts and images every page names, written once and not per page (the GUI's
+    // preview of 700 copies of tester.md has 4,200 pages; empty strings without formulas or images).
+    std::string pageMathFonts, pageImages;
+    AppendMathFontResources(pageMathFonts, mathFontIds);
+    AppendXObjectResources(pageImages, imageObjectIds);
     const std::vector<size_t>& pageStarts = renderer.PageStarts();
     for (size_t pageIndex = 0; pageIndex < pageStarts.size(); pageIndex++) {
         const size_t pageEnd = pageIndex + 1 < pageStarts.size() ? pageStarts[pageIndex + 1] - PageGapBefore(pageIndex + 1)
@@ -14613,7 +14623,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
             ? pdf.AddStream("", contentsOverlays[pageIndex]) : 0;
         std::string page;
-        page.reserve(160);
+        page.reserve(160 + pageMathFonts.size() + pageImages.size());
         AppendLit(page, "<< /Type /Page /Parent ");
         AppendInt(page, pagesId);
         if (bottoms == nullptr) {
@@ -14633,9 +14643,9 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
             AppendInt(page, numberFontId);
             AppendLit(page, " 0 R");
         }
-        AppendMathFontResources(page, mathFontIds);
+        page += pageMathFonts;
         AppendLit(page, " >>");
-        AppendXObjectResources(page, imageObjectIds);
+        page += pageImages;
         AppendLit(page, " >>");
         AppendContents(page, contentId, numberId, contentsId);
         if (pageIndex < annotationIds.size()) AppendPageAnnotations(page, annotationIds[pageIndex]);
