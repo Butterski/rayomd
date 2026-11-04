@@ -7,6 +7,10 @@
 #include <cstdint>
 #include <cstring>
 
+#if defined(__SSE2__) && defined(__GNUC__)
+#include <emmintrin.h>
+#endif
+
 namespace RayoMd::Serve {
 
 namespace {
@@ -15,22 +19,53 @@ enum Field : unsigned { kId, kInput, kMarkdown, kSourcePath, kOutput, kArgs, kFi
 
 constexpr const char* kFieldNames[kFieldCount] = { "id", "input", "markdown", "source_path", "output", "args" };
 
-void AppendUtf8(std::string& out, uint32_t codePoint) {
+// `codePoint` as UTF-8 at `out`; its length.
+size_t EncodeUtf8(char* out, uint32_t codePoint) {
     if (codePoint < 0x80) {
-        out += static_cast<char>(codePoint);
-    } else if (codePoint < 0x800) {
-        out += static_cast<char>(0xC0 | (codePoint >> 6));
-        out += static_cast<char>(0x80 | (codePoint & 0x3F));
-    } else if (codePoint < 0x10000) {
-        out += static_cast<char>(0xE0 | (codePoint >> 12));
-        out += static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (codePoint & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (codePoint >> 18));
-        out += static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (codePoint & 0x3F));
+        out[0] = static_cast<char>(codePoint);
+        return 1;
     }
+    if (codePoint < 0x800) {
+        out[0] = static_cast<char>(0xC0 | (codePoint >> 6));
+        out[1] = static_cast<char>(0x80 | (codePoint & 0x3F));
+        return 2;
+    }
+    if (codePoint < 0x10000) {
+        out[0] = static_cast<char>(0xE0 | (codePoint >> 12));
+        out[1] = static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
+        out[2] = static_cast<char>(0x80 | (codePoint & 0x3F));
+        return 3;
+    }
+    out[0] = static_cast<char>(0xF0 | (codePoint >> 18));
+    out[1] = static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F));
+    out[2] = static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
+    out[3] = static_cast<char>(0x80 | (codePoint & 0x3F));
+    return 4;
+}
+
+// Where the run of bytes from `at` that a JSON string holds as they are ends: at a quote, a
+// backslash, a control character or a byte from 0x80 (UTF-8 to check), or at `size`. Sixteen
+// bytes a step with SSE2: a request's Markdown is mostly such runs, about 80 bytes between its
+// escaped line breaks, and a byte loop over it took a third of a 1 MB request's time.
+size_t PlainRunEnd(const char* data, size_t at, size_t size) {
+#if defined(__SSE2__) && defined(__GNUC__)
+    const __m128i quote = _mm_set1_epi8('"');
+    const __m128i backslash = _mm_set1_epi8('\\');
+    const __m128i space = _mm_set1_epi8(0x20);
+    for (; size - at >= 16; at += 16) {
+        const __m128i bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + at));
+        // Signed bytes below 0x20: the control characters and every byte from 0x80.
+        const __m128i special = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(bytes, quote), _mm_cmpeq_epi8(bytes, backslash)),
+            _mm_cmplt_epi8(bytes, space));
+        const unsigned mask = static_cast<unsigned>(_mm_movemask_epi8(special));
+        if (mask != 0) return at + static_cast<size_t>(__builtin_ctz(mask));
+    }
+#endif
+    for (; at < size; at++) {
+        const unsigned char c = static_cast<unsigned char>(data[at]);
+        if (c == '"' || c == '\\' || c < 0x20 || c >= 0x80) break;
+    }
+    return at;
 }
 
 // A forward cursor over the line: every byte is read once, and no value nests.
@@ -59,15 +94,21 @@ struct Reader {
 
     bool Hex4(uint32_t& value) {
         if (text.size() - at < 4) return false;
-        value = 0;
+        const char* digits = text.data() + at;
+        uint32_t result = 0;
         for (int i = 0; i < 4; i++) {
-            const char c = text[at++];
-            value <<= 4;
-            if (c >= '0' && c <= '9') value |= static_cast<uint32_t>(c - '0');
-            else if (c >= 'a' && c <= 'f') value |= static_cast<uint32_t>(c - 'a' + 10);
-            else if (c >= 'A' && c <= 'F') value |= static_cast<uint32_t>(c - 'A' + 10);
-            else return false;
+            const char c = digits[i];
+            result <<= 4;
+            if (c >= '0' && c <= '9') result |= static_cast<uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f') result |= static_cast<uint32_t>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') result |= static_cast<uint32_t>(c - 'A' + 10);
+            else {
+                at += static_cast<size_t>(i) + 1;
+                return false;
+            }
         }
+        at += 4;
+        value = result;
         return true;
     }
 
@@ -76,11 +117,19 @@ struct Reader {
     bool String(std::string& out) {
         out.clear();
         for (;;) {
+            // Plain bytes and well-formed UTF-8 up to the next quote, escape or control character,
+            // appended at once.
             const size_t run = at;
-            while (at < text.size()) {
-                const unsigned char c = static_cast<unsigned char>(text[at]);
-                if (c == '"' || c == '\\' || c < 0x20 || c >= 0x80) break;
-                at++;
+            for (;;) {
+                at = PlainRunEnd(text.data(), at, text.size());
+                // A run of characters from U+0080 (a CJK paragraph) checked one after the other.
+                while (at < text.size() && static_cast<unsigned char>(text[at]) >= 0x80) {
+                    uint32_t codePoint = 0;
+                    size_t length = 0;
+                    if (!RayoMd::Text::DecodeUtf8(text, at, codePoint, length)) return Fail("invalid UTF-8");
+                    at += length;
+                }
+                if (at == text.size() || static_cast<unsigned char>(text[at]) < 0x20 || text[at] == '"' || text[at] == '\\') break;
             }
             out.append(text.data() + run, at - run);
             if (at == text.size()) return Fail("unterminated string");
@@ -90,43 +139,47 @@ struct Reader {
                 return true;
             }
             if (c < 0x20) return Fail("control character in a string");
-            if (c >= 0x80) {
-                uint32_t codePoint = 0;
-                size_t length = 0;
-                if (!RayoMd::Text::DecodeUtf8(text, at, codePoint, length)) return Fail("invalid UTF-8");
-                out.append(text.data() + at, length);
-                at += length;
-                continue;
-            }
-            if (++at == text.size()) return Fail("unterminated string");
-            switch (text[at++]) {
-            case '"': out += '"'; break;
-            case '\\': out += '\\'; break;
-            case '/': out += '/'; break;
-            case 'b': out += '\b'; break;
-            case 'f': out += '\f'; break;
-            case 'n': out += '\n'; break;
-            case 'r': out += '\r'; break;
-            case 't': out += '\t'; break;
-            case 'u': {
-                uint32_t codePoint = 0;
-                if (!Hex4(codePoint)) return Fail("bad \\u escape");
-                if (codePoint >= 0xDC00 && codePoint <= 0xDFFF) return Fail("unpaired surrogate");
-                if (codePoint >= 0xD800 && codePoint <= 0xDBFF) {
-                    uint32_t low = 0;
-                    if (text.size() - at < 2 || text[at] != '\\' || text[at + 1] != 'u') return Fail("unpaired surrogate");
-                    at += 2;
-                    if (!Hex4(low)) return Fail("bad \\u escape");
-                    if (low < 0xDC00 || low > 0xDFFF) return Fail("unpaired surrogate");
-                    codePoint = 0x10000 + ((codePoint - 0xD800) << 10) + (low - 0xDC00);
+            // An escape, and the ones right after it: text a client sent as \uXXXX (Python's
+            // json.dumps does so for every character from U+0080) is one escape after another,
+            // decoded into `decoded` and appended a block at a time.
+            char decoded[256];
+            size_t length = 0;
+            for (;;) {
+                if (++at == text.size()) return Fail("unterminated string");
+                const char escape = text[at++];
+                switch (escape) {
+                case '"': case '\\': case '/': decoded[length++] = escape; break;
+                case 'b': decoded[length++] = '\b'; break;
+                case 'f': decoded[length++] = '\f'; break;
+                case 'n': decoded[length++] = '\n'; break;
+                case 'r': decoded[length++] = '\r'; break;
+                case 't': decoded[length++] = '\t'; break;
+                case 'u': {
+                    uint32_t codePoint = 0;
+                    if (!Hex4(codePoint)) return Fail("bad \\u escape");
+                    if (codePoint >= 0xDC00 && codePoint <= 0xDFFF) return Fail("unpaired surrogate");
+                    if (codePoint >= 0xD800 && codePoint <= 0xDBFF) {
+                        uint32_t low = 0;
+                        if (text.size() - at < 2 || text[at] != '\\' || text[at + 1] != 'u') return Fail("unpaired surrogate");
+                        at += 2;
+                        if (!Hex4(low)) return Fail("bad \\u escape");
+                        if (low < 0xDC00 || low > 0xDFFF) return Fail("unpaired surrogate");
+                        codePoint = 0x10000 + ((codePoint - 0xD800) << 10) + (low - 0xDC00);
+                    }
+                    length += EncodeUtf8(decoded + length, codePoint);
+                    break;
                 }
-                AppendUtf8(out, codePoint);
-                break;
+                default:
+                    at--;
+                    return Fail("bad escape");
+                }
+                if (at == text.size() || text[at] != '\\') break;
+                if (length > sizeof(decoded) - 4) {
+                    out.append(decoded, length);
+                    length = 0;
+                }
             }
-            default:
-                at--;
-                return Fail("bad escape");
-            }
+            out.append(decoded, length);
         }
     }
 

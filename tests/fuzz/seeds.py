@@ -18,6 +18,7 @@ Only the standard library."""
 import argparse
 import base64
 import hashlib
+import json
 import pathlib
 import re
 import shutil
@@ -815,6 +816,12 @@ SERVE = {
     ]) + "\n"),
     "long-line.jsonl": (b"\xff", '{"id":"1","markdown":"' + "x" * 5000 + '","output":"a.pdf"}\n'
                         '{"id":"2","input":"a.md","output":"a.pdf"}\n'),
+    # Strings longer than the reader's 16-byte steps, with each kind of byte that ends a step at
+    # every offset of one: escapes, raw UTF-8, \u escapes in a row, a surrogate pair.
+    "long-strings.jsonl": (b"\x0f", "\n".join(
+        json.dumps({"id": str(shift), "markdown": "a" * shift + "# T\u00eftle \u4e2d\u6587 \U0001f600\n\n" + "x" * 40 +
+                    "\"q\" \\ \t/" + "\u00e9" * 20, "output": "o.pdf"}, ensure_ascii=escaped)
+        for shift in range(17) for escaped in (False, True)) + "\n"),
 }
 
 
