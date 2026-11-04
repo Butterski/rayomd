@@ -8,7 +8,9 @@
 #include "../core/book.h"
 #include "../core/export_options.h"
 #include "../core/rayomd_pdf_source.h"
+#if RAYOMD_SERVE_JSON
 #include "serve_request.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -806,6 +808,7 @@ int RunServeExport(const Path& outputDir, const CliExportOptions& options) {
     return failures == 0 ? 0 : lastResult;
 }
 
+#if RAYOMD_SERVE_JSON
 // What standard input has, up to `size` bytes; 0 at its end or on an error. A read(2), not
 // fread, which would wait for a full buffer while a client waits for its answer.
 size_t ReadStandardInput(void*, char* buffer, size_t size) {
@@ -901,6 +904,7 @@ int RunServeJson(const CliExportOptions& options) {
     }
     return written ? 0 : 12;
 }
+#endif
 
 int RunNativeBench(const Path& inputPath, const Path& outputDir, int iterations, const CliExportOptions& cliOptions) {
     if (iterations < 1) iterations = 1;
@@ -975,6 +979,11 @@ int RunDoctor() {
 #else
     facts += "curl=disabled\n";
 #endif
+#if RAYOMD_SERVE_JSON
+    facts += "serve_json=enabled\n";
+#else
+    facts += "serve_json=disabled\n";
+#endif
 #ifdef _WIN32
     facts += "platform_images=winhttp,wic\n";
 #else
@@ -1029,7 +1038,9 @@ void PrintUsage() {
         "  rayomd --batch <input-folder> <output-folder> [native] [style] [margin]\n"
         "  rayomd --stdin-batch <output-folder> [native] [style] [margin]\n"
         "  rayomd --serve <output-folder> [native] [style] [margin]\n"
+#if RAYOMD_SERVE_JSON
         "  rayomd --serve --json [native] [style] [margin]\n"
+#endif
         "  rayomd --bench <input.md> <output-folder> <iterations> [style] [margin]\n"
         "\n"
         "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
@@ -1068,9 +1079,11 @@ void PrintUsage() {
         "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
         "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
         "  line per document; - for standard output).\n"
+#if RAYOMD_SERVE_JSON
         "Serve: --serve --json reads one JSON request a line, {\"id\":\"1\",\"input\":\"a.md\" or \"markdown\":\"...\"\n"
         "  with \"source_path\",\"output\":\"a.pdf\",\"args\":[\"--toc\"]}, and answers each with its report\n"
         "  line and the id, after a first line {\"rayomd\":\"VERSION\",\"protocol\":1}; quit ends it.\n"
+#endif
         "Books: --book makes one PDF of the files a SUMMARY.md lists (mdBook, GitBook), of a folder's\n"
         "  Markdown files by name with README.md first, or of the files given: each from a new page, the\n"
         "  links between them kept, one outline, and with --toc one table of contents for all of them.\n"
@@ -1142,6 +1155,7 @@ int main(int argc, char** argv) {
 
     if (command == "--serve") {
         if (argc >= 3 && Lower(argv[2]) == "--json") {
+#if RAYOMD_SERVE_JSON
             std::string error;
             if (!ParseExportOptions(argc, argv, 3, options, error)) return PrintArgumentError(error);
             if (options.followLinks != 0 || !options.report.empty() || options.workers != 0 || options.recursive ||
@@ -1150,6 +1164,10 @@ int main(int argc, char** argv) {
                     "--skip-unchanged) and no --follow-links: its answers are the report.");
             }
             return RunServeJson(options);
+#else
+            PrintError("Error: this build has no --serve --json (built with RAYOMD_SERVE_JSON=OFF).");
+            return 2;
+#endif
         }
         if (argc < 3) return PrintArgumentError("--serve requires <output-folder>.");
         std::string error;

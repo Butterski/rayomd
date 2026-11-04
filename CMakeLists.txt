@@ -18,6 +18,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Threads REQUIRED)
 
 option(RAYOMD_USE_CURL "Use libcurl for HTTP/HTTPS image URLs on non-Windows" OFF)
+# --serve --json, protocol 1 for front ends (the MCP server, editor plugins): its request reader,
+# src/cli/serve_request.cpp, and the session loop, 12 KB of the Linux binary. OFF answers
+# `--serve --json` with an error (exit 2); everything else and every PDF stay the same.
+option(RAYOMD_SERVE_JSON "Build --serve --json (protocol 1 for front ends)" ON)
 option(RAYOMD_ENABLE_LTO "Enable interprocedural optimization for measured release experiments" OFF)
 option(RAYOMD_ENABLE_PROFILING "Enable phase timing and allocation counters" OFF)
 option(RAYOMD_ENABLE_TSAN "Enable ThreadSanitizer on supported non-Windows builds" OFF)
@@ -359,7 +363,7 @@ rayomd_warnings(rayomd_engine)
 if(RAYOMD_BUILD_CLI)
     if(WIN32)
         enable_language(RC)
-        add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/win32/main_windows_cli.cpp src/cli/serve_request.cpp src/win32/rayomd.rc)
+        add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/win32/main_windows_cli.cpp src/win32/rayomd.rc)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             target_sources(rayomd PRIVATE
                 src/win32/delay_load.cpp
@@ -393,7 +397,7 @@ if(RAYOMD_BUILD_CLI)
         rayomd_warnings(rayomd)
         rayomd_experiments(rayomd)
     else()
-        add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp src/cli/serve_request.cpp)
+        add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
             # Release builds, compiled without exceptions: libstdc++'s throws abort where they are
             # made (std_throws.cpp).
@@ -424,6 +428,10 @@ if(RAYOMD_BUILD_CLI)
         rayomd_warnings(rayomd)
         rayomd_hot_sections(rayomd)
         rayomd_experiments(rayomd)
+    endif()
+    if(RAYOMD_SERVE_JSON)
+        target_sources(rayomd PRIVATE src/cli/serve_request.cpp)
+        target_compile_definitions(rayomd PRIVATE RAYOMD_SERVE_JSON=1)
     endif()
 endif()
 

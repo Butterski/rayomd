@@ -35,7 +35,9 @@
 #include "../core/book.h"
 #include "../core/export_options.h"
 #include "../common/thread_object.h"
+#if RAYOMD_SERVE_JSON
 #include "../cli/serve_request.h"
+#endif
 #endif
 
 thread_local int g_nativePdfLastError = 0;
@@ -924,6 +926,7 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
     return failures == 0 ? 0 : 10 + GetNativePdfLastError();
 }
 
+#if RAYOMD_SERVE_JSON
 // What standard input has, up to `size` bytes; 0 at its end or on an error.
 size_t ReadStandardInput(void*, char* buffer, size_t size) {
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
@@ -1034,6 +1037,7 @@ int RunServeJson(const WinExportOptions& options) {
     }
     return written ? 0 : 12;
 }
+#endif
 
 int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
     int iterations, const WinExportOptions& exportOptions) {
@@ -1083,6 +1087,11 @@ int RunDoctor() {
     WriteStdoutLine(std::string("RayoMD doctor ") + RAYOMD_VERSION);
     WriteStdoutLine("platform=windows");
     WriteStdoutLine("curl=disabled");
+#if RAYOMD_SERVE_JSON
+    WriteStdoutLine("serve_json=enabled");
+#else
+    WriteStdoutLine("serve_json=disabled");
+#endif
     WriteStdoutLine("platform_images=winhttp,wic");
 
     TinyPdf::PdfOptions options;
@@ -1189,7 +1198,9 @@ void PrintUsage() {
         "  rayomd.exe --batch <input-folder> <output-folder> [native] [style] [margin]\n"
         "  rayomd.exe --stdin-batch <output-folder> [native] [style] [margin]\n"
         "  rayomd.exe --serve <output-folder> [native] [style] [margin]\n"
+#if RAYOMD_SERVE_JSON
         "  rayomd.exe --serve --json [native] [style] [margin]\n"
+#endif
         "  rayomd.exe --bench <input.md> <output-folder> <iterations> [style] [margin]\n"
         "\n"
         "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
@@ -1228,9 +1239,11 @@ void PrintUsage() {
         "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
         "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
         "  line per document; - for standard output).\n"
+#if RAYOMD_SERVE_JSON
         "Serve: --serve --json reads one JSON request a line, {\"id\":\"1\",\"input\":\"a.md\" or \"markdown\":\"...\"\n"
         "  with \"source_path\",\"output\":\"a.pdf\",\"args\":[\"--toc\"]}, and answers each with its report\n"
         "  line and the id, after a first line {\"rayomd\":\"VERSION\",\"protocol\":1}; quit ends it.\n"
+#endif
         "Books: --book makes one PDF of the files a SUMMARY.md lists (mdBook, GitBook), of a folder's\n"
         "  Markdown files by name with README.md first, or of the files given: each from a new page, the\n"
         "  links between them kept, one outline, and with --toc one table of contents for all of them.\n"
@@ -1354,6 +1367,7 @@ int RunCommandLine() {
         if (argc >= 3 && lstrcmpiW(argv[2], L"--json") == 0) {
             // Standard output carries the protocol only: an argument error goes to standard error.
             int result = 2;
+#if RAYOMD_SERVE_JSON
             if (!ParseExportOptions(argc, argv, 3, options, error)) {
                 WriteStderr("Error: " + WideToUtf8(error) + "\n");
             } else if (options.followLinks != 0 || !options.report.empty() || options.workers != 0 || options.recursive ||
@@ -1363,6 +1377,9 @@ int RunCommandLine() {
             } else {
                 result = RunServeJson(options);
             }
+#else
+            WriteStderr("Error: this build has no --serve --json (built with RAYOMD_SERVE_JSON=OFF).\n");
+#endif
             LocalFree(argv);
             return result;
         }

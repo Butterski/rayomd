@@ -960,6 +960,11 @@ address (up to 0.04 ms of a fresh start more than plain `-static`'s fixed-addres
 `-static-libgcc`/`-static-libstdc++`, after which GCC 13 links libc dynamically under
 `-static-pie`; CI checks the result with `readelf` (no INTERP or NEEDED, Type DYN), as `ldd`
 calls a static-pie "statically linked" and succeeds.
+`-DRAYOMD_SERVE_JSON=OFF` leaves out `--serve --json` (`src/cli/serve_request.cpp` and the
+session loop, behind `#if RAYOMD_SERVE_JSON` in both command lines): 12,360 bytes less on Linux,
+exactly the binary without the protocol, every PDF the same. Such a build answers
+`--serve --json` with exit 2 and `--doctor` prints `serve_json=disabled`, which
+`tests/verify_cli.py` reads; CI builds and verifies it. Releases keep the default, ON.
 
 CMake 3.21 or newer can use the presets of `CMakePresets.json` instead: `release`
 (`build/linux`), `release-static`, `release-curl`, `asan` (AddressSanitizer and

@@ -48,6 +48,11 @@ jobs:
         run: |
           cmake -S . -B build/linux-curl -DCMAKE_BUILD_TYPE=Release -DRAYOMD_USE_CURL=ON
           cmake --build build/linux-curl --config Release
+      - name: Build and verify the edition without --serve --json
+        run: |
+          cmake -S . -B build/linux-noserve -DCMAKE_BUILD_TYPE=Release -DRAYOMD_SERVE_JSON=OFF
+          cmake --build build/linux-noserve --config Release --target rayomd
+          python3 -B tests/verify_cli.py --binary build/linux-noserve/rayomd
       - name: Build and verify fully static edition
         run: |
           cmake -S . -B build/linux-static -DCMAKE_BUILD_TYPE=Release -DRAYOMD_STATIC=ON

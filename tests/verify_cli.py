@@ -507,7 +507,8 @@ def verify_serve_json(binary: Path, root: Path) -> None:
     the request's id; options per request, Markdown sent inline whose relative image resolves from
     its source_path, and PDFs byte for byte those of --export with the same flags. Malformed JSON, an
     unknown flag, a batch flag, a missing file and an over-long line are each answered with an
-    error while the session goes on; quit ends it. The plain --serve keeps its replies."""
+    error while the session goes on; quit ends it. The plain --serve keeps its replies. A build
+    with RAYOMD_SERVE_JSON=OFF (--doctor: serve_json=disabled) refuses --serve --json."""
     folder = root / "serve json"
     notes = folder / "notes"
     out = folder / "out"
@@ -519,6 +520,27 @@ def verify_serve_json(binary: Path, root: Path) -> None:
     inline = "# Inline\n\nZa\u017c\u00f3\u0142\u0107.\n\n![inline-logo](logo.png)\n"
     (notes / "b.md").write_text(inline, encoding="utf-8", newline="\n")
     letter = ["--page-size=letter", "--page-numbers"]
+
+    plain = subprocess.run(
+        [str(binary), "--serve", str(folder / "plain"), "--no-image-cache"],
+        input=(str(note) + "\nquit\n").encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=60,
+    )
+    reply = plain.stdout.decode("utf-8").splitlines()
+    if plain.returncode != 0 or len(reply) != 1 or not reply[0].startswith("OK\t") or not reply[0].endswith("a.pdf"):
+        raise AssertionError(f"plain --serve replied {plain.stdout!r}")
+
+    if b"serve_json=disabled" in run(binary, "--doctor").stdout:
+        refused = subprocess.run(
+            [str(binary), "--serve", "--json"], input=b"", cwd=folder, capture_output=True, check=False, timeout=10
+        )
+        if refused.returncode != 2 or refused.stdout or (folder / "--json").exists():
+            raise AssertionError(f"a build without --serve --json did not refuse it: {refused!r}")
+        return
+
     requests = [
         json.dumps({"id": "a", "input": str(note), "output": str(out / "a.pdf"), "args": letter}),
         json.dumps({"id": 2, "markdown": inline, "source_path": str(notes / "b.md"), "output": str(out / "b")}),
@@ -569,18 +591,6 @@ def verify_serve_json(binary: Path, root: Path) -> None:
     if b"inline-logo" in (out / "b.pdf").read_bytes() or answers[1]["failed_images"] != 0:
         raise AssertionError("the image of inline Markdown did not resolve from its source_path")
     run(binary, "--serve", "--json", "--report=-", stdin="", expect=2)
-
-    plain = subprocess.run(
-        [str(binary), "--serve", str(folder / "plain"), "--no-image-cache"],
-        input=(str(note) + "\nquit\n").encode("utf-8"),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=60,
-    )
-    reply = plain.stdout.decode("utf-8").splitlines()
-    if plain.returncode != 0 or len(reply) != 1 or not reply[0].startswith("OK\t") or not reply[0].endswith("a.pdf"):
-        raise AssertionError(f"plain --serve replied {plain.stdout!r}")
 
 
 def verify(binary: Path, keep: Path | None) -> None:
