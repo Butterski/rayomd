@@ -796,8 +796,11 @@ Important image/link details:
   batch flags a request may not give (`IsBatchFlag`), and lines of standard input through a buffer
   of its own (`LineReader`: a line over `kMaxRequestBytes`, 32 MiB, read to its end without being
   held). A request's `args` go through the command line's own `ParseExportOptions`, its answer
-  through `RayoMd::Batch::AppendRecord`, so the option vocabulary and the report stay one. Not
-  part of the engine library; built at `-Os`; fuzz target `serve_request`.
+  through `RayoMd::Batch::AppendRecord`, so the option vocabulary and the report stay one. A
+  string's plain runs end 16 bytes a step (`PlainRunEnd`, SSE2; bytes elsewhere), UTF-8 runs are
+  checked without rescanning and escapes in a row decoded into a block: a 1 MB request of ASCII
+  Markdown parses in 0.3 ms, 2.75 before (CJK raw 1.4 against 6.0, as `\u` escapes 5.0 against
+  11.2). Not part of the engine library; built at `-Os`; fuzz target `serve_request`.
 
 - `src/cli/terminate.cpp`
   The terminate handler in place of libstdc++'s (whose demangler is 61 KB) where `no_unwind.cpp`
