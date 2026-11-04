@@ -18,7 +18,7 @@ for what renders and what degrades.
 ## 1. Get the binary
 
 ```sh
-rayomd --version          # prints "rayomd 5.2.5"; on Windows: rayomd.exe --version
+rayomd --version          # prints "rayomd 5.3.0"; on Windows: rayomd.exe --version
 ```
 
 If it is not on `PATH`, download the release asset for the platform from
@@ -144,8 +144,8 @@ For a folder: `rayomd --batch <in-folder> <out-folder> [flags] --report=-` (`--r
 
 For many exports from one process, `rayomd --serve --json [flags]` reads one JSON request a
 line on stdin and answers one JSON line a request, in order, with the fields of the report
-below and the request's `id`. It is newer than 5.2.5 (which takes `--json` for an output
-folder and answers otherwise): its first output line is `{"rayomd":"<version>","protocol":1}`;
+below and the request's `id`. It comes with 5.3.0 (5.2.5 and older take `--json` for an output
+folder and answer otherwise): its first output line is `{"rayomd":"<version>","protocol":1}`;
 use it only when that line comes.
 
 ```sh
