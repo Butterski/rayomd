@@ -102,10 +102,15 @@ bool Report::Open(const std::string& path) {
     return file != nullptr;
 }
 
-void Report::Write(const Record& record) {
-    std::string line;
-    line.reserve(160 + record.input.size() + record.output.size() + record.error.size());
-    line += "{\"input\":\"";
+void AppendRecord(std::string& line, const Record& record) {
+    line.reserve(line.size() + 160 + record.id.size() + record.input.size() + record.output.size() + record.error.size());
+    if (!record.id.empty()) {
+        line += "{\"id\":";
+        line += record.id;
+        line += ",\"input\":\"";
+    } else {
+        line += "{\"input\":\"";
+    }
     AppendJsonString(line, record.input);
     line += "\",\"output\":\"";
     AppendJsonString(line, record.output);
@@ -129,6 +134,11 @@ void Report::Write(const Record& record) {
     line += ",\"failed_images\":";
     AppendNumber(line, record.failedImages);
     line += "}\n";
+}
+
+void Report::Write(const Record& record) {
+    std::string line;
+    AppendRecord(line, record);
 
     std::lock_guard<std::mutex> lock(mutex);
     if (!file) return;

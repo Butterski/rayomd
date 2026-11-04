@@ -196,6 +196,7 @@ endfunction()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
         src/cli/main_cli.cpp
+        src/cli/serve_request.cpp
         src/win32/main_windows_cli.cpp
         src/cli/std_throws.cpp
         src/cli/no_unwind.cpp
@@ -358,7 +359,7 @@ rayomd_warnings(rayomd_engine)
 if(RAYOMD_BUILD_CLI)
     if(WIN32)
         enable_language(RC)
-        add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/win32/main_windows_cli.cpp src/win32/rayomd.rc)
+        add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/win32/main_windows_cli.cpp src/cli/serve_request.cpp src/win32/rayomd.rc)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             target_sources(rayomd PRIVATE
                 src/win32/delay_load.cpp
@@ -392,7 +393,7 @@ if(RAYOMD_BUILD_CLI)
         rayomd_warnings(rayomd)
         rayomd_experiments(rayomd)
     else()
-        add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp)
+        add_executable(rayomd ${RAYOMD_CORE_SOURCES} src/cli/main_cli.cpp src/cli/serve_request.cpp)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
             # Release builds, compiled without exceptions: libstdc++'s throws abort where they are
             # made (std_throws.cpp).

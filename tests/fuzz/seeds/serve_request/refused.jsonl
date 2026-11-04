@@ -1,0 +1,14 @@
+{"id":"1","input":"a.md"
+{"id":1.5,"input":"a.md","output":"a.pdf"}
+{"id":"2","input":"a.md","markdown":"x","output":"a.pdf"}
+{"id":"3","input":"a.md","output":"a.pdf","extra":true}
+{"id":"4","input":"a.md","output":"a.pdf","args":[1]}
+{"id":"5","input":"a.md","output":"a.pdf","input":"b.md"}
+{"id":"6","markdown":"\ud800","output":"a.pdf"}
+{"id":"7","input":"a\u0000.md","output":"a.pdf"}
+{"id":"8","input":"a.md","output":null}
+{"id":"9","source_path":"a.md","input":"a.md","output":"a.pdf"}
+{"id":01,"input":"a.md","output":"a.pdf"}
+{"id":"10","input":"a.md","output":"a.pdf"} trailing
+[]
+

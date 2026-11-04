@@ -14,8 +14,10 @@ list(TRANSFORM rayomd_fuzz_engine PREPEND "${PROJECT_SOURCE_DIR}/")
 
 add_library(rayomd_fuzz_targets STATIC EXCLUDE_FROM_ALL
     ${rayomd_fuzz_engine}
+    "${PROJECT_SOURCE_DIR}/src/cli/serve_request.cpp"
     fuzz_env.cpp
     fuzz_public.cpp
+    fuzz_serve.cpp
     fuzz_internal.cpp)
 target_include_directories(rayomd_fuzz_targets PUBLIC
     "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -46,7 +48,8 @@ if(RAYOMD_FUZZ)
     set(function_image Image)
     set(function_svg Svg)
     set(function_mermaid Mermaid)
-    foreach(name buildpdf pdfsource theme font cff image svg mermaid)
+    set(function_serve_request ServeRequest)
+    foreach(name buildpdf pdfsource theme font cff image svg mermaid serve_request)
         add_executable(rayomd-fuzz-${name} fuzz_main.cpp)
         target_compile_definitions(rayomd-fuzz-${name} PRIVATE RAYOMD_FUZZ_TARGET=${function_${name}})
         target_link_libraries(rayomd-fuzz-${name} PRIVATE rayomd_fuzz_targets)

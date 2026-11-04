@@ -33,6 +33,7 @@ const NamedTarget kTargets[] = {
     { "image", Image },
     { "svg", Svg },
     { "mermaid", Mermaid },
+    { "serve_request", ServeRequest },
 };
 const size_t kTargetCount = sizeof(kTargets) / sizeof(kTargets[0]);
 

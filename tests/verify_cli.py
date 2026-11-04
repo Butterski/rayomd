@@ -502,6 +502,87 @@ def verify_image_cache(binary: Path, root: Path) -> None:
             raise AssertionError("image cache: a damaged entry was used or not written again")
 
 
+def verify_serve_json(binary: Path, root: Path) -> None:
+    """--serve --json: a greeting, then one answer a request in order, each the --report record with
+    the request's id; options per request, Markdown sent inline whose relative image resolves from
+    its source_path, and PDFs byte for byte those of --export with the same flags. Malformed JSON, an
+    unknown flag, a batch flag, a missing file and an over-long line are each answered with an
+    error while the session goes on; quit ends it. The plain --serve keeps its replies."""
+    folder = root / "serve json"
+    notes = folder / "notes"
+    out = folder / "out"
+    notes.mkdir(parents=True)
+    out.mkdir()
+    shutil.copyfile(Path(__file__).resolve().parents[1] / "docs" / "assets" / "branding" / "rayomd.png", notes / "logo.png")
+    note = notes / "a.md"
+    note.write_text("# Served\n\n![served-logo](logo.png)\n\n[one](https://example.com/one)\n", encoding="utf-8")
+    inline = "# Inline\n\nZa\u017c\u00f3\u0142\u0107.\n\n![inline-logo](logo.png)\n"
+    (notes / "b.md").write_text(inline, encoding="utf-8", newline="\n")
+    letter = ["--page-size=letter", "--page-numbers"]
+    requests = [
+        json.dumps({"id": "a", "input": str(note), "output": str(out / "a.pdf"), "args": letter}),
+        json.dumps({"id": 2, "markdown": inline, "source_path": str(notes / "b.md"), "output": str(out / "b")}),
+        '{"id":"bad","input":',
+        json.dumps({"id": "flag", "input": str(note), "output": str(out / "c.pdf"), "args": ["--no-such-flag"]}),
+        json.dumps({"id": "batch", "input": str(note), "output": str(out / "d.pdf"), "args": ["--workers=2"]}),
+        json.dumps({"id": "missing", "input": str(folder / "missing.md"), "output": str(out / "m.pdf")}),
+        "x" * (32 * 1024 * 1024 + 1),
+        "",
+        json.dumps({"id": "after", "input": str(note), "output": str(out / "e.pdf")}),
+        "quit",
+        json.dumps({"id": "unread", "input": str(note), "output": str(out / "unread.pdf")}),
+    ]
+    proc = subprocess.run(
+        [str(binary), "--serve", "--json"],
+        input=("\n".join(requests) + "\n").encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"--serve --json exited {proc.returncode}: {proc.stderr!r}")
+    lines = proc.stdout.decode("utf-8").splitlines()
+    version = run(binary, "--version").stdout.decode("utf-8").split()[-1]
+    if json.loads(lines[0]) != {"rayomd": version, "protocol": 1}:
+        raise AssertionError(f"unexpected greeting: {lines[0]!r}")
+    answers = [json.loads(line) for line in lines[1:]]
+    expected = [("a", 0), (2, 0), ("bad", 2), ("flag", 2), ("batch", 2), ("missing", 3), (None, 2), ("after", 0)]
+    if [(answer.get("id"), answer["code"]) for answer in answers] != expected:
+        raise AssertionError(f"unexpected answers: {lines[1:]!r}")
+    for answer in answers:
+        if (answer["status"] == "ok") != (answer["code"] == 0) or (answer["code"] != 0 and not answer.get("error")):
+            raise AssertionError(f"inconsistent answer: {answer!r}")
+    if "unrecognized export option" not in answers[3]["error"] or "exceeds" not in answers[6]["error"]:
+        raise AssertionError(f"unexpected errors: {answers[3]!r} {answers[6]!r}")
+    if answers[1]["output"] != str(out / "b.pdf") or answers[0]["pages"] != 1 or answers[0]["bytes"] != (out / "a.pdf").stat().st_size:
+        raise AssertionError(f"unexpected records: {answers[0]!r} {answers[1]!r}")
+    if (out / "unread.pdf").exists():
+        raise AssertionError("a request after quit was exported")
+    run(binary, "--export", str(note), str(out / "a-export.pdf"), *letter)
+    run(binary, "--export", str(notes / "b.md"), str(out / "b-export.pdf"))
+    if (out / "a.pdf").read_bytes() != (out / "a-export.pdf").read_bytes():
+        raise AssertionError("a served PDF differs from --export's with the same flags")
+    if (out / "b.pdf").read_bytes() != (out / "b-export.pdf").read_bytes():
+        raise AssertionError("a PDF of inline Markdown differs from --export's of the same text")
+    require_pdf(out / "a.pdf", b"/MediaBox [0 0 612 792]")
+    if b"inline-logo" in (out / "b.pdf").read_bytes() or answers[1]["failed_images"] != 0:
+        raise AssertionError("the image of inline Markdown did not resolve from its source_path")
+    run(binary, "--serve", "--json", "--report=-", stdin="", expect=2)
+
+    plain = subprocess.run(
+        [str(binary), "--serve", str(folder / "plain"), "--no-image-cache"],
+        input=(str(note) + "\nquit\n").encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=60,
+    )
+    reply = plain.stdout.decode("utf-8").splitlines()
+    if plain.returncode != 0 or len(reply) != 1 or not reply[0].startswith("OK\t") or not reply[0].endswith("a.pdf"):
+        raise AssertionError(f"plain --serve replied {plain.stdout!r}")
+
+
 def verify(binary: Path, keep: Path | None) -> None:
     binary = binary.resolve()
     if not binary.is_file():
@@ -558,6 +639,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_image_cache(binary, root)
         verify_theme(binary, root)
         verify_pdfa(binary, root)
+        verify_serve_json(binary, root)
         verify_footnotes(binary, root)
         verify_highlight(binary, root)
         verify_contents(binary, root)

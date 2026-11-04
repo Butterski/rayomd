@@ -234,6 +234,83 @@ jobs:
               --latest
           fi
 
+  container:
+    name: Container image
+    # After publish, so it runs only where publish does (a release branch or a tag) and finds the
+    # release whose notes get the image's size.
+    needs: [version, publish]
+    environment: release
+    runs-on: ubuntu-22.04
+
+    permissions:
+      contents: write
+      packages: write
+
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RAYOMD_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rayomd-linux-release
+          path: dist
+
+      # The image holds the static binary of the release archive, not a second build of it.
+      - name: Build and smoke-test the image
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          tar -xzf "dist/rayomd-${RAYOMD_VERSION}-linux-x64-static.tar.gz" -C dist
+          DOCKER_BUILDKIT=1 docker build \
+            -f packaging/container/Dockerfile \
+            --build-arg "VERSION=${RAYOMD_VERSION}" \
+            -t "${image}:${RAYOMD_VERSION}" \
+            -t "${image}:latest" \
+            "dist/rayomd-${RAYOMD_VERSION}-linux-x64-static"
+          docker run --rm "${image}:${RAYOMD_VERSION}" --version | grep -Fx "rayomd ${RAYOMD_VERSION}"
+          docker run --rm "${image}:${RAYOMD_VERSION}" --doctor
+          docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/w" "${image}:${RAYOMD_VERSION}" \
+            --export tester.md container-smoke.pdf --no-image-cache
+          test -s container-smoke.pdf
+
+      - name: Push the image
+        run: |
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "${IMAGE}:${RAYOMD_VERSION}"
+          docker push "${IMAGE}:latest"
+
+      # The size as pulled (the registry's compressed layers, of the linux/amd64 manifest when the
+      # tag is an index) and as unpacked (the exported file system), in a section at the end of the
+      # release notes that a rerun replaces.
+      - name: Add the image's size to the release notes
+        run: |
+          manifest="$(docker buildx imagetools inspect --raw "${IMAGE}:${RAYOMD_VERSION}")"
+          if jq -e '.manifests' >/dev/null <<< "$manifest"; then
+            digest="$(jq -r 'first(.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest)' <<< "$manifest")"
+            manifest="$(docker buildx imagetools inspect --raw "${IMAGE}@${digest}")"
+          fi
+          pulled="$(jq '[.layers[].size] | add' <<< "$manifest")"
+          container="$(docker create "${IMAGE}:${RAYOMD_VERSION}")"
+          unpacked="$(docker export "$container" | wc -c)"
+          docker rm "$container" > /dev/null
+          megabytes() { awk -v bytes="$1" 'BEGIN { printf "%.1f MB", bytes / 1000000 }'; }
+          marker='<!-- container image -->'
+          gh release view "$RELEASE_TAG" --json body --jq .body | sed "/^${marker}\$/,\$d" > notes.md
+          {
+            echo "$marker"
+            echo "### Container image"
+            echo
+            echo "\`docker pull ${IMAGE}:${RAYOMD_VERSION}\` (also \`latest\`): the static linux-x64 binary on scratch with DejaVu Sans, $(megabytes "$pulled") to pull, $(megabytes "$unpacked") unpacked."
+          } >> notes.md
+          gh release edit "$RELEASE_TAG" --notes-file notes.md
+
   arch:
     name: Arch Linux packages
     needs: [version, publish]

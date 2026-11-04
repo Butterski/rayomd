@@ -785,6 +785,44 @@ def make_mermaid_seeds():
         write(SEEDS / "mermaid" / name, text)
 
 
+# Serve requests ----------------------------------------------------------------------------------
+# Request lines of `rayomd --serve --json`: the first byte is the size of the reads (+1), the rest
+# standard input. Valid requests of each form, then what the reader must refuse.
+
+SERVE = {
+    "valid.jsonl": (b"\x00", "\n".join([
+        '{"id":"7","input":"notes/a.md","output":"out/a.pdf","args":["--toc","--page-size=a5"]}',
+        '{"id":8,"markdown":"# Title\\n\\n\\u00e9t\\u00e9 \\ud83d\\ude00 \\"q\\" \\\\ \\/","source_path":"notes/b.md","output":"out/b"}',
+        '  { "output" : "x.pdf" , "input" : "x.md" , "args" : [ ] }  ',
+        '{"id":-0,"input":"a.md","output":"a.pdf","args":["modern","wide","--no-highlight"]}\r',
+        "quit",
+    ]) + "\n"),
+    "refused.jsonl": (b"\x06", "\n".join([
+        '{"id":"1","input":"a.md"',
+        '{"id":1.5,"input":"a.md","output":"a.pdf"}',
+        '{"id":"2","input":"a.md","markdown":"x","output":"a.pdf"}',
+        '{"id":"3","input":"a.md","output":"a.pdf","extra":true}',
+        '{"id":"4","input":"a.md","output":"a.pdf","args":[1]}',
+        '{"id":"5","input":"a.md","output":"a.pdf","input":"b.md"}',
+        '{"id":"6","markdown":"\\ud800","output":"a.pdf"}',
+        '{"id":"7","input":"a\\u0000.md","output":"a.pdf"}',
+        '{"id":"8","input":"a.md","output":null}',
+        '{"id":"9","source_path":"a.md","input":"a.md","output":"a.pdf"}',
+        '{"id":01,"input":"a.md","output":"a.pdf"}',
+        '{"id":"10","input":"a.md","output":"a.pdf"} trailing',
+        '[]',
+        '',
+    ]) + "\n"),
+    "long-line.jsonl": (b"\xff", '{"id":"1","markdown":"' + "x" * 5000 + '","output":"a.pdf"}\n'
+                        '{"id":"2","input":"a.md","output":"a.pdf"}\n'),
+}
+
+
+def make_serve_seeds():
+    for name, (prefix, text) in SERVE.items():
+        write(SEEDS / "serve_request" / name, prefix + text.encode("utf-8"))
+
+
 def make_pdfs(rayomd):
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
@@ -813,6 +851,7 @@ def generate(args):
     write(SEEDS / "cff" / "tiny.cff", struct.pack(">H", count) + cff)
     make_text_seeds(images)
     make_mermaid_seeds()
+    make_serve_seeds()
     if args.rayomd:
         make_pdfs(args.rayomd)
 

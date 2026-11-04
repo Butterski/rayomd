@@ -21,7 +21,8 @@ Treat the native renderer as a fast Markdown subset, not a full Pandoc clone.
 
 - Keep the repository root clean: source entry points, `README.md`, `LICENSE`,
   `CMakeLists.txt`, `CMakePresets.json`, `.editorconfig`, `AGENTS.md`,
-  `CONTRIBUTING.md`, `VERSION`, and the main smoke document belong there.
+  `CONTRIBUTING.md`, `VERSION`, the main smoke document and `skills/` (the Agent Skill)
+  belong there.
 - Keep source-coupled fixtures, specifications, and decision documents under
   docs/; keep longer user guides, dated reports, benchmark results, and research
   archives in the GitHub wiki. Release benchmark records are not kept in the
@@ -783,9 +784,20 @@ Important image/link details:
 
 - `src/cli/main_cli.cpp`
   Portable CLI entry point for Linux and non-GUI workflows. Supports single
-  export, stdin Markdown export, folder batch, stdin batch, warm serve mode,
+  export, stdin Markdown export, folder batch, stdin batch, warm serve mode (also
+  `--serve --json`, protocol 1 for front ends: `RunServeJson`),
   books, and benchmarks. Built at `-Os` with `batch_report.cpp` and the Windows CLI: the glue
   runs once a run (`--bench` and `--serve` only call the engine in their loops).
+
+- `src/cli/serve_request.h` and `src/cli/serve_request.cpp`
+  `--serve --json`'s request reader for both command lines: the JSON of one request a line
+  (`ParseRequest`: exactly protocol 1's fields, strings, integers and one array of strings, `\u`
+  escapes with surrogate pairs, valid UTF-8; anything else refused, each byte read once), the
+  batch flags a request may not give (`IsBatchFlag`), and lines of standard input through a buffer
+  of its own (`LineReader`: a line over `kMaxRequestBytes`, 32 MiB, read to its end without being
+  held). A request's `args` go through the command line's own `ParseExportOptions`, its answer
+  through `RayoMd::Batch::AppendRecord`, so the option vocabulary and the report stay one. Not
+  part of the engine library; built at `-Os`; fuzz target `serve_request`.
 
 - `src/cli/terminate.cpp`
   The terminate handler in place of libstdc++'s (whose demangler is 61 KB) where `no_unwind.cpp`
@@ -891,8 +903,9 @@ Important image/link details:
   libFuzzer targets of the engine's untrusted-input entry points (`fuzz_targets.h`): Markdown
   through `BuildPdf` (the first two bytes choose the options, the third, the text's first, more), `PdfSource::Inspect`, `ParseTheme`
   and a build with its theme, TrueType and OpenType fonts loaded and subset as a theme's font,
-  bare CFF, image decoding, SVG through both hosts, and Mermaid diagrams through `Mermaid::ToSvg`
-  and `ConvertSvg`. `fuzz_internal.cpp` compiles `tiny_pdf.cpp` inside itself to reach its internal names (and reads fonts into memory instead of
+  bare CFF, image decoding, SVG through both hosts, Mermaid diagrams through `Mermaid::ToSvg`
+  and `ConvertSvg`, and `--serve --json`'s request lines (`serve_request`, `fuzz_serve.cpp`).
+  `fuzz_internal.cpp` compiles `tiny_pdf.cpp` inside itself to reach its internal names (and reads fonts into memory instead of
   mapping them, so ASan sees overreads); each target runs on a 2 MiB stack. `-DRAYOMD_FUZZ=ON` with
   clang builds `rayomd-fuzz-<target>` (ASan, UBSan); `tests/fuzz/run.sh BUILD SECONDS` runs them on
   the corpus `seeds.py collect` makes (-timeout=10, -rss_limit_mb=2048). Every test build on Linux
@@ -1002,7 +1015,9 @@ GitHub CI entry points:
   version bumps, `v<VERSION>` tags, and manual dispatch; keep `VERSION` and package contents
   aligned. Archives are packed at zopfli strength (`pigz -11` for the `.tar.gz`, 7-Zip's
   `-mx=9 -mpass=15` for the `.zip`): the same formats, 29 to 52 KB smaller each than `tar -z`
-  and zlib's level 6 (5.2.5's binaries).
+  and zlib's level 6 (5.2.5's binaries). Its `container` job builds `ghcr.io/butterski/rayomd`
+  (`packaging/container/Dockerfile`: the static asset on `scratch` with DejaVu Sans) from that
+  asset, smoke-tests and pushes it, and adds its size to the release notes.
 
 ## Benchmark And Documentation Rules
 
@@ -1191,6 +1206,10 @@ GitHub CI entry points:
   set, pushes both to the AUR. `publish` and `arch` run only for `master`/`main` or a tag and in
   the `release` environment, which holds that secret (with its protection rules in the
   repository settings); a manual run on another branch builds but publishes nothing.
+- `skills/rayomd/` is the Agent Skill (agentskills.io format: `SKILL.md`,
+  `references/syntax.md`) for agents that make PDFs with the CLI. Not built; keep its commands
+  and the report's fields in step with `PrintUsage` and README, its syntax reference with
+  README's Features and Boundaries; `skills-ref validate skills/rayomd` checks it.
 - RayoMD's own code is licensed under Apache-2.0. Keep `LICENSE`,
   `NOTICE`, README license wording, and SPDX headers aligned when changing
   licensing metadata.

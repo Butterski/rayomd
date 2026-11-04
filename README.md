@@ -536,6 +536,20 @@ rayomd --batch docs pdf-out --recursive --skip-unchanged --report=report.jsonl -
 cat notes.md | rayomd --stdin notes.pdf
 ```
 
+### Front ends: `--serve --json`
+
+`--serve --json` keeps one process running for an editor plugin, an agent tool or a script: each
+line in is a JSON request with its own input (a file, or the Markdown text with the file it stands
+for), output and export flags; each line out is the request's `--report` record with its `id`.
+The first line out is `{"rayomd":"VERSION","protocol":1}`; a bad request gets an error line and
+the session goes on. The PDFs are byte for byte those of `--export` with the same flags.
+
+```sh
+printf '%s\n' '{"id":"1","input":"notes/a.md","output":"out/a.pdf","args":["--toc","--page-size=a5"]}' \
+  '{"id":"2","markdown":"# Title\n\n![logo](logo.png)","source_path":"notes/b.md","output":"out/b.pdf"}' \
+  | rayomd --serve --json
+```
+
 ### Compression, archiving and accessibility
 
 - `--compress` writes page content, fonts and CMaps as FlateDecode streams with RayoMD's own
@@ -577,6 +591,22 @@ for byte; `--inspect-source` describes it.
 ```sh
 rayomd --export notes.md notes.pdf --embed-source
 rayomd --recover-source notes.pdf recovered.md
+```
+
+### Agents
+
+[`skills/rayomd`](skills/rayomd/SKILL.md) is an [Agent Skill](https://agentskills.io/specification)
+for agents that write Markdown and have a shell: getting the binary and checking its SHA-256, the
+commands for the common asks, checking the result (`pages`, `failed_images`,
+`missing_characters`) and what to do when a count is not zero, and in
+[`references/syntax.md`](skills/rayomd/references/syntax.md) what renders and what degrades.
+Releases also publish a container image, the static binary on `scratch` with DejaVu Sans (about
+1.5 MB), for CI jobs and sandboxes; [RayoMD GUI](https://github.com/Butterski/rayomd-gui) shows
+the live preview of a note an agent rewrites.
+
+```sh
+cp -r skills/rayomd ~/.claude/skills/
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/w" ghcr.io/butterski/rayomd --export notes.md notes.pdf
 ```
 
 ### Diagnostics

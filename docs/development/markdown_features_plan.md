@@ -272,7 +272,7 @@ footnotes, long pages and print output, from the follow-up report, are planned i
   on the command line, never by a document.
 - `--watch`; `--show-properties` (front matter as a key/value block); MkDocs `nav` as a book
   source; MkDocs and Docusaurus admonitions; definition lists; right-to-left text (bidi, then
-  Arabic shaping; large); a container image and a CI action.
+  Arabic shaping; large); a CI action (the container image is done, #37).
 
 **GUI.**
 - Print: the desktop portal's `Print` on Linux (the GUI has its own D-Bus client), GDI on
@@ -293,6 +293,8 @@ editor.
   bounded stylesheet subset mapped onto RayoMD's own layout values.
 - [#30](https://github.com/Butterski/rayomd/issues/30) VS Code extension on `rayomd --serve --json`.
 - [#36](https://github.com/Butterski/rayomd/issues/36) A versioned JSON-lines serve protocol (per-request
-  input, output and flags) for the extension, the MCP server and an Obsidian plugin.
+  input, output and flags) for the extension, the MCP server and an Obsidian plugin. Done:
+  `rayomd --serve --json`, protocol 1 (`src/cli/serve_request.h`, the wiki's CLI reference).
 - [#37](https://github.com/Butterski/rayomd/issues/37) Agent tools: an Agent Skill, an MCP server on the
-  serve protocol, and a container image.
+  serve protocol, and a container image. Done here: `skills/rayomd`, the release workflow's
+  `container` job (`packaging/container/`); the MCP server `rayomd-mcp` is its own repository.

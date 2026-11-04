@@ -34,6 +34,9 @@ int Svg(const uint8_t* data, size_t size);
 // A Mermaid diagram through Mermaid::ToSvg with a host of fixed-width text, then the SVG it gives
 // through ConvertSvg, which must draw it.
 int Mermaid(const uint8_t* data, size_t size);
+// Request lines of `rayomd --serve --json` through its line reader (read sizes from the first
+// byte) and RayoMd::Serve::ParseRequest; an accepted request rewritten as JSON must read the same.
+int ServeRequest(const uint8_t* data, size_t size);
 
 struct NamedTarget {
     const char* name;

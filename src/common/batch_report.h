@@ -20,6 +20,7 @@ namespace RayoMd::Batch {
 
 // One document of a batch: a line of the report.
 struct Record {
+    std::string id;              // JSON text written first as "id" (--serve --json); empty for none
     std::string input;           // UTF-8
     std::string output;          // UTF-8
     const char* status = "ok";   // "ok", "skipped" or "error"
@@ -63,6 +64,9 @@ private:
 // Appends `text` to `out` as the contents of a JSON string: quotes, backslashes and control
 // characters escaped, and bytes that are not UTF-8 (possible in Linux file names) as U+FFFD.
 void AppendJsonString(std::string& out, std::string_view text);
+
+// Appends `record` to `out` as a line of the report, its line break included.
+void AppendRecord(std::string& out, const Record& record);
 
 // Whether `output` is a complete PDF at least as new as `input`, the check --skip-unchanged
 // makes, as make does. A PDF that a stopped run left cut short does not end with %%EOF.

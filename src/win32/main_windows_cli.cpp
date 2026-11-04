@@ -35,6 +35,7 @@
 #include "../core/book.h"
 #include "../core/export_options.h"
 #include "../common/thread_object.h"
+#include "../cli/serve_request.h"
 #endif
 
 thread_local int g_nativePdfLastError = 0;
@@ -923,6 +924,117 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
     return failures == 0 ? 0 : 10 + GetNativePdfLastError();
 }
 
+// What standard input has, up to `size` bytes; 0 at its end or on an error.
+size_t ReadStandardInput(void*, char* buffer, size_t size) {
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD read = 0;
+    if (in == INVALID_HANDLE_VALUE || in == nullptr || !ReadFile(in, buffer, static_cast<DWORD>(size), &read, nullptr)) return 0;
+    return read;
+}
+
+// `text` on standard output, all of it; false when a write failed.
+bool WriteStdoutAll(const std::string& text) {
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (out == INVALID_HANDLE_VALUE || out == nullptr) return false;
+    for (size_t at = 0; at < text.size();) {
+        DWORD written = 0;
+        if (!WriteFile(out, text.data() + at, static_cast<DWORD>(text.size() - at), &written, nullptr) || written == 0) return false;
+        at += written;
+    }
+    return true;
+}
+
+// One request of --serve --json into `record`: its options are the session's with the request's
+// `args`, and its PDF the bytes --export writes with them.
+void ServeJsonRequest(const RayoMd::Serve::Request& request, const WinExportOptions& sessionOptions,
+    std::string& pdfBuffer, RayoMd::Batch::Record& record) {
+    std::wstring outputPath = Utf8ToWide(request.output);
+    if (outputPath.size() < 4 || _wcsicmp(outputPath.c_str() + outputPath.size() - 4, L".pdf") != 0) outputPath += L".pdf";
+    record.output = WideToUtf8(outputPath);
+    record.input = request.hasInput ? request.input : request.sourcePath;
+    const auto fail = [&](int code, std::string error) {
+        record.status = "error";
+        record.code = code;
+        record.error = std::move(error);
+    };
+    WinExportOptions options = sessionOptions;
+    std::vector<std::wstring> arguments;
+    arguments.reserve(request.args.size());
+    for (const std::string& arg : request.args) {
+        if (RayoMd::Serve::IsBatchFlag(arg)) return fail(2, arg + " does not apply to a serve request");
+        arguments.push_back(Utf8ToWide(arg));
+    }
+    std::vector<LPWSTR> argv;
+    argv.reserve(arguments.size());
+    for (std::wstring& argument : arguments) argv.push_back(&argument[0]);
+    std::wstring error;
+    if (!ParseExportOptions(static_cast<int>(argv.size()), argv.data(), 0, options, error)) return fail(2, WideToUtf8(error));
+
+    TinyPdf::BuildResult details;
+    const auto start = std::chrono::steady_clock::now();
+    const std::wstring inputPath = Utf8ToWide(request.hasInput ? request.input : request.sourcePath);
+    int code = 0;
+    if (request.hasInput) {
+        code = ExportNativeFileWithBufferResult(inputPath, outputPath, options, pdfBuffer, &details);
+    } else {
+        pdfBuffer.clear();
+        code = !BuildNativePdfBytes(request.markdown, options, pdfBuffer, inputPath, &details) ? 10 + GetNativePdfLastError()
+            : WriteBinaryFile(outputPath, pdfBuffer) ? 0 : 12;
+    }
+    record.milliseconds = MillisecondsSince(start);
+    if (code == 3) return fail(code, "could not read input Markdown file: " + request.input);
+    if (code == 12) return fail(code, "could not write PDF file: " + record.output);
+    if (code != 0) return fail(code, "native PDF export failed for " + record.input + " (code " + std::to_string(code) + ").");
+    record.pages = details.pages;
+    record.bytes = pdfBuffer.size();
+    record.missingCharacters = details.missingCharacters;
+    record.failedImages = details.failedImages;
+}
+
+// --serve --json: protocol 1, one JSON request a line and one report record a request, in order
+// (docs: the wiki's CLI reference). Standard output carries the protocol only.
+int RunServeJson(const WinExportOptions& options) {
+    std::string answer = std::string("{\"rayomd\":\"") + RAYOMD_VERSION + "\",\"protocol\":" +
+        std::to_string(RayoMd::Serve::kProtocol) + "}\n";
+    bool written = WriteStdoutAll(answer);
+
+    RayoMd::Serve::LineReader lines(ReadStandardInput, nullptr);
+    RayoMd::Serve::Request request;
+    std::string line;
+    std::string error;
+    std::string pdfBuffer;
+    pdfBuffer.reserve(1024 * 1024);
+    while (written) {
+        const RayoMd::Serve::LineReader::Status status = lines.Next(line, RayoMd::Serve::kMaxRequestBytes);
+        if (status == RayoMd::Serve::LineReader::Status::End) break;
+        RayoMd::Batch::Record record;
+        if (status == RayoMd::Serve::LineReader::Status::TooLong) {
+            record.status = "error";
+            record.code = 2;
+            record.error = "request line exceeds " + std::to_string(RayoMd::Serve::kMaxRequestBytes) + " bytes";
+        } else {
+            if (line.find_first_not_of(" \t") == std::string::npos) continue;
+            if (line.size() < 16) {
+                const std::string word = RayoMd::Text::Trim(line);
+                if (word == "quit" || word == "exit") break;
+            }
+            if (RayoMd::Serve::ParseRequest(line, request, error)) {
+                record.id = request.id;
+                ServeJsonRequest(request, options, pdfBuffer, record);
+            } else {
+                record.id = request.id;
+                record.status = "error";
+                record.code = 2;
+                record.error = error;
+            }
+        }
+        answer.clear();
+        RayoMd::Batch::AppendRecord(answer, record);
+        written = WriteStdoutAll(answer);
+    }
+    return written ? 0 : 12;
+}
+
 int RunNativeBench(const std::wstring& inputPath, const std::wstring& outputDir,
     int iterations, const WinExportOptions& exportOptions) {
     if (iterations < 1) iterations = 1;
@@ -1077,6 +1189,7 @@ void PrintUsage() {
         "  rayomd.exe --batch <input-folder> <output-folder> [native] [style] [margin]\n"
         "  rayomd.exe --stdin-batch <output-folder> [native] [style] [margin]\n"
         "  rayomd.exe --serve <output-folder> [native] [style] [margin]\n"
+        "  rayomd.exe --serve --json [native] [style] [margin]\n"
         "  rayomd.exe --bench <input.md> <output-folder> <iterations> [style] [margin]\n"
         "\n"
         "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
@@ -1115,6 +1228,9 @@ void PrintUsage() {
         "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
         "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
         "  line per document; - for standard output).\n"
+        "Serve: --serve --json reads one JSON request a line, {\"id\":\"1\",\"input\":\"a.md\" or \"markdown\":\"...\"\n"
+        "  with \"source_path\",\"output\":\"a.pdf\",\"args\":[\"--toc\"]}, and answers each with its report\n"
+        "  line and the id, after a first line {\"rayomd\":\"VERSION\",\"protocol\":1}; quit ends it.\n"
         "Books: --book makes one PDF of the files a SUMMARY.md lists (mdBook, GitBook), of a folder's\n"
         "  Markdown files by name with README.md first, or of the files given: each from a new page, the\n"
         "  links between them kept, one outline, and with --toc one table of contents for all of them.\n"
@@ -1235,6 +1351,21 @@ int RunCommandLine() {
     }
 
     if (lstrcmpiW(argv[1], L"--serve") == 0) {
+        if (argc >= 3 && lstrcmpiW(argv[2], L"--json") == 0) {
+            // Standard output carries the protocol only: an argument error goes to standard error.
+            int result = 2;
+            if (!ParseExportOptions(argc, argv, 3, options, error)) {
+                WriteStderr("Error: " + WideToUtf8(error) + "\n");
+            } else if (options.followLinks != 0 || !options.report.empty() || options.workers != 0 || options.recursive ||
+                options.skipUnchanged) {
+                WriteStderr("Error: --serve --json takes no batch flags (--report, --workers, --recursive, "
+                    "--skip-unchanged) and no --follow-links: its answers are the report.\n");
+            } else {
+                result = RunServeJson(options);
+            }
+            LocalFree(argv);
+            return result;
+        }
         if (argc < 3) {
             LocalFree(argv);
             return 2;

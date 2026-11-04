@@ -8,6 +8,7 @@
 #include "../core/book.h"
 #include "../core/export_options.h"
 #include "../core/rayomd_pdf_source.h"
+#include "serve_request.h"
 
 #include <algorithm>
 #include <atomic>
@@ -27,6 +28,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#else
+#include <io.h>
 #endif
 
 namespace {
@@ -803,6 +806,102 @@ int RunServeExport(const Path& outputDir, const CliExportOptions& options) {
     return failures == 0 ? 0 : lastResult;
 }
 
+// What standard input has, up to `size` bytes; 0 at its end or on an error. A read(2), not
+// fread, which would wait for a full buffer while a client waits for its answer.
+size_t ReadStandardInput(void*, char* buffer, size_t size) {
+#ifdef _WIN32
+    const int got = _read(0, buffer, static_cast<unsigned>(size));
+    return got > 0 ? static_cast<size_t>(got) : 0;
+#else
+    for (;;) {
+        const ssize_t got = ::read(STDIN_FILENO, buffer, size);
+        if (got >= 0) return static_cast<size_t>(got);
+        if (errno != EINTR) return 0;
+    }
+#endif
+}
+
+// One request of --serve --json into `record`: its options are the session's with the request's
+// `args`, and its PDF the bytes --export writes with them.
+void ServeJsonRequest(const RayoMd::Serve::Request& request, const CliExportOptions& sessionOptions,
+    std::string& pdfBuffer, RayoMd::Batch::Record& record) {
+    Path outputPath = RayoMd::File::PathFromUtf8(request.output);
+    if (RayoMd::File::ExtensionOf(outputPath) != ".pdf") outputPath += ".pdf";
+    record.output = PathToUtf8(outputPath);
+    record.input = request.hasInput ? request.input : request.sourcePath;
+    const auto fail = [&](int code, std::string error) {
+        record.status = "error";
+        record.code = code;
+        record.error = error.rfind("Error: ", 0) == 0 ? error.substr(7) : std::move(error);
+    };
+    CliExportOptions options = sessionOptions;
+    std::vector<char*> argv;
+    argv.reserve(request.args.size());
+    for (const std::string& arg : request.args) {
+        if (RayoMd::Serve::IsBatchFlag(arg)) return fail(2, arg + " does not apply to a serve request");
+        argv.push_back(const_cast<char*>(arg.c_str()));
+    }
+    std::string error;
+    if (!ParseExportOptions(static_cast<int>(argv.size()), argv.data(), 0, options, error)) return fail(2, error);
+
+    TinyPdf::BuildResult details;
+    const auto start = std::chrono::steady_clock::now();
+    const int code = request.hasInput
+        ? BuildNativePdfFile(RayoMd::File::PathFromUtf8(request.input), outputPath, options, pdfBuffer, &error, &details)
+        : BuildNativePdfMarkdown(request.markdown, request.sourcePath, outputPath, options, pdfBuffer, request.sourcePath,
+              &error, &details);
+    record.milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (code != 0) return fail(code, error);
+    record.pages = details.pages;
+    record.bytes = pdfBuffer.size();
+    record.missingCharacters = details.missingCharacters;
+    record.failedImages = details.failedImages;
+}
+
+// --serve --json: protocol 1, one JSON request a line and one report record a request, in order
+// (docs: the wiki's CLI reference). Standard output carries the protocol only.
+int RunServeJson(const CliExportOptions& options) {
+    std::string answer = std::string("{\"rayomd\":\"") + RAYOMD_VERSION + "\",\"protocol\":" +
+        std::to_string(RayoMd::Serve::kProtocol) + "}\n";
+    bool written = std::fwrite(answer.data(), 1, answer.size(), stdout) == answer.size() && std::fflush(stdout) == 0;
+
+    RayoMd::Serve::LineReader lines(ReadStandardInput, nullptr);
+    RayoMd::Serve::Request request;
+    std::string line;
+    std::string error;
+    std::string pdfBuffer;
+    pdfBuffer.reserve(1024 * 1024);
+    while (written) {
+        const RayoMd::Serve::LineReader::Status status = lines.Next(line, RayoMd::Serve::kMaxRequestBytes);
+        if (status == RayoMd::Serve::LineReader::Status::End) break;
+        RayoMd::Batch::Record record;
+        if (status == RayoMd::Serve::LineReader::Status::TooLong) {
+            record.status = "error";
+            record.code = 2;
+            record.error = "request line exceeds " + std::to_string(RayoMd::Serve::kMaxRequestBytes) + " bytes";
+        } else {
+            if (line.find_first_not_of(" \t") == std::string::npos) continue;
+            if (line.size() < 16) {
+                const std::string word = RayoMd::Text::Trim(line);
+                if (word == "quit" || word == "exit") break;
+            }
+            if (RayoMd::Serve::ParseRequest(line, request, error)) {
+                record.id = request.id;
+                ServeJsonRequest(request, options, pdfBuffer, record);
+            } else {
+                record.id = request.id;
+                record.status = "error";
+                record.code = 2;
+                record.error = error;
+            }
+        }
+        answer.clear();
+        RayoMd::Batch::AppendRecord(answer, record);
+        written = std::fwrite(answer.data(), 1, answer.size(), stdout) == answer.size() && std::fflush(stdout) == 0;
+    }
+    return written ? 0 : 12;
+}
+
 int RunNativeBench(const Path& inputPath, const Path& outputDir, int iterations, const CliExportOptions& cliOptions) {
     if (iterations < 1) iterations = 1;
     std::string fsError;
@@ -930,6 +1029,7 @@ void PrintUsage() {
         "  rayomd --batch <input-folder> <output-folder> [native] [style] [margin]\n"
         "  rayomd --stdin-batch <output-folder> [native] [style] [margin]\n"
         "  rayomd --serve <output-folder> [native] [style] [margin]\n"
+        "  rayomd --serve --json [native] [style] [margin]\n"
         "  rayomd --bench <input.md> <output-folder> <iterations> [style] [margin]\n"
         "\n"
         "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
@@ -968,6 +1068,9 @@ void PrintUsage() {
         "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
         "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
         "  line per document; - for standard output).\n"
+        "Serve: --serve --json reads one JSON request a line, {\"id\":\"1\",\"input\":\"a.md\" or \"markdown\":\"...\"\n"
+        "  with \"source_path\",\"output\":\"a.pdf\",\"args\":[\"--toc\"]}, and answers each with its report\n"
+        "  line and the id, after a first line {\"rayomd\":\"VERSION\",\"protocol\":1}; quit ends it.\n"
         "Books: --book makes one PDF of the files a SUMMARY.md lists (mdBook, GitBook), of a folder's\n"
         "  Markdown files by name with README.md first, or of the files given: each from a new page, the\n"
         "  links between them kept, one outline, and with --toc one table of contents for all of them.\n"
@@ -1038,6 +1141,16 @@ int main(int argc, char** argv) {
     }
 
     if (command == "--serve") {
+        if (argc >= 3 && Lower(argv[2]) == "--json") {
+            std::string error;
+            if (!ParseExportOptions(argc, argv, 3, options, error)) return PrintArgumentError(error);
+            if (options.followLinks != 0 || !options.report.empty() || options.workers != 0 || options.recursive ||
+                options.skipUnchanged) {
+                return PrintArgumentError("--serve --json takes no batch flags (--report, --workers, --recursive, "
+                    "--skip-unchanged) and no --follow-links: its answers are the report.");
+            }
+            return RunServeJson(options);
+        }
         if (argc < 3) return PrintArgumentError("--serve requires <output-folder>.");
         std::string error;
         if (!ParseExportOptions(argc, argv, 3, options, error)) return PrintArgumentError(error);
