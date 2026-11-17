@@ -3424,7 +3424,9 @@ bool CheckHtmlInText() {
 }
 
 // With pageNumbers every page gets "N", without the total, in a content stream of its own, in
-// Helvetica (/FN on Unicode pages); without it a page has one stream. In both renderers.
+// Helvetica (/FN on Unicode pages); without it a page has one stream. In both renderers. Each
+// number's stream is as long as its /Length says, on pages of a fixed size and long ones, and is
+// centred: "10" starts half a digit (2.5 points) left of "9".
 bool CheckPageNumbers() {
     std::string document = "# Pages\n\n";
     for (int line = 0; line < 120; line++) document += "Line " + std::to_string(line) + " of text that fills pages.\n\n";
@@ -3444,6 +3446,30 @@ bool CheckPageNumbers() {
         }
         if (!ok) {
             std::cerr << "page numbers mismatch (" << (unicode ? "Unicode" : "standard") << " renderer)" << std::endl;
+            return false;
+        }
+    }
+    std::string twelve = "# Pages\n\n";
+    for (int page = 1; page < 12; page++) twelve += "\\pagebreak\n\nPage.\n\n";
+    for (const bool longPages : { false, true }) {
+        TinyPdf::PdfOptions options;
+        options.pageNumbers = true;
+        if (longPages) options.pageSize = TinyPdf::PdfPageSize{ 420.0, 595.0, true };
+        std::string pdf;
+        if (!TinyPdf::BuildPdf(twelve, options, pdf).Ok()) return false;
+        const std::string open = "stream\nq 0.45 0.45 0.45 rg BT /F1 9 Tf 1 0 0 1 ";
+        std::vector<double> x;
+        bool lengths = true;
+        for (size_t at = pdf.find(open); at != std::string::npos; at = pdf.find(open, at + 1)) {
+            const size_t begin = at + 7;
+            const size_t end = pdf.find("\nendstream", begin);
+            const size_t length = pdf.rfind("/Length ", begin);
+            lengths = lengths && end != std::string::npos && length != std::string::npos &&
+                std::strtoul(pdf.c_str() + length + 8, nullptr, 10) == end - begin;
+            x.push_back(std::strtod(pdf.c_str() + at + open.size(), nullptr));
+        }
+        if (!lengths || x.size() != 12 || x[0] != x[8] || std::abs(x[8] - x[9] - 2.5) > 0.02 || x[9] != x[11]) {
+            std::cerr << "page number streams mismatch (" << (longPages ? "long" : "fixed") << " pages)" << std::endl;
             return false;
         }
     }

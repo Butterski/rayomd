@@ -188,8 +188,8 @@ function(rayomd_experiments target)
 endfunction()
 
 # Recovery is cold, opt-in code, the math parser and layout run only for documents with
-# formulas, options and themes are parsed once per run, a theme's header, footer and cover,
-# PDF/A's metadata and the footnotes' numbering are made once per document, page footnotes keep
+# formulas, options and themes are parsed once per run, a theme's header, footer and cover, the
+# page numbers, PDF/A's metadata and the footnotes' numbering are made once per document, page footnotes keep
 # their account once per note, an OpenType font's CFF table is read once and subset once per
 # document, an HTML block is mapped once, the notes a document embeds or links to are read once,
 # the image encoder's threads only hand out segments that flate.cpp compresses, and the command
@@ -231,6 +231,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         src/common/path.cpp
         src/common/thread_object.cpp
         src/core/build_session.cpp
+        src/core/page_numbers.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-Os>")
     # A formula is parsed and laid out a node at a time, and a document such as tester.md has
     # thousands: at -Os GCC copies and zeroes the layout's 64-byte boxes with `rep movs`/`rep stos`,
@@ -318,7 +319,8 @@ set(RAYOMD_CORE_SOURCES
     src/core/print_colors.cpp
     src/core/word_bounds.cpp
     src/common/path.cpp
-    src/common/thread_object.cpp)
+    src/common/thread_object.cpp
+    src/core/page_numbers.cpp)
 # BuildSession (incremental builds for an editor's preview): only the engine library and the core
 # tests have it, compiled with RAYOMD_BUILD_SESSION; the command lines make no session and carry
 # none of its code (MinGW's linker kept 24 KB of it in rayomd.exe when it was there unused).
