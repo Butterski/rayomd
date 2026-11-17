@@ -161,23 +161,36 @@ void ParseInlineRuns(std::string_view input, InlineRuns& out, bool recognizeMath
 // `scratch.text`.
 std::string_view StripInlineMarkdownView(std::string_view input, InlineRuns& scratch, bool recognizeMath);
 
+// The first byte at or after `from` whose kByteClasses entry is not 0, or text.size(): AVX2,
+// 32 bytes a step, where the CPU has it and 32 bytes remain, else a byte at a time.
+size_t FindClassedByte(std::string_view text, size_t from);
+
 // Whether `text` needs the inline parser: inline syntax (or a byte of `classes`), or the "://"
 // or '@' of a bare URL or email address. One pass, which stops at the first inline syntax; only
 // text with a ':' or '@' and no syntax is searched again. The classes seen are summed before the
-// test: fewer instructions than testing each block first, mostly in short table cells. When it
-// returns false, `seenOut` (if given) gets the classes of all of `text`.
+// test: fewer instructions than testing each block first, mostly in short table cells. From 64
+// bytes the pass jumps from one byte with a class to the next (FindClassedByte): `seen` is the
+// same, as only those bytes add to it. When it returns false, `seenOut` (if given) gets the
+// classes of all of `text`.
 inline bool NeedsInlineParse(std::string_view text, unsigned char classes = 0, unsigned char* seenOut = nullptr) {
     const unsigned syntax = RayoMd::Text::kByteInlineSyntax | classes;
-    const unsigned char* at = reinterpret_cast<const unsigned char*>(text.data());
-    size_t left = text.size();
     const auto& byteClasses = RayoMd::Text::Detail::kByteClasses;
     unsigned char seen = 0;
-    for (; left >= 8; at += 8, left -= 8) {
-        seen |= byteClasses[at[0]] | byteClasses[at[1]] | byteClasses[at[2]] | byteClasses[at[3]] |
-            byteClasses[at[4]] | byteClasses[at[5]] | byteClasses[at[6]] | byteClasses[at[7]];
-        if (seen & syntax) return true;
+    if (text.size() >= 64) {
+        for (size_t at = FindClassedByte(text, 0); at < text.size(); at = FindClassedByte(text, at + 1)) {
+            seen |= byteClasses[static_cast<unsigned char>(text[at])];
+            if (seen & syntax) return true;
+        }
+    } else {
+        const unsigned char* at = reinterpret_cast<const unsigned char*>(text.data());
+        size_t left = text.size();
+        for (; left >= 8; at += 8, left -= 8) {
+            seen |= byteClasses[at[0]] | byteClasses[at[1]] | byteClasses[at[2]] | byteClasses[at[3]] |
+                byteClasses[at[4]] | byteClasses[at[5]] | byteClasses[at[6]] | byteClasses[at[7]];
+            if (seen & syntax) return true;
+        }
+        for (; left > 0; at++, left--) seen |= byteClasses[*at];
     }
-    for (; left > 0; at++, left--) seen |= byteClasses[*at];
     if (seen & syntax) return true;
     if (seenOut != nullptr) *seenOut = seen;
     return (seen & RayoMd::Text::kByteAutolinkLead) &&
