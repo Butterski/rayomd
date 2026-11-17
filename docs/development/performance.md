@@ -41,6 +41,31 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Object numbers and cross-reference offsets in digit pairs (2026-11-17)
+
+`PdfObjects::WriteTail` wrote each cross-reference entry's ten offset digits with ten divisions by
+10; it now writes five pairs from `kDigitPairs`. `BuildInto` writes each object's number with
+`WriteDigitsBackward` (pairs, ending at the given place) instead of `std::to_chars`. A page is two
+objects (page and content), three with `--page-numbers`, so the savings follow the page count.
+Every PDF is byte for byte the same: 16 documents in 10 option sets
+and 2 books (`same=162 diff=0`).
+
+`--bench`, GCC 13.3, Ryzen 5 PRO 4650GE pinned to one core, files on tmpfs, medians of 11 runs:
+
+| Document | before (instructions / ms) | after | Change |
+|---|---:|---:|---:|
+| pages2000.md (2,000 pages) | 14,867,668 / 1.34 | 14,610,971 / 1.29 | -1.73 % |
+| pages2000.md, a4-landscape `--page-numbers` | 16,767,378 / 1.66 | 16,392,748 / 1.62 | -2.23 % |
+| essay.md, a4-landscape `--page-numbers` | 21,793,408 / 1.94 | 21,739,651 / 1.85 | -0.25 % |
+| readme10.md | 37,114,794 / 4.43 | 37,033,322 / 4.40 | -0.22 % |
+| README.md | 3,758,940 / 0.50 | 3,751,036 / 0.49 | -0.21 % |
+| tester.md | 1,265,039 / 0.21 | 1,262,100 / 0.21 | -0.23 % |
+| polish.md | 11,496,428 / 0.91 | 11,488,692 / 0.89 | -0.07 % |
+
+A fresh `--export --page-size=a4-landscape --page-numbers` (perf stat -r 200): README.md
+5,108,281 → 5,099,090 instructions, polish.md 11,553,289 → 11,542,659, license.txt 591,940 →
+591,255. Text -432 bytes.
+
 ## The inline parse test 32 bytes a step (2026-11-17)
 
 `NeedsInlineParse`, which every paragraph, heading and table cell asks first, summed the class of
