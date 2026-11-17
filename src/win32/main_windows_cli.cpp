@@ -425,102 +425,111 @@ int ExportFile(const std::wstring& inputPath, const std::wstring& outputPath, co
 
 bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& options, std::wstring& error) {
     for (int i = start; i < argc; i++) {
-        if (lstrcmpiW(argv[i], L"pandoc") == 0) {
+        // `--name VALUE` is `--name=VALUE` for the options that take one, and a digit after
+        // --number-headings or --follow-links is their level.
+        std::wstring joined;
+        const wchar_t* arg = argv[i];
+        if (i + 1 < argc && (RayoMd::Cli::TakesValue(WideToUtf8(arg)) || RayoMd::Cli::TakesLevel(WideToUtf8(arg), WideToUtf8(argv[i + 1])))) {
+            joined = std::wstring(arg) + L"=" + argv[i + 1];
+            arg = joined.c_str();
+            i++;
+        }
+        if (lstrcmpiW(arg, L"pandoc") == 0) {
             error = L"the pandoc engine was removed; RayoMD exports with its native renderer only";
             return false;
-        } else if (lstrcmpiW(argv[i], L"native") == 0) {
+        } else if (lstrcmpiW(arg, L"native") == 0) {
             // The only engine, still accepted from older command lines.
-        } else if (lstrcmpiW(argv[i], L"--allow-url-images") == 0) {
+        } else if (lstrcmpiW(arg, L"--allow-url-images") == 0) {
             options.enableUrlImages = true;
-        } else if (lstrcmpiW(argv[i], L"--allow-unsafe-local-images") == 0 || lstrcmpiW(argv[i], L"--unsafe-local-images") == 0) {
+        } else if (lstrcmpiW(arg, L"--allow-unsafe-local-images") == 0 || lstrcmpiW(arg, L"--unsafe-local-images") == 0) {
             options.allowUnsafeLocalImages = true;
-        } else if (lstrcmpiW(argv[i], L"--embed-source") == 0) {
+        } else if (lstrcmpiW(arg, L"--embed-source") == 0) {
             options.embedSource = true;
-        } else if (lstrcmpiW(argv[i], L"--no-image-cache") == 0) {
+        } else if (lstrcmpiW(arg, L"--no-image-cache") == 0) {
             options.imageCache = false;
-        } else if (lstrcmpiW(argv[i], L"--page-numbers") == 0) {
+        } else if (lstrcmpiW(arg, L"--page-numbers") == 0) {
             options.pageNumbers = true;
-        } else if (lstrcmpiW(argv[i], L"--compress") == 0) {
+        } else if (lstrcmpiW(arg, L"--compress") == 0) {
             options.compress = true;
-        } else if (lstrcmpiW(argv[i], L"--fast-images") == 0) {
+        } else if (lstrcmpiW(arg, L"--fast-images") == 0) {
             options.fastImages = true;
-        } else if (lstrcmpiW(argv[i], L"--pdfa") == 0) {
+        } else if (lstrcmpiW(arg, L"--pdfa") == 0) {
             options.pdfa = true;
-        } else if (lstrcmpiW(argv[i], L"--pdfua") == 0) {
+        } else if (lstrcmpiW(arg, L"--pdfua") == 0) {
             options.pdfua = true;
-        } else if (lstrcmpiW(argv[i], L"--no-highlight") == 0) {
+        } else if (lstrcmpiW(arg, L"--no-highlight") == 0) {
             options.highlightCode = false;
-        } else if (lstrcmpiW(argv[i], L"--no-diagrams") == 0) {
+        } else if (lstrcmpiW(arg, L"--no-diagrams") == 0) {
             options.diagrams = false;
-        } else if (lstrcmpiW(argv[i], L"--black-text") == 0) {
+        } else if (lstrcmpiW(arg, L"--black-text") == 0) {
             options.blackText = true;
-        } else if (lstrcmpiW(argv[i], L"--hide-tags") == 0) {
+        } else if (lstrcmpiW(arg, L"--hide-tags") == 0) {
             options.hideTags = true;
-        } else if (lstrcmpiW(argv[i], L"--toc") == 0) {
+        } else if (lstrcmpiW(arg, L"--toc") == 0) {
             options.toc = true;
-        } else if (_wcsnicmp(argv[i], L"--toc-depth=", 12) == 0) {
-            const wchar_t* depth = argv[i] + 12;
+        } else if (_wcsnicmp(arg, L"--toc-depth=", 12) == 0) {
+            const wchar_t* depth = arg + 12;
             if (depth[0] < L'1' || depth[0] > L'6' || depth[1] != L'\0') {
                 error = L"--toc-depth must be 1 to 6";
                 return false;
             }
             options.tocDepth = depth[0] - L'0';
-        } else if (_wcsnicmp(argv[i], L"--page-break-before=", 20) == 0) {
-            const wchar_t* level = argv[i] + 20;
+        } else if (_wcsnicmp(arg, L"--page-break-before=", 20) == 0) {
+            const wchar_t* level = arg + 20;
             if ((level[0] != L'h' && level[0] != L'H') || level[1] < L'1' || level[1] > L'6' || level[2] != L'\0') {
                 error = L"--page-break-before must be h1 to h6";
                 return false;
             }
             options.pageBreakBeforeLevel = level[1] - L'0';
-        } else if (lstrcmpiW(argv[i], L"--number-headings") == 0) {
+        } else if (lstrcmpiW(arg, L"--number-headings") == 0) {
             options.numberHeadings = 3;
-        } else if (_wcsnicmp(argv[i], L"--number-headings=", 18) == 0) {
-            const wchar_t* depth = argv[i] + 18;
+        } else if (_wcsnicmp(arg, L"--number-headings=", 18) == 0) {
+            const wchar_t* depth = arg + 18;
             if (depth[0] < L'1' || depth[0] > L'6' || depth[1] != L'\0') {
                 error = L"--number-headings must be 1 to 6";
                 return false;
             }
             options.numberHeadings = depth[0] - L'0';
-        } else if (lstrcmpiW(argv[i], L"--dialect=github") == 0) {
+        } else if (lstrcmpiW(arg, L"--dialect=github") == 0) {
             options.dialect = TinyPdf::MarkdownDialect::GitHub;
-        } else if (lstrcmpiW(argv[i], L"--dialect=obsidian") == 0) {
+        } else if (lstrcmpiW(arg, L"--dialect=obsidian") == 0) {
             options.dialect = TinyPdf::MarkdownDialect::Obsidian;
-        } else if (_wcsnicmp(argv[i], L"--dialect=", 10) == 0) {
+        } else if (_wcsnicmp(arg, L"--dialect=", 10) == 0) {
             error = L"--dialect must be github or obsidian";
             return false;
-        } else if (lstrcmpiW(argv[i], L"--footnotes=end") == 0) {
+        } else if (lstrcmpiW(arg, L"--footnotes=end") == 0) {
             options.footnotes = TinyPdf::FootnotePlacement::End;
-        } else if (lstrcmpiW(argv[i], L"--footnotes=page") == 0) {
+        } else if (lstrcmpiW(arg, L"--footnotes=page") == 0) {
             options.footnotes = TinyPdf::FootnotePlacement::Page;
-        } else if (_wcsnicmp(argv[i], L"--footnotes=", 12) == 0) {
+        } else if (_wcsnicmp(arg, L"--footnotes=", 12) == 0) {
             error = L"--footnotes must be end or page";
             return false;
-        } else if (_wcsnicmp(argv[i], L"--vault=", 8) == 0) {
-            options.vaultRoot = WideToUtf8(argv[i] + 8);
+        } else if (_wcsnicmp(arg, L"--vault=", 8) == 0) {
+            options.vaultRoot = WideToUtf8(arg + 8);
             if (options.vaultRoot.empty()) {
                 error = L"--vault needs a folder";
                 return false;
             }
-        } else if (lstrcmpiW(argv[i], L"--embeds=link") == 0) {
+        } else if (lstrcmpiW(arg, L"--embeds=link") == 0) {
             options.embedsAsLinks = true;
-        } else if (lstrcmpiW(argv[i], L"--embeds=content") == 0) {
+        } else if (lstrcmpiW(arg, L"--embeds=content") == 0) {
             options.embedsAsLinks = false;
-        } else if (_wcsnicmp(argv[i], L"--embeds=", 9) == 0) {
+        } else if (_wcsnicmp(arg, L"--embeds=", 9) == 0) {
             error = L"--embeds must be link or content";
             return false;
-        } else if (lstrcmpiW(argv[i], L"--backlinks") == 0) {
+        } else if (lstrcmpiW(arg, L"--backlinks") == 0) {
             options.backlinks = true;
-        } else if (lstrcmpiW(argv[i], L"--follow-links") == 0) {
+        } else if (lstrcmpiW(arg, L"--follow-links") == 0) {
             options.followLinks = 1;
-        } else if (_wcsnicmp(argv[i], L"--follow-links=", 15) == 0) {
-            const wchar_t* depth = argv[i] + 15;
+        } else if (_wcsnicmp(arg, L"--follow-links=", 15) == 0) {
+            const wchar_t* depth = arg + 15;
             if (depth[0] < L'1' || depth[0] > L'6' || depth[1] != L'\0') {
                 error = L"--follow-links must be 1 to 6";
                 return false;
             }
             options.followLinks = depth[0] - L'0';
-        } else if (_wcsnicmp(argv[i], L"--theme=", 8) == 0) {
-            const std::wstring themePath = argv[i] + 8;
+        } else if (_wcsnicmp(arg, L"--theme=", 8) == 0) {
+            const std::wstring themePath = arg + 8;
             const size_t slash = themePath.find_last_of(L"\\/");
             const std::wstring directory = slash == std::wstring::npos ? std::wstring() : themePath.substr(0, slash);
             std::string text;
@@ -539,38 +548,38 @@ bool ParseExportOptions(int argc, LPWSTR* argv, int start, WinExportOptions& opt
                 error = L"--theme " + themePath + L": " + Utf8ToWide(themeError);
                 return false;
             }
-        } else if (_wcsnicmp(argv[i], L"--page-size=", 12) == 0) {
-            if (!TinyPdf::Internal::ParsePageSize(WideToUtf8(argv[i] + 12), options.pageSize)) {
+        } else if (_wcsnicmp(arg, L"--page-size=", 12) == 0) {
+            if (!TinyPdf::Internal::ParsePageSize(WideToUtf8(arg + 12), options.pageSize)) {
                 error = L"--page-size must be a4, a3, a5, letter or legal (each also with -landscape), "
                     L"WIDTHxHEIGHT in mm, cm, in or pt, such as 210x297mm, or WIDTHxauto, such as 210mmxauto";
                 return false;
             }
-        } else if (lstrcmpiW(argv[i], L"--recursive") == 0) {
+        } else if (lstrcmpiW(arg, L"--recursive") == 0) {
             options.recursive = true;
-        } else if (lstrcmpiW(argv[i], L"--skip-unchanged") == 0) {
+        } else if (lstrcmpiW(arg, L"--skip-unchanged") == 0) {
             options.skipUnchanged = true;
-        } else if (_wcsnicmp(argv[i], L"--report=", 9) == 0) {
-            options.report = WideToUtf8(argv[i] + 9);
+        } else if (_wcsnicmp(arg, L"--report=", 9) == 0) {
+            options.report = WideToUtf8(arg + 9);
             if (options.report.empty()) {
                 error = L"--report needs a file name, or - for standard output";
                 return false;
             }
-        } else if (_wcsnicmp(argv[i], L"--workers=", 10) == 0) {
+        } else if (_wcsnicmp(arg, L"--workers=", 10) == 0) {
             wchar_t* end = nullptr;
-            unsigned long parsed = std::wcstoul(argv[i] + 10, &end, 10);
+            unsigned long parsed = std::wcstoul(arg + 10, &end, 10);
             if (!end || *end != wchar_t(0) || parsed < 1 || parsed > 64) {
                 error = L"--workers must be between 1 and 64";
                 return false;
             }
             options.workers = static_cast<unsigned>(parsed);
         } else {
-            std::string token = WideToUtf8(argv[i]);
+            std::string token = WideToUtf8(arg);
             TinyPdf::PdfMargin margin;
             TinyPdf::PdfStyle style;
             if (TinyPdf::Internal::ParsePdfMargin(token, margin)) options.margin = margin;
             else if (TinyPdf::Internal::ParsePdfStyle(token, style)) options.style = style;
             else {
-                error = L"unrecognized export option '" + std::wstring(argv[i]) + L"'";
+                error = L"unrecognized export option '" + std::wstring(arg) + L"'." + Utf8ToWide(RayoMd::Cli::UnknownOptionHint(token));
                 return false;
             }
         }
@@ -1368,15 +1377,34 @@ int RunCommandLine() {
         return 2;
     }
 
-    if (argc >= 2 && (lstrcmpiW(argv[1], L"--version") == 0 || lstrcmpiW(argv[1], L"-v") == 0)) {
-        WriteStdoutLine(std::string("rayomd ") + RAYOMD_VERSION);
-        LocalFree(argv);
-        return 0;
+    // --help and -h anywhere print the help, --version the version, as GNU's standards ask (-v
+    // only in the command's place, where it cannot be meant as "verbose").
+    for (int i = 1; i < argc; i++) {
+        if (lstrcmpiW(argv[i], L"--help") == 0 || lstrcmpiW(argv[i], L"-h") == 0) {
+            PrintUsage(STD_OUTPUT_HANDLE);
+            LocalFree(argv);
+            return 0;
+        }
+        if (lstrcmpiW(argv[i], L"--version") == 0 || (i == 1 && lstrcmpiW(argv[i], L"-v") == 0)) {
+            WriteStdoutLine(std::string("rayomd ") + RAYOMD_VERSION);
+            LocalFree(argv);
+            return 0;
+        }
     }
-    if (argc >= 2 && (lstrcmpiW(argv[1], L"--help") == 0 || lstrcmpiW(argv[1], L"-h") == 0)) {
-        PrintUsage(STD_OUTPUT_HANDLE);
-        LocalFree(argv);
-        return 0;
+    // Options before the command go after its paths: `rayomd.exe --toc --export a.md` is
+    // `rayomd.exe --export a.md --toc`. The array's pointers move; LocalFree takes it as it is.
+    if (!RayoMd::Cli::IsCommand(WideToUtf8(argv[1]))) {
+        int at = 1;
+        while (at < argc && !RayoMd::Cli::IsCommand(WideToUtf8(argv[at])) &&
+               (IsOptionWord(argv[at]) || (at > 1 && RayoMd::Cli::TakesValue(WideToUtf8(argv[at - 1]))))) {
+            at++;
+        }
+        if (at < argc && RayoMd::Cli::IsCommand(WideToUtf8(argv[at]))) std::rotate(argv + 1, argv + at, argv + argc);
+        if (lstrcmpiW(argv[1], L"-v") == 0) {
+            WriteStdoutLine(std::string("rayomd ") + RAYOMD_VERSION);
+            LocalFree(argv);
+            return 0;
+        }
     }
 
     if (argc >= 2 && lstrcmpiW(argv[1], L"--doctor") == 0) {
@@ -1409,7 +1437,7 @@ int RunCommandLine() {
         lstrcmpiW(argv[1], L"--stdin") != 0 && lstrcmpiW(argv[1], L"--batch") != 0 &&
         lstrcmpiW(argv[1], L"--stdin-batch") != 0 && lstrcmpiW(argv[1], L"--serve") != 0 &&
         lstrcmpiW(argv[1], L"--bench") != 0 && lstrcmpiW(argv[1], L"--book") != 0) {
-        PrintArgumentError("unknown command '" + WideToUtf8(argv[1]) + "'.");
+        PrintArgumentError("unknown command '" + WideToUtf8(argv[1]) + "'." + RayoMd::Cli::UnknownCommandHint(WideToUtf8(argv[1])));
         LocalFree(argv);
         return 2;
     }
@@ -1539,8 +1567,14 @@ int RunCommandLine() {
             LocalFree(argv);
             return 2;
         }
-        int iterations = _wtoi(argv[4]);
-        int result = RunNativeBench(argv[2], argv[3], iterations, options);
+        wchar_t* end = nullptr;
+        const long iterations = std::wcstol(argv[4], &end, 10);
+        int result = 2;
+        if (end == argv[4] || *end != L'\0' || iterations < 1 || iterations > 100000000) {
+            PrintArgumentError("--bench takes 1 to 100000000 iterations, not '" + WideToUtf8(argv[4]) + "'.");
+        } else {
+            result = RunNativeBench(argv[2], argv[3], static_cast<int>(iterations), options);
+        }
         LocalFree(argv);
         return result;
     }

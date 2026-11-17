@@ -615,6 +615,49 @@ def verify_help(binary: Path) -> None:
             raise AssertionError(f"{flag}: the help has a tab or lines wider than 79 columns: {wide}")
 
 
+def verify_arguments(binary: Path, root: Path) -> None:
+    """--help, -h and --version anywhere print and stop; options before the command, `--name VALUE`
+    and `--number-headings 2` give the PDF their usual forms give; a mistyped option, command, style
+    or margin is answered with the nearest the help names, an option without its value with the
+    help's form, an option or a file in the command's place with where it goes; --bench refuses a
+    count that is no number."""
+    folder = root / "arguments"
+    folder.mkdir()
+    note = folder / "note.md"
+    note.write_text("# Arguments\n\n## Part\n\nText.\n", encoding="utf-8")
+    shown = run(binary, "--export", str(note), str(folder / "help.pdf"), "--toc", "--help")
+    if b"Usage:" not in shown.stdout or (folder / "help.pdf").exists():
+        raise AssertionError("--help after a command did not print the help alone")
+    if not run(binary, "--export", str(note), "--version").stdout.startswith(b"rayomd "):
+        raise AssertionError("--version after a command did not print the version")
+    pairs = [
+        (["--export", str(note), "{}", "--page-size=a5", "--toc", "--toc-depth=2", "--number-headings=2", "modern"],
+         ["--page-size", "a5", "--toc", "modern", "--export", str(note), "{}", "--toc-depth", "2", "--number-headings", "2"]),
+    ]
+    for usual, other in pairs:
+        first, second = folder / "usual.pdf", folder / "other.pdf"
+        run(binary, *[str(first) if arg == "{}" else arg for arg in usual])
+        run(binary, *[str(second) if arg == "{}" else arg for arg in other])
+        if first.read_bytes() != second.read_bytes():
+            raise AssertionError(f"{other} did not give the PDF of {usual}")
+    hints = [
+        (["--export", str(note), "--page-number"], b"Did you mean --page-numbers?"),
+        (["--export", str(note), str(folder / "x.pdf"), "elegent"], b"Did you mean elegant?"),
+        (["--exprot", str(note)], b"Did you mean --export?"),
+        (["--export", str(note), str(folder / "x.pdf"), "--theme"], b"It takes a value: --theme=FILE."),
+        (["--export", str(note), str(folder / "x.pdf"), "-o"], b"The output is the path after the input"),
+        (["--toc"], b"It is an option, which follows a command"),
+        ([str(note)], b"To export a file: "),
+        (["--bench", str(note), str(folder / "bench"), "many"], b"--bench takes 1 to 100000000 iterations"),
+    ]
+    for args, needle in hints:
+        proc = subprocess.run([str(binary), *args], capture_output=True, check=False, timeout=60)
+        if proc.returncode != 2 or needle not in proc.stderr or proc.stdout:
+            raise AssertionError(f"{args}: expected exit 2 and {needle!r} on standard error, got {proc!r}")
+    if (folder / "x.pdf").exists() or (folder / "bench").exists():
+        raise AssertionError("a refused command line wrote a file")
+
+
 def verify_output_paths(binary: Path, root: Path) -> None:
     """Where --export puts the PDF: without an output (nothing, or an option, a style or a margin in
     its place) beside the input with .pdf; in a folder given (by a final separator, or because one
@@ -741,6 +784,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_help(binary)
         verify_errors(binary, root)
         verify_output_paths(binary, root)
+        verify_arguments(binary, root)
         unknown = run(binary, "--no-such-mode", expect=2)
         if b"unknown command" not in unknown.stdout or b" --help' " not in unknown.stdout or b"Commands:" in unknown.stdout:
             raise AssertionError("an unknown command was not reported in a line pointing to --help")

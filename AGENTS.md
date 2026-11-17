@@ -820,11 +820,18 @@ Important image/link details:
 - `src/cli/help.h`
   The help of both command lines: `--help` and `-h` print it on standard output, a command line
   without arguments on standard error; an argument error ends with a line pointing to `--help`
-  instead. The commands, then the options by topic, in one text that `LayOutHelp` lays out as it
-  is printed (a tab moves on to the description column), so neither binary stores the padding.
-  Each command line names its title, program and image cache before including it.
+  instead. The commands, then the options by topic, in one text (`kHelpSource`) that `LayOutHelp`
+  lays out as it is printed (a tab moves on to the description column), so neither binary stores
+  the padding. Each command line names its title, program and image cache before including it.
   `tests/verify_cli.py` checks that the help names every `"--flag"` literal of `main_cli.cpp` in
-  lines of at most 79 columns, so a new flag goes into it too.
+  lines of at most 79 columns, so a new flag goes into it too. It is also what both command lines
+  know of their arguments: `--help`, `-h` and `--version` anywhere; the commands (`IsCommand`),
+  before which options are moved after them; the options that take a value, also as the next
+  argument (`TakesValue`; `TakesLevel` for a digit after `--number-headings`/`--follow-links`); and
+  the hint after an unknown argument (`UnknownOptionHint`, `UnknownCommandHint`): the nearest
+  `--flag` of the help text or style or margin word (`NearestWord`, an edit distance), the help's
+  `--name=FORM`, or where an option or a file goes. A new option that takes a value goes into
+  `TakesValue`; a new command into `IsCommand`.
 
 - `src/cli/messages.h`
   What both command lines say of an export in the same words: a failed build's error

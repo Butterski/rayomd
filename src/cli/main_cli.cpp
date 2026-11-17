@@ -273,7 +273,16 @@ struct CliExportOptions {
 bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& options,
     std::string& error) {
     for (int i = start; i < argc; i++) {
-        std::string value = Lower(argv[i]);
+        // `--name VALUE` is `--name=VALUE` for the options that take one, and a digit after
+        // --number-headings or --follow-links is their level.
+        std::string joined;
+        const char* argument = argv[i];
+        if (i + 1 < argc && (RayoMd::Cli::TakesValue(argument) || RayoMd::Cli::TakesLevel(argument, argv[i + 1]))) {
+            joined = std::string(argument) + "=" + argv[i + 1];
+            argument = joined.c_str();
+            i++;
+        }
+        std::string value = Lower(argument);
         if (value == "pandoc") {
             error = "the pandoc engine was removed; RayoMD exports with its native renderer only";
             return false;
@@ -328,7 +337,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
             return false;
         }
         else if (value.rfind("--vault=", 0) == 0) {
-            options.vaultRoot = argv[i] + 8;
+            options.vaultRoot = argument + 8;
             if (options.vaultRoot.empty()) {
                 error = "--vault needs a folder";
                 return false;
@@ -350,7 +359,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
             options.followLinks = value[15] - '0';
         }
         else if (value.rfind("--theme=", 0) == 0) {
-            const Path themePath = RayoMd::File::PathFromUtf8(argv[i] + 8);
+            const Path themePath = RayoMd::File::PathFromUtf8(argument + 8);
             std::string text;
             std::string themeError;
             if (themePath.empty()) {
@@ -379,7 +388,7 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else if (value == "--recursive") options.recursive = true;
         else if (value == "--skip-unchanged") options.skipUnchanged = true;
         else if (value.rfind("--report=", 0) == 0) {
-            options.report = argv[i] + 9;
+            options.report = argument + 9;
             if (options.report.empty()) {
                 error = "--report needs a file name, or - for standard output";
                 return false;
@@ -398,10 +407,10 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
         else {
             TinyPdf::PdfMargin margin;
             TinyPdf::PdfStyle style;
-            if (TinyPdf::Internal::ParsePdfMargin(argv[i], margin)) options.margin = margin;
-            else if (TinyPdf::Internal::ParsePdfStyle(argv[i], style)) options.style = style;
+            if (TinyPdf::Internal::ParsePdfMargin(argument, margin)) options.margin = margin;
+            else if (TinyPdf::Internal::ParsePdfStyle(argument, style)) options.style = style;
             else {
-                error = "unrecognized export option '" + std::string(argv[i]) + "'";
+                error = "unrecognized export option '" + std::string(argument) + "'." + RayoMd::Cli::UnknownOptionHint(argument);
                 return false;
             }
         }
@@ -1086,6 +1095,35 @@ int PrintArgumentError(const std::string& message) {
     std::_Exit(code);
 }
 
+// What the arguments ask before a command runs: --help and -h anywhere print the help, --version
+// the version, as GNU's standards ask (-v only in the command's place, where it cannot be meant
+// as "verbose"); true then, for exit code 0. Options before the command are moved after its
+// paths: `rayomd --toc --export a.md` is `rayomd --export a.md --toc`.
+bool AnsweredBeforeCommand(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        const std::string word = Lower(argv[i]);
+        if (word == "--help" || word == "-h") {
+            PrintUsage(stdout);
+            return true;
+        }
+        if (word == "--version" || (i == 1 && word == "-v")) {
+            Print(stdout, std::string("rayomd ") + RAYOMD_VERSION + "\n");
+            return true;
+        }
+    }
+    if (RayoMd::Cli::IsCommand(argv[1])) return false;
+    int at = 1;
+    while (at < argc && !RayoMd::Cli::IsCommand(argv[at]) &&
+           (IsOptionWord(argv[at]) || (at > 1 && RayoMd::Cli::TakesValue(argv[at - 1])))) {
+        at++;
+    }
+    if (at == argc || !RayoMd::Cli::IsCommand(argv[at])) return false;
+    std::rotate(argv + 1, argv + at, argv + argc);
+    if (Lower(argv[1]) != "-v") return false;
+    Print(stdout, std::string("rayomd ") + RAYOMD_VERSION + "\n");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1094,17 +1132,10 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    if (AnsweredBeforeCommand(argc, argv)) return 0;
+
     std::string command = Lower(argv[1]);
     CliExportOptions options;
-
-    if (command == "--version" || command == "-v") {
-        Print(stdout, std::string("rayomd ") + RAYOMD_VERSION + "\n");
-        return 0;
-    }
-    if (command == "--help" || command == "-h") {
-        PrintUsage(stdout);
-        return 0;
-    }
 
     if (command == "--doctor") return RunDoctor();
 
@@ -1168,10 +1199,15 @@ int main(int argc, char** argv) {
 
     if (command == "--bench") {
         if (argc < 5) return PrintArgumentError("--bench requires <input.md> <output-folder> <iterations>.");
+        char* end = nullptr;
+        const long iterations = std::strtol(argv[4], &end, 10);
+        if (end == argv[4] || *end != '\0' || iterations < 1 || iterations > 100000000) {
+            return PrintArgumentError("--bench takes 1 to 100000000 iterations, not '" + std::string(argv[4]) + "'.");
+        }
         std::string error;
         if (!ParseExportOptions(argc, argv, 5, options, error)) return PrintArgumentError(error);
         if (options.followLinks != 0) return PrintArgumentError(kFollowLinksExportOnly);
-        return RunNativeBench(argv[2], argv[3], std::atoi(argv[4]), options);
+        return RunNativeBench(argv[2], argv[3], static_cast<int>(iterations), options);
     }
 
     if (command == "--batch") {
@@ -1214,5 +1250,5 @@ int main(int argc, char** argv) {
         return RunBookExport(std::vector<Path>(argv + 2, argv + output), argv[output], options);
     }
 
-    return PrintArgumentError("unknown command '" + std::string(argv[1]) + "'.");
+    return PrintArgumentError("unknown command '" + std::string(argv[1]) + "'." + RayoMd::Cli::UnknownCommandHint(argv[1]));
 }
