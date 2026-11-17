@@ -813,6 +813,15 @@ Important image/link details:
   Markdown parses in 0.3 ms, 2.75 before (CJK raw 1.4 against 6.0, as `\u` escapes 5.0 against
   11.2). Not part of the engine library; built at `-Os`; fuzz target `serve_request`.
 
+- `src/cli/help.h`
+  The help of both command lines: `--help` and `-h` print it on standard output, a command line
+  without arguments on standard error; an argument error ends with a line pointing to `--help`
+  instead (on Windows, an unknown command). The commands, then the options by topic, in one text
+  that `LayOutHelp` lays out as it is printed (a tab moves on to the description column), so
+  neither binary stores the padding. Each command line names its title, program and image cache
+  before including it. `tests/verify_cli.py` checks that the help names every `"--flag"` literal
+  of `main_cli.cpp` in lines of at most 79 columns, so a new flag goes into it too.
+
 - `src/cli/terminate.cpp`
   The terminate handler in place of libstdc++'s (whose demangler is 61 KB) where `no_unwind.cpp`
   is not linked (Debug builds, other compilers): the same message with the exception's type as

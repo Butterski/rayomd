@@ -72,7 +72,8 @@ Paths are inside the container, so keep the Markdown, its images and the PDF und
 folder. If the PDF cannot be written (exit code 12), add `-u "$(id -u):$(id -g)"`. Tags are
 `latest` and each version (`ghcr.io/butterski/rayomd:<version>`).
 
-`rayomd --doctor` checks fonts and a test export when something looks wrong.
+`rayomd --doctor` checks fonts and a test export when something looks wrong; `rayomd --help`
+lists every command and option by topic.
 
 ## 2. Export
 

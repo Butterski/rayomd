@@ -593,6 +593,28 @@ def verify_serve_json(binary: Path, root: Path) -> None:
     run(binary, "--serve", "--json", "--report=-", stdin="", expect=2)
 
 
+def verify_help(binary: Path) -> None:
+    """--help and -h print the help on standard output and exit 0. It names every command and
+    option the command line takes (each "--name" string literal of main_cli.cpp, but the old
+    spelling --unsafe-local-images and --serve's --json), --serve --json where the build has it,
+    and no line is wider than 79 columns."""
+    source = (Path(__file__).resolve().parents[1] / "src" / "cli" / "main_cli.cpp").read_text(encoding="utf-8")
+    names = sorted({name.rstrip("=") for name in re.findall(r'"(--[a-z0-9-]+=?)"', source)}
+                   - {"--json", "--unsafe-local-images"})
+    serve_json = b"serve_json=disabled" not in run(binary, "--doctor").stdout
+    for flag in ("--help", "-h"):
+        shown = subprocess.run([str(binary), flag], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if shown.returncode != 0 or shown.stderr or b"Usage:" not in shown.stdout:
+            raise AssertionError(f"{flag} did not print the help on standard output")
+        text = shown.stdout.decode("ascii")
+        missing = [name for name in names if not re.search("^  " + re.escape(name) + r"[ =,<\[]", text, re.M)]
+        if missing or ("\n  --serve --json " in text) != serve_json:
+            raise AssertionError(f"{flag}: the help lacks {missing or ['--serve --json']} or names what the build lacks")
+        wide = [line for line in text.splitlines() if len(line) > 79]
+        if wide or "\t" in text:
+            raise AssertionError(f"{flag}: the help has a tab or lines wider than 79 columns: {wide}")
+
+
 def verify(binary: Path, keep: Path | None) -> None:
     binary = binary.resolve()
     if not binary.is_file():
@@ -608,9 +630,10 @@ def verify(binary: Path, keep: Path | None) -> None:
         usage = run(binary, expect=2)
         if b"Usage:" not in usage.stdout:
             raise AssertionError("no arguments did not print the usage")
+        verify_help(binary)
         unknown = run(binary, "--no-such-mode", expect=2)
-        if b"unknown command" not in unknown.stdout:
-            raise AssertionError("an unknown command was not reported")
+        if b"unknown command" not in unknown.stdout or b" --help' " not in unknown.stdout or b"Commands:" in unknown.stdout:
+            raise AssertionError("an unknown command was not reported in a line pointing to --help")
         if os.name == "nt":
             # Exercise CommandLineToArgvW behavior outside the common fast path.
             run_raw_windows(binary, "   --doctor")
