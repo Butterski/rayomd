@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -225,7 +226,12 @@ static bool ParseNumberedView(std::string_view line, int& level, int& number, st
     if ((s[i] != '.' && s[i] != ')') || i + 1 >= s.size() || !IsSpace(s[i + 1])) return false;
     level = std::min(4, CountIndent(line) / 4);
     number = 0;
-    for (size_t j = 0; j < i; j++) number = number * 10 + (s[j] - '0');
+    // More digits than an int holds (CommonMark allows nine) saturate instead of overflowing.
+    for (size_t j = 0; j < i; j++) {
+        const int digit = s[j] - '0';
+        number = number > (std::numeric_limits<int>::max() - digit) / 10 ? std::numeric_limits<int>::max()
+                                                                          : number * 10 + digit;
+    }
     text = TrimView(s.substr(i + 2));
     return true;
 }

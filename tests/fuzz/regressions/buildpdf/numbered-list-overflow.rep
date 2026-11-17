@@ -1,0 +1,5 @@
+# A numbered list item whose number has more digits than an int holds (found by the buildpdf
+# fuzzer): ParseNumberedView's number * 10 overflowed, undefined behaviour.
+1*\x00\x00
+1*12345678901. item\n
+1*99999999999999999999) item\n
