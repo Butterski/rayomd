@@ -45,8 +45,9 @@ cleanup, clickable Markdown links (also bare URLs, email addresses and shortcut
 references), bookmarks and `#anchor` links from headings, HTML comments, `<br>`
 and character references, document metadata from the front matter (`/Info` title,
 author, subject and keywords, the catalog's `/Lang`; `FrontMatterMetadata` reads
-the YAML subset), opt-in page numbers, page sizes (A4 by default, presets,
-landscape and custom sizes; the renderers' `pageW`/`pageH`, never constants; one long page,
+the YAML subset), opt-in page numbers ("N"; "N / M" is a theme's `{page} / {pages}`), page
+sizes (A4 by default, presets, landscape and custom sizes; the renderers' `pageW`/`pageH`, never
+constants; one long page,
 `--page-size=WIDTHxauto`, `PdfPageSize::autoHeight`: `ResolvePageSize` gives the nominal height,
 width × √2, and what sizes content to a page (image, diagram and formula fits, `MaxMathHeight`,
 title pages, the cover) reads it as `fitH`; a page lays out on `fullH`, `kMaxPageSide`, from its
@@ -229,9 +230,9 @@ pair-gated pass then reads). Without the flag `RewriteObsidian` only asks `Hidde
 pair-gated pass is as it was.
 Print output (`--black-text`, `PdfOptions::blackText`): after layout and before
 `CompressPageContents`, both builders hand the page content, a theme's bands and cover and the
-table of contents' overlays to `Internal::PrintColors` (`print_colors.cpp`), as `AddPageNumber`
-its stream; every `rg`/`RG`/`g`/`G` becomes the grey of its luminance (black below 0.5) over the
-same bytes, padded with spaces, so no offset or length moves. Diagrams take
+table of contents' overlays to `Internal::PrintColors` (`print_colors.cpp`), as `WritePageNumbers`
+the page numbers' operators; every `rg`/`RG`/`g`/`G` becomes the grey of its luminance (black
+below 0.5) over the same bytes, padded with spaces, so no offset or length moves. Diagrams take
 `Mermaid::kPrintPalette` (the cache keys on the palette) and their form's colours the same pass;
 images keep theirs. A new paint needs nothing: its colour operator is rewritten with the rest.
 Without the flag nothing runs and the bytes stay as they are.
@@ -764,6 +765,16 @@ Important image/link details:
   `tiny_pdf.cpp`, the vector's code moved the renderers' constructors out of line and widened
   `ResolvePageSize`. The renderers' `fitH` and `fullH` have no default value: one store more in
   `StandardRenderer`'s constructor took it out of `BuildStandardPdfBytes` (+3.3 KB).
+
+- `src/core/page_numbers.h` and `src/core/page_numbers.cpp`
+  `--page-numbers` (`WritePageNumbers`): "N" in Helvetica centred at the foot of each page, a
+  stream object of its own after the page's content. All of a build's objects are written whole
+  into one buffer kept for the thread, which `PdfObjects::AddView` views until `BuildInto`; the
+  text before the number is formatted once for each count of digits on pages of a fixed size, and
+  the label counts up in place. The objects are what `PdfObjects::AddStream` wrote before (its
+  `"<<  /Length n >>"` with two spaces), byte for byte; `CheckPageNumbers` holds each one's
+  `/Length` and centring. 2,000 pages: 950 instructions a page, 3,700 before (performance.md).
+  Built at `-Os`.
 
 - `src/core/pdfa.h` and `src/core/pdfa.cpp`
   What PDF/A-3b adds: the 480-byte sRGB ICC profile (a v4.2 display profile written

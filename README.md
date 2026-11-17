@@ -425,11 +425,11 @@ $$
 
 Styles `elegant` (default), `modern` and `tech`; margins `compact`, `normal`, `wide`,
 `margin=0.75in` or `margin=54pt`; page sizes `a4` (default), `a3`, `a5`, `letter`, `legal`,
-each also `-landscape`, or any `WIDTHxHEIGHT` in `mm`, `cm`, `in` or `pt`; "N / M" page
-numbers. A new page starts at `\pagebreak`, `\newpage` or `<!-- pagebreak -->`, at the HTML
-page breaks other tools are given (`<div style="page-break-after: always"></div>`,
-`break-before: page`, `class="page-break"`), and with `--page-break-before=h1` before each
-chapter heading (`h2`: and each section).
+each also `-landscape`, or any `WIDTHxHEIGHT` in `mm`, `cm`, `in` or `pt`; page numbers
+("N"; "N / M" with a theme's `footer-center = {page} / {pages}`). A new page starts at
+`\pagebreak`, `\newpage` or `<!-- pagebreak -->`, at the HTML page breaks other tools are given
+(`<div style="page-break-after: always"></div>`, `break-before: page`, `class="page-break"`), and
+with `--page-break-before=h1` before each chapter heading (`h2`: and each section).
 
 `--page-size=210mmxauto` (any width and unit) makes one long page for reading on screen: no
 page breaks but the explicit ones, each page cut just below its text. Images, diagrams and

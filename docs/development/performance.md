@@ -41,6 +41,42 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## Page numbers without the total (#38, #39, 2026-11-17)
+
+`--page-numbers` writes "N" instead of "N / M" (a theme's `footer-center = {page} / {pages}` keeps
+"N / M"). The number stays a stream of its own after the page's, but `AddPageNumber`, a
+`std::string` a page grown by appends, two `AppendFixed2` and a `StandardTextWidth`, then copied by
+`PdfObjects::AddStream` into a second string, is gone: `WritePageNumbers` (`page_numbers.cpp`, at
+`-Os`) writes every page's whole object into one buffer kept for the thread, which `AddView` views
+until `BuildInto`. The object's text before the number is formatted once for each count of digits
+on pages of a fixed size (Helvetica's digits are all 556 units wide; Debug builds assert it), once
+a page on long pages, and the label counts up in place. A theme's bands, PDF/A's and PDF/UA's
+numbers among them, are viewed (`AddStreamView`) instead of copied. Every PDF is byte for byte what
+the per-page strings wrote: 87 documents and option sets (`--compress`, `--black-text`, a theme,
+`210mmxauto`, letter landscape, `--pdfa`, `--pdfua`, `--toc`, `--embed-source`, books; plain,
+Unicode and 2,000-page documents) and a 10,050-page document in five sets.
+
+`--bench`, GCC 13.3, Ryzen 5 PRO 4650GE pinned to one core, files on tmpfs, medians of 11 runs.
+pages2000.md is 2,000 one-line pages between `\pagebreak`s, essay.md 1,500 paragraphs of Lorem
+ipsum; "fix" is the label change alone, "now" with the writer:
+
+| Document | fix (instructions / ms) | now | Change |
+|---|---:|---:|---:|
+| pages2000.md (2,000 pages) `--page-numbers` | 22,265,067 / 2.25 | 16,764,859 / 1.64 | -24.7 % / -27 % |
+| same, `--black-text` | 24,023,034 / 2.49 | 17,023,594 / 1.61 | -29.1 % / -35 % |
+| same, `--page-size=210mmxauto` | 22,526,274 / 2.33 | 18,272,330 / 1.81 | -18.9 % / -22 % |
+| same, a theme's bands | 29,493,909 / 3.23 | 28,807,435 / 3.01 | -2.3 % |
+| same, `--pdfa` | 32,004,621 / 3.32 | 31,291,108 / 3.16 | -2.2 % |
+| essay.md (301 pages) `--page-numbers` | 26,358,013 / 2.53 | 25,544,408 / 2.42 | -3.1 % |
+| README.md x20 (260 pages) `--page-numbers` | 73,048,971 | 72,320,254 | -1.0 % |
+| tester.md `--page-numbers` | 1,291,121 | 1,278,882 | -0.9 % |
+
+What a page number costs, over the same document without them: 3,924 instructions a page with "N /
+M" (5.3.0), 3,700 with "N", 950 now; most of the rest is the object itself (its entry in
+`BuildInto`, the cross-reference table and the page's `/Contents` array). Documents without page
+numbers run the same instructions (within 0.006 %); peak memory of one export of pages2000.md is
+5.3 to 5.5 MB in all three. Text +2,336 bytes (`WritePageNumbers` 1.7 KB).
+
 ## Round 6: the GUI's preview against the engine harness (opt6/gap, 2026-10-20)
 
 rayomd-gui's worker took 49 ms a keystroke at the title of 700 copies of `tester.md` (lab

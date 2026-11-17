@@ -626,7 +626,7 @@ bool CheckThemeFields() {
     const std::vector<std::string> many4096 = ThemeBandStreams(theme, true, document, 3, page, logo, font);
     theme.headerLeft = "{title}";
     const std::vector<std::string> once = ThemeBandStreams(theme, true, document, 3, page, logo, font);
-    const std::string expected = "q 0.45 0.45 0.45 rg\n[" + shortened(title, (612.0 - 144.0) / 3.0) + "]\n[Ann 2]\n[2 / 3]\nQ";
+    const std::string expected = "q 0.45 0.45 0.45 rg\n[" + shortened(title, (612.0 - 144.0) / 3.0) + "]\n[Ann 2]\n[2]\nQ";
     if (once.size() != 3 || once[1] != expected || many4096 != once) {
         std::cerr << "a theme's long header is shortened otherwise than before" << std::endl;
         return false;
