@@ -134,32 +134,71 @@ static bool IsAllAscii(std::string_view str) {
     return true;
 }
 
+#if FAST_MD_SSE2
+// Widens 16 ASCII bytes to code units at `to`.
+static RAYOMD_HOT_INLINE void WidenAscii16(wchar_t* to, __m128i chunk) {
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i low = _mm_unpacklo_epi8(chunk, zero);
+    const __m128i high = _mm_unpackhi_epi8(chunk, zero);
+    __m128i* const units = reinterpret_cast<__m128i*>(to);
+    if constexpr (sizeof(wchar_t) == 4) {
+        _mm_storeu_si128(units, _mm_unpacklo_epi16(low, zero));
+        _mm_storeu_si128(units + 1, _mm_unpackhi_epi16(low, zero));
+        _mm_storeu_si128(units + 2, _mm_unpacklo_epi16(high, zero));
+        _mm_storeu_si128(units + 3, _mm_unpackhi_epi16(high, zero));
+    } else {
+        _mm_storeu_si128(units, low);
+        _mm_storeu_si128(units + 1, high);
+    }
+}
+#endif
+
 #ifndef _WIN32
 // Writes the UTF-16 code units of `str` at `out`, which has room for one per byte, and returns
 // the end. A sequence that is not UTF-8 becomes U+FFFD, as MultiByteToWideChar makes it on
-// Windows; std::wstring_convert threw, which ended the process.
-static wchar_t* WriteUtf8Units(wchar_t* out, std::string_view str) {
-    for (size_t at = 0; at < str.size();) {
-        const unsigned char lead = (unsigned char)str[at];
-        if (lead < 0x80) {
-            *out++ = (wchar_t)lead;
-            at++;
-            continue;
+// Windows; std::wstring_convert threw, which ended the process. ASCII runs go 16 bytes a step
+// in SSE2, two-byte sequences are decoded in place, the rest by DecodeUtf8.
+static RAYOMD_NOINLINE wchar_t* WriteUtf8Units(wchar_t* out, std::string_view str) {
+    const unsigned char* const bytes = reinterpret_cast<const unsigned char*>(str.data());
+    const size_t n = str.size();
+    size_t at = 0;
+    while (at < n) {
+#if FAST_MD_SSE2
+        // All 16 bytes are widened, `out` moves past the ASCII ones only: one unit a byte at
+        // most went before, so `out` has the room `at` has.
+        while (at + 16 <= n) {
+            const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes + at));
+            const unsigned mask = (unsigned)_mm_movemask_epi8(chunk);
+            WidenAscii16(out, chunk);
+            const unsigned ascii = mask == 0 ? 16u : (unsigned)__builtin_ctz(mask);
+            out += ascii;
+            at += ascii;
+            if (mask != 0) break;
         }
-        uint32_t codePoint = 0;
-        size_t length = 0;
-        if (!RayoMd::Text::DecodeUtf8(str, at, codePoint, length)) {
-            *out++ = (wchar_t)0xFFFD;
-            at++;
-            continue;
-        }
-        at += length;
-        if (codePoint >= 0x10000) {
-            codePoint -= 0x10000;
-            *out++ = (wchar_t)(0xD800 + (codePoint >> 10));
-            *out++ = (wchar_t)(0xDC00 + (codePoint & 0x3FF));
-        } else {
-            *out++ = (wchar_t)codePoint;
+#endif
+        while (at < n && bytes[at] < 0x80) *out++ = (wchar_t)bytes[at++];
+        while (at < n && bytes[at] >= 0x80) {
+            const unsigned lead = bytes[at];
+            if (lead >= 0xC2 && lead <= 0xDF && at + 1 < n && (bytes[at + 1] & 0xC0) == 0x80) {
+                *out++ = (wchar_t)(((lead & 0x1Fu) << 6) | (bytes[at + 1] & 0x3Fu));
+                at += 2;
+                continue;
+            }
+            uint32_t codePoint = 0;
+            size_t length = 0;
+            if (!RayoMd::Text::DecodeUtf8(str, at, codePoint, length)) {
+                *out++ = (wchar_t)0xFFFD;
+                at++;
+                continue;
+            }
+            at += length;
+            if (codePoint >= 0x10000) {
+                codePoint -= 0x10000;
+                *out++ = (wchar_t)(0xD800 + (codePoint >> 10));
+                *out++ = (wchar_t)(0xDC00 + (codePoint & 0x3FF));
+            } else {
+                *out++ = (wchar_t)codePoint;
+            }
         }
     }
     return out;
@@ -190,27 +229,13 @@ static std::wstring Utf8ToWide(std::string_view str) {
 // Writes Utf8ToWide(str) at `out`, which has room for one code unit per byte, and returns the end.
 // ASCII, the usual case for a span or a table cell, needs no decoder: its bytes are tested and
 // widened in one pass, 16 a step in SSE2 (the last step widens the text's last 16 bytes again).
-// Text with a byte from 0x80 is decoded from its start. Out of line: one copy for its callers.
+// Text with a byte from 0x80 is decoded from the first 16-byte step that holds one; on Windows
+// from its start. Out of line: one copy for its callers.
 static RAYOMD_NOINLINE wchar_t* WriteUtf8Wide(wchar_t* out, std::string_view str) {
     const char* const bytes = str.data();
     const size_t n = str.size();
 #if FAST_MD_SSE2
     if (n >= 16) {
-        const __m128i zero = _mm_setzero_si128();
-        const auto widen = [out, zero](size_t at, __m128i chunk) RAYOMD_HOT_LAMBDA {
-            const __m128i low = _mm_unpacklo_epi8(chunk, zero);
-            const __m128i high = _mm_unpackhi_epi8(chunk, zero);
-            __m128i* const to = reinterpret_cast<__m128i*>(out + at);
-            if constexpr (sizeof(wchar_t) == 4) {
-                _mm_storeu_si128(to, _mm_unpacklo_epi16(low, zero));
-                _mm_storeu_si128(to + 1, _mm_unpackhi_epi16(low, zero));
-                _mm_storeu_si128(to + 2, _mm_unpacklo_epi16(high, zero));
-                _mm_storeu_si128(to + 3, _mm_unpackhi_epi16(high, zero));
-            } else {
-                _mm_storeu_si128(to, low);
-                _mm_storeu_si128(to + 1, high);
-            }
-        };
         size_t at = 0;
         bool ascii = true;
         for (; at + 16 <= n; at += 16) {
@@ -219,14 +244,19 @@ static RAYOMD_NOINLINE wchar_t* WriteUtf8Wide(wchar_t* out, std::string_view str
                 ascii = false;
                 break;
             }
-            widen(at, chunk);
+            WidenAscii16(out + at, chunk);
         }
         if (ascii && at < n) {
             const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes + n - 16));
             ascii = _mm_movemask_epi8(chunk) == 0;
-            if (ascii) widen(n - 16, chunk);
+            if (ascii) WidenAscii16(out + n - 16, chunk);
+            else at = n - 16;
         }
         if (ascii) return out + n;
+#if !defined(_WIN32)
+        // Everything before `at` is ASCII and widened already.
+        return WriteUtf8Units(out + at, str.substr(at));
+#endif
     } else if (IsAllAscii(str)) {
         for (size_t at = 0; at < n; at++) out[at] = (wchar_t)(unsigned char)bytes[at];
         return out + n;

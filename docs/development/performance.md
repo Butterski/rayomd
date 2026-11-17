@@ -41,6 +41,33 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## UTF-8 to UTF-16 without starting over (2026-11-17)
+
+`WriteUtf8Wide` widened a text's bytes 16 a step until a step held a byte from 0x80, then decoded
+the whole text again from its start a byte at a time (`WriteUtf8Units`). It now goes on where that
+step starts, and `WriteUtf8Units` widens ASCII runs 16 bytes a step (`WidenAscii16`, the old
+lambda) and decodes two-byte sequences in place, the rest through `DecodeUtf8` as before. Windows
+keeps `MultiByteToWideChar` from the start. Same units for every input: 223,520 strings (random
+bytes and pieces of ASCII, Polish, CJK, emoji, truncated, out-of-range and surrogate sequences, and a
+non-ASCII byte at every position of 16 to 64 bytes) against the old function, also under ASan. Every
+PDF is byte for byte the same: 16 documents in 9 option sets and 2 books (`same=146 diff=0`).
+
+`--bench`, GCC 13.3, Ryzen 5 PRO 4650GE pinned to one core, files on tmpfs, medians of 11 runs;
+polish.md is 400 paragraphs of a Polish pangram, readme10.md README.md ten times:
+
+| Document | before (instructions / ms) | after | Change |
+|---|---:|---:|---:|
+| polish.md | 12,266,284 / 0.95 | 12,092,186 / 0.94 | -1.42 % |
+| polish.md, a4-landscape `--page-numbers` | 11,915,948 / 0.93 | 11,741,856 / 0.92 | -1.46 % |
+| README.md | 3,770,636 / 0.46 | 3,765,332 / 0.46 | -0.14 % |
+| readme10.md | 37,233,118 / 4.13 | 37,180,921 / 4.18 | -0.14 % |
+| tester.md | 1,267,535 / 0.20 | 1,266,435 / 0.20 | -0.09 % |
+| essay.md, pages2000.md (ASCII) | | | 0.00 % |
+
+A fresh `--export --page-size=a4-landscape --page-numbers` (perf stat -r 200): polish.md
+12,310,604 → 12,139,346 instructions (-1.39 %), README.md 5,120,050 → 5,114,762; license.txt
+unchanged. Text +784 bytes.
+
 ## Page numbers without the total (#38, #39, 2026-11-17)
 
 `--page-numbers` writes "N" instead of "N / M" (a theme's `footer-center = {page} / {pages}` keeps
