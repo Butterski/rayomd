@@ -615,6 +615,45 @@ def verify_help(binary: Path) -> None:
             raise AssertionError(f"{flag}: the help has a tab or lines wider than 79 columns: {wide}")
 
 
+def verify_errors(binary: Path, root: Path) -> None:
+    """Errors go to standard error and standard output stays empty, on Linux and Windows alike: a
+    file that cannot be read or written and a missing folder are named, and an argument error ends
+    with the line pointing to --help. --serve keeps its replies on standard output and says on
+    standard error why a document failed; it ends with that document's exit code."""
+    doc = root / "errors.md"
+    doc.write_text("# Errors\n", encoding="utf-8")
+    missing = root / "missing.md"
+    hint = b" --help' for the commands and options."
+    cases = [
+        (3, ["--export", str(missing), str(root / "missing.pdf")], b"could not read input Markdown file", False),
+        (12, ["--export", str(doc), str(root / "no such folder" / "out.pdf")], b"could not write PDF file", False),
+        (3, ["--batch", str(root / "no such folder"), str(root / "batch-out")], b"(does not exist)", False),
+        (3, ["--inspect-source", str(root / "missing.pdf")], b"could not read PDF", False),
+        (2, ["--export", str(doc)], b"--export requires", True),
+        (2, ["--stdin-batch"], b"--stdin-batch requires", True),
+        (2, ["--serve"], b"--serve requires", True),
+        (2, ["--bench", str(doc)], b"--bench requires", True),
+        (2, ["--inspect-source"], b"--inspect-source requires", True),
+        (2, ["--export", str(doc), str(root / "errors.pdf"), "--toc-depth=9"], b"--toc-depth must be 1 to 6", True),
+    ]
+    for code, args, needle, hinted in cases:
+        proc = subprocess.run([str(binary), *args], stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=60)
+        if proc.returncode != code or proc.stdout or needle not in proc.stderr or (hint in proc.stderr) != hinted:
+            raise AssertionError(f"{args}: expected exit {code} and {needle!r} on standard error alone, the --help "
+                                 f"line {'' if hinted else 'not '}after it; got {proc!r}")
+    served = subprocess.run(
+        [str(binary), "--serve", str(root / "serve errors")],
+        input=f"{missing}\n{doc}\n".encode("utf-8"),
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    replies = served.stdout.decode("utf-8").splitlines()
+    if (served.returncode != 3 or len(replies) != 2 or not replies[0].startswith("ERR\t") or not replies[1].startswith("OK\t")
+            or served.stderr.count(b"could not read input Markdown file") != 1):
+        raise AssertionError(f"--serve did not reply ERR and OK, the error on standard error, and exit 3: {served!r}")
+
+
 def verify(binary: Path, keep: Path | None) -> None:
     binary = binary.resolve()
     if not binary.is_file():
@@ -631,6 +670,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         if b"Usage:" not in usage.stdout:
             raise AssertionError("no arguments did not print the usage")
         verify_help(binary)
+        verify_errors(binary, root)
         unknown = run(binary, "--no-such-mode", expect=2)
         if b"unknown command" not in unknown.stdout or b" --help' " not in unknown.stdout or b"Commands:" in unknown.stdout:
             raise AssertionError("an unknown command was not reported in a line pointing to --help")

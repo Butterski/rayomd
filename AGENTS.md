@@ -820,11 +820,19 @@ Important image/link details:
 - `src/cli/help.h`
   The help of both command lines: `--help` and `-h` print it on standard output, a command line
   without arguments on standard error; an argument error ends with a line pointing to `--help`
-  instead (on Windows, an unknown command). The commands, then the options by topic, in one text
-  that `LayOutHelp` lays out as it is printed (a tab moves on to the description column), so
-  neither binary stores the padding. Each command line names its title, program and image cache
-  before including it. `tests/verify_cli.py` checks that the help names every `"--flag"` literal
-  of `main_cli.cpp` in lines of at most 79 columns, so a new flag goes into it too.
+  instead. The commands, then the options by topic, in one text that `LayOutHelp` lays out as it
+  is printed (a tab moves on to the description column), so neither binary stores the padding.
+  Each command line names its title, program and image cache before including it.
+  `tests/verify_cli.py` checks that the help names every `"--flag"` literal of `main_cli.cpp` in
+  lines of at most 79 columns, so a new flag goes into it too.
+
+- `src/cli/messages.h`
+  What both command lines say of an export in the same words: a failed build's error
+  (`ExportFailure`), the missing-character warning, why a folder cannot be read or made
+  (`NotAFolder`, `MakeFolder`). Errors and warnings go to standard error on both, standard output
+  keeps what was asked for (`--serve`'s replies, `--doctor`, `--inspect-source`);
+  `verify_errors` in `tests/verify_cli.py` holds both binaries to it. A new message both say goes
+  here.
 
 - `src/cli/terminate.cpp`
   The terminate handler in place of libstdc++'s (whose demangler is 61 KB) where `no_unwind.cpp`

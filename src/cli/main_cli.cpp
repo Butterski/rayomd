@@ -15,6 +15,7 @@
 #define RAYOMD_HELP_PROGRAM "rayomd"
 #define RAYOMD_HELP_IMAGE_CACHE "$XDG_CACHE_HOME/rayomd/images, else ~/.cache/rayomd/images"
 #include "help.h"
+#include "messages.h"
 
 #include <algorithm>
 #include <atomic>
@@ -42,6 +43,7 @@ namespace {
 
 using RayoMd::File::Path;
 using RayoMd::File::PathToUtf8;
+using RayoMd::Cli::Reason;
 
 #ifndef RAYOMD_VERSION
 #define RAYOMD_VERSION "0.0.0"
@@ -59,11 +61,6 @@ void Print(std::FILE* stream, std::string_view text) {
 void PrintError(std::string message) {
     message += '\n';
     Print(stderr, message);
-}
-
-// " (why)" after a message, or nothing.
-std::string Reason(const std::string& why) {
-    return why.empty() ? std::string() : " (" + why + ")";
 }
 
 // A line of standard input without its line break; false at the end. Standard output is flushed
@@ -226,30 +223,6 @@ int RunRecoverSource(const Path& inputPath, const Path& outputPath) {
     }
     Print(stdout, "Recovered " + std::to_string(result.info.sourceBytes) + " bytes to " + PathToUtf8(outputPath) + "\n");
     return 0;
-}
-
-bool IsDirectoryPortable(const Path& path, std::string& error) {
-    RayoMd::File::FileStatus status;
-    int code = 0;
-    if (!RayoMd::File::StatusOf(path, status, &code)) {
-        error = code == ENOENT || code == ENOTDIR ? "does not exist" : RayoMd::File::ErrorText(code);
-        return false;
-    }
-    if (status.type != RayoMd::File::FileType::Directory) {
-        error = "not a directory";
-        return false;
-    }
-    error.clear();
-    return true;
-}
-
-bool EnsureDirectoryPortable(const Path& path, std::string& error) {
-    int code = 0;
-    if (!RayoMd::File::CreateDirectories(path, &code)) {
-        error = RayoMd::File::ErrorText(code);
-        return false;
-    }
-    return IsDirectoryPortable(path, error);
 }
 
 std::string Lower(std::string value) {
@@ -435,15 +408,7 @@ void ReportExportError(std::string* deferredError, const std::string& message) {
 }
 // A warning, not an error: the PDF is written. One write, so batch workers do not mix lines.
 void WarnMissingCharacters(const std::string& inputLabel, uint32_t count) {
-    std::string message = "Warning: ";
-    message += inputLabel.empty() ? std::string("the document") : inputLabel;
-    message += ": ";
-    message += std::to_string(count);
-    message += " character(s) have no glyph in the fonts found and are shown as a base letter or '?'."
-        " Install a font that has them (DejaVu Sans or Noto Sans for most alphabets, Noto Sans CJK or"
-        " WenQuanYi Micro Hei for Chinese, Japanese and Korean), or set RAYOMD_FONT or RAYOMD_FALLBACK_FONT"
-        " to a .ttf, .otf or .ttc file.\n";
-    Print(stderr, message);
+    Print(stderr, RayoMd::Cli::MissingCharactersWarning(inputLabel, count));
 }
 Path PdfNameForMarkdown(const Path& path) {
     Path out(RayoMd::File::FileNameOf(RayoMd::File::PathView(path)));
@@ -507,27 +472,6 @@ TinyPdf::PdfOptions PdfOptionsFor(const CliExportOptions& options, const std::st
     return pdfOptions;
 }
 
-// "Error: native PDF export failed for <label> (code N)." and what the code means.
-std::string ExportFailure(const TinyPdf::BuildResult& result, const std::string& inputLabel, const CliExportOptions& options) {
-    std::string message = "Error: native PDF export failed";
-    if (!inputLabel.empty()) message += " for " + inputLabel;
-    message += " (code " + std::to_string(10 + static_cast<int>(result.error)) + ").";
-    if (result.error == TinyPdf::BuildError::ThemeFontUnavailable) {
-        std::string paths;
-        for (const std::string* path : { &options.theme.fontPath, &options.theme.fontBoldPath, &options.theme.fontItalicPath,
-                 &options.theme.fontBoldItalicPath }) {
-            if (path->empty()) continue;
-            if (!paths.empty()) paths += ", ";
-            paths += *path;
-        }
-        message += " The theme's fonts cannot be read or are no TrueType/OpenType fonts: " + paths;
-    }
-    if (result.error == TinyPdf::BuildError::PdfaFontUnavailable) {
-        message += " PDF/A embeds every font, but no TrueType/OpenType font was found; set RAYOMD_FONT to one.";
-    }
-    return message;
-}
-
 // `details`, when given, receives the result of a build that succeeded: pages, characters
 // without a glyph, failed images.
 int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourcePath,
@@ -536,7 +480,7 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     pdfBuffer.clear();
     TinyPdf::BuildResult buildResult = TinyPdf::BuildPdf(markdown, PdfOptionsFor(options, sourcePath), pdfBuffer);
     if (!buildResult) {
-        ReportExportError(deferredError, ExportFailure(buildResult, inputLabel, options));
+        ReportExportError(deferredError, RayoMd::Cli::ExportFailure(buildResult, inputLabel, options.theme));
         return 10 + static_cast<int>(buildResult.error);
     }
     if (buildResult.missingCharacters != 0) WarnMissingCharacters(inputLabel, buildResult.missingCharacters);
@@ -568,7 +512,7 @@ int WriteBookPdf(const TinyPdf::Book& book, const Path& outputPath, const CliExp
     std::string pdf;
     const TinyPdf::BuildResult result = TinyPdf::BuildBookPdf(book, PdfOptionsFor(options, std::string()), pdf);
     if (!result) {
-        PrintError(ExportFailure(result, "the book", options));
+        PrintError(RayoMd::Cli::ExportFailure(result, "the book", options.theme));
         return 10 + static_cast<int>(result.error);
     }
     if (result.missingCharacters != 0) WarnMissingCharacters("the book", result.missingCharacters);
@@ -704,12 +648,13 @@ int ExecuteBatchJobs(std::vector<BatchJob>& jobs, const CliExportOptions& option
 }
 
 int RunBatchExport(const Path& inputDir, const Path& outputDir, const CliExportOptions& options) {
-    std::string fsError;
-    if (!IsDirectoryPortable(inputDir, fsError)) {
+    std::string fsError = RayoMd::Cli::NotAFolder(inputDir);
+    if (!fsError.empty()) {
         PrintError("Error: input folder is not a readable directory: " + PathToUtf8(inputDir) + Reason(fsError));
         return 3;
     }
-    if (!EnsureDirectoryPortable(outputDir, fsError)) {
+    fsError = RayoMd::Cli::MakeFolder(outputDir);
+    if (!fsError.empty()) {
         PrintError("Error: could not create output folder: " + PathToUtf8(outputDir) + Reason(fsError));
         return 12;
     }
@@ -729,7 +674,7 @@ int RunBatchExport(const Path& inputDir, const Path& outputDir, const CliExportO
         const RayoMd::File::PathView folder = RayoMd::File::ParentOf(RayoMd::File::PathView(job.outputPath));
         if (options.recursive && folder != outputDir && folder != madeFolder) {
             const Path made(folder);
-            if (EnsureDirectoryPortable(made, fsError)) {
+            if (RayoMd::Cli::MakeFolder(made).empty()) {
                 madeFolder = made;
             } else {
                 job.result = 12;
@@ -742,8 +687,8 @@ int RunBatchExport(const Path& inputDir, const Path& outputDir, const CliExportO
 }
 
 int RunStdinBatchExport(const Path& outputDir, const CliExportOptions& options) {
-    std::string fsError;
-    if (!EnsureDirectoryPortable(outputDir, fsError)) {
+    const std::string fsError = RayoMd::Cli::MakeFolder(outputDir);
+    if (!fsError.empty()) {
         PrintError("Error: could not create output folder: " + PathToUtf8(outputDir) + Reason(fsError));
         return 12;
     }
@@ -770,8 +715,8 @@ int RunStdinBatchExport(const Path& outputDir, const CliExportOptions& options) 
 }
 
 int RunServeExport(const Path& outputDir, const CliExportOptions& options) {
-    std::string fsError;
-    if (!EnsureDirectoryPortable(outputDir, fsError)) {
+    const std::string fsError = RayoMd::Cli::MakeFolder(outputDir);
+    if (!fsError.empty()) {
         PrintError("Error: could not create output folder: " + PathToUtf8(outputDir) + Reason(fsError));
         return 12;
     }
@@ -912,8 +857,8 @@ int RunServeJson(const CliExportOptions& options) {
 
 int RunNativeBench(const Path& inputPath, const Path& outputDir, int iterations, const CliExportOptions& cliOptions) {
     if (iterations < 1) iterations = 1;
-    std::string fsError;
-    if (!EnsureDirectoryPortable(outputDir, fsError)) {
+    const std::string fsError = RayoMd::Cli::MakeFolder(outputDir);
+    if (!fsError.empty()) {
         PrintError("Error: could not create benchmark output folder: " + PathToUtf8(outputDir) + Reason(fsError));
         return 12;
     }
