@@ -770,15 +770,21 @@ int RunBatchExport(const Path& inputDir, const Path& outputDir, const CliExportO
         PrintError("Error: could not read input folder: " + PathToUtf8(inputDir) + " (" + fsError + ")");
         return 3;
     }
+    if (files.empty()) Print(stderr, RayoMd::Cli::NoMarkdownWarning(PathToUtf8(inputDir), options.recursive));
     std::vector<BatchJob> jobs;
     jobs.reserve(files.size());
+    // a.md and a.markdown would write one PDF: the second is an error.
+    std::set<std::string> outputs;
     // A subfolder's PDFs go to a subfolder of the output folder, made before the workers start, once
     // for each run of its files in the sorted list, not for every file (two stats each).
     Path madeFolder;
     for (RayoMd::Batch::File& file : files) {
         BatchJob job{ std::move(file.input), std::move(file.output) };
         const RayoMd::File::PathView folder = RayoMd::File::ParentOf(RayoMd::File::PathView(job.outputPath));
-        if (options.recursive && folder != outputDir && folder != madeFolder) {
+        if (!outputs.insert(PathToUtf8(job.outputPath)).second) {
+            job.result = 12;
+            job.error = "Error: multiple inputs map to the same output PDF: " + PathToUtf8(job.outputPath);
+        } else if (options.recursive && folder != outputDir && folder != madeFolder) {
             const Path made(folder);
             if (RayoMd::Cli::MakeFolder(made).empty()) {
                 madeFolder = made;

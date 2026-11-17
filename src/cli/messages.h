@@ -94,6 +94,12 @@ inline std::string FailedImagesWarning(const std::string& inputLabel, uint32_t c
 // The warning when standard input held nothing: the PDF is blank.
 constexpr const char kEmptyInputWarning[] = "Warning: standard input was empty, so the PDF is blank.\n";
 
+// The warning of a batch whose folder holds no Markdown file; with its line break.
+inline std::string NoMarkdownWarning(const std::string& folder, bool recursive) {
+    return "Warning: " + folder + " holds no Markdown files (.md, .markdown)" +
+        (recursive ? std::string(".\n") : std::string("; --recursive reads its subfolders too.\n"));
+}
+
 // The note --stdin, --stdin-batch and --serve write when standard input is a terminal, where they
 // would seem to hang: what they read there, and how it ends.
 inline std::string TerminalInputNote(const char* what) {

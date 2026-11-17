@@ -540,11 +540,12 @@ cat notes.md | rayomd --stdin - > notes.pdf
 
 ### Batch conversion
 
-`--batch` converts a folder on up to 64 threads (6 by default); `--recursive` mirrors its
-subfolders, `--skip-unchanged` keeps PDFs newer than their Markdown, and `--report` writes one
-JSON line per document (`-` for standard output). `--stdin` converts Markdown piped in,
-`--stdin-batch` converts the paths piped in, and `--serve` stays running and converts each path
-it reads, answering one line per document.
+`--batch` converts the `.md` and `.markdown` files of a folder on up to 64 threads (6 by
+default) and says so when there are none; `--recursive` mirrors its subfolders,
+`--skip-unchanged` keeps PDFs newer than their Markdown, and `--report` writes one JSON line per
+document (`-` for standard output). `--stdin` converts Markdown piped in, `--stdin-batch`
+converts the paths piped in, and `--serve` stays running and converts each path it reads,
+answering one line per document.
 
 ```sh
 rayomd --batch docs pdf-out --recursive --skip-unchanged --report=report.jsonl --workers=8

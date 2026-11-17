@@ -105,6 +105,30 @@ def verify_batch(binary: Path, root: Path) -> None:
         raise AssertionError(f"unexpected stdin batch report: {records}")
 
 
+def verify_batch_names(binary: Path, root: Path) -> None:
+    """--batch takes .md and .markdown files in any letter case and no others; two that would
+    write one PDF fail the second with exit 12; a folder without Markdown files says so, exit 0."""
+    folder = root / "batch names"
+    folder.mkdir()
+    for name in ("a.md", "B.MD", "c.markdown", "d.txt", "dup.markdown", "dup.md"):
+        (folder / name).write_text(f"# {name}\n", encoding="utf-8")
+    out = root / "batch names out"
+    proc = subprocess.run([str(binary), "--batch", str(folder), str(out), "--report=-"], capture_output=True,
+                          check=False, timeout=120)
+    made = sorted(path.name for path in out.iterdir())
+    records = report_records(proc.stdout.decode("utf-8"))
+    if (proc.returncode != 12 or made != ["B.pdf", "a.pdf", "c.pdf", "dup.pdf"] or "d.txt" in records
+            or [records[name]["status"] for name in ("a.md", "B.MD", "c.markdown", "dup.markdown")] != ["ok"] * 4
+            or records.get("dup.md", {}).get("code") != 12 or b"multiple inputs map to the same output PDF" not in proc.stderr):
+        raise AssertionError(f"--batch took {made}, reported {records}: {proc!r}")
+    empty = root / "batch empty"
+    empty.mkdir()
+    nothing = subprocess.run([str(binary), "--batch", str(empty), str(root / "batch empty out")], capture_output=True,
+                             check=False, timeout=60)
+    if nothing.returncode != 0 or b"holds no Markdown files" not in nothing.stderr or b"--recursive" not in nothing.stderr:
+        raise AssertionError(f"an empty batch folder was not warned of: {nothing!r}")
+
+
 def verify_theme(binary: Path, root: Path) -> None:
     """--theme reads a theme file whose relative paths are its folder's: a logo in the header and
     on a cover page, page numbers in the footer; an unknown key fails with exit 2."""
@@ -884,6 +908,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_svg(binary, root)
         verify_pdfua(binary, root)
         verify_batch(binary, root)
+        verify_batch_names(binary, root)
 
         if os.name == "nt":
             adjacent_quote_pdf = root / "adjacent-quote.pdf"
