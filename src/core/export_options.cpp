@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
-#include <cstring>
 
 namespace TinyPdf::Internal {
 namespace {
@@ -88,8 +87,9 @@ bool ParsePdfMargin(std::string_view value, PdfMargin& margin) {
     char* end = nullptr;
     double points = std::strtod(numberStart, &end);
     if (end == numberStart || points <= 0.0) return false;
-    if (*end == '\0' || std::strcmp(end, "in") == 0) points *= 72.0;
-    else if (std::strcmp(end, "pt") != 0) return false;
+    const double perUnit = *end == '\0' ? 72.0 : UnitPoints(end);   // a bare number is inches
+    if (perUnit == 0.0) return false;
+    points *= perUnit;
 
     margin = PdfMargin::CustomPoints(points);
     return true;

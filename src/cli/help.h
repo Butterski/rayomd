@@ -70,7 +70,7 @@ inline std::string HelpText() {
         "\n"
         "Styles: elegant (default), modern, tech\n"
         "Margins: compact (34pt), normal (54pt, default), wide (72pt),\n"
-        "  margin=0.75in or margin=54pt\n"
+        "  margin=0.75in, margin=54pt or margin=1.5cm (in, pt, cm, mm)\n"
         "\n"
         "Output:\n"
         "  --compress\tSmaller files (FlateDecode), slower export\n"

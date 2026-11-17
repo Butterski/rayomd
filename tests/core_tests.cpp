@@ -1950,6 +1950,11 @@ bool CheckTableHeaderRepeat() {
 // with a unit, and nothing else. In both renderers.
 bool CheckPageSize() {
     using TinyPdf::Internal::ParsePageSize;
+    using TinyPdf::Internal::ParsePdfMargin;
+    TinyPdf::PdfMargin margin;
+    const auto customMargin = [&margin](double points) {
+        return margin.preset == TinyPdf::MarginPreset::Custom && std::abs(margin.customPoints - points) < 1e-9;
+    };
     TinyPdf::PdfPageSize size;
     const bool parsed = ParsePageSize("Letter", size) && size.width == 612.0 && size.height == 792.0 &&
         ParsePageSize("a4-landscape", size) && size.width == 842.0 && size.height == 595.0 &&
@@ -1957,7 +1962,14 @@ bool CheckPageSize() {
         ParsePageSize("21x29.7cm", size) && std::abs(size.width - 595.2756) < 0.001 &&
         !ParsePageSize("210x297", size) && !ParsePageSize("x297mm", size) && !ParsePageSize("1x1mm", size) &&
         !ParsePageSize("letter-portrait", size) && !ParsePageSize("210x297mm-landscape", size) &&
-        !ParsePageSize("b5", size);
+        !ParsePageSize("b5", size) &&
+        ParsePdfMargin("margin=1.5cm", margin) && customMargin(1.5 * 72.0 / 2.54) &&
+        ParsePdfMargin("margin=15mm", margin) && customMargin(1.5 * 72.0 / 2.54) &&
+        ParsePdfMargin("margin=1", margin) && customMargin(72.0) &&
+        ParsePdfMargin("margin=54pt", margin) && customMargin(54.0) &&
+        ParsePdfMargin("margin=0.75in", margin) && customMargin(54.0) &&
+        !ParsePdfMargin("margin=1.5px", margin) && !ParsePdfMargin("margin=cm", margin) &&
+        !ParsePdfMargin("margin=-1cm", margin);
     if (!parsed) {
         std::cerr << "page size parsing mismatch" << std::endl;
         return false;
