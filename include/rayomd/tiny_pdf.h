@@ -75,7 +75,7 @@ struct PdfTheme {
     // Text in the top and bottom margin of every page, at its left, centre and right, cut short
     // with an ellipsis when it does not fit. {title}, {author}, {subject}, {date}, {page} and
     // {pages} are replaced from the front matter and the page; a field that is just {logo}
-    // shows the logo. With pageNumbers and no footerCenter, the footer centre is "{page} / {pages}".
+    // shows the logo. With pageNumbers and no footerCenter, the footer centre is "{page}".
     std::string headerLeft;
     std::string headerCenter;
     std::string headerRight;

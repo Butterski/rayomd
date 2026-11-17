@@ -205,7 +205,7 @@ std::vector<std::string> WrapText(const ThemeTextFont& font, std::string_view te
 std::vector<std::string> ThemeBandStreams(const PdfTheme& theme, bool pageNumbers, const ThemeDocument& document,
     size_t pages, const ThemePage& page, const ThemeLogoImage& logo, const ThemeTextFont& font) {
     const std::string_view fields[6] = { theme.headerLeft, theme.headerCenter, theme.headerRight, theme.footerLeft,
-        theme.footerCenter.empty() && pageNumbers ? std::string_view("{page} / {pages}") : theme.footerCenter,
+        theme.footerCenter.empty() && pageNumbers ? std::string_view("{page}") : theme.footerCenter,
         theme.footerRight };
     const size_t limit = FieldBytes(page.width - page.margin * 2.0);
     FieldTemplate templates[6];

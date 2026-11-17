@@ -1231,7 +1231,7 @@ void PrintUsage() {
         "  the foot of the page of its first reference; default end, after the text), --black-text\n"
         "  (for black-and-white printers: text, links and code black, fills and diagrams light grey;\n"
         "  images keep their colours).\n"
-        "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
+        "Page flags: --page-numbers (\"N\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
         "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4;\n"
         "  or WIDTHxauto, such as 210mmxauto: one long page cut below its text, a new one only at page\n"
         "  breaks or past 200 in), --page-break-before=hN (a new page before each heading of level 1\n"

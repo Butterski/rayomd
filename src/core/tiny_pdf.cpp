@@ -13429,16 +13429,14 @@ private:
     double textBottom = 0.0;
 };
 
-// The page number at the foot of a page: "N / M" centred in the bottom margin, small and grey,
+// The page number at the foot of a page: "N" centred in the bottom margin, small and grey,
 // in Helvetica, which the page names `font`; black with `black`. A content stream of its own,
 // after the page's, which was rendered before the page count was known. `bottoms`: the bottom of
 // each long page's box (Renderer::PageBottoms), nullptr for pages of a fixed size, which start at 0.
-RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t pages, double margin, double pageWidth,
+RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t /*pages*/, double margin, double pageWidth,
     const char* font, const double* bottoms, bool black) {
     char label[48];
     char* end = std::to_chars(label, label + 20, page).ptr;
-    memcpy(end, " / ", 3);
-    end = std::to_chars(end + 3, end + 23, pages).ptr;
     const std::string_view text(label, (size_t)(end - label));
     constexpr double kSize = 9.0;
     std::string stream = "q 0.45 0.45 0.45 rg BT /";

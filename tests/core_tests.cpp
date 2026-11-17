@@ -3422,7 +3422,7 @@ bool CheckHtmlInText() {
     return true;
 }
 
-// With pageNumbers every page gets "N / M" in a content stream of its own, in Helvetica (/FN
+// With pageNumbers every page gets "N" in a content stream of its own, in Helvetica (/FN
 // on Unicode pages); without it a page has one stream. In both renderers.
 bool CheckPageNumbers() {
     std::string document = "# Pages\n\n";
@@ -3438,7 +3438,7 @@ bool CheckPageNumbers() {
         bool ok = pages >= 3 && plain.find("/Contents [") == std::string::npos &&
             CountOccurrences(numbered, "/Contents [") == pages && (numbered.find(" /FN ") != std::string::npos) == unicode;
         for (size_t page = 1; ok && page <= pages; page++) {
-            ok = numbered.find("(" + std::to_string(page) + " / " + std::to_string(pages) + ") Tj") != std::string::npos;
+            ok = numbered.find("(" + std::to_string(page) + ") Tj") != std::string::npos;
         }
         if (!ok) {
             std::cerr << "page numbers mismatch (" << (unicode ? "Unicode" : "standard") << " renderer)" << std::endl;
