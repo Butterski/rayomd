@@ -8,8 +8,10 @@
 // what comes before it reaches the column, and a line that starts with a tab goes on with the
 // description above it. A command line defines RAYOMD_HELP_TITLE, RAYOMD_HELP_PROGRAM and
 // RAYOMD_HELP_IMAGE_CACHE before it includes this file; RAYOMD_SERVE_JSON keeps --serve --json.
+// The options the help names are also what an unknown argument is matched against (NearestWord).
 
 #include <cstddef>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 
@@ -45,8 +47,8 @@ inline std::string LayOutHelp(std::string_view text) {
 // The line an argument error ends with, instead of the whole help.
 constexpr const char kHelpHint[] = "Run '" RAYOMD_HELP_PROGRAM " --help' for the commands and options.\n";
 
-inline std::string HelpText() {
-    return LayOutHelp(RAYOMD_HELP_TITLE " " RAYOMD_VERSION ", Markdown to PDF\n"
+// The help before LayOutHelp, a tab before each description.
+constexpr const char kHelpSource[] = RAYOMD_HELP_TITLE " " RAYOMD_VERSION ", Markdown to PDF\n"
         "\n"
         "Usage: " RAYOMD_HELP_PROGRAM " <command> [style] [margin] [options]\n"
         "\n"
@@ -161,7 +163,180 @@ inline std::string HelpText() {
         "  " RAYOMD_HELP_PROGRAM " --export notes.md notes.pdf\n"
         "  " RAYOMD_HELP_PROGRAM " --export notes.md notes.pdf modern wide --toc --page-numbers\n"
         "  " RAYOMD_HELP_PROGRAM " --batch notes pdfs --recursive --workers=4\n"
-        "  " RAYOMD_HELP_PROGRAM " --book SUMMARY.md book.pdf --toc\n");
+        "  " RAYOMD_HELP_PROGRAM " --book SUMMARY.md book.pdf --toc\n";
+
+inline std::string HelpText() {
+    return LayOutHelp(kHelpSource);
+}
+
+constexpr char LowerAscii(char c) {
+    return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+inline bool EqualsIgnoringCase(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (LowerAscii(a[i]) != LowerAscii(b[i])) return false;
+    }
+    return true;
+}
+
+// The commands of the help's Commands block. A command line's options follow its command and its
+// paths; options given before the command are moved after them.
+inline bool IsCommand(std::string_view argument) {
+    for (const std::string_view command : { "--export", "--stdin", "--book", "--batch", "--stdin-batch", "--serve",
+             "--bench", "--inspect-source", "--recover-source", "--doctor", "--version", "-v", "--help", "-h" }) {
+        if (EqualsIgnoringCase(argument, command)) return true;
+    }
+    return false;
+}
+
+// The options that take a value, as `--name=VALUE` or as the next argument (`--theme FILE`).
+inline bool TakesValue(std::string_view argument) {
+    for (const std::string_view option : { "--toc-depth", "--page-break-before", "--dialect", "--footnotes", "--vault",
+             "--embeds", "--theme", "--page-size", "--report", "--workers" }) {
+        if (EqualsIgnoringCase(argument, option)) return true;
+    }
+    return false;
+}
+
+// The options whose level may be left out, --number-headings and --follow-links: a digit as the
+// next argument is theirs (`--number-headings 2`), not a style's number.
+inline bool TakesLevel(std::string_view argument, std::string_view next) {
+    return (EqualsIgnoringCase(argument, "--number-headings") || EqualsIgnoringCase(argument, "--follow-links")) &&
+        next.size() == 1 && next[0] >= '0' && next[0] <= '9';
+}
+
+// The style and margin words, which stand without dashes.
+constexpr std::string_view kStyleAndMarginWords[] = { "elegant", "modern", "tech", "compact", "normal", "wide" };
+
+// The next `--name` the help shows from `at` on, `at` moved past it; empty at the end. A name can
+// come more than once.
+inline std::string_view NextHelpFlag(size_t& at) {
+    const std::string_view help(kHelpSource);
+    for (; at + 2 < help.size(); at++) {
+        if (help[at] != '-' || help[at + 1] != '-') continue;
+        if (at > 0 && help[at - 1] != ' ' && help[at - 1] != '\t' && help[at - 1] != '(') continue;
+        size_t end = at + 2;
+        while (end < help.size() && ((help[end] >= 'a' && help[end] <= 'z') || (help[end] >= '0' && help[end] <= '9') ||
+                                        help[end] == '-')) {
+            end++;
+        }
+        if (end == at + 2) continue;
+        const std::string_view flag = help.substr(at, end - at);
+        at = end;
+        return flag;
+    }
+    at = help.size();
+    return std::string_view();
+}
+
+// The optimal string alignment distance of `a` and `b` (insertions, deletions, substitutions and
+// swaps of neighbours, without letter case); words of at most 63 bytes.
+inline size_t EditDistance(std::string_view a, std::string_view b) {
+    size_t rows[3][64];
+    size_t* before = rows[0];
+    size_t* previous = rows[1];
+    size_t* current = rows[2];
+    for (size_t j = 0; j <= b.size(); j++) previous[j] = j;
+    for (size_t i = 1; i <= a.size(); i++) {
+        current[0] = i;
+        for (size_t j = 1; j <= b.size(); j++) {
+            size_t best = previous[j - 1] + (LowerAscii(a[i - 1]) == LowerAscii(b[j - 1]) ? 0 : 1);
+            if (previous[j] + 1 < best) best = previous[j] + 1;
+            if (current[j - 1] + 1 < best) best = current[j - 1] + 1;
+            if (i > 1 && j > 1 && LowerAscii(a[i - 1]) == LowerAscii(b[j - 2]) &&
+                LowerAscii(a[i - 2]) == LowerAscii(b[j - 1]) && before[j - 2] + 1 < best) {
+                best = before[j - 2] + 1;
+            }
+            current[j] = best;
+        }
+        size_t* const reused = before;
+        before = previous;
+        previous = current;
+        current = reused;
+    }
+    return previous[b.size()];
+}
+
+// The option of the help, or the style or margin word, that `typed` most likely meant (its
+// `=VALUE` left out): one edit away for up to 6 bytes, two for more, else the only option it
+// begins, from 5 bytes. Empty when none is that near, or `typed` is one of them.
+inline std::string NearestWord(std::string_view typed) {
+    typed = typed.substr(0, typed.find('='));
+    if (typed.empty() || typed.size() > 63) return std::string();
+    const size_t allowed = typed.size() <= 6 ? 1 : 2;
+    std::string_view best;
+    size_t bestDistance = allowed + 1;
+    std::string_view begun;
+    size_t begunCount = 0;
+    bool exact = false;
+    const auto consider = [&](std::string_view word) {
+        if (word.size() > 63) return;
+        const size_t distance = EditDistance(typed, word);
+        exact = exact || distance == 0;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = word;
+        }
+        if (typed.size() >= 5 && word.size() > typed.size() && EqualsIgnoringCase(word.substr(0, typed.size()), typed) &&
+            word != begun) {
+            begun = word;
+            begunCount++;
+        }
+    };
+    size_t at = 0;
+    for (std::string_view flag = NextHelpFlag(at); !flag.empty(); flag = NextHelpFlag(at)) consider(flag);
+    for (const std::string_view word : kStyleAndMarginWords) consider(word);
+    if (exact) return std::string();
+    if (bestDistance <= allowed) return std::string(best);
+    return begunCount == 1 ? std::string(begun) : std::string();
+}
+
+// `name=FORM` as the help first shows the option `name` (--theme=FILE), else `name=VALUE`.
+inline std::string ValueForm(std::string_view name) {
+    const std::string_view help(kHelpSource);
+    size_t at = 0;
+    for (std::string_view flag = NextHelpFlag(at); !flag.empty(); flag = NextHelpFlag(at)) {
+        if (flag != name || help[at] != '=') continue;
+        size_t end = at;
+        while (end < help.size() && help[end] != '\t' && help[end] != ' ' && help[end] != '\n' && help[end] != ')') end++;
+        return std::string(help.substr(at - flag.size(), flag.size() + end - at));
+    }
+    return std::string(name) + "=VALUE";
+}
+
+// What to say after an export option that was not understood: a sentence with a leading space, or
+// nothing.
+inline std::string UnknownOptionHint(std::string_view typed) {
+    const std::string_view name = typed.substr(0, typed.find('='));
+    if (EqualsIgnoringCase(name, "-o") || EqualsIgnoringCase(name, "--output") || EqualsIgnoringCase(name, "--out")) {
+        return " The output is the path after the input: --export in.md out.pdf.";
+    }
+    if (TakesValue(name) && name.size() == typed.size()) {
+        std::string lowered(name);
+        for (char& c : lowered) c = LowerAscii(c);
+        return " It takes a value: " + ValueForm(lowered) + ".";
+    }
+    const std::string nearest = NearestWord(typed);
+    return nearest.empty() ? std::string() : " Did you mean " + nearest + "?";
+}
+
+// What to say after an unknown command: a sentence with a leading space, or nothing.
+inline std::string UnknownCommandHint(std::string_view typed) {
+    const std::string_view name = typed.substr(0, typed.find('='));
+    bool option = false;
+    size_t at = 0;
+    for (std::string_view flag = NextHelpFlag(at); !flag.empty() && !option; flag = NextHelpFlag(at)) {
+        option = EqualsIgnoringCase(flag, name);
+    }
+    for (const std::string_view word : kStyleAndMarginWords) option = option || EqualsIgnoringCase(word, typed);
+    if (option) return " It is an option, which follows a command: --export in.md " + std::string(typed) + ".";
+    if (!typed.empty() && typed[0] != '-') {
+        return " To export a file: " RAYOMD_HELP_PROGRAM " --export " + std::string(typed) + ".";
+    }
+    const std::string nearest = NearestWord(typed);
+    return nearest.empty() ? std::string() : " Did you mean " + nearest + "?";
 }
 
 } // namespace RayoMd::Cli
