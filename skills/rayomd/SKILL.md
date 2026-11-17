@@ -169,9 +169,10 @@ A line `quit` or the end of input ends the session.
 
 The exit code says whether a PDF was written: 0 written; 2 bad arguments; 3 input not readable
 or a PDF; 10 and above a build error; 12 output not writable (the message on stderr says why). A
-written PDF can still have degraded parts. A single `--export` reports only missing characters,
-as a `Warning:` line on stderr; for the counts, convert the file through a batch mode with
-`--report=-`, which prints one JSON line a document on stdout:
+written PDF can still have degraded parts. A single `--export` says so in `Warning:` lines on
+stderr: characters no font has, images that could not be shown (with the flags that would admit
+them). For the counts, convert the file through a batch mode with `--report=-`, which prints one
+JSON line a document on stdout:
 
 ```sh
 echo report.md | rayomd --stdin-batch out --report=- --toc --page-numbers

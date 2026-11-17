@@ -567,6 +567,10 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
         return 10 + static_cast<int>(buildResult.error);
     }
     if (buildResult.missingCharacters != 0) WarnMissingCharacters(inputLabel, buildResult.missingCharacters);
+    if (buildResult.failedImages != 0) {
+        Print(stderr, RayoMd::Cli::FailedImagesWarning(inputLabel, buildResult.failedImages, options.enableUrlImages,
+            options.allowUnsafeLocalImages));
+    }
     if (details) *details = buildResult;
     if (!WritePdf(outputPath, pdfBuffer)) {
         const int error = RayoMd::Cli::LastSystemError();
@@ -604,6 +608,10 @@ int WriteBookPdf(const TinyPdf::Book& book, const Path& outputPath, const CliExp
         return 10 + static_cast<int>(result.error);
     }
     if (result.missingCharacters != 0) WarnMissingCharacters("the book", result.missingCharacters);
+    if (result.failedImages != 0) {
+        Print(stderr, RayoMd::Cli::FailedImagesWarning("the book", result.failedImages, options.enableUrlImages,
+            options.allowUnsafeLocalImages));
+    }
     if (!WritePdf(outputPath, pdf)) {
         const int error = RayoMd::Cli::LastSystemError();
         PrintError(RayoMd::Cli::WriteError("PDF file", outputPath, error));
@@ -642,6 +650,7 @@ int RunLinkedExport(const Path& inputPath, const Path& outputPath, const CliExpo
 
 int RunStdinExport(const Path& outputPath, const CliExportOptions& options) {
     std::string markdown;
+    if (::isatty(STDIN_FILENO)) Print(stderr, RayoMd::Cli::TerminalInputNote("Markdown"));
     const int read = ReadStdinPortable(markdown);
     if (read != 0) {
         PrintError(read < 0 ? "Error: Markdown on standard input is larger than " +
@@ -653,6 +662,7 @@ int RunStdinExport(const Path& outputPath, const CliExportOptions& options) {
         PrintError(RayoMd::Cli::PdfGivenAsMarkdown(std::string()));
         return 3;
     }
+    if (markdown.empty()) Print(stderr, RayoMd::Cli::kEmptyInputWarning);
 
     std::string pdfBuffer;
     pdfBuffer.reserve(1024 * 1024);
@@ -789,6 +799,7 @@ int RunStdinBatchExport(const Path& outputDir, const CliExportOptions& options) 
         return 12;
     }
 
+    if (::isatty(STDIN_FILENO)) Print(stderr, RayoMd::Cli::TerminalInputNote("Markdown paths, one a line,"));
     std::vector<BatchJob> jobs;
     std::set<std::string> outputs;
     std::string line;
@@ -817,6 +828,7 @@ int RunServeExport(const Path& outputDir, const CliExportOptions& options) {
         return 12;
     }
 
+    if (::isatty(STDIN_FILENO)) Print(stderr, RayoMd::Cli::TerminalInputNote("Markdown paths, one a line,"));
     RayoMd::Batch::Report report;
     if (!OpenReport(report, options)) return 12;
     std::string pdfBuffer;

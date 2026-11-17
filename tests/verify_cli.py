@@ -615,6 +615,52 @@ def verify_help(binary: Path) -> None:
             raise AssertionError(f"{flag}: the help has a tab or lines wider than 79 columns: {wide}")
 
 
+def verify_warnings(binary: Path, root: Path) -> None:
+    """Warnings on standard error, the PDF written (exit 0): images that could not be shown (with
+    the flags that would admit them), standard input that was empty, a RAYOMD_FONT nobody can read
+    named in the missing-character warning; a note when --stdin reads a terminal (POSIX, a pty)."""
+    folder = root / "warnings"
+    (folder / "notes").mkdir(parents=True)
+    images = folder / "notes" / "images.md"
+    images.write_text("# Images\n\n![gone](gone.png)\n\n![outside](../outside.png)\n", encoding="utf-8")
+    shutil.copyfile(Path(__file__).resolve().parents[1] / "docs" / "assets" / "branding" / "rayomd.png", folder / "outside.png")
+    shown = subprocess.run([str(binary), "--export", str(images), str(folder / "images.pdf"), "--no-image-cache"],
+                           capture_output=True, check=False, timeout=60)
+    if (shown.returncode != 0 or b"2 image(s) could not be shown" not in shown.stderr
+            or b"--allow-unsafe-local-images" not in shown.stderr):
+        raise AssertionError(f"failed images were not warned of: {shown!r}")
+    require_pdf(folder / "images.pdf", b"gone")
+    admitted = subprocess.run([str(binary), "--export", str(images), str(folder / "admitted.pdf"), "--no-image-cache",
+                               "--allow-unsafe-local-images"], capture_output=True, check=False, timeout=60)
+    if admitted.returncode != 0 or b"1 image(s) could not be shown" not in admitted.stderr:
+        raise AssertionError(f"the warning did not count the images admitted: {admitted!r}")
+    empty = subprocess.run([str(binary), "--stdin", str(folder / "empty.pdf")], input=b"", capture_output=True,
+                           check=False, timeout=60)
+    if empty.returncode != 0 or b"standard input was empty" not in empty.stderr:
+        raise AssertionError(f"empty standard input was not warned of: {empty!r}")
+    require_pdf(folder / "empty.pdf")
+    odd = folder / "odd.md"
+    odd.write_text("# Odd\n\n\U0010fffd\n", encoding="utf-8")
+    unreadable = str(folder / "no-such-font.ttf")
+    font = subprocess.run([str(binary), "--export", str(odd), str(folder / "odd.pdf")], capture_output=True, check=False,
+                          timeout=120, env={**os.environ, "RAYOMD_FONT": unreadable})
+    if font.returncode != 0 or ("RAYOMD_FONT=" + unreadable + " cannot be read (").encode("utf-8") not in font.stderr:
+        raise AssertionError(f"an unreadable RAYOMD_FONT was not named: {font!r}")
+    if hasattr(os, "openpty"):
+        terminal, side = os.openpty()
+        try:
+            reading = subprocess.Popen([str(binary), "--stdin", str(folder / "typed.pdf")], stdin=side,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            os.write(terminal, b"# Typed\n\x04")
+            _, note = reading.communicate(timeout=60)
+        finally:
+            os.close(terminal)
+            os.close(side)
+        if reading.returncode != 0 or b"from the terminal; Ctrl+D ends it." not in note:
+            raise AssertionError(f"--stdin at a terminal gave no note: {reading.returncode} {note!r}")
+        require_pdf(folder / "typed.pdf", b"Typed")
+
+
 def verify_arguments(binary: Path, root: Path) -> None:
     """--help, -h and --version anywhere print and stop; options before the command, `--name VALUE`
     and `--number-headings 2` give the PDF their usual forms give; a mistyped option, command, style
@@ -785,6 +831,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         verify_errors(binary, root)
         verify_output_paths(binary, root)
         verify_arguments(binary, root)
+        verify_warnings(binary, root)
         unknown = run(binary, "--no-such-mode", expect=2)
         if b"unknown command" not in unknown.stdout or b" --help' " not in unknown.stdout or b"Commands:" in unknown.stdout:
             raise AssertionError("an unknown command was not reported in a line pointing to --help")
