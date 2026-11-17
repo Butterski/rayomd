@@ -524,6 +524,19 @@ rayomd --book docs/src/SUMMARY.md manual.pdf --toc --page-numbers
 rayomd --export Project.md project.pdf --dialect=obsidian --follow-links=2 --backlinks
 ```
 
+### Where the PDF goes
+
+Without an output name, `--export notes.md` writes `notes.pdf` beside the Markdown, also with
+options in its place; a folder as the output gets `notes.pdf` in it. `-` writes the PDF to
+standard output for pipes, with `--stdin` too, and never to a terminal. Any other name gets `.pdf`
+unless it ends in it, in any letter case.
+
+```sh
+rayomd --export notes.md --toc                  # notes.pdf
+rayomd --export notes.md pdfs/                  # pdfs/notes.pdf
+cat notes.md | rayomd --stdin - > notes.pdf
+```
+
 ### Batch conversion
 
 `--batch` converts a folder on up to 64 threads (6 by default); `--recursive` mirrors its

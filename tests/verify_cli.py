@@ -615,6 +615,62 @@ def verify_help(binary: Path) -> None:
             raise AssertionError(f"{flag}: the help has a tab or lines wider than 79 columns: {wide}")
 
 
+def verify_output_paths(binary: Path, root: Path) -> None:
+    """Where --export puts the PDF: without an output (nothing, or an option, a style or a margin in
+    its place) beside the input with .pdf; in a folder given (by a final separator, or because one
+    is there); with - on standard output, byte for byte the file's, never on a terminal; a name
+    ending in .PDF is kept. An output that would replace the input is refused. --stdin takes - too
+    and refuses an option or a folder in its output's place."""
+    folder = root / "output paths"
+    pdfs = folder / "pdfs"
+    pdfs.mkdir(parents=True)
+    note = folder / "note.md"
+    note.write_text("# Output\n\nText.\n", encoding="utf-8")
+    beside = folder / "note.pdf"
+    for extra in (["--toc"], ["modern", "wide"], ["margin=1.5cm"], []):
+        beside.unlink(missing_ok=True)
+        run(binary, "--export", str(note), *extra)
+        require_pdf(beside)
+    if sorted(path.name for path in folder.iterdir()) != ["note.md", "note.pdf", "pdfs"]:
+        raise AssertionError(f"an option was taken for the output: {sorted(p.name for p in folder.iterdir())}")
+    for named in (str(pdfs) + os.sep, str(pdfs)):
+        run(binary, "--export", str(note), named)
+        require_pdf(pdfs / "note.pdf")
+        (pdfs / "note.pdf").unlink()
+    run(binary, "--export", str(note), str(folder / "UPPER.PDF"))
+    require_pdf(folder / "UPPER.PDF")
+    if (folder / "UPPER.PDF.pdf").exists():
+        raise AssertionError("an output ending in .PDF got .pdf added")
+    piped = subprocess.run([str(binary), "--export", str(note), "-"], capture_output=True, check=False, timeout=60)
+    if piped.returncode != 0 or piped.stdout != beside.read_bytes() or piped.stderr:
+        raise AssertionError(f"--export to - did not write the PDF's bytes on standard output: {piped.returncode} {piped.stderr!r}")
+    stdin_file = folder / "stdin.pdf"
+    run(binary, "--stdin", str(stdin_file), stdin=note.read_text(encoding="utf-8"))
+    stdin_piped = subprocess.run([str(binary), "--stdin", "-"], input=note.read_bytes(), capture_output=True, check=False,
+                                 timeout=60)
+    if stdin_piped.returncode != 0 or stdin_piped.stdout != stdin_file.read_bytes():
+        raise AssertionError(f"--stdin - did not write the PDF on standard output: {stdin_piped!r}")
+    if hasattr(os, "openpty"):
+        terminal, side = os.openpty()
+        try:
+            refused = subprocess.run([str(binary), "--export", str(note), "-"], stdout=side, stderr=subprocess.PIPE,
+                                     check=False, timeout=60)
+        finally:
+            os.close(terminal)
+            os.close(side)
+        if refused.returncode != 2 or b"not written to a terminal" not in refused.stderr:
+            raise AssertionError(f"a PDF was written to a terminal: {refused!r}")
+    same = folder / "same.pdf"
+    same.write_text("# Markdown named .pdf\n", encoding="utf-8")
+    replaced = run(binary, "--export", str(same), expect=2)
+    if b"would replace the input" not in replaced.stdout or same.read_text(encoding="utf-8") != "# Markdown named .pdf\n":
+        raise AssertionError("an output that is the input was not refused")
+    for args in (["--stdin", "--toc"], ["--stdin", str(pdfs) + os.sep]):
+        run(binary, *args, stdin="# x\n", expect=2)
+    if any(pdfs.iterdir()):
+        raise AssertionError("--stdin wrote into a folder named as its output")
+
+
 def verify_errors(binary: Path, root: Path) -> None:
     """Errors go to standard error and standard output stays empty, on Linux and Windows alike: a
     file that cannot be read or written is named with the reason in parentheses (the system's
@@ -632,11 +688,11 @@ def verify_errors(binary: Path, root: Path) -> None:
         (3, ["--export", str(missing), str(root / "missing.pdf")], b"could not read input Markdown file", False),
         (3, ["--export", str(missing), str(root / "missing.pdf")], b"missing.md (", False),
         (3, ["--export", str(root), str(root / "folder.pdf")], b"(a folder, not a file)", False),
-        (3, ["--export", str(pdf), str(pdf)], b"is a PDF, not Markdown", False),
+        (3, ["--export", str(pdf), str(root / "from-pdf.pdf")], b"is a PDF, not Markdown", False),
         (12, ["--export", str(doc), str(root / "no such folder" / "out.pdf")], b"(its folder does not exist)", False),
         (3, ["--batch", str(root / "no such folder"), str(root / "batch-out")], b"(does not exist)", False),
         (3, ["--inspect-source", str(root / "missing.pdf")], b"missing.pdf (", False),
-        (2, ["--export", str(doc)], b"--export requires", True),
+        (2, ["--export"], b"--export requires", True),
         (2, ["--stdin-batch"], b"--stdin-batch requires", True),
         (2, ["--serve"], b"--serve requires", True),
         (2, ["--bench", str(doc)], b"--bench requires", True),
@@ -684,6 +740,7 @@ def verify(binary: Path, keep: Path | None) -> None:
             raise AssertionError("no arguments did not print the usage")
         verify_help(binary)
         verify_errors(binary, root)
+        verify_output_paths(binary, root)
         unknown = run(binary, "--no-such-mode", expect=2)
         if b"unknown command" not in unknown.stdout or b" --help' " not in unknown.stdout or b"Commands:" in unknown.stdout:
             raise AssertionError("an unknown command was not reported in a line pointing to --help")

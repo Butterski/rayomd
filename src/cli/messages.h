@@ -164,6 +164,11 @@ inline std::string PdfGivenAsMarkdown(const std::string& inputLabel) {
     return "Error: " + inputLabel + " is a PDF, not Markdown (input and output the other way round?)";
 }
 
+// The argument error for "-" as the output while standard output is a terminal, where a PDF's
+// bytes would only scramble the screen.
+constexpr const char kTerminalOutput[] =
+    "a PDF is not written to a terminal: redirect standard output (> out.pdf) or name a file.";
+
 // Why `path` is no folder to read files from: empty when it is one.
 inline std::string NotAFolder(const RayoMd::File::Path& path) {
     RayoMd::File::FileStatus status;

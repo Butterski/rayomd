@@ -119,6 +119,18 @@ void WriteStdoutLine(const std::string& line) {
     WriteFile(hOut, output.data(), (DWORD)output.size(), &written, nullptr);
 }
 
+// `text` on standard output, all of it; false, GetLastError set, when a write failed.
+bool WriteStdoutAll(const std::string& text) {
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (out == INVALID_HANDLE_VALUE || out == nullptr) return false;
+    for (size_t at = 0; at < text.size();) {
+        DWORD written = 0;
+        if (!WriteFile(out, text.data() + at, static_cast<DWORD>(text.size() - at), &written, nullptr) || written == 0) return false;
+        at += written;
+    }
+    return true;
+}
+
 // `message` and a line break on standard error.
 void PrintError(const std::string& message) {
     WriteStderr(message + "\n");
@@ -357,6 +369,16 @@ TinyPdf::PdfOptions PdfOptionsFor(const WinExportOptions& exportOptions, const s
     return options;
 }
 
+// "-": --export and --stdin write the PDF to standard output.
+bool IsStandardOutput(const std::wstring& path) {
+    return path == L"-";
+}
+
+// The PDF to `path`, or to standard output for "-"; false, GetLastError set, when it cannot be.
+bool WritePdf(const std::wstring& path, const std::string& pdf) {
+    return IsStandardOutput(path) ? WriteStdoutAll(pdf) : WriteBinaryFile(path, pdf);
+}
+
 // Builds `markdown` into `outputPath`: 0, or the exit code with its error (ReportExportError).
 // `details`, when given, receives the result of a build that succeeded: pages, characters without
 // a glyph, failed images.
@@ -373,7 +395,7 @@ int ExportMarkdown(const std::string& markdown, const std::wstring& sourcePath, 
         WriteStderr(RayoMd::Cli::MissingCharactersWarning(inputLabel, result.missingCharacters));
     }
     if (details) *details = result;
-    if (!WriteBinaryFile(outputPath, pdfBuffer)) {
+    if (!WritePdf(outputPath, pdfBuffer)) {
         const int error = RayoMd::Cli::LastSystemError();
         ReportExportError(deferredError, RayoMd::Cli::WriteError("PDF file", outputPath, error));
         return 12;
@@ -579,7 +601,7 @@ int WriteBookPdf(const TinyPdf::Book& book, const std::wstring& outputPath, cons
     if (result.missingCharacters != 0) {
         WriteStderr(RayoMd::Cli::MissingCharactersWarning("the book", result.missingCharacters));
     }
-    if (!WriteBinaryFile(outputPath, pdfBytes)) {
+    if (!WritePdf(outputPath, pdfBytes)) {
         const int error = RayoMd::Cli::LastSystemError();
         PrintError(RayoMd::Cli::WriteError("PDF file", outputPath, error));
         return 12;
@@ -731,6 +753,60 @@ std::wstring OutputPathKey(const std::wstring& path) {
         ch = (wchar_t)std::towlower(ch);
     }
     return key;
+}
+
+// Whether `path` names a PDF: its extension is .pdf in any letter case.
+bool NamesPdf(const std::wstring& path) {
+    return path.size() >= 4 && _wcsicmp(path.c_str() + path.size() - 4, L".pdf") == 0;
+}
+
+// Whether `path` names a folder for a PDF to go in: it ends in a separator, or a folder is there.
+bool NamesFolder(const std::wstring& path) {
+    return !path.empty() && (path.back() == L'\\' || path.back() == L'/' || RayoMd::File::IsDirectory(path));
+}
+
+// Whether standard output is a console, where a PDF's bytes would only scramble the screen.
+bool StandardOutputIsConsole() {
+    const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    return out != INVALID_HANDLE_VALUE && out != nullptr && GetConsoleMode(out, &mode);
+}
+
+// Whether an argument where --export's output may stand is an option (a flag, a style, a margin)
+// and so no output; "-" is standard output.
+bool IsOptionWord(const wchar_t* argument) {
+    if (argument[0] == L'-') return argument[1] != L'\0';
+    if (lstrcmpiW(argument, L"native") == 0 || lstrcmpiW(argument, L"pandoc") == 0) return true;
+    const std::string word = WideToUtf8(argument);
+    TinyPdf::PdfMargin margin;
+    TinyPdf::PdfStyle style;
+    return TinyPdf::Internal::ParsePdfMargin(word, margin) || TinyPdf::Internal::ParsePdfStyle(word, style);
+}
+
+// Where --export puts the PDF of `input`: `named` as given, with .pdf added unless it names a PDF;
+// "-", standard output; a folder, the input's name with .pdf in it; no name (null or empty), that
+// name beside the input. Empty, `error` said, when it would replace the input, or for "-" while
+// standard output is a console.
+std::wstring ExportOutputPath(const std::wstring& input, const wchar_t* named, std::string& error) {
+    std::wstring output = named != nullptr ? named : L"";
+    if (IsStandardOutput(output)) {
+        if (!StandardOutputIsConsole()) return output;
+        error = RayoMd::Cli::kTerminalOutput;
+        return std::wstring();
+    }
+    if (output.empty()) {
+        output = input;
+        RayoMd::File::ReplaceExtension(output, L".pdf");
+    } else if (NamesFolder(output)) {
+        output = JoinPath(output, PdfNameForMarkdown(input));
+    } else if (!NamesPdf(output)) {
+        output += L".pdf";
+    }
+    if (OutputPathKey(output) == OutputPathKey(input)) {
+        error = "the PDF would replace the input " + WideToUtf8(input) + ": name the output.";
+        return std::wstring();
+    }
+    return output;
 }
 
 struct WinBatchJob {
@@ -1015,18 +1091,6 @@ size_t ReadStandardInput(void*, char* buffer, size_t size) {
     DWORD read = 0;
     if (in == INVALID_HANDLE_VALUE || in == nullptr || !ReadFile(in, buffer, static_cast<DWORD>(size), &read, nullptr)) return 0;
     return read;
-}
-
-// `text` on standard output, all of it; false when a write failed.
-bool WriteStdoutAll(const std::string& text) {
-    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (out == INVALID_HANDLE_VALUE || out == nullptr) return false;
-    for (size_t at = 0; at < text.size();) {
-        DWORD written = 0;
-        if (!WriteFile(out, text.data() + at, static_cast<DWORD>(text.size() - at), &written, nullptr) || written == 0) return false;
-        at += written;
-    }
-    return true;
 }
 
 // One request of --serve --json into `record`: its options are the session's with the request's
@@ -1371,8 +1435,8 @@ int RunCommandLine() {
     };
 
     if (lstrcmpiW(argv[1], L"--stdin") == 0) {
-        if (argc < 3) {
-            PrintArgumentError("--stdin requires <output.pdf>.");
+        if (argc < 3 || argv[2][0] == L'\0' || IsOptionWord(argv[2])) {
+            PrintArgumentError("--stdin requires <output.pdf>, or - for standard output.");
             LocalFree(argv);
             return 2;
         }
@@ -1381,10 +1445,15 @@ int RunCommandLine() {
             return 2;
         }
         std::wstring outputPath = argv[2];
-        if (outputPath.size() < 4 || _wcsicmp(outputPath.c_str() + outputPath.size() - 4, L".pdf") != 0) {
-            outputPath += L".pdf";
+        int result = 2;
+        if (IsStandardOutput(outputPath) && StandardOutputIsConsole()) {
+            PrintArgumentError(RayoMd::Cli::kTerminalOutput);
+        } else if (!IsStandardOutput(outputPath) && NamesFolder(outputPath)) {
+            PrintArgumentError("--stdin needs a file name for the PDF: " + WideToUtf8(outputPath) + " is a folder.");
+        } else {
+            if (!IsStandardOutput(outputPath) && !NamesPdf(outputPath)) outputPath += L".pdf";
+            result = RunStdinExport(outputPath, options);
         }
-        int result = RunStdinExport(outputPath, options);
         LocalFree(argv);
         return result;
     }
@@ -1476,29 +1545,36 @@ int RunCommandLine() {
         return result;
     }
 
-    if (argc < 4) {
-        PrintArgumentError(lstrcmpiW(argv[1], L"--export") == 0
-            ? "--export requires <input.md> <output.pdf>."
-            : "--batch requires <input-folder> <output-folder>.");
-        LocalFree(argv);
-        return 2;
-    }
-
-    if (!parseOrReport(4)) {
-        LocalFree(argv);
-        return 2;
-    }
-
     if (lstrcmpiW(argv[1], L"--batch") == 0) {
-        int result = RunBatchExport(argv[2], argv[3], options);
+        int result = 2;
+        if (argc < 4) {
+            PrintArgumentError("--batch requires <input-folder> <output-folder>.");
+        } else if (parseOrReport(4)) {
+            result = RunBatchExport(argv[2], argv[3], options);
+        }
         LocalFree(argv);
         return result;
     }
 
-    std::wstring inputPath = argv[2];
-    std::wstring outputPath = argv[3];
-    if (outputPath.size() < 4 || _wcsicmp(outputPath.c_str() + outputPath.size() - 4, L".pdf") != 0) {
-        outputPath += L".pdf";
+    // --export. The output may be left out, nothing or an option in its place: the PDF goes beside
+    // the input.
+    if (argc < 3) {
+        PrintArgumentError("--export requires <input.md> [output.pdf].");
+        LocalFree(argv);
+        return 2;
+    }
+    const bool named = argc > 3 && !IsOptionWord(argv[3]);
+    if (!parseOrReport(named ? 4 : 3)) {
+        LocalFree(argv);
+        return 2;
+    }
+    const std::wstring inputPath = argv[2];
+    std::string pathError;
+    const std::wstring outputPath = ExportOutputPath(inputPath, named ? argv[3] : nullptr, pathError);
+    if (outputPath.empty()) {
+        PrintArgumentError(pathError);
+        LocalFree(argv);
+        return 2;
     }
     if (options.followLinks != 0) {
         const int result = RunLinkedExport(inputPath, outputPath, options);

@@ -408,6 +408,18 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
     }
     return true;
 }
+
+// Whether an argument where --export's output may stand is an option (a flag, a style, a margin)
+// and so no output; "-" is standard output.
+bool IsOptionWord(const char* argument) {
+    if (argument[0] == '-') return argument[1] != '\0';
+    const std::string word = Lower(argument);
+    TinyPdf::PdfMargin margin;
+    TinyPdf::PdfStyle style;
+    return word == "native" || word == "pandoc" || TinyPdf::Internal::ParsePdfMargin(argument, margin) ||
+        TinyPdf::Internal::ParsePdfStyle(argument, style);
+}
+
 void ReportExportError(std::string* deferredError, const std::string& message) {
     if (deferredError) {
         *deferredError = message;
@@ -423,6 +435,59 @@ Path PdfNameForMarkdown(const Path& path) {
     Path out(RayoMd::File::FileNameOf(RayoMd::File::PathView(path)));
     RayoMd::File::ReplaceExtension(out, RayoMd::File::PathOfAscii(".pdf"));
     return out;
+}
+
+// Whether `path` names a PDF: its extension is .pdf in any letter case.
+bool NamesPdf(const Path& path) {
+    return Lower(std::string(RayoMd::File::ExtensionOf(path))) == ".pdf";
+}
+
+// "-": --export and --stdin write the PDF to standard output.
+bool IsStandardOutput(const Path& path) {
+    return path.size() == 1 && path[0] == '-';
+}
+
+// Whether `path` names a folder for a PDF to go in: it ends in a separator, or a folder is there.
+bool NamesFolder(const Path& path) {
+    return !path.empty() && (path.back() == '/' || RayoMd::File::IsDirectory(path));
+}
+
+// Where --export puts the PDF of `input`: `named` as given, with .pdf added unless it names a PDF;
+// "-", standard output; a folder, the input's name with .pdf in it; no name (null or empty), that
+// name beside the input. Empty, `error` said, when it would replace the input, or for "-" while
+// standard output is a terminal.
+Path ExportOutputPath(const Path& input, const char* named, std::string& error) {
+    Path output(named != nullptr ? named : "");
+    if (IsStandardOutput(output)) {
+        if (!::isatty(STDOUT_FILENO)) return output;
+        error = RayoMd::Cli::kTerminalOutput;
+        return Path();
+    }
+    if (output.empty()) {
+        output = input;
+        RayoMd::File::ReplaceExtension(output, ".pdf");
+    } else if (NamesFolder(output)) {
+        RayoMd::File::AppendPath(output, PdfNameForMarkdown(input));
+    } else if (!NamesPdf(output)) {
+        output += ".pdf";
+    }
+    Path absoluteOutput;
+    Path absoluteInput;
+    if (RayoMd::File::Absolute(output, absoluteOutput) && RayoMd::File::Absolute(input, absoluteInput)) {
+        RayoMd::File::Normalize(absoluteOutput);
+        RayoMd::File::Normalize(absoluteInput);
+        if (absoluteOutput == absoluteInput) {
+            error = "the PDF would replace the input " + PathToUtf8(input) + ": name the output.";
+            return Path();
+        }
+    }
+    return output;
+}
+
+// The PDF to `path`, or to standard output for "-"; false, errno set, when it cannot be written.
+bool WritePdf(const Path& path, const std::string& pdf) {
+    if (!IsStandardOutput(path)) return WriteBinaryFilePortable(path, pdf);
+    return std::fwrite(pdf.data(), 1, pdf.size(), stdout) == pdf.size() && std::fflush(stdout) == 0;
 }
 
 // `base` and then each of `names`, joined by the platform's separator.
@@ -494,7 +559,7 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     }
     if (buildResult.missingCharacters != 0) WarnMissingCharacters(inputLabel, buildResult.missingCharacters);
     if (details) *details = buildResult;
-    if (!WriteBinaryFilePortable(outputPath, pdfBuffer)) {
+    if (!WritePdf(outputPath, pdfBuffer)) {
         const int error = RayoMd::Cli::LastSystemError();
         ReportExportError(deferredError, RayoMd::Cli::WriteError("PDF file", outputPath, error));
         return 12;
@@ -530,7 +595,7 @@ int WriteBookPdf(const TinyPdf::Book& book, const Path& outputPath, const CliExp
         return 10 + static_cast<int>(result.error);
     }
     if (result.missingCharacters != 0) WarnMissingCharacters("the book", result.missingCharacters);
-    if (!WriteBinaryFilePortable(outputPath, pdf)) {
+    if (!WritePdf(outputPath, pdf)) {
         const int error = RayoMd::Cli::LastSystemError();
         PrintError(RayoMd::Cli::WriteError("PDF file", outputPath, error));
         return 12;
@@ -800,7 +865,7 @@ size_t ReadStandardInput(void*, char* buffer, size_t size) {
 void ServeJsonRequest(const RayoMd::Serve::Request& request, const CliExportOptions& sessionOptions,
     std::string& pdfBuffer, RayoMd::Batch::Record& record) {
     Path outputPath = RayoMd::File::PathFromUtf8(request.output);
-    if (RayoMd::File::ExtensionOf(outputPath) != ".pdf") outputPath += ".pdf";
+    if (!NamesPdf(outputPath)) outputPath += ".pdf";
     record.output = PathToUtf8(outputPath);
     record.input = request.hasInput ? request.input : request.sourcePath;
     const auto fail = [&](int code, std::string error) {
@@ -1053,12 +1118,20 @@ int main(int argc, char** argv) {
     }
 
     if (command == "--stdin") {
-        if (argc < 3) return PrintArgumentError("--stdin requires <output.pdf>.");
+        if (argc < 3 || argv[2][0] == '\0' || IsOptionWord(argv[2])) {
+            return PrintArgumentError("--stdin requires <output.pdf>, or - for standard output.");
+        }
         std::string error;
         if (!ParseExportOptions(argc, argv, 3, options, error)) return PrintArgumentError(error);
         if (options.followLinks != 0) return PrintArgumentError(kFollowLinksExportOnly);
         Path outputPath(argv[2]);
-        if (RayoMd::File::ExtensionOf(outputPath) != ".pdf") outputPath += ".pdf";
+        if (IsStandardOutput(outputPath)) {
+            if (::isatty(STDOUT_FILENO)) return PrintArgumentError(RayoMd::Cli::kTerminalOutput);
+        } else if (NamesFolder(outputPath)) {
+            return PrintArgumentError("--stdin needs a file name for the PDF: " + std::string(argv[2]) + " is a folder.");
+        } else if (!NamesPdf(outputPath)) {
+            outputPath += ".pdf";
+        }
         ExitOneShot(RunStdinExport(outputPath, options));
     }
 
@@ -1110,11 +1183,13 @@ int main(int argc, char** argv) {
     }
 
     if (command == "--export") {
-        if (argc < 4) return PrintArgumentError("--export requires <input.md> <output.pdf>.");
+        if (argc < 3) return PrintArgumentError("--export requires <input.md> [output.pdf].");
+        // The output may be left out, nothing or an option in its place: the PDF goes beside the input.
+        const bool named = argc > 3 && !IsOptionWord(argv[3]);
         std::string error;
-        if (!ParseExportOptions(argc, argv, 4, options, error)) return PrintArgumentError(error);
-        Path outputPath(argv[3]);
-        if (RayoMd::File::ExtensionOf(outputPath) != ".pdf") outputPath += ".pdf";
+        if (!ParseExportOptions(argc, argv, named ? 4 : 3, options, error)) return PrintArgumentError(error);
+        const Path outputPath = ExportOutputPath(argv[2], named ? argv[3] : nullptr, error);
+        if (outputPath.empty()) return PrintArgumentError(error);
         if (options.followLinks != 0) {
             // A book: no embedded source, which a book drops with the source map.
             if (options.embedSource) return PrintArgumentError("--embed-source does not apply to --follow-links: a book is not reversible.");
