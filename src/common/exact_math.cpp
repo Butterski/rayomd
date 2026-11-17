@@ -59,8 +59,9 @@ T RoundHalfAway(double x) {
 } // namespace
 
 double Trunc(double x) {
-    // From 2^52 on every double is a whole number; infinities and NaN stay as they are.
-    if (!(Abs(x) < kTwo52)) return x;
+    // From 2^52 on every double is a whole number and infinities stay as they are; a NaN comes back
+    // as x + x, quiet, as glibc's trunc, floor and ceil return it.
+    if (!(Abs(x) < kTwo52)) return x != x ? x + x : x;
     // The conversion drops the fraction exactly; the sign bit keeps -0.0 for -0.5 < x <= -0.0.
     return FromBits(Bits(static_cast<double>(static_cast<int64_t>(x))) | (Bits(x) & kSign));
 }

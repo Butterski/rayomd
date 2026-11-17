@@ -1246,7 +1246,8 @@ bool CheckMathPdf() {
 }
 
 // The hard regression rule of the math feature: a document without math syntax is
-// rendered byte-for-byte the same with and without it. The digests were recorded when the
+// rendered byte-for-byte the same with and without it. The digests were recorded when every
+// Producer started to name its version (#42; 0.0.0 here, which has none), when the
 // document title started to come from the first heading, after headings started to make the
 // PDF outline, code backgrounds started at the first glyph of the code, the standard-font
 // renderer started to show bold, italic and strike-through, exact AFM widths,
@@ -1257,9 +1258,10 @@ bool CheckMathPdf() {
 bool CheckNoMathGolden() {
     struct Golden { TinyPdf::PdfStyle style; size_t size; const char* sha256; };
     const Golden goldens[] = {
-        {TinyPdf::PdfStyle::Modern, 7883, "8df480b6a98e4f4f9d38e7147d08f90e4471c9757335de167ee1ec70ac8e1d4b"},
-        {TinyPdf::PdfStyle::Tech, 7911, "df9f7235d18e915b290b467d056890f2c6b9ec0fd80b44f2f26bc3d27c07445f"},
+        {TinyPdf::PdfStyle::Modern, 7889, "ca942b8cacb67658811796f74839f60643e9f1150978b387828d9261ff074e75"},
+        {TinyPdf::PdfStyle::Tech, 7917, "c1e6d39288241f01dd3f44e25c3832b9874f2455c2f6aefe3d66a4b5ac1ff3c1"},
     };
+    bool ok = true;
     for (const Golden& golden : goldens) {
         TinyPdf::PdfOptions options;
         options.style = golden.style;
@@ -1269,10 +1271,10 @@ bool CheckNoMathGolden() {
             RayoMd::PdfSource::Sha256Hex(pdf) != golden.sha256) {
             std::cerr << "no-math golden mismatch: " << pdf.size() << " "
                 << RayoMd::PdfSource::Sha256Hex(pdf) << std::endl;
-            return false;
+            ok = false;
         }
     }
-    return true;
+    return ok;
 }
 
 // Pages are rendered straight into the caller's output buffer and the file is assembled
@@ -3191,16 +3193,24 @@ bool CheckExactMath() {
     };
     const double inf = std::numeric_limits<double>::infinity();
     const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double snan = fromBits(0x7FF4000000000000ull);   // signaling
     const double edges[] = {0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, -0.49999999999999994,
         0.5000000000000001, 4503599627370495.5, -4503599627370495.5, 4503599627370496.0, 9007199254740991.0,
         9007199254740993.0, 9223372036854774784.0, -9223372036854775808.0, 9223372036854775808.0, 1e300, -1e300,
         4.9406564584124654e-324, -4.9406564584124654e-324, 2.2250738585072014e-308, 1.7976931348623157e308,
-        -1.7976931348623157e308, inf, -inf, nan, -nan, 1.0, -1.0, 0.1, -0.1, 360.0, -720.5, 1e-9};
+        -1.7976931348623157e308, inf, -inf, nan, -nan, snan, -snan, 1.0, -1.0, 0.1, -0.1, 360.0, -720.5, 1e-9};
     size_t failures = 0;
+    // A signaling NaN comes back quiet from libm's ceil, floor and trunc but unchanged where GCC
+    // expands them inline (which it does at some levels, -O0 never): for a NaN, the results must be
+    // NaNs of its sign. Every other value must match bit for bit.
+    auto same = [&](double x, double ours, double theirs) {
+        return std::isnan(x) ? std::isnan(ours) && std::isnan(theirs) && std::signbit(ours) == std::signbit(theirs)
+                             : bits(ours) == bits(theirs);
+    };
     auto unary = [&](double x) {
-        const bool ok = bits(X::Ceil(x)) == bits(std::ceil(x)) && bits(X::Floor(x)) == bits(std::floor(x)) &&
-            bits(X::Trunc(x)) == bits(std::trunc(x)) && X::LRound(x) == std::lround(x) &&
-            X::LlRound(x) == std::llround(x) && bits(X::Sqrt(x)) == bits(std::sqrt(x));
+        const bool ok = same(x, X::Ceil(x), std::ceil(x)) && same(x, X::Floor(x), std::floor(x)) &&
+            same(x, X::Trunc(x), std::trunc(x)) && X::LRound(x) == std::lround(x) &&
+            X::LlRound(x) == std::llround(x) && same(x, X::Sqrt(x), std::sqrt(x));
         if (!ok && failures++ < 5) std::cerr << "ExactMath differs from libm for " << std::hexfloat << x << std::defaultfloat << std::endl;
     };
     // A NaN divisor (RayoMD divides by constants) gives a NaN whose sign and payload differ

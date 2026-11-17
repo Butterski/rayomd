@@ -721,7 +721,7 @@ bool CheckDiagramBlocks() {
     std::string golden;
     if (!TinyPdf::BuildPdf("# D\n\n```mermaid\n" + flow + "\n```mermaid\nsequenceDiagram\n  A->>B: hi\n```\n\n"
             "```mermaid\npie\n  \"a\" : 1\n  \"b\" : 2\n```\n", TinyPdf::PdfOptions(), golden).Ok() ||
-        RayoMd::PdfSource::Sha256Hex(golden) != "86d61c5588ec05382f76406fa139349d02ed8f01ed44114a40afcad818461bb4") {
+        RayoMd::PdfSource::Sha256Hex(golden) != "8406b8b31d238c115b17b97bcbe3d4e513e6b358a6a21f304261dc7e66b68b63") {
         std::cerr << "Mermaid PDF golden changed: " << RayoMd::PdfSource::Sha256Hex(golden) << std::endl;
         return false;
     }

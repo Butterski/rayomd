@@ -96,6 +96,12 @@
 #define RAYOMD_VERSION "0.0.0"
 #endif
 
+// Every PDF's Producer names the version that made it (#42), as Ghostscript's and pdfcpu's do.
+// Builds without a version, the core tests among them, say 0.0.0: their golden digests hold from
+// release to release.
+constexpr const char* kStandardProducer = "RayoMD Native Standard PDF " RAYOMD_VERSION;
+constexpr const char* kUnicodeProducer = "RayoMD Native Tiny PDF " RAYOMD_VERSION;
+
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_IX86)
 #include <emmintrin.h>
 #define FAST_MD_SSE2 1
@@ -14176,7 +14182,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
     if (options.embedSource) AddReversibleSource(pdf, catalog, source);
     AppendLit(catalog, " >>");
     int catalogId = pdf.Add(std::move(catalog));
-    int infoId = pdf.Add(InfoDictionary("RayoMD Native Standard PDF", metadata, headings, winAnsi));
+    int infoId = pdf.Add(InfoDictionary(kStandardProducer, metadata, headings, winAnsi));
 
     pdf.BuildInto(catalogId, infoId, pdfBytes, options.embedSource);
     stats.pages = static_cast<uint32_t>(pageStarts.size() + (coverId != 0));
@@ -14915,7 +14921,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
 #else
         pageIds, false, outline.value);
 #endif
-    const char* const producer = "RayoMD Native Tiny PDF";
+    const char* const producer = kUnicodeProducer;
     if (options.pdfa || tags) {
         AddArchivalCatalogEntries(pdf, catalog, metadata, headings, producer,
             options.embedSource ? std::string_view(markdown) : std::string_view(), options.pdfa, structTreeRoot);

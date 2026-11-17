@@ -758,9 +758,10 @@ def verify(binary: Path, keep: Path | None) -> None:
         )
         math_pdf = root / "math.pdf"
         run(binary, "--export", str(math_md), str(math_pdf), "native", "modern", "normal")
+        version = run(binary, "--version").stdout.decode("utf-8").split()[-1].encode("ascii")
         math_data = require_pdf(
             math_pdf,
-            b"RayoMD Native Standard PDF",
+            b"/Producer (RayoMD Native Standard PDF " + version + b")",
             b"+RayoMDMath-Symbol",
             b"+RayoMDMath-Italic",
             b"/Subtype /Type1C",
@@ -775,7 +776,7 @@ def verify(binary: Path, keep: Path | None) -> None:
         unicode_math = root / "unicode-math.md"
         unicode_math.write_text("Zażółć $\\text{gęślą} + x^2$\n", encoding="utf-8", newline="\n")
         run(binary, "--export", str(unicode_math), str(root / "unicode-math.pdf"), "native", "modern", "normal")
-        require_pdf(root / "unicode-math.pdf", b"RayoMD Native Tiny PDF", b"+RayoMDMath-Italic")
+        require_pdf(root / "unicode-math.pdf", b"/Producer (RayoMD Native Tiny PDF " + version + b")", b"+RayoMDMath-Italic")
 
         run(binary, "--stdin", str(root / "stdin-math.pdf"), "native", "modern", "normal", stdin="$$\nx^2\n$$\n")
         require_pdf(root / "stdin-math.pdf", b"+RayoMDMath-Italic")
