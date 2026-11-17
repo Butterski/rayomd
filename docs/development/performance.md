@@ -41,6 +41,34 @@ said; a fresh export is a new `rayomd --export` process, start to exit.
   (4.0: digit-pair numbers, one-lookup widths, formulas without a string per
   word, the static runtime).
 
+## The inline parse test 32 bytes a step (2026-11-17)
+
+`NeedsInlineParse`, which every paragraph, heading and table cell asks first, summed the class of
+each byte, eight table lookups a step (9.7 % of polish.md's profile). From 64 bytes it now jumps
+from one byte with a class to the next (`FindClassedByte`): AVX2 nibble tables of every class
+below 0x80 (`kClassNibbles`, exact by a static_assert; their high nibbles 0 to 7 take the 8 bits)
+and a compare for 0xE2, the one byte from 0x80 with a class; without AVX2 a byte at a time. Only
+bytes with a class add to `seen`, so the answer and `seenOut` are the same. Shorter text keeps the
+eight-byte loop. Every PDF is byte for byte the same: 16 documents in 10 option sets (`margin=1.5cm`
+among them) and 2 books (`same=162 diff=0`).
+
+`--bench`, GCC 13.3, Ryzen 5 PRO 4650GE pinned to one core, files on tmpfs, medians of 11 runs:
+
+| Document | before (instructions / ms) | after | Change |
+|---|---:|---:|---:|
+| essay.md | 25,262,324 / 2.24 | 22,570,121 / 1.93 | -10.66 % |
+| essay.md, a4-landscape `--page-numbers` | 24,485,612 / 2.16 | 21,793,408 / 1.84 | -11.00 % |
+| polish.md | 12,092,188 / 0.95 | 11,496,435 / 0.88 | -4.93 % |
+| polish.md, a4-landscape `--page-numbers` | 11,741,851 / 0.92 | 11,146,095 / 0.84 | -5.07 % |
+| readme10.md | 37,180,850 / 4.20 | 37,114,797 / 4.15 | -0.18 % |
+| README.md | 3,765,380 / 0.46 | 3,758,930 / 0.46 | -0.17 % |
+| tester.md | 1,266,437 / 0.20 | 1,265,048 / 0.20 | -0.11 % |
+| pages2000.md | 14,869,701 / 1.24 | 14,867,667 / 1.26 | -0.01 % |
+
+A fresh `--export --page-size=a4-landscape --page-numbers` (perf stat -r 200): polish.md
+12,139,331 → 11,553,324 instructions (-4.8 %, 2.30 → 2.18 ms), license.txt 610,563 → 591,942,
+README.md 5,114,761 → 5,108,287. Text +2,736 bytes.
+
 ## UTF-8 to UTF-16 without starting over (2026-11-17)
 
 `WriteUtf8Wide` widened a text's bytes 16 a step until a step held a byte from 0x80, then decoded

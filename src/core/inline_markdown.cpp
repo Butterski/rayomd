@@ -1329,38 +1329,50 @@ void InlineScanner::BuildDestinationEnds(Tables& index) const {
 constexpr unsigned char kStops = RayoMd::Text::kByteInlineSyntax | RayoMd::Text::kByteAutolinkLead;
 
 #if RAYOMD_INLINE_AVX2
-// The stops as two tables of 16 bytes, looked up by a byte's low and high nibble (vpshufb): each
-// high nibble of a stop has a bit of its own, which the low-nibble entry of each stop with that
-// high nibble sets, so a byte is a stop when its two entries share a bit. Bytes from 0x80 look up
-// 0 in the low table (vpshufb's sign rule) and in the high one. Twelve compares a step in SSE2
-// (FindByteClass) are four instructions here.
+// The bytes of some classes as two tables of 16 bytes, looked up by a byte's low and high nibble
+// (vpshufb): each high nibble of such a byte has a bit of its own, which the low-nibble entry of
+// each such byte with that high nibble sets, so a byte is one when its two entries share a bit.
+// Bytes from 0x80 look up 0 in the low table (vpshufb's sign rule) and in the high one. Twelve
+// compares a step in SSE2 (FindByteClass) are four instructions here.
 struct StopNibbles {
     unsigned char low[16];
     unsigned char high[16];
 };
 
-constexpr StopNibbles MakeStopNibbles() {
+constexpr StopNibbles MakeStopNibbles(unsigned char mask) {
     StopNibbles tables{};
     unsigned char bitOfHigh[8] = {};
     unsigned next = 0;
     for (unsigned value = 0; value < 0x80; value++) {
-        if ((RayoMd::Text::Detail::kByteClasses[value] & kStops) == 0) continue;
+        if ((RayoMd::Text::Detail::kByteClasses[value] & mask) == 0) continue;
         if (bitOfHigh[value >> 4] == 0) bitOfHigh[value >> 4] = static_cast<unsigned char>(1u << next++);
         tables.high[value >> 4] = bitOfHigh[value >> 4];
         tables.low[value & 15] |= bitOfHigh[value >> 4];
     }
     return tables;
 }
-constexpr StopNibbles kStopNibbles = MakeStopNibbles();
+constexpr StopNibbles kStopNibbles = MakeStopNibbles(kStops);
+// Every byte below 0x80 with a class: its high nibbles 0 to 7 all occur, exactly the 8 bits. Of the
+// bytes from 0x80 only 0xE2 has a class (kByteSymbolLead), which FindClassedAvx2 compares.
+constexpr StopNibbles kClassNibbles = MakeStopNibbles(0xFF);
 
-constexpr bool StopNibblesExact() {
-    for (unsigned value = 0; value < 256; value++) {
-        const bool stop = value < 0x80 && (kStopNibbles.low[value & 15] & kStopNibbles.high[value >> 4]) != 0;
-        if (stop != ((RayoMd::Text::Detail::kByteClasses[value] & kStops) != 0)) return false;
+// Whether `tables` find exactly the bytes of `mask`'s classes below `end`.
+constexpr bool StopNibblesExact(const StopNibbles& tables, unsigned char mask, unsigned end) {
+    for (unsigned value = 0; value < end; value++) {
+        const bool stop = value < 0x80 && (tables.low[value & 15] & tables.high[value >> 4]) != 0;
+        if (stop != ((RayoMd::Text::Detail::kByteClasses[value] & mask) != 0)) return false;
     }
     return true;
 }
-static_assert(StopNibblesExact(), "the nibble tables find exactly the stops");
+constexpr bool OnlySymbolLeadAbove0x80() {
+    for (unsigned value = 0x80; value < 256; value++) {
+        if ((RayoMd::Text::Detail::kByteClasses[value] != 0) != (value == 0xE2)) return false;
+    }
+    return true;
+}
+static_assert(StopNibblesExact(kStopNibbles, kStops, 256), "the nibble tables find exactly the stops");
+static_assert(StopNibblesExact(kClassNibbles, 0xFF, 0x80) && OnlySymbolLeadAbove0x80(),
+    "the class tables and 0xE2 find exactly the bytes with a class");
 
 // The first stop in data[at, size) or size, for at least 32 bytes: 32 a step, the last step
 // reading the text's last 32 bytes again.
@@ -1380,6 +1392,31 @@ __attribute__((target("avx2"))) RAYOMD_NOINLINE size_t FindStopsAvx2(const char*
     const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + size - 32));
     const __m256i hits = _mm256_and_si256(_mm256_shuffle_epi8(low, chunk),
         _mm256_shuffle_epi8(high, _mm256_and_si256(_mm256_srli_epi16(chunk, 4), nibble)));
+    const uint32_t bits = ~static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(hits, zero))) >> (at + 32 - size);
+    return bits != 0 ? at + static_cast<size_t>(__builtin_ctz(bits)) : size;
+}
+
+// The first byte with a class in data[at, size) or size, for at least 32 bytes: FindStopsAvx2 on
+// kClassNibbles, with 0xE2 compared.
+__attribute__((target("avx2"))) RAYOMD_NOINLINE size_t FindClassedAvx2(const char* data, size_t at, size_t size) {
+    const __m256i low = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(kClassNibbles.low)));
+    const __m256i high = _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(kClassNibbles.high)));
+    const __m256i nibble = _mm256_set1_epi8(0x0F);
+    const __m256i symbol = _mm256_set1_epi8(static_cast<char>(0xE2));
+    const __m256i zero = _mm256_setzero_si256();
+    for (; at + 32 <= size; at += 32) {
+        const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + at));
+        const __m256i hits = _mm256_or_si256(_mm256_and_si256(_mm256_shuffle_epi8(low, chunk),
+            _mm256_shuffle_epi8(high, _mm256_and_si256(_mm256_srli_epi16(chunk, 4), nibble))),
+            _mm256_cmpeq_epi8(chunk, symbol));
+        const uint32_t bits = ~static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(hits, zero)));
+        if (bits != 0) return at + static_cast<size_t>(__builtin_ctz(bits));
+    }
+    if (at == size) return size;
+    const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + size - 32));
+    const __m256i hits = _mm256_or_si256(_mm256_and_si256(_mm256_shuffle_epi8(low, chunk),
+        _mm256_shuffle_epi8(high, _mm256_and_si256(_mm256_srli_epi16(chunk, 4), nibble))),
+        _mm256_cmpeq_epi8(chunk, symbol));
     const uint32_t bits = ~static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(hits, zero))) >> (at + 32 - size);
     return bits != 0 ? at + static_cast<size_t>(__builtin_ctz(bits)) : size;
 }
@@ -1469,6 +1506,18 @@ __attribute__((target("avx2"))) RAYOMD_NOINLINE unsigned ParagraphBitsAvx2(const
 #endif
 
 } // namespace
+
+size_t FindClassedByte(std::string_view text, size_t from) {
+#if RAYOMD_INLINE_AVX2
+    if (text.size() - from >= 32) {
+        const signed char state = avx2State.load(std::memory_order_relaxed);
+        if (state > 0 || (state < 0 && AskAvx2())) return FindClassedAvx2(text.data(), from, text.size());
+    }
+#endif
+    const auto& classes = RayoMd::Text::Detail::kByteClasses;
+    while (from < text.size() && classes[static_cast<unsigned char>(text[from])] == 0) from++;
+    return from;
+}
 
 unsigned ParagraphRunsTest(std::string_view text, bool notes) {
     unsigned bits = 0;

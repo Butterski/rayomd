@@ -634,7 +634,9 @@ Important image/link details:
   goes into `kByteInlineSyntax`, and the tables follow. A paragraph's run-path tests ('\n', '$',
   "\(", "[^", 0xE2) are one pass, `ParagraphRunsTest` (nibble tables checked by a static_assert;
   core check against the searches in `inline_lookahead_tests.inc`); `StripInlineMarkdown` parses into
-  the thread's `ScratchRuns`.
+  the thread's `ScratchRuns`. `NeedsInlineParse` (inline in the header) jumps from 64 bytes between
+  bytes with any class (`FindClassedByte`: the same nibble scheme, `kClassNibbles`, and 0xE2): a new
+  class from 0x80 must be compared there too, or the static_assert fails.
 
 - `src/core/math_parser.h` and `src/core/math_parser.cpp`
   Tokenizer, parser, error recovery, and limits for the TeX math subset; produces a
