@@ -85,7 +85,8 @@ rayomd --export report.md report.pdf
 ```
 
 The command prints nothing on success and exits 0. `.pdf` is appended to an output name
-without it.
+without it; without an output, the PDF goes beside the Markdown (`report.md` gives
+`report.pdf`), and `-` writes it to stdout.
 
 Markdown already in a pipe (no images: with `--stdin` there is no source file to resolve them
 from):
