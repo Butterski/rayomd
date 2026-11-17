@@ -627,7 +627,8 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/w" ghcr.io/butterski/rayomd --e
 ### Diagnostics
 
 `--doctor` checks fonts, temporary output and a smoke export; `--bench` times repeated exports of
-one document; `--version` prints the version. Exit codes are in the
+one document; `--version` prints the version. `--help` also lists the exit codes and the font
+variables `RAYOMD_FONT` and `RAYOMD_FALLBACK_FONT`; every code is in the
 [CLI Reference](https://github.com/Butterski/rayomd/wiki/CLI-Reference).
 
 ```sh

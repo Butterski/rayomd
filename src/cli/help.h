@@ -159,11 +159,24 @@ constexpr const char kHelpSource[] = RAYOMD_HELP_TITLE " " RAYOMD_VERSION ", Mar
         "  about 256 MB (the PDF is the same either way), in\n"
         "  " RAYOMD_HELP_IMAGE_CACHE "\n"
         "\n"
+        "Environment:\n"
+        "  RAYOMD_FONT=FILE\tThe font for text the standard PDF fonts\n"
+        "\tcannot show, and for --pdfa and --pdfua\n"
+        "\t(.ttf, .otf, .ttc); else a system font\n"
+        "  RAYOMD_FALLBACK_FONT=FILE\tA font for the characters that one lacks,\n"
+        "\tsuch as Chinese, Japanese or Korean\n"
+        "\n"
+        "Exit status: 0 done; 1 --doctor found a problem; 2 bad arguments; 3 input\n"
+        "  not read, or a PDF; 12 output not written; 14-18 the export failed;\n"
+        "  30-34 --inspect-source, --recover-source (the wiki's CLI Reference)\n"
+        "\n"
         "Examples:\n"
-        "  " RAYOMD_HELP_PROGRAM " --export notes.md notes.pdf\n"
+        "  " RAYOMD_HELP_PROGRAM " --export notes.md\n"
         "  " RAYOMD_HELP_PROGRAM " --export notes.md notes.pdf modern wide --toc --page-numbers\n"
         "  " RAYOMD_HELP_PROGRAM " --batch notes pdfs --recursive --workers=4\n"
-        "  " RAYOMD_HELP_PROGRAM " --book SUMMARY.md book.pdf --toc\n";
+        "  " RAYOMD_HELP_PROGRAM " --book SUMMARY.md book.pdf --toc\n"
+        "\n"
+        "Documentation and issues: https://github.com/Butterski/rayomd\n";
 
 inline std::string HelpText() {
     return LayOutHelp(kHelpSource);
