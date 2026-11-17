@@ -445,7 +445,8 @@ rayomd --export notes.md notes-screen.pdf --page-size=210mmxauto
 ### Document metadata
 
 The YAML front matter fills the PDF's metadata and is not shown on the page. Without a `title`
-the first heading is the title; `description` stands in for `subject`.
+the first heading is the title; `description` stands in for `subject`. The Producer names the
+RayoMD version that made the file, as in `RayoMD Native Standard PDF` followed by the version.
 
 ```yaml
 ---

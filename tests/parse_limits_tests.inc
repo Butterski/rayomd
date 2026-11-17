@@ -117,7 +117,7 @@ bool CheckReferenceLinks() {
         "[img]: docs/assets/branding/rayomd.png\n"
         "[titled]: https://example.com/t\n"
         "    'A title'\n";
-    if (!SameBytes("reference links", ordinary, 7632, "19bb62266e34877010e466e0904a5f11fbad861f03929ee04cf18a02d15d65d5")) {
+    if (!SameBytes("reference links", ordinary, 7638, "9bb8bd3a19c5467f1b3d1185235c9f6bf5141ca3c58d53ab8950bccc69b55736")) {
         return false;
     }
 
@@ -188,7 +188,7 @@ bool CheckTables() {
         "| h1 | h2 | h3 |\n|---|---|\n| short |\n|  |\n\n"
         "> | q | r |\n> |---|---|\n> | only |\n\n"
         "- item\n\n  | s | t | u | v |\n  |---|---|---|---|\n  | 1 |\n";
-    if (!SameBytes("ragged tables", ragged, 5447, "2a42e434fe1acd7f088c00ad41c7d005f69c6becf9d1a16950582bc28843f7d7")) {
+    if (!SameBytes("ragged tables", ragged, 5453, "8b33129b35063f93778912d25d639b812ef71c0f75b1a8170683df9f5e28333d")) {
         return false;
     }
 
@@ -382,7 +382,7 @@ bool CheckHeadingRun() {
     using math_markdown_tests::Repeat;
     const std::string mixed = Repeat("# One\n", 30) + Repeat("## Two\n###### Six\n", 25) + "text\n\n" +
         Repeat("### Three\n\n<a id=\"x\"></a>\n\n", 40) + "---\n" + Repeat("#### Four\n", 70);
-    if (!SameBytes("runs of headings", mixed, 73373, "a0e2ff7cbe02ec1cb98aec1f7fe18d85ec1171e66a2867e37e2e64f32e07f9b5")) {
+    if (!SameBytes("runs of headings", mixed, 73379, "50695e746b18719cb93ae9765ce6867afeba721555a0dcc609ad0dc7411a40f0")) {
         return false;
     }
     const std::string run = Repeat("# a\n", 100000);

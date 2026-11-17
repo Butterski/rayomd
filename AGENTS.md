@@ -45,7 +45,9 @@ cleanup, clickable Markdown links (also bare URLs, email addresses and shortcut
 references), bookmarks and `#anchor` links from headings, HTML comments, `<br>`
 and character references, document metadata from the front matter (`/Info` title,
 author, subject and keywords, the catalog's `/Lang`; `FrontMatterMetadata` reads
-the YAML subset), opt-in page numbers ("N"; "N / M" is a theme's `{page} / {pages}`), page
+the YAML subset; the `/Producer` names the version, `kStandardProducer`/`kUnicodeProducer`, 0.0.0
+in the core tests, which have no `RAYOMD_VERSION`, so their golden digests hold across releases),
+opt-in page numbers ("N"; "N / M" is a theme's `{page} / {pages}`), page
 sizes (A4 by default, presets, landscape and custom sizes; the renderers' `pageW`/`pageH`, never
 constants; one long page,
 `--page-size=WIDTHxauto`, `PdfPageSize::autoHeight`: `ResolvePageSize` gives the nominal height,
