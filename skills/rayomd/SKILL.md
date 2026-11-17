@@ -166,11 +166,11 @@ A line `quit` or the end of input ends the session.
 
 ## 3. Check the result
 
-The exit code says whether a PDF was written: 0 written; 2 bad arguments; 3 input not readable;
-10 and above a build error; 12 output not writable. A written PDF can still have degraded
-parts. A single `--export` reports only missing characters, as a `Warning:` line on stderr;
-for the counts, convert the file through a batch mode with `--report=-`, which prints one JSON
-line a document on stdout:
+The exit code says whether a PDF was written: 0 written; 2 bad arguments; 3 input not readable
+or a PDF; 10 and above a build error; 12 output not writable (the message on stderr says why). A
+written PDF can still have degraded parts. A single `--export` reports only missing characters,
+as a `Warning:` line on stderr; for the counts, convert the file through a batch mode with
+`--report=-`, which prints one JSON line a document on stdout:
 
 ```sh
 echo report.md | rayomd --stdin-batch out --report=- --toc --page-numbers

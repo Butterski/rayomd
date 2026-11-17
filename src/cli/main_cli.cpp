@@ -86,16 +86,18 @@ bool ReadUtf8FilePortable(const Path& path, std::string& content) {
     return RayoMd::File::ReadAll(path, (size_t)kMaxMarkdownInputBytes, content);
 }
 
-bool ReadStdinPortable(std::string& content) {
+// Standard input, all of it: 0; -1 when it has more than kMaxMarkdownInputBytes; else the read's
+// error (errno).
+int ReadStdinPortable(std::string& content) {
     content.clear();
     char buffer[64 * 1024];
     for (;;) {
         const size_t read = std::fread(buffer, 1, sizeof(buffer), stdin);
         if (read > 0) {
-            if ((long long)(content.size() + read) > kMaxMarkdownInputBytes) return false;
+            if ((long long)(content.size() + read) > kMaxMarkdownInputBytes) return -1;
             content.append(buffer, read);
         }
-        if (read < sizeof(buffer)) return !std::ferror(stdin);
+        if (read < sizeof(buffer)) return std::ferror(stdin) ? (errno != 0 ? errno : EIO) : 0;
     }
 }
 
@@ -188,8 +190,8 @@ int RecoveryExitCode(RayoMd::PdfSource::Status status) {
 int RunInspectSource(const Path& inputPath) {
     std::string pdf;
     if (!ReadBinaryFileLimited(inputPath, RayoMd::PdfSource::kMaxPdfBytes, pdf)) {
-        PrintError("Error: could not read PDF or input exceeds " + std::to_string(RayoMd::PdfSource::kMaxPdfBytes) +
-            " bytes.");
+        const int error = RayoMd::Cli::LastSystemError();
+        PrintError(RayoMd::Cli::ReadError("PDF", inputPath, RayoMd::PdfSource::kMaxPdfBytes, error));
         return 3;
     }
     RayoMd::PdfSource::Result result = RayoMd::PdfSource::Inspect(pdf, false);
@@ -206,8 +208,8 @@ int RunInspectSource(const Path& inputPath) {
 int RunRecoverSource(const Path& inputPath, const Path& outputPath) {
     std::string pdf;
     if (!ReadBinaryFileLimited(inputPath, RayoMd::PdfSource::kMaxPdfBytes, pdf)) {
-        PrintError("Error: could not read PDF or input exceeds " + std::to_string(RayoMd::PdfSource::kMaxPdfBytes) +
-            " bytes.");
+        const int error = RayoMd::Cli::LastSystemError();
+        PrintError(RayoMd::Cli::ReadError("PDF", inputPath, RayoMd::PdfSource::kMaxPdfBytes, error));
         return 3;
     }
     RayoMd::PdfSource::Result result = RayoMd::PdfSource::Inspect(pdf, true);
@@ -217,8 +219,9 @@ int RunRecoverSource(const Path& inputPath, const Path& outputPath) {
     }
     bool existed = false;
     if (!WriteNewFileAtomicPortable(outputPath, result.source, existed)) {
-        PrintError(std::string(existed ? "Error: destination already exists: " : "Error: could not write recovered source: ") +
-            PathToUtf8(outputPath));
+        const int error = RayoMd::Cli::LastSystemError();
+        PrintError(existed ? "Error: destination already exists: " + PathToUtf8(outputPath)
+                           : RayoMd::Cli::WriteError("recovered source", outputPath, error));
         return existed ? 34 : 12;
     }
     Print(stdout, "Recovered " + std::to_string(result.info.sourceBytes) + " bytes to " + PathToUtf8(outputPath) + "\n");
@@ -350,8 +353,14 @@ bool ParseExportOptions(int argc, char** argv, int start, CliExportOptions& opti
             const Path themePath = RayoMd::File::PathFromUtf8(argv[i] + 8);
             std::string text;
             std::string themeError;
-            if (themePath.empty() || !ReadUtf8FilePortable(themePath, text)) {
-                error = "--theme: cannot read " + PathToUtf8(themePath);
+            if (themePath.empty()) {
+                error = "--theme needs a file";
+                return false;
+            }
+            if (!ReadUtf8FilePortable(themePath, text)) {
+                const int readError = RayoMd::Cli::LastSystemError();
+                error = "--theme: cannot read " + PathToUtf8(themePath) +
+                    Reason(RayoMd::Cli::ReadFailure(themePath, (uint64_t)kMaxMarkdownInputBytes, readError));
                 return false;
             }
             if (!TinyPdf::Internal::ParseTheme(text, PathToUtf8(Path(RayoMd::File::ParentOf(RayoMd::File::PathView(themePath)))),
@@ -486,7 +495,8 @@ int BuildNativePdfMarkdown(const std::string& markdown, const std::string& sourc
     if (buildResult.missingCharacters != 0) WarnMissingCharacters(inputLabel, buildResult.missingCharacters);
     if (details) *details = buildResult;
     if (!WriteBinaryFilePortable(outputPath, pdfBuffer)) {
-        ReportExportError(deferredError, "Error: could not write PDF file: " + PathToUtf8(outputPath));
+        const int error = RayoMd::Cli::LastSystemError();
+        ReportExportError(deferredError, RayoMd::Cli::WriteError("PDF file", outputPath, error));
         return 12;
     }
     return 0;
@@ -496,13 +506,17 @@ int BuildNativePdfFile(const Path& inputPath, const Path& outputPath, const CliE
     std::string& pdfBuffer, std::string* deferredError = nullptr, TinyPdf::BuildResult* details = nullptr) {
     const auto profileBefore = RayoMd::Profiling::Capture();
     std::string markdown;
+    int result = 3;
     if (!ReadUtf8FilePortable(inputPath, markdown)) {
-        ReportExportError(deferredError, "Error: could not read input Markdown file: " + PathToUtf8(inputPath));
-        RayoMd::Profiling::EmitDelta("export", profileBefore, RayoMd::Profiling::Capture());
-        return 3;
+        const int error = RayoMd::Cli::LastSystemError();
+        ReportExportError(deferredError,
+            RayoMd::Cli::ReadError("input Markdown file", inputPath, (uint64_t)kMaxMarkdownInputBytes, error));
+    } else if (RayoMd::Cli::IsPdf(markdown)) {
+        ReportExportError(deferredError, RayoMd::Cli::PdfGivenAsMarkdown(PathToUtf8(inputPath)));
+    } else {
+        result = BuildNativePdfMarkdown(markdown, PathToUtf8(inputPath), outputPath, options,
+            pdfBuffer, PathToUtf8(inputPath), deferredError, details);
     }
-    int result = BuildNativePdfMarkdown(markdown, PathToUtf8(inputPath), outputPath, options,
-        pdfBuffer, PathToUtf8(inputPath), deferredError, details);
     RayoMd::Profiling::EmitDelta("export", profileBefore, RayoMd::Profiling::Capture());
     return result;
 }
@@ -517,7 +531,8 @@ int WriteBookPdf(const TinyPdf::Book& book, const Path& outputPath, const CliExp
     }
     if (result.missingCharacters != 0) WarnMissingCharacters("the book", result.missingCharacters);
     if (!WriteBinaryFilePortable(outputPath, pdf)) {
-        PrintError("Error: could not write PDF file: " + PathToUtf8(outputPath));
+        const int error = RayoMd::Cli::LastSystemError();
+        PrintError(RayoMd::Cli::WriteError("PDF file", outputPath, error));
         return 12;
     }
     return 0;
@@ -553,9 +568,15 @@ int RunLinkedExport(const Path& inputPath, const Path& outputPath, const CliExpo
 
 int RunStdinExport(const Path& outputPath, const CliExportOptions& options) {
     std::string markdown;
-    if (!ReadStdinPortable(markdown)) {
-        PrintError("Error: could not read Markdown from stdin or input exceeded " + std::to_string(kMaxMarkdownInputBytes) +
-            " bytes.");
+    const int read = ReadStdinPortable(markdown);
+    if (read != 0) {
+        PrintError(read < 0 ? "Error: Markdown on standard input is larger than " +
+                                  std::to_string(kMaxMarkdownInputBytes >> 20) + " MiB"
+                            : "Error: could not read standard input" + Reason(RayoMd::Cli::SystemErrorText(read)));
+        return 3;
+    }
+    if (RayoMd::Cli::IsPdf(markdown)) {
+        PrintError(RayoMd::Cli::PdfGivenAsMarkdown(std::string()));
         return 3;
     }
 
@@ -608,7 +629,8 @@ RayoMd::Batch::Record RecordFor(const BatchJob& job) {
 // Opens --report, or says why it cannot; true without a report.
 bool OpenReport(RayoMd::Batch::Report& report, const CliExportOptions& options) {
     if (options.report.empty() || report.Open(options.report)) return true;
-    PrintError("Error: could not create the report file: " + options.report);
+    const int error = RayoMd::Cli::LastSystemError();
+    PrintError(RayoMd::Cli::WriteError("the report file", RayoMd::File::PathFromUtf8(options.report), error));
     return false;
 }
 
@@ -865,7 +887,8 @@ int RunNativeBench(const Path& inputPath, const Path& outputDir, int iterations,
 
     std::string markdown;
     if (!ReadUtf8FilePortable(inputPath, markdown)) {
-        PrintError("Error: could not read input Markdown file: " + PathToUtf8(inputPath));
+        const int error = RayoMd::Cli::LastSystemError();
+        PrintError(RayoMd::Cli::ReadError("input Markdown file", inputPath, (uint64_t)kMaxMarkdownInputBytes, error));
         return 3;
     }
 
@@ -881,7 +904,8 @@ int RunNativeBench(const Path& inputPath, const Path& outputDir, int iterations,
         return code;
     }
     if (!WriteBinaryFilePortable(Joined(outputDir, { "sample.pdf" }), pdfBytes)) {
-        PrintError("Error: could not write benchmark sample PDF in " + PathToUtf8(outputDir));
+        const int error = RayoMd::Cli::LastSystemError();
+        PrintError(RayoMd::Cli::WriteError("benchmark sample PDF", Joined(outputDir, { "sample.pdf" }), error));
         return 12;
     }
 
@@ -910,7 +934,8 @@ int RunNativeBench(const Path& inputPath, const Path& outputDir, int iterations,
     report += std::string("path=") + RayoMd::Text::RendererPathName(markdown) + "\n";
 
     if (!WriteUtf8FilePortable(Joined(outputDir, { "bench-results.txt" }), report)) {
-        PrintError("Error: could not write benchmark results in " + PathToUtf8(outputDir));
+        const int error = RayoMd::Cli::LastSystemError();
+        PrintError(RayoMd::Cli::WriteError("benchmark results", Joined(outputDir, { "bench-results.txt" }), error));
         return 12;
     }
     return 0;
