@@ -38,6 +38,10 @@
 #if RAYOMD_SERVE_JSON
 #include "../cli/serve_request.h"
 #endif
+#define RAYOMD_HELP_TITLE "RayoMD Windows CLI"
+#define RAYOMD_HELP_PROGRAM "rayomd.exe"
+#define RAYOMD_HELP_IMAGE_CACHE "%LOCALAPPDATA%\\RayoMD\\cache\\images"
+#include "../cli/help.h"
 #endif
 
 thread_local int g_nativePdfLastError = 0;
@@ -1185,71 +1189,13 @@ void WriteStderr(const std::string& text) {
     WriteFile(hErr, text.data(), (DWORD)text.size(), &written, nullptr);
 }
 
-void PrintUsage() {
-    WriteStderr("RayoMD Windows CLI " RAYOMD_VERSION "\n"
-        "Usage:\n"
-        "  rayomd.exe --version\n"
-        "  rayomd.exe --doctor\n"
-        "  rayomd.exe --inspect-source <input.pdf>\n"
-        "  rayomd.exe --recover-source <input.pdf> <output.md>\n"
-        "  rayomd.exe --export <input.md> <output.pdf> [native] [style] [margin]\n"
-        "  rayomd.exe --book <SUMMARY.md | folder | files.md...> <output.pdf> [native] [style] [margin]\n"
-        "  rayomd.exe --stdin <output.pdf> [native] [style] [margin]\n"
-        "  rayomd.exe --batch <input-folder> <output-folder> [native] [style] [margin]\n"
-        "  rayomd.exe --stdin-batch <output-folder> [native] [style] [margin]\n"
-        "  rayomd.exe --serve <output-folder> [native] [style] [margin]\n"
-#if RAYOMD_SERVE_JSON
-        "  rayomd.exe --serve --json [native] [style] [margin]\n"
-#endif
-        "  rayomd.exe --bench <input.md> <output-folder> <iterations> [style] [margin]\n"
-        "\n"
-        "Defaults: native elegant normal, URL images off, local images contained to the input directory.\n"
-        "Styles: elegant, modern, tech. Margins: compact, normal, wide, margin=0.75in, margin=54pt.\n"
-        "Resource flags: --allow-url-images, --allow-unsafe-local-images, --embed-source, --no-image-cache\n"
-        "  (by default PNGs with transparency are re-encoded once and kept in\n"
-        "  %LOCALAPPDATA%\\RayoMD\\cache\\images: at most about 256 MB, the PDF the same either way).\n"
-        "Output flags: --compress (FlateDecode streams: smaller files, slower export), --fast-images\n"
-        "  (PNGs with transparency re-encoded faster, their image streams larger), --pdfa (PDF/A-3b:\n"
-        "  every font embedded, the formula fonts too), --pdfua (PDF/UA-1, tagged for screen readers:\n"
-        "  headings, lists, tables, figures with their alt text, links and notes; fonts as with --pdfa,\n"
-        "  formulas as TeX source; the language is the front matter's lang, else en), --theme=FILE (key =\n"
-        "  value lines: font, font-bold, font-italic, font-bold-italic, logo, heading-color, link-color,\n"
-        "  accent-color, header-left/center/right, footer-left/center/right with {title} {author}\n"
-        "  {subject} {date} {page} {pages} {logo}, cover), --no-highlight (code\n"
-        "  blocks in one colour; by default fenced code in a language GitHub knows is coloured),\n"
-        "  --no-diagrams (```mermaid blocks as code; by default flowcharts, sequence diagrams and pie\n"
-        "  charts are drawn), --toc\n"
-        "  (a table of contents, first or at a [TOC] or [[_TOC_]] paragraph, which always gets one),\n"
-        "  --toc-depth=N (heading levels it lists, 1-6; default 3), --number-headings[=N] (1, 1.1, 1.1.1\n"
-        "  before the headings of N levels, 1-6, default 3, and in the table of contents and bookmarks),\n"
-        "  --dialect=obsidian (Obsidian's callouts, ==highlights==, %%comments%%, [[wiki links]],\n"
-        "  ![[images]], ^block ids left out, and ![[note]] alone on a line printing that note, its\n"
-        "  #heading section or #^id block, read from the vault; default github), --vault=DIR (the\n"
-        "  folder embedded and linked notes must lie in and are found in by name, local images too;\n"
-        "  default the input's folder), --embeds=link (embedded notes stay links; default content),\n"
-        "  --hide-tags (with --dialect=obsidian: #tags left out), --footnotes=page (each footnote at\n"
-        "  the foot of the page of its first reference; default end, after the text), --black-text\n"
-        "  (for black-and-white printers: text, links and code black, fills and diagrams light grey;\n"
-        "  images keep their colours).\n"
-        "Page flags: --page-numbers (\"N / M\" at the foot of every page), --page-size=SIZE (a4, a3, a5,\n"
-        "  letter or legal, each also with -landscape, or WIDTHxHEIGHT in mm, cm, in or pt; default a4;\n"
-        "  or WIDTHxauto, such as 210mmxauto: one long page cut below its text, a new one only at page\n"
-        "  breaks or past 200 in), --page-break-before=hN (a new page before each heading of level 1\n"
-        "  to N; h1 for chapters).\n"
-        "Batch flags: --workers=N (1-64; automatic mode uses at most 6), --recursive (subfolders,\n"
-        "  mirrored), --skip-unchanged (keep PDFs newer than their Markdown), --report=FILE (one JSON\n"
-        "  line per document; - for standard output).\n"
-#if RAYOMD_SERVE_JSON
-        "Serve: --serve --json reads one JSON request a line, {\"id\":\"1\",\"input\":\"a.md\" or \"markdown\":\"...\"\n"
-        "  with \"source_path\",\"output\":\"a.pdf\",\"args\":[\"--toc\"]}, and answers each with its report\n"
-        "  line and the id, after a first line {\"rayomd\":\"VERSION\",\"protocol\":1}; quit ends it.\n"
-#endif
-        "Books: --book makes one PDF of the files a SUMMARY.md lists (mdBook, GitBook), of a folder's\n"
-        "  Markdown files by name with README.md first, or of the files given: each from a new page, the\n"
-        "  links between them kept, one outline, and with --toc one table of contents for all of them.\n"
-        "  --follow-links[=N] (with --export) makes a book of the note and the notes it links to, N links\n"
-        "  deep (1-6, default 1; at most 1000 notes); --backlinks ends each file of a book with links to\n"
-        "  the files that link to it.\n");
+// The help (help.h): on standard error without arguments, on standard output for --help.
+void PrintUsage(DWORD stream = STD_ERROR_HANDLE) {
+    const HANDLE handle = GetStdHandle(stream);
+    if (handle == INVALID_HANDLE_VALUE || handle == nullptr) return;
+    const std::string text = RayoMd::Cli::HelpText();
+    DWORD written = 0;
+    WriteFile(handle, text.data(), (DWORD)text.size(), &written, nullptr);
 }
 
 int RunCommandLine() {
@@ -1270,6 +1216,11 @@ int RunCommandLine() {
 
     if (argc >= 2 && (lstrcmpiW(argv[1], L"--version") == 0 || lstrcmpiW(argv[1], L"-v") == 0)) {
         WriteStdoutLine(std::string("rayomd ") + RAYOMD_VERSION);
+        LocalFree(argv);
+        return 0;
+    }
+    if (argc >= 2 && (lstrcmpiW(argv[1], L"--help") == 0 || lstrcmpiW(argv[1], L"-h") == 0)) {
+        PrintUsage(STD_OUTPUT_HANDLE);
         LocalFree(argv);
         return 0;
     }
@@ -1304,8 +1255,7 @@ int RunCommandLine() {
         lstrcmpiW(argv[1], L"--stdin") != 0 && lstrcmpiW(argv[1], L"--batch") != 0 &&
         lstrcmpiW(argv[1], L"--stdin-batch") != 0 && lstrcmpiW(argv[1], L"--serve") != 0 &&
         lstrcmpiW(argv[1], L"--bench") != 0 && lstrcmpiW(argv[1], L"--book") != 0) {
-        WriteStderr("Error: unknown command '" + WideToUtf8(argv[1]) + "'.\n\n");
-        PrintUsage();
+        WriteStderr("Error: unknown command '" + WideToUtf8(argv[1]) + "'.\n" + RayoMd::Cli::kHelpHint);
         LocalFree(argv);
         return 2;
     }
