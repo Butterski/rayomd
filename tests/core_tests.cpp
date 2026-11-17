@@ -1963,7 +1963,7 @@ bool CheckPageSize() {
     std::string document = "# Size\n\n[top](#top)\n\n";
     for (int line = 0; line < 80; line++) document += "Line " + std::to_string(line) + " of words that wrap across the page.\n\n";
     const auto numberX = [](const std::string& pdf) {
-        const size_t text = pdf.find(" Tm (1 / ");
+        const size_t text = pdf.find(" Tm (1) Tj");
         const size_t matrix = text == std::string::npos ? text : pdf.rfind("1 0 0 1 ", text);
         return matrix == std::string::npos ? -1.0 : std::strtod(pdf.c_str() + matrix + 8, nullptr);
     };
@@ -2491,7 +2491,8 @@ bool CheckTheme() {
     banded.theme.logoPath = std::string(RAYOMD_TEST_SOURCE_DIR) + "/docs/assets/branding/rayomd.png";
     TinyPdf::BuildResult result = TinyPdf::BuildPdf(fronted, banded, pdf);
     if (!result.Ok() || result.failedImages != 0 || result.pages != 2 || pdf.find("(Report by Ann {unknown}) Tj") == npos ||
-        pdf.find("(2026-10-09) Tj") == npos || pdf.find("(1 / 2) Tj") == npos || pdf.find("(2 / 2) Tj") == npos ||
+        pdf.find("(2026-10-09) Tj") == npos || pdf.find("(1) Tj") == npos || pdf.find("(2) Tj") == npos ||
+        pdf.find("(1 / 2) Tj") != npos ||
         pdf.find("x\x85) Tj") == npos || pdf.find(std::string(260, 'x')) != npos || pdf.find(" cm /Im1 Do") == npos) {
         std::cerr << "theme header and footer mismatch" << std::endl;
         return false;
@@ -3422,8 +3423,8 @@ bool CheckHtmlInText() {
     return true;
 }
 
-// With pageNumbers every page gets "N" in a content stream of its own, in Helvetica (/FN
-// on Unicode pages); without it a page has one stream. In both renderers.
+// With pageNumbers every page gets "N", without the total, in a content stream of its own, in
+// Helvetica (/FN on Unicode pages); without it a page has one stream. In both renderers.
 bool CheckPageNumbers() {
     std::string document = "# Pages\n\n";
     for (int line = 0; line < 120; line++) document += "Line " + std::to_string(line) + " of text that fills pages.\n\n";
@@ -3438,7 +3439,8 @@ bool CheckPageNumbers() {
         bool ok = pages >= 3 && plain.find("/Contents [") == std::string::npos &&
             CountOccurrences(numbered, "/Contents [") == pages && (numbered.find(" /FN ") != std::string::npos) == unicode;
         for (size_t page = 1; ok && page <= pages; page++) {
-            ok = numbered.find("(" + std::to_string(page) + ") Tj") != std::string::npos;
+            ok = numbered.find("(" + std::to_string(page) + ") Tj") != std::string::npos &&
+                numbered.find("(" + std::to_string(page) + " / " + std::to_string(pages) + ") Tj") == std::string::npos;
         }
         if (!ok) {
             std::cerr << "page numbers mismatch (" << (unicode ? "Unicode" : "standard") << " renderer)" << std::endl;

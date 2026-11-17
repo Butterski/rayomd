@@ -158,7 +158,7 @@ bool CheckRenderer(const std::string& prefix, const std::filesystem::path& direc
     std::vector<double> expected;
     for (size_t page = 0; page + 1 < boxes.size(); page++) {
         expected.push_back(kTop - kMargin * 0.5 - 3.0);           // header
-        expected.push_back(boxes[page].bottom + kMargin * 0.5 - 3.0);   // footer centre, "{page} / {pages}"
+        expected.push_back(boxes[page].bottom + kMargin * 0.5 - 3.0);   // footer centre, "{page}"
         expected.push_back(boxes[page].bottom + kMargin * 0.5 - 3.0);   // footer right
     }
     bool bands = result.Ok() && boxes.size() == 3 && baselines.size() == expected.size() && boxes[0].bottom < boxes[1].bottom &&

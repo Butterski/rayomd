@@ -630,7 +630,9 @@ def verify(binary: Path, keep: Path | None) -> None:
         require_pdf(spaced_pdf, b"/Subtype /Link", b"https://example.com/one")
         numbered_pdf = root / "numbered.pdf"
         run(binary, "--export", str(ascii_md), str(numbered_pdf), "native", "modern", "normal", "--page-numbers")
-        require_pdf(numbered_pdf, b"/Contents [", b"(1 / 1) Tj")
+        require_pdf(numbered_pdf, b"/Contents [", b"(1) Tj")
+        if b"(1 / 1) Tj" in numbered_pdf.read_bytes():
+            raise AssertionError("--page-numbers still writes the page count")
         letter_pdf = root / "letter.pdf"
         run(binary, "--export", str(ascii_md), str(letter_pdf), "native", "modern", "normal", "--page-size=letter")
         require_pdf(letter_pdf, b"/MediaBox [0 0 612 792]")

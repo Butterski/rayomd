@@ -109,7 +109,7 @@ Options go after the output path, in any order. Style and margin are bare words:
 | Margins | `compact`, `normal` (default), `wide`, `margin=0.75in`, `margin=54pt` |
 | Table of contents | `--toc`, `--toc-depth=N` (1-6, default 3); or a `[TOC]` paragraph in the text |
 | Numbered headings | `--number-headings` (3 levels), `--number-headings=N` (1-6) |
-| Page numbers | `--page-numbers` ("N" at the foot of each page) |
+| Page numbers | `--page-numbers` ("N" at the foot of each page; "N / M": `footer-center = {page} / {pages}` in a `--theme` file) |
 | Paper | `--page-size=a4` (default), `a3`, `a5`, `letter`, `legal`, each also `-landscape` (`letter-landscape`), or `WIDTHxHEIGHT` in `mm`, `cm`, `in`, `pt` (`150mmx200mm`) |
 | One long page for screens | `--page-size=210mmxauto` |
 | Chapter per page | `--page-break-before=h1` (`h2`: sections too) |

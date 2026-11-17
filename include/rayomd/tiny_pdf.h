@@ -156,7 +156,8 @@ struct PdfOptions {
     // instead of decoding the PNG again. The PDF bytes are the same either way. At most about
     // 256 MB, the least recently used images removed first. Empty, the default: nothing is kept.
     std::string imageCacheDirectory;
-    // "N / M" centred in the bottom margin of every page.
+    // The page number, "N", centred in the bottom margin of every page. "N / M" takes a theme whose
+    // footerCenter is "{page} / {pages}".
     bool pageNumbers = false;
     // FlateDecode page content, font program and CMaps where that makes the file smaller:
     // text-heavy PDFs two to five times smaller, at the cost of compressing them.

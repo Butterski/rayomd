@@ -13429,14 +13429,16 @@ private:
     double textBottom = 0.0;
 };
 
-// The page number at the foot of a page: "N" centred in the bottom margin, small and grey,
-// in Helvetica, which the page names `font`; black with `black`. A content stream of its own,
-// after the page's, which was rendered before the page count was known. `bottoms`: the bottom of
-// each long page's box (Renderer::PageBottoms), nullptr for pages of a fixed size, which start at 0.
-RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, size_t /*pages*/, double margin, double pageWidth,
-    const char* font, const double* bottoms, bool black) {
-    char label[48];
-    char* end = std::to_chars(label, label + 20, page).ptr;
+// The page number at the foot of a page: "N" centred in the bottom margin, small and grey, in
+// Helvetica, which the page names `font`; black with `black`. A content stream of its own after
+// the page's: a long page knows its bottom only once it is laid out, and a session's page
+// dictionaries (AddSessionPage) name the number's stream apart from the page's. `bottoms`: the
+// bottom of each long page's box (Renderer::PageBottoms), nullptr for pages of a fixed size,
+// which start at 0.
+RAYOMD_COLD static int AddPageNumber(PdfObjects& pdf, size_t page, double margin, double pageWidth, const char* font,
+    const double* bottoms, bool black) {
+    char label[20];   // the digits of a size_t
+    char* end = std::to_chars(label, label + sizeof label, page).ptr;
     const std::string_view text(label, (size_t)(end - label));
     constexpr double kSize = 9.0;
     std::string stream = "q 0.45 0.45 0.45 rg BT /";
@@ -14104,7 +14106,7 @@ static bool BuildStandardPdfBytes(const std::string& text, const std::string& so
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
-            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "F1",
+            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, renderer.Margin(), renderer.PageWidth(), "F1",
                 bottoms, options.blackText)
             : 0;
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
@@ -14849,7 +14851,7 @@ static bool BuildUnicodePdfBytes(const std::string& markdown, const TtfFont& fon
         int contentId = pdf.AddStreamInPlace(!flatePages.empty() && flatePages[pageIndex] ? "/Filter /FlateDecode" : "",
             pageStarts[pageIndex], pageEnd - pageStarts[pageIndex]);
         const int numberId = !bands.empty() ? pdf.AddStream("", bands[pageIndex])
-            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, pageStarts.size(), renderer.Margin(), renderer.PageWidth(), "FN",
+            : options.pageNumbers ? AddPageNumber(pdf, pageIndex + 1, renderer.Margin(), renderer.PageWidth(), "FN",
                 bottoms, options.blackText)
             : 0;
         const int contentsId = pageIndex < contentsOverlays.size() && !contentsOverlays[pageIndex].empty()
