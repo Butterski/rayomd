@@ -2072,6 +2072,20 @@ static size_t DecimalDigits(size_t value) {
     return digits;
 }
 
+// Writes `value`'s decimal digits so that they end at `end`, two a copy.
+static RAYOMD_HOT_INLINE void WriteDigitsBackward(char* end, size_t value) {
+    while (value >= 100) {
+        end -= 2;
+        memcpy(end, RayoMd::Text::Detail::kDigitPairs + 2 * (value % 100), 2);
+        value /= 100;
+    }
+    if (value >= 10) {
+        memcpy(end - 2, RayoMd::Text::Detail::kDigitPairs + 2 * value, 2);
+    } else {
+        end[-1] = (char)('0' + value);
+    }
+}
+
 // A payload that BuildInto writes straight into the file, instead of copying it from a buffer.
 class PdfPayloadWriter {
 public:
@@ -2324,7 +2338,7 @@ public:
             } else if (payloadBytes != 0) {
                 memcpy(payload, object.view.data(), payloadBytes);
             }
-            std::to_chars(at, at + idDigits, i + 1);
+            WriteDigitsBackward(at + idDigits, i + 1);
             memcpy(at + idDigits, " 0 obj\n", kObjectOpenBytes);
             memcpy(at + idDigits + kObjectOpenBytes, object.head.data(), object.head.size());
             char* cursor = payload + payloadBytes;
@@ -2398,9 +2412,9 @@ private:
             char* entry = out + size;
             for (size_t i = 1; i <= count; i++, entry += 20) {
                 size_t offset = offsets[i];
-                for (int digit = 9; digit >= 0; digit--) {
-                    entry[digit] = (char)('0' + offset % 10);
-                    offset /= 10;
+                for (int pair = 4; pair >= 0; pair--) {
+                    memcpy(entry + 2 * pair, RayoMd::Text::Detail::kDigitPairs + 2 * (offset % 100), 2);
+                    offset /= 100;
                 }
                 memcpy(entry + 10, " 00000 n \n", 10);
             }
