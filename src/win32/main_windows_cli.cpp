@@ -394,6 +394,10 @@ int ExportMarkdown(const std::string& markdown, const std::wstring& sourcePath, 
     if (result.missingCharacters != 0) {
         WriteStderr(RayoMd::Cli::MissingCharactersWarning(inputLabel, result.missingCharacters));
     }
+    if (result.failedImages != 0) {
+        WriteStderr(RayoMd::Cli::FailedImagesWarning(inputLabel, result.failedImages, options.enableUrlImages,
+            options.allowUnsafeLocalImages));
+    }
     if (details) *details = result;
     if (!WritePdf(outputPath, pdfBuffer)) {
         const int error = RayoMd::Cli::LastSystemError();
@@ -610,6 +614,10 @@ int WriteBookPdf(const TinyPdf::Book& book, const std::wstring& outputPath, cons
     if (result.missingCharacters != 0) {
         WriteStderr(RayoMd::Cli::MissingCharactersWarning("the book", result.missingCharacters));
     }
+    if (result.failedImages != 0) {
+        WriteStderr(RayoMd::Cli::FailedImagesWarning("the book", result.failedImages, exportOptions.enableUrlImages,
+            exportOptions.allowUnsafeLocalImages));
+    }
     if (!WritePdf(outputPath, pdfBytes)) {
         const int error = RayoMd::Cli::LastSystemError();
         PrintError(RayoMd::Cli::WriteError("PDF file", outputPath, error));
@@ -779,6 +787,14 @@ bool StandardOutputIsConsole() {
     const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD mode = 0;
     return out != INVALID_HANDLE_VALUE && out != nullptr && GetConsoleMode(out, &mode);
+}
+
+// Whether standard input is a console, where --stdin, --stdin-batch and --serve would seem to hang
+// without a word.
+bool StandardInputIsConsole() {
+    const HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    return in != INVALID_HANDLE_VALUE && in != nullptr && GetConsoleMode(in, &mode);
 }
 
 // Whether an argument where --export's output may stand is an option (a flag, a style, a margin)
@@ -978,6 +994,7 @@ int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& o
         PrintError("Error: could not create output folder: " + WideToUtf8(outputDir) + RayoMd::Cli::Reason(fsError));
         return 12;
     }
+    if (StandardInputIsConsole()) WriteStderr(RayoMd::Cli::TerminalInputNote("Markdown paths, one a line,"));
     std::string list;
     if (const int read = ReadAllStdin(list, 0); read != 0) {
         PrintError("Error: could not read the Markdown paths from standard input" +
@@ -1003,6 +1020,7 @@ int RunStdinBatchExport(const std::wstring& outputDir, const WinExportOptions& o
 }
 int RunStdinExport(const std::wstring& outputPath, const WinExportOptions& options) {
     std::string markdown;
+    if (StandardInputIsConsole()) WriteStderr(RayoMd::Cli::TerminalInputNote("Markdown"));
     const int read = ReadAllStdin(markdown);
     if (read != 0) {
         PrintError(read < 0 ? "Error: Markdown on standard input is larger than " +
@@ -1014,6 +1032,7 @@ int RunStdinExport(const std::wstring& outputPath, const WinExportOptions& optio
         PrintError(RayoMd::Cli::PdfGivenAsMarkdown(std::string()));
         return 3;
     }
+    if (markdown.empty()) WriteStderr(RayoMd::Cli::kEmptyInputWarning);
     std::string pdfBuffer;
     pdfBuffer.reserve(1024 * 1024);
     return ExportMarkdown(markdown, std::wstring(), outputPath, options, pdfBuffer, std::string());
@@ -1026,6 +1045,7 @@ int RunServeExport(const std::wstring& outputDir, const WinExportOptions& option
         return 12;
     }
 
+    if (StandardInputIsConsole()) WriteStderr(RayoMd::Cli::TerminalInputNote("Markdown paths, one a line,"));
     HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
     if (hIn == INVALID_HANDLE_VALUE || hIn == nullptr) {
         PrintError("Error: could not read standard input.");

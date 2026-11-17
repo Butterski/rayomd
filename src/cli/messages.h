@@ -13,6 +13,7 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -27,6 +28,9 @@ namespace RayoMd::Cli {
 inline std::string Reason(const std::string& why) {
     return why.empty() ? std::string() : " (" + why + ")";
 }
+
+// What RAYOMD_FONT and RAYOMD_FALLBACK_FONT name and nobody can read (defined below).
+inline std::string UnreadableFontVariables();
 
 // "Error: native PDF export failed for <label> (code N)." and what the code means; no line break.
 inline std::string ExportFailure(const TinyPdf::BuildResult& result, const std::string& inputLabel,
@@ -45,7 +49,8 @@ inline std::string ExportFailure(const TinyPdf::BuildResult& result, const std::
         message += " The theme's fonts cannot be read or are no TrueType/OpenType fonts: " + paths;
     }
     if (result.error == TinyPdf::BuildError::PdfaFontUnavailable) {
-        message += " PDF/A embeds every font, but no TrueType/OpenType font was found; set RAYOMD_FONT to one.";
+        message += " PDF/A embeds every font, but no TrueType/OpenType font was found; set RAYOMD_FONT to one." +
+            UnreadableFontVariables();
     }
     return message;
 }
@@ -60,8 +65,43 @@ inline std::string MissingCharactersWarning(const std::string& inputLabel, uint3
     message += " character(s) have no glyph in the fonts found and are shown as a base letter or '?'."
         " Install a font that has them (DejaVu Sans or Noto Sans for most alphabets, Noto Sans CJK or"
         " WenQuanYi Micro Hei for Chinese, Japanese and Korean), or set RAYOMD_FONT or RAYOMD_FALLBACK_FONT"
-        " to a .ttf, .otf or .ttc file.\n";
+        " to a .ttf, .otf or .ttc file.";
+    message += UnreadableFontVariables();
+    message += '\n';
     return message;
+}
+
+// A warning, not an error: the PDF is written, each image that could not be shown standing as its
+// alt text. With its line break. `urlImages` and `unsafeLocalImages` are the export's options,
+// which tell what may have kept an image out.
+inline std::string FailedImagesWarning(const std::string& inputLabel, uint32_t count, bool urlImages,
+    bool unsafeLocalImages) {
+    std::string message = "Warning: ";
+    message += inputLabel.empty() ? std::string("the document") : inputLabel;
+    message += ": " + std::to_string(count) + " image(s) could not be shown and stand as their alt text:"
+        " a file that is missing, unreadable or in no format RayoMD reads";
+    if (!unsafeLocalImages) message += ", one outside the Markdown's folder (--allow-unsafe-local-images)";
+#if defined(_WIN32) || defined(RAYOMD_USE_CURL)
+    message += urlImages ? ", a URL that could not be fetched" : ", a URL (--allow-url-images)";
+#else
+    static_cast<void>(urlImages);
+    message += ", a URL (this build fetches none)";
+#endif
+    message += ".\n";
+    return message;
+}
+
+// The warning when standard input held nothing: the PDF is blank.
+constexpr const char kEmptyInputWarning[] = "Warning: standard input was empty, so the PDF is blank.\n";
+
+// The note --stdin, --stdin-batch and --serve write when standard input is a terminal, where they
+// would seem to hang: what they read there, and how it ends.
+inline std::string TerminalInputNote(const char* what) {
+#ifdef _WIN32
+    return std::string("Reading ") + what + " from the console; Ctrl+Z and Enter end it.\n";
+#else
+    return std::string("Reading ") + what + " from the terminal; Ctrl+D ends it.\n";
+#endif
 }
 
 // The error of the last system call that failed: errno, or GetLastError's code on Windows.
@@ -121,6 +161,30 @@ inline std::string ReadFailure(const RayoMd::File::Path& path, uint64_t maximum,
     if (status.type != RayoMd::File::FileType::Regular) return "not a regular file";
     if (status.size > maximum) return "larger than " + std::to_string(maximum >> 20) + " MiB";
     return error != 0 ? SystemErrorText(error) : std::string();
+}
+
+// " RAYOMD_FONT=path cannot be read (why)." for each of RAYOMD_FONT and RAYOMD_FALLBACK_FONT that
+// names a file nobody can open, which the export passes over in silence; empty otherwise.
+inline std::string UnreadableFontVariables() {
+    std::string said;
+#ifdef _WIN32
+    for (const wchar_t* name : { L"RAYOMD_FONT", L"RAYOMD_FALLBACK_FONT" }) {
+        const wchar_t* value = _wgetenv(name);
+#else
+    for (const char* name : { "RAYOMD_FONT", "RAYOMD_FALLBACK_FONT" }) {
+        const char* value = std::getenv(name);
+#endif
+        if (value == nullptr || *value == 0) continue;
+        const RayoMd::File::Path path(value);
+        if (std::FILE* file = RayoMd::File::Open(path, "rb")) {
+            std::fclose(file);
+            continue;
+        }
+        const int error = LastSystemError();
+        said += std::string(" ") + RayoMd::File::PathToUtf8(name) + "=" + RayoMd::File::PathToUtf8(path) +
+            " cannot be read" + Reason(ReadFailure(path, UINT64_MAX, error)) + ".";
+    }
+    return said;
 }
 
 // Why the file `path` could not be written, after the write failed with `error`

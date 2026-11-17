@@ -843,7 +843,11 @@ Important image/link details:
   The Windows CLI's file helpers keep the failing call's `GetLastError` through their cleanup.
   Errors and warnings go to standard error on both, standard output keeps what was asked for
   (`--serve`'s replies, `--doctor`, `--inspect-source`); `verify_errors` in `tests/verify_cli.py`
-  holds both binaries to it. A new message both say goes here.
+  holds both binaries to it. Warnings, the PDF written: characters without a glyph (naming a
+  RAYOMD_FONT or RAYOMD_FALLBACK_FONT nobody can open, `UnreadableFontVariables`), images that could
+  not be shown (`FailedImagesWarning`, the flags that would admit them for the build), empty
+  standard input; a note when --stdin, --stdin-batch or --serve read a terminal
+  (`TerminalInputNote`). A new message both say goes here.
 
 - `src/cli/terminate.cpp`
   The terminate handler in place of libstdc++'s (whose demangler is 61 KB) where `no_unwind.cpp`
