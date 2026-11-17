@@ -107,7 +107,7 @@ Options go after the output path, in any order. Style and margin are bare words:
 | Ask | Arguments |
 |---|---|
 | Look | `elegant` (default), `modern`, `tech` |
-| Margins | `compact`, `normal` (default), `wide`, `margin=0.75in`, `margin=54pt` |
+| Margins | `compact`, `normal` (default), `wide`, `margin=0.75in`, `margin=54pt`, `margin=1.5cm` |
 | Table of contents | `--toc`, `--toc-depth=N` (1-6, default 3); or a `[TOC]` paragraph in the text |
 | Numbered headings | `--number-headings` (3 levels), `--number-headings=N` (1-6) |
 | Page numbers | `--page-numbers` ("N" at the foot of each page; "N / M": `footer-center = {page} / {pages}` in a `--theme` file) |
