@@ -617,18 +617,25 @@ def verify_help(binary: Path) -> None:
 
 def verify_errors(binary: Path, root: Path) -> None:
     """Errors go to standard error and standard output stays empty, on Linux and Windows alike: a
-    file that cannot be read or written and a missing folder are named, and an argument error ends
-    with the line pointing to --help. --serve keeps its replies on standard output and says on
-    standard error why a document failed; it ends with that document's exit code."""
+    file that cannot be read or written is named with the reason in parentheses (the system's
+    text, or RayoMD's for a folder and a missing output folder), a PDF given as the Markdown is
+    refused before it can be overwritten, and an argument error ends with the line pointing to
+    --help. --serve keeps its replies on standard output and says on standard error why a document
+    failed; it ends with that document's exit code."""
     doc = root / "errors.md"
     doc.write_text("# Errors\n", encoding="utf-8")
     missing = root / "missing.md"
+    pdf = root / "errors-input.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n% not Markdown\n")
     hint = b" --help' for the commands and options."
     cases = [
         (3, ["--export", str(missing), str(root / "missing.pdf")], b"could not read input Markdown file", False),
-        (12, ["--export", str(doc), str(root / "no such folder" / "out.pdf")], b"could not write PDF file", False),
+        (3, ["--export", str(missing), str(root / "missing.pdf")], b"missing.md (", False),
+        (3, ["--export", str(root), str(root / "folder.pdf")], b"(a folder, not a file)", False),
+        (3, ["--export", str(pdf), str(pdf)], b"is a PDF, not Markdown", False),
+        (12, ["--export", str(doc), str(root / "no such folder" / "out.pdf")], b"(its folder does not exist)", False),
         (3, ["--batch", str(root / "no such folder"), str(root / "batch-out")], b"(does not exist)", False),
-        (3, ["--inspect-source", str(root / "missing.pdf")], b"could not read PDF", False),
+        (3, ["--inspect-source", str(root / "missing.pdf")], b"missing.pdf (", False),
         (2, ["--export", str(doc)], b"--export requires", True),
         (2, ["--stdin-batch"], b"--stdin-batch requires", True),
         (2, ["--serve"], b"--serve requires", True),
@@ -641,6 +648,12 @@ def verify_errors(binary: Path, root: Path) -> None:
         if proc.returncode != code or proc.stdout or needle not in proc.stderr or (hint in proc.stderr) != hinted:
             raise AssertionError(f"{args}: expected exit {code} and {needle!r} on standard error alone, the --help "
                                  f"line {'' if hinted else 'not '}after it; got {proc!r}")
+    if pdf.read_bytes() != b"%PDF-1.7\n% not Markdown\n":
+        raise AssertionError("a PDF given as the Markdown was overwritten")
+    piped = subprocess.run([str(binary), "--stdin", str(root / "piped.pdf")], input=pdf.read_bytes(), capture_output=True,
+                           check=False, timeout=60)
+    if piped.returncode != 3 or b"standard input is a PDF" not in piped.stderr or (root / "piped.pdf").exists():
+        raise AssertionError(f"a PDF on standard input was not refused: {piped!r}")
     served = subprocess.run(
         [str(binary), "--serve", str(root / "serve errors")],
         input=f"{missing}\n{doc}\n".encode("utf-8"),

@@ -828,11 +828,15 @@ Important image/link details:
 
 - `src/cli/messages.h`
   What both command lines say of an export in the same words: a failed build's error
-  (`ExportFailure`), the missing-character warning, why a folder cannot be read or made
-  (`NotAFolder`, `MakeFolder`). Errors and warnings go to standard error on both, standard output
-  keeps what was asked for (`--serve`'s replies, `--doctor`, `--inspect-source`);
-  `verify_errors` in `tests/verify_cli.py` holds both binaries to it. A new message both say goes
-  here.
+  (`ExportFailure`), the missing-character warning, why a file could not be read or written
+  (`ReadError`, `WriteError`: the path and, in parentheses, what is there now, a missing output
+  folder, else the system's text of the failing call's error, `LastSystemError`; on Windows
+  `FormatMessageW`'s, in English where installed), a PDF given as the Markdown (`IsPdf`, exit 3,
+  before anything is written), why a folder cannot be read or made (`NotAFolder`, `MakeFolder`).
+  The Windows CLI's file helpers keep the failing call's `GetLastError` through their cleanup.
+  Errors and warnings go to standard error on both, standard output keeps what was asked for
+  (`--serve`'s replies, `--doctor`, `--inspect-source`); `verify_errors` in `tests/verify_cli.py`
+  holds both binaries to it. A new message both say goes here.
 
 - `src/cli/terminate.cpp`
   The terminate handler in place of libstdc++'s (whose demangler is 61 KB) where `no_unwind.cpp`
