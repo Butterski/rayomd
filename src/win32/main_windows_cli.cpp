@@ -938,7 +938,7 @@ int RunBatchExport(const std::wstring& inputDir, const std::wstring& outputDir, 
         PrintError("Error: could not read input folder: " + WideToUtf8(inputDir) + " (" + fsError + ")");
         return 3;
     }
-
+    if (files.empty()) WriteStderr(RayoMd::Cli::NoMarkdownWarning(WideToUtf8(inputDir), options.recursive));
     std::vector<WinBatchJob> jobs;
     jobs.reserve(files.size());
     std::set<std::wstring> seenOutputs;

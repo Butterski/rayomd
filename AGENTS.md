@@ -790,7 +790,8 @@ Important image/link details:
   What both command lines share for batch export: the JSON Lines report (one
   line per document, written by the worker that finished it), the up-to-date
   check behind `--skip-unchanged` (PDF newer than its Markdown and ending in
-  `%%EOF`), the recursive collection behind `--recursive` (sorted by name as indices: a sort
+  `%%EOF`), the collection of a folder's Markdown files (`.md` and `.markdown` in any letter case,
+  `--recursive` also its subfolders; sorted by name as indices: a sort
   of the files themselves, two paths each, was 20 KB of code) and the workers (`RunJobs`: one a
   usable CPU, at most 6, unless `--workers`; they take the inputs' sizes for the 16/64 MiB limits
   between them before they build). Keep per-file work off the thread that starts them: three stats

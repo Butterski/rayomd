@@ -219,16 +219,28 @@ bool OutputUpToDate(const RayoMd::File::Path& input, const RayoMd::File::Path& o
     return read && std::string_view(bytes, static_cast<size_t>(tail)).find("%%EOF") != std::string_view::npos;
 }
 
+// Whether a file's extension names Markdown: .md or .markdown, in any letter case (README.MD).
+static bool IsMarkdownExtension(RayoMd::File::PathView extension) {
+    for (const std::string_view known : { std::string_view(".md"), std::string_view(".markdown") }) {
+        size_t at = 0;
+        while (at < known.size() && at < extension.size() &&
+               (extension[at] == known[at] || (known[at] >= 'a' && extension[at] == known[at] - 'a' + 'A'))) {
+            at++;
+        }
+        if (at == known.size() && at == extension.size()) return true;
+    }
+    return false;
+}
+
 bool CollectMarkdown(const RayoMd::File::Path& inputDir, const RayoMd::File::Path& outputDir, bool recursive,
     std::vector<File>& files, std::string& error) {
     using RayoMd::File::Entry;
     using RayoMd::File::Path;
     files.clear();
-    // A regular file (through a link too) named *.md, its PDF at the same place below `outputDir`.
+    // A regular file (through a link too) named *.md or *.markdown in any letter case, its PDF at
+    // the same place below `outputDir`.
     const auto add = [&](const Entry& entry, const Path& path) {
-        const RayoMd::File::PathView extension = RayoMd::File::ExtensionOf(entry.name);
-        if (entry.type != RayoMd::File::FileType::Regular || extension.size() != 3 || extension[0] != '.' ||
-            extension[1] != 'm' || extension[2] != 'd') {
+        if (entry.type != RayoMd::File::FileType::Regular || !IsMarkdownExtension(RayoMd::File::ExtensionOf(entry.name))) {
             return;
         }
         Path output = outputDir;

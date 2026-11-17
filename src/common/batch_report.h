@@ -77,9 +77,10 @@ struct File {
     RayoMd::File::Path output;
 };
 
-// The .md files of `inputDir`, with `recursive` also those of its subfolders except hidden ones
-// (".git"), sorted by path, each with its PDF at the same relative place under `outputDir`.
-// False, with `error`, when the folder cannot be read.
+// The Markdown files of `inputDir` (.md and .markdown, in any letter case), with `recursive` also
+// those of its subfolders except hidden ones (".git"), sorted by path, each with its PDF at the
+// same relative place under `outputDir` (a.md and a.markdown share one). False, with `error`,
+// when the folder cannot be read.
 bool CollectMarkdown(const RayoMd::File::Path& inputDir, const RayoMd::File::Path& outputDir, bool recursive,
     std::vector<File>& files, std::string& error);
 

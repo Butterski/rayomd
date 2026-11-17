@@ -59,7 +59,7 @@ constexpr const char kHelpSource[] = RAYOMD_HELP_TITLE " " RAYOMD_VERSION ", Mar
         "  --stdin <out.pdf>\tExport Markdown read from standard input\n"
         "\t(- for standard output)\n"
         "  --book <in...> <out.pdf>\tOne PDF of several files (Books, below)\n"
-        "  --batch <in-dir> <out-dir>\tExport the Markdown files of a folder\n"
+        "  --batch <in-dir> <out-dir>\tExport a folder's .md and .markdown files\n"
         "  --stdin-batch <out-dir>\tExport each Markdown path read from stdin\n"
         "  --serve <out-dir>\tStay running: export each path read from\n"
         "\tstdin, answering OK or ERR; quit ends it\n"
